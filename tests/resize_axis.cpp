@@ -29,6 +29,7 @@
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -110,6 +111,21 @@ double measuredExtentAlong(const TopoDS_Shape& s, const gp_Dir& axis)
         if (std::fabs(gp_Vec(axes[i]).Dot(gp_Vec(axis))) >= 0.999999) return sizes[i];
     }
     return -1.0;
+}
+
+// Where a shape's vertices START and END along `axis`. The mitred block needs
+// this rather than the centre of mass: lopping a corner off moves the centre
+// on its own, so a centre-of-mass check there would be measuring the mitre
+// and not which end the anchor held.
+void vertexSpan(const TopoDS_Shape& s, const gp_Dir& axis, double& lo, double& hi)
+{
+    lo = 1.0e300;
+    hi = -1.0e300;
+    for (TopExp_Explorer it(s, TopAbs_VERTEX); it.More(); it.Next()) {
+        const double v = along(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())), axis);
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+    }
 }
 
 // The three extents of a shape's measured box, large to small.
@@ -310,34 +326,76 @@ int main()
               "a direction that is not a side: the refusal carries a null shape");
     }
     {
-        // A MITRED END - the expected, documented refusal. The high end of the
-        // board is cut off at 45 degrees, so there is no single flat face
-        // square to X there any more.
+        // A MITRED END IS STRETCHED, NOT REFUSED (improvements item 13, the
+        // user's own report: "if I add bevel or a cut angle in the shape i
+        // could not use the re measure tool"). The high end of the board is
+        // cut off at 45 degrees, so there is no flat face square to X there
+        // to pull - and the length comes out of the board's straight middle
+        // instead, which leaves the 45 exactly the 45 it was.
         const TopoDS_Face high = endFace(board, X, true);
         check(!high.IsNull(), "mitred end: the board has a flat high end to cut");
         const ModelingOps::BooleanResult mitred =
             ModelingOps::mitreEnd(board, high, 45.0, ModelingOps::MitreSide::ThicknessA);
         check(mitred.ok, "mitred end: the mitre was made");
         if (mitred.ok) {
+            const double mitredVolume = ModelingOps::volume(mitred.shape);
             check(ModelingOps::checkResize(mitred.shape, X, 450.0, ResizeAnchor::Low) ==
-                      ResizeCheck::EndNotFlat,
-                  "mitred end: moving the mitred end reports EndNotFlat");
-            const ModelingOps::BooleanResult refused =
+                      ResizeCheck::Ok,
+                  "mitred end: moving the mitred end is accepted - the stretch has a "
+                  "straight middle to take 150 out of");
+            const ModelingOps::BooleanResult shortened =
                 ModelingOps::resizeAlongAxis(mitred.shape, X, 450.0, ResizeAnchor::Low);
-            check(!refused.ok, "mitred end: moving the mitred end is refused");
-            check(refused.shape.IsNull(), "mitred end: the refusal carries a null shape");
-            check(!refused.error.empty(), "mitred end: the refusal says why");
+            check(shortened.ok, "mitred end: and the stretch builds");
+            if (shortened.ok) {
+                checkNear(measuredExtentAlong(shortened.shape, X), 450.0, kExact,
+                          "mitred end: the board is the typed length");
+                // THE MITRE SURVIVES AT ITS OWN SIZE, and volume is how that
+                // is measured rather than eyeballed: a 45 through an 18 mm
+                // thickness removes 0.5 * 18 * 18 * 300 whatever the board's
+                // length, so the shortened board's volume is the straight
+                // board's less exactly the same corner. A stretch that
+                // sheared the mitre off would come back at the full
+                // 450 * 300 * 18.
+                const double straight = 450.0 * 300.0 * 18.0;
+                const double corner = 600.0 * 300.0 * 18.0 - mitredVolume;
+                checkNear(ModelingOps::volume(shortened.shape), straight - corner, 1.0,
+                          "mitred end: and the 45 is still exactly the 45 it was");
+                // Anchor Low keeps the LOW end where it is, so the mitred
+                // high end is the one that came in - 150 mm, the whole
+                // difference. Read off the vertices rather than the centre of
+                // mass, which a lopped corner moves on its own.
+                double lo = 0.0, hi = 0.0;
+                vertexSpan(shortened.shape, X, lo, hi);
+                double lo0 = 0.0, hi0 = 0.0;
+                vertexSpan(mitred.shape, X, lo0, hi0);
+                checkNear(lo, lo0, kExact, "mitred end: anchor Low left the low end put");
+                checkNear(hi, hi0 - 150.0, kExact,
+                          "mitred end: and brought the mitred end in by the whole 150");
+            }
             check(ModelingOps::checkResize(mitred.shape, X, 450.0, ResizeAnchor::Centre) ==
-                      ResizeCheck::EndNotFlat,
-                  "mitred end: Centre moves both ends, so it reports EndNotFlat too");
-            // ...and the SQUARE end can still be moved: the refusal is about
-            // the end that has to move, not about the body.
+                      ResizeCheck::Ok,
+                  "mitred end: Centre is accepted too - the stretch does not care which "
+                  "end the anchor names");
+            // ...and the SQUARE end still moves exactly as it always did.
             const ModelingOps::BooleanResult allowed =
                 ModelingOps::resizeAlongAxis(mitred.shape, X, 450.0, ResizeAnchor::High);
-            check(allowed.ok, "mitred end: moving the square end instead is accepted");
+            check(allowed.ok, "mitred end: moving the square end is accepted");
             if (allowed.ok)
                 checkNear(measuredExtentAlong(allowed.shape, X), 450.0, kExact,
                           "mitred end: the square end moved to the typed size");
+            // WHAT IS STILL REFUSED, so the stretch is not mistaken for "any
+            // size works": the length has to come out of the straight middle,
+            // and asking for 200 from a 600 board means taking 400 out of a
+            // middle that is not 400 long.
+            check(ModelingOps::checkResize(mitred.shape, X, 200.0, ResizeAnchor::Low) ==
+                      ResizeCheck::NoStraightPart,
+                  "mitred end: a size with no straight part left to take reports "
+                  "NoStraightPart");
+            const ModelingOps::BooleanResult tooShort =
+                ModelingOps::resizeAlongAxis(mitred.shape, X, 200.0, ResizeAnchor::Low);
+            check(!tooShort.ok, "mitred end: and it is refused");
+            check(tooShort.shape.IsNull(), "mitred end: the refusal carries a null shape");
+            check(!tooShort.error.empty(), "mitred end: the refusal says why");
         }
     }
 

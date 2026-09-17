@@ -96,10 +96,14 @@ cmake --preset linux && cmake --build --preset linux
 **Kernel integration and the core UI loop are verified on Windows** (MSVC 19.38, OCCT
 8.0.1, Qt 6.11.1).
 
-Verified by the two headless tests (49 checks, all passing):
-wire -> face -> prism -> cut -> exact face counts and volumes -> 494-entity `out.step`;
-ray/plane unprojection including the parallel-ray case; sketch accumulation; document id
-lifecycle; compound building.
+Verified by the headless tests - **eleven of them now, 2,046 checks, `ctest` 11/11**
+(measured 2026-09-17; it was two tests and 49 checks at Milestone 1, and the sentence is
+kept in its original shape so the growth is legible): wire -> face -> prism -> cut -> exact
+face counts and volumes -> 494-entity `out.step`; ray/plane unprojection including the
+parallel-ray case; sketch accumulation; document id lifecycle; compound building - plus
+direct modeling, the serial round trip, `Measure`, `UserProgress`, the oriented measured
+box, the mitre frame, the whole joinery layer (665 on its own) and `resizeAlongAxis` with
+its stretch.
 
 Verified by driving the running app and reading the screenshots:
 viewport renders with grid, triedron and lighting; sketch mode draws a live yellow polyline
@@ -176,17 +180,40 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 4126, and it is ~4 LOW as of the joinery merge — read this before
-trusting it.** The number is real: two consecutive official runs measured 4125 checks + 1
-environment skip = 4126, agreeing to the digit, and it is committed with its provenance.
-But the branch's last two commits (the drawer-numbers fix and its pin) added roughly five
-more checks *after* that run, and the user deliberately chose to merge without taking a
-third one. So the floor sits about four below the true accounted total. It cannot produce a
-false pass — a floor below the total never does — but it does mean **about four checks could
-stop running without the gate noticing**, which is exactly the slack the floor exists to
-remove. The next official run should re-ratchet to whatever it measures, and must not
-compute the number: this project has twice chosen measuring over arithmetic here, both times
-because a floor written from a prediction is a number nobody has ever seen the suite produce.
+**`kCheckFloor` is 4782, measured twice on the tree that carries it.** The improvements
+branch re-ratcheted it and **the joinery merge's ~4-check debt is settled with it**: that
+floor sat below its own true total because two commits landed after the run that measured
+it, and this one was taken on the final tree. Two consecutive unfiltered runs measured
+**4781 checks + 1 environment skip = 4782**, agreeing to the digit, and the second ran
+against the binary the branch ships — built minutes before it, after the crash-hunt
+diagnostics came out, and the counts did not move, which is what says those diagnostics were
+inert rather than merely believed to be. The one environment skip is the RayTracing
+floor-blend measurement, which does not apply when PathTracing is the session's tier.
+
+**Measured, never computed** — this project has now chosen measuring over arithmetic three
+times, and the improvements branch is the clearest case for it: fifty checks changed their
+expectation and a dozen were added, so any predicted delta on 4126 would have been a number
+nobody had watched the suite print. A floor below the true total cannot false-pass, but it
+lets exactly that many checks stop running unnoticed, which is the whole failure this
+constant exists to catch.
+
+**`gui_smoke` links `/STACK:33554432`, and the reason is this file's own shape.** The suite
+started dying at `window.show()` with a stack overflow 34 frames deep, inside the first GL
+context creation, with **no recursion anywhere in the stack** — which is why it looked
+impossible and took a vectored exception handler to read at all. The cause is that `main()`
+here is one function of some thirty thousand lines, and **MSVC allocates a function's entire
+frame at entry**: every local in every one of its blocks, whether that block ever runs or
+not. The frame grows with each block added, Windows gives a thread 1 MB by default, and the
+deep call through the display driver is simply what finally ran off the end of it. Reserve,
+not commit, so it costs address space and nothing else. The suite also keeps its own
+stack-overflow reporter (`traceStackOverflow()`, `SetThreadStackGuarantee()` +
+`AddVectoredExceptionHandler()`, symbols through DbgHelp, frames to **stderr**): there is no
+debugger installed on this machine, and a crash whose location cannot be read costs far more
+than one link and forty lines. Two lessons generalize. **A stack overflow with no recursion
+in it is a frame-size problem, not a loop** — look at the size of the functions on the stack
+before hunting for a cycle. And **the reporter writes to stderr rather than a file**: a
+hard-coded path is a diagnostic that works on exactly one machine, and stderr is unbuffered
+by the standard, which is the one property a dying process actually needs.
 
 **The no-input law runs both ways.** `gui_smoke` installs an application-wide filter that
 drops every *spontaneous* mouse, wheel and key event, so the machine's own user cannot drive
@@ -287,6 +314,11 @@ Source files under `src/`, plus `tests/`:
 | `ui/VersionsPanel.{h,cpp}` | versions drawer: thumbnail cards, Compare, Restore, two-click Delete |
 | `ui/UnsavedCloseCard.{h,cpp}` | the close question over a dimmed viewport, and the status bar's unsaved dot (`FurnitureNameMark`) |
 | `ui/RenderSettingsPanel.{h,cpp}` | the render-mode settings card and its shutter (`RenderShutterButton`, same file) |
+| `ui/CardSlide.{h,cpp}` | slide-in/out for an overlay card; only the rail uses it. `setShown()` is idempotent against what was ASKED for, `settle()` re-aims a live flight at relayout's new home rather than stopping it |
+| `ui/NameFurnitureCard.{h,cpp}` | the "what should this be called" question; creates nothing until it is answered |
+| `ui/SlatsTool.{h,cpp}` | the slats chip - Width/Gap/Depth/Flip and a live count, bottom-centre |
+| `ui/LoadingCard.{h,cpp}` | the app mark, the name and a progress bar while a heavy furniture opens |
+| `ui/MaterialCard.{h,cpp}` | one material's colour and brightness, bottom-left, over a live viewport |
 
 ### The vocabulary — enforced by test
 
@@ -312,6 +344,16 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | A live mirrored twin | Mirror | symmetry, mirroring-mode, reflect |
 | A copy that follows its source | Linked copy, `Duplicate linked` | instance, clone, reference |
 | The settings drawer | Settings | preferences, options, config |
+| A named container of items in the drawer | folder | collection, layer, node, bin |
+| A run of evenly spaced thin boards | slats | battens, ribs, louvres, sticks |
+| A material's own colour and brightness | look | shader, finish, skin |
+
+**"Group" is not in the folder row's Never column, deliberately.** This app already owns
+that word for something else and says it constantly: a multi-body selection is a group, and
+`selectionSizesKind() == Group`, "3 bodies selected — overall …" and "a group's overall size
+is read-only" all depend on it. A **folder** is a named, saved container in the Items drawer;
+a **group** is whatever happens to be selected right now. Two concepts, two words, and
+banning either would make one of them unsayable.
 
 **The Settings row was renamed when the panel grew, and the rename is deliberate.** It
 used to read "The colours-and-fonts panel | Appearance | theme, **settings**, preferences",
@@ -338,7 +380,10 @@ a user who reads "Body 03 rounded" has no word to look for in the interface.
 
 `ModelingOps::BooleanKind::Fuse` and `::Cut` keep their kernel-facing names — the
 user never sees them, and renaming them would churn the geometry library and its
-tests for no visible gain. The enforced bans match the bare word (case-insensitive):
+tests for no visible gain. `ModelingOps::stretchAlongAxis()` is the same case one row
+down: "stretch-to" is Re-measure's own Never column, and this is the function the tool
+calls when an end cannot be pulled (improvements item 13). Nothing painted says stretch —
+the user typed a size and got a board of that size, which is all Re-measure ever claims. The enforced bans match the bare word (case-insensitive):
 `OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, `Join` and `bevel` are forbidden
 everywhere in action text and widget tooltips, regardless of capitalization —
 and so is `symmetry`, added in Milestone 4's fix wave. The kernel-facing
@@ -476,6 +521,19 @@ Both cost a fix round, and both produced a green test suite while the app was br
   pointer.** Asserting an attribute flag, or `sendEvent`-ing straight at the widget you hope
   is reachable, passes against a control no user can click. The same applies to visibility:
   assert `isVisible()`, or a stub that sets the text and never calls `show()` sails through.
+- **A probe that finds a control BY SHAPE finds whatever else has that shape.** The suite
+  scanned the Items drawer for "the first visible `QPushButton`" to get a row's eye toggle,
+  which was exact until the folders work put a `+` in the title row — also a `QPushButton`,
+  also always visible, and **added to the panel before any row exists**, so it was the first
+  thing the scan reached. Every such probe then clicked it, and each click made a folder
+  called "Folder" that landed at row 0 and broke every row-index check downstream in the same
+  shared window: **eighteen failures, none of them in the code that changed.** The fix is to
+  tell them apart STRUCTURALLY — an eye belongs to a ROW, the `+` is a direct child of the
+  panel — in `firstVisibleRowToggle()`, which is now the one implementation every such scan
+  goes through, because the two local copies of it had already drifted apart once. The rule
+  generalizes past this one button: a scan whose predicate is "the first widget of type T"
+  is a scan that will one day find a different T, and the cheapest insurance is that it
+  lives in exactly one place where the next person can fix it once.
 
 A widget that accepts a press must accept the release too. `HintBalloon` left the release to
 propagate, and the viewport underneath re-picked and re-emitted `selectionChanged()` on
@@ -918,7 +976,10 @@ cancels; one undo, the twin and linked copies follow, joints re-derive.
   refuses while it is live and `canReMeasureSize()` refuses while a placement is, Rename and
   Save version exclude it as they exclude a placement, and the pull arrow, the bevel arrow,
   the mitre chip and `ExtrudePreview` are already held apart by needing a Face, an Edge, a
-  Face and a pending outline respectively. The joint chip needs exactly TWO bodies.
+  Face and a pending outline respectively. **The joint chip is the one that stopped being
+  held apart by its selection** — improvements item 2 made it a live gesture, so
+  `canReMeasureSize()` carries an explicit `jointChipJointId() > 0` stand-down beside the
+  others rather than relying on the card wanting two bodies where this gesture wants one.
 - **A group's overall size is read-only, and it says so in the STATUS BAR.** A group's box
   is not any one body's side, so there is no honest answer to which piece a retyped number
   should change. Not a Failure toast: nothing failed, the gesture simply cannot begin, which
@@ -957,12 +1018,30 @@ cancels; one undo, the twin and linked copies follow, joints re-derive.
   window (`and it kept its centre (x 225, expected 300)`), and the travel threshold ignored
   (`a right DRAG opens no field`). `kCheckFloor` was **not** touched: this branch ran
   filtered blocks only, and the floor is re-ratcheted by measuring an official run.
+- **An end that cannot be PULLED is stretched from the middle instead (improvements item
+  13).** The user's report is the whole specification: *"is like for example if I add bevel
+  or a cut angle in the shape i could not use the re measure tool"* — a mitred, chamfered,
+  rounded, stepped or L-shaped end is not one flat face square to the axis, so there was
+  nothing for `pullFace()` to move and the tool refused the board outright. It refused the
+  exact board somebody wants to make 150 shorter. `ModelingOps::stretchAlongAxis()` takes
+  the length out of the board's STRAIGHT PART instead: cut across the middle, slide the end
+  piece along the axis by the difference, fuse the two again — so every feature survives at
+  its own size (a 45 stays a 45, an 8 mm chamfer stays an 8 mm chamfer) and the two untyped
+  sides are untouched to the micron, which is the promise re-measure makes everywhere else.
+  Growing copies the straight slab `[cut-delta, cut]` as the filler, and the result is
+  MEASURED against the requested length before it is accepted. `resizeAlongAxis()` routes an
+  unpullable end here and shifts the result per anchor, so Low/Centre/High still mean exactly
+  what they meant. `ResizeCheck::EndNotFlat` is **deleted, not left unreachable** — a code no
+  caller can see is a sentence no user can be shown — and what remains is
+  `NoStraightPart`: there is a middle to take the length out of, or there is not. The
+  headless oracle is volume arithmetic rather than a picture: a 45 through an 18 mm thickness
+  removes `0.5 × 18 × 18 × 300` whatever the board's length, so a board shortened by 150 must
+  come back at the straight board's volume less exactly the same corner, and a stretch that
+  sheared the mitre off would come back bigger.
 - **Honest limits.** The ghost wears the app's one preview look (the yellow body caged in
   its own outline), not the mockup's green. The mockup's "stays" and "moves" captions are
   not drawn beside the line — the status bar carries that instead (`… — keeping the centre
-  — both ends move by half`). An end that is not ONE flat face square to the axis refuses:
-  a mitred end, a curved end, and equally a stepped or L-shaped end where two coplanar faces
-  sit at the same extreme, since picking one of them would move half the end.
+  — both ends move by half`).
 
 #### The custom transform gizmos: three 3D tools, one chip, no AIS_Manipulator
 
@@ -1037,7 +1116,7 @@ they generalize.
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
 `Theme::Spec`; `defaultSpec()` is **the user's own look** — Graphite plus six baked deltas
 from `assets/defaultcolors.furnifytheme` (near-black viewport and grids, `#6a00ff` accent,
-tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 28 colour defaults are
+tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 29 colour defaults are
 pinned to hex in the suite (three of them, `gizmoAxisX/Y/Z`, added in Milestone 3 — see
 "Direct modeling"'s gizmo restyle note; the last two, `sizesOneBody`/`sizesGroup`, by the
 selection sizes — see "Sizes around the selection"). `graphite()` stays as the readable base the deltas
@@ -1234,7 +1313,9 @@ on by default, persisted as `showSizes`, no shortcut.
   read `Measure::formatDimensions()`, the WORLD-axis bounding box — the exact "neither side"
   bug the oriented-box paragraph above describes (a 600 × 300 × 18 board turned 30° read
   669.6 × 559.8 in the list) — while the viewport's own selection sizes read the board's true
-  600 × 300 × 18 from day one of this feature.
+  600 × 300 × 18 from day one of this feature. (The drawer grew folders and a scroll area
+  later — see "Improvements" — but a row is still name and eye button, and the folders work
+  did not put a size back on one.)
 
 ### Files, versions and the library
 
@@ -1450,9 +1531,19 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   (`renderBackdropColour()` — the user's reference shot, blended 4:1 toward the viewport
   token so Appearance edits still move it; the original gradient was rejected because only a
   flat colour shared with the floor makes the floor's seam invisible), a **shadow-catcher
-  floor** (`showRenderFloor()` — a large matte plane a hair below the lowest *displayed*
+  floor** (`showRenderFloor()` — a large matte **disc** a hair below the lowest *displayed*
   body, backdrop-coloured, selection mode −1 so it can never be picked or hovered, rebuilt
-  on a theme edit, absent on an empty document), an **angled key light** (every directional
+  on a theme edit, absent on an empty document. A disc since the user asked for one — "in
+  the render mode we have the floor that currently is a plane, can be a circle?" — built as
+  `BRepBuilderAPI_MakeEdge(gp_Circ)` → wire → face and tessellated at `radius/400`, which is
+  fine enough that the rim reads as a curve rather than a polygon at any framing this app
+  offers. The user asked for a circle "that fades", and what carries the fade is the floor
+  material's existing calibration rather than any gradient added for it: the floor is built
+  to land within a few levels of the backdrop, so the rim measures a step of **3 to 7 of 255**
+  (backdrop `(193,191,186)` against a floor of `(196,195,193)` just inside it, sampled on
+  `render-mode-after.png`) and reads as a soft arc. There is **no alpha ramp on the disc**,
+  and there deliberately is not one yet: the floor is a shadow catcher, and blending it is
+  the one change that would take the cast shadow with it), an **angled key light** (every directional
   light's direction, intensity and headlight flag saved at entry and restored at exit —
   straight down, the whole shadow hides under the body; **OCCT's default directional light
   is a HEADLIGHT whose direction is read in VIEW space**, so `SetHeadlight(false)` must come
@@ -1472,17 +1563,38 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   floor goes up **before** the tier probe, deliberately: the tier-2 pixel probe must measure
   the scene the user will see — with no floor, a straight-down shadow could touch no pixel
   and the probe would fall to Plain on hardware that shadow-maps fine.
-- **`Save Screenshot` exports at 2× device pixels while render mode is on — except on the
-  path-traced tier, which exports the converged on-screen buffer at 1×.** The 2× path is an
-  offscreen `ToPixMap()` render, and for a path-traced view **that renders exactly one
-  deterministic sample per pixel**: six successive calls returned the identical pixel bit for
-  bit, and `SamplesPerPixel` × `AdaptiveScreenSampling` swept across ten combinations changed
-  nothing. Measured, it exported a floor at 140 where the on-screen buffer at rest reads 194
-  — a third darker than the picture the user was looking at when they asked for it. Only the
-  on-screen framebuffer accumulates, and only `Dump()` reads it, so `awaitPathTracingConvergence()`
-  drives it and `saveSnapshot()` dumps. Half the linear resolution against twice the
-  resolution of the wrong image. There is one `saveSnapshot()`, so the menu entry, the
-  shutter and the furniture thumbnail all get this.
+- **`Save Screenshot` exports at the size the user picked, on every tier, through an
+  OFFSCREEN buffer that survives several redraws.** `ToPixMap()` renders its own buffer and
+  reads it in ONE call, and on a progressive tier that is exactly one sample: six successive
+  calls returned the identical pixel bit for bit, `SamplesPerPixel` ×
+  `AdaptiveScreenSampling` swept across ten combinations changed nothing, and it exported a
+  floor at 140 where the on-screen buffer at rest reads 194 — a third darker than the picture
+  the user was looking at when they asked for it. The first fix was to export the CONVERGED
+  ON-SCREEN buffer at 1× instead (only it accumulates, and only `Dump()` reads it), and that
+  bought the right image at the window's own size and nothing else — which is what the
+  resolution picker then broke: asked for 1440, the user got a 1200×800 file and said so.
+  `OcctViewWidget::dumpOffscreen(path, pixels, withAlpha)` is the answer to both at once.
+  `FBOCreate()`/`SetFBO()` hand the view a buffer that survives repeated `Redraw()`s, and a
+  path tracer accumulates across redraws **of the same target** — so the passes go in at the
+  requested size, the buffer is read once with `BufferDump()`, and a 4K path-traced export is
+  the picture that was on screen with four times the pixels. The camera's aspect follows the
+  buffer and is restored, the accumulation the export spent is restarted, and
+  `renderExportSizeApplies()` now answers true for every tier because the reason it did not
+  is gone. **Two OCCT facts this cost, both measured rather than reasoned:**
+  `Image_AlienPixMap::InitTrash(format, w, h)` + `SetTopDown(false)` must run BEFORE
+  `BufferDump()` — it reads into a pre-sized image and an empty pixmap simply fails, which
+  surfaced to the user as "Screenshot failed — Couldn't save the image"; and alpha writes
+  alone do not stop the opaque backdrop being drawn, so a cut-out needs
+  `Graphic3d_TOB_NONE` as well as `buffersOpaqueAlpha = false`. There is one
+  `saveSnapshot()`, so the menu entry, the shutter and the furniture thumbnail all get this.
+- **`ExportSize` is `Viewport / 720 / 1080 / 1440 / 2160`**, a picker on the render settings
+  card ("i notice something, the render is not Full HD, can you add an option to select the
+  resolution"). The height is what is chosen and the width follows the viewport's aspect, so
+  a framing the user set is never recomposed by an export. **The cut-out is its own export**
+  (`saveCutoutSnapshot()`, "an option to make .png images of the render with out the floor
+  and background"): the floor comes down, the background type goes to `Graphic3d_TOB_NONE`,
+  the driver's `buffersOpaqueAlpha` goes false, and `dumpOffscreen(..., withAlpha=true)`
+  writes RGBA. Both settings are put back afterwards whatever happened.
 - **The calibrated numbers survived the QOpenGLWidget migration unchanged — measured, not
   assumed.** Phase 3 re-ran the identical suite against the pre-migration commit and against
   the migrated branch on the same machine and scene, and **every render-mode number is
@@ -1679,6 +1791,27 @@ as numbers to mark with a pencil and a square.
   `refreshJoints()` is the one place drawings are pushed to the viewport, and the one place
   that decides which joints are drawn at all (the drawer open draws every joint; otherwise
   only the selected one, which placement sets).
+- **The joint's card is a LIVE GESTURE, and the selection is not a term in it (improvements
+  item 2).** `jointChipJointId()` used to require the joint's own two pieces to BE the
+  whole-body selection, which read as sound until auto selection removed the modes: with no
+  mode to be in, the first click anywhere — a face, an edge, empty space — stopped being
+  "those two bodies" and retired the card the user was working in. The user reported exactly
+  that: *"having Join activated and press the face selector disables the joinery mode."* So
+  the selection is no longer consulted. The card opens when a joint is selected and stays
+  until it is **closed** (the × or Escape with nothing typed), until the joint itself is
+  **gone** (deleted, or undone away — `jointOf()` validates against the live document), or
+  until the **editor is left** (`jointEditEnvironmentOk()`: the init screen, a sketch, a
+  pending outline, render mode, a compare pane, a live Mirror placement).
+  **What that costs, and where it is paid.** Disjointness from every other gesture used to
+  fall out of the selection term for free — the card simply lost whichever pick came next —
+  and now it does not. So `canPullSelectedFace()`, `bevelTarget()`, `transformableBodyId()`,
+  `canMitreSelectedFace()`, `canReMeasureSize()`, `canBeginSlats()` and
+  `canBeginMirrorPlacement()` each carry an explicit `jointChipJointId() > 0` stand-down,
+  exactly as they already carry one another's. At most one application-wide Enter/Escape
+  claim, still **by construction** rather than by luck — just written down in seven places
+  instead of inferred from one. `gui_smoke` pins each stand-down AND its non-vacuity: close
+  the card and the very same body pick raises the transform gizmo, so a green run cannot mean
+  "the gizmo was never coming anyway".
 - **Every whole-document operation carries the joints, and each is one rule in one place.**
   **Mirror** copies a joint onto its pieces' twins, both ways round: mirroring two pieces that
   already carry a joint copies it inside `pairWithMirror()`'s own checkpoint, and placing a
@@ -1728,9 +1861,11 @@ that pins the one exception) landed **after** that run and added about five chec
 merge was taken deliberately without a third run. So the floor sits roughly four low: it cannot
 false-pass, but about four checks could stop running unnoticed. The final tree's evidence is all
 six joinery blocks green at 963 checks filtered, and headless at 665 with `ctest` 8/8 — not a
-filter-less invocation. Re-ratchet on the next official run, and **measure it rather than
-computing it**: a predicted floor is a number nobody has watched the suite produce, which is
-the whole reason this project measured it twice instead of adding six to the last one.
+filter-less invocation. **That debt is settled**: the improvements branch re-ratcheted the
+floor to a twice-measured 4782 on its own final tree (see `kCheckFloor` above). The rule the
+note existed to state still stands - **measure it rather than computing it**: a predicted
+floor is a number nobody has watched the suite produce, which is the whole reason this
+project measured it twice instead of adding six to the last one.
 
 **What the green run is worth, and why.** The number to trust on this feature is not 4125 checks
 passing — it is that roughly two dozen mutations were each made to produce a **named** red line,
@@ -1746,6 +1881,140 @@ skipped the rebuild and the run measured a stale exe. All three are in Pitfalls.
 add up to: **a mutation counts only when it produces a real red line naming the expected check**,
 and a run that produces no output file, or a check that simply vanishes from the output, is a
 failure to apply rather than a pass.
+
+### Improvements: eighteen items, and the follow-ups that came out of testing them
+
+One user-written list, worked top to bottom, then a run of asks that came out of the user
+actually driving the result. Items with their own machinery are written up in their own
+sections (item 5 under "Sizes around the selection", item 8 and item 13 under "Re-Measure",
+item 10 under "Settings", item 18 under "The shell"); what follows is everything else, plus
+the rulings each one settled.
+
+**Folders in the Items drawer (item 11).** `DocumentModel::Group` is `{id, name, parent}`,
+held in `State` — so a folder is **undoable content**, like a name and unlike visibility:
+grouping three boards is an edit, and one `Ctrl+Z` has to take it back whole. The API is
+`createGroup`/`removeGroup`/`setGroupParent`/`setItemGroup`/`groupOf`/`childGroups`/
+`itemsInGroup`/`bodiesUnderGroup`/`groupContains`/`groupExists`/`groupNameOf`/`setGroupName`,
+and `bodiesUnderGroup()` is the one that matters to every caller outside the drawer: a
+folder's contents are its whole subtree, and nothing else should be re-deriving that walk.
+`DocumentMeta` carries `GroupRecord{name, parentIndex}` with **parents emitted first**, so a
+load never has to resolve a forward reference, and the whole block is validated before
+anything is mutated — the same scratch-then-swap law every other load in this app follows.
+`ItemsPanel` grew tree rows (`addItemRow`, `addGroupRow`, `buildGroupRows`, `kIndentPx = 12`),
+multi-select (plain/Ctrl/Shift through one `selectionRequested(std::vector<int>)` signal),
+drag-and-drop onto a folder (`itemsDropped(std::vector<int>, int)`, `kDragThresholdPx = 6`),
+and a right-click menu of New folder with these / Rename / Ungroup / **Delete folder and its
+contents**. Folders start **folded** (`myExpanded` is empty until something opens one), which
+is the user's call and the right default for the drawer's actual problem — a long list.
+
+**The drawer scrolls, and its height comes from the rows (item 12).** The user's words were
+"the items list is too long and it does not have a scroll bar, can you add an invisible
+scroll bar?", and invisible is literal: a `QScrollArea` with **both bars off**, so nothing is
+drawn and nothing is clickable, the card's painted rectangle is unchanged, and the wheel is
+the whole interaction. Then the card was too short, and this is the finding worth keeping,
+because it cost three wrong fixes in a row (the cap, then `setSizeAdjustPolicy`, then the cap
+again): **`QScrollArea::sizeHint()` does not answer for its widget.** It returns a cached size
+bounded to roughly 24 text lines and it ignores `sizeAdjustPolicy` entirely, so every
+attempt to raise a cap was raising a cap that was never the binding constraint.
+`ItemsPanel::sizeHint()` reads `myRows->sizeHint()` — the row container's own height —
+directly, and never `heightForWidth()`. The title row's `+` makes a folder from the
+selection; there is **no hover × on this drawer**, by the user's call, and the rail chip and
+the menu entry still close it.
+
+**Slats (item 14).** Two rounds of pictures settled what the user wanted: not one stick at a
+time but *"defining a certain area, the tool put those stick and i can edit they sizes"*.
+`ModelingOps` owns it, Qt-free: `SlatPlan{width, gap, depth, runAcross}`,
+`SlatCheck{Ok, NotAFlatFace, SizeOutOfRange, NoneFit}`, `checkSlats()` returning a value the
+UI maps to a sentence (`checkMitre()`'s contract), `slatsOnFace()`, `slatsOnArea()` and
+`slatRunFromBodies()`. The layout rule is one line and it is why the result looks made rather
+than generated: `count = floor((extent + gap) / (width + gap))`, then
+`pitch = (extent - width) / (count - 1)` — so the count comes from the gap the user asked for
+and the pitch is then re-derived to land **both end slats flush** with the area's edges. The
+chip is `SlatsTool` (Width / Gap / Depth / Flip, with a live count), placed bottom-centre at a
+fixed `kBottomMargin = 24` because the user asked for it there, previewing through
+`MainWindow::slatsResult()` — the call the commit itself uses — and the run lands in a folder
+of its own so it can be moved, hidden or deleted as one thing.
+
+**Multi-object transform.** Move, Rotate and Scale act on the **whole selection**, and on a
+selected folder's whole subtree. `MainWindow::transformableBodyIds()` is the one derivation
+(it is `transformableBodyId()`'s plural, carrying the same stand-downs) and
+`transformBodies()` applies one delta about the selection's own pivot inside one checkpoint,
+so a multi-body move is one undo and one toast.
+
+**The loading card.** A heavy furniture took seconds to open behind a blank window, and the
+ask was Unity's or Photoshop's answer: show something. `LoadingCard` is the app mark, the
+furniture's name and a progress bar, driven from `openFurniture()`
+(`begin()`/`setTotal()`/`step()`/`end()`) and ticked from `resyncView()`, whose
+`displaySolid()` loop is where the seconds actually go — one step per body. `pump()` calls
+`QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents)`: the card has to paint
+while the load runs, and **excluding user input is not optional** — a click delivered in the
+middle of a half-built document reaches a window that is not ready for it.
+
+**Per-material colour and brightness.** Double-clicking a material tile opens `MaterialCard`
+— a swatch and a 25–200% brightness slider, bottom-LEFT so it does not cover the furniture it
+is about, Escape to close, and **no key claim beyond Escape**: orbiting while the slider moves
+is exactly how a material gets judged. What it edits is
+`DocumentModel::MaterialLook{material, red, green, blue, brightness}`, stored **outside
+`State`** — presentation, the same category as visibility, so it is persisted with the
+furniture and bumps `revision()` (autosave notices, the unsaved dot lights) but takes **no
+checkpoint**, because a colour is not an edit to undo. `MainWindow::activeMaterialName()` is
+the one derivation of which record is live (a wood names itself; everything else is the
+nearest preset, derived exactly as the tiles' own highlight is), `applyMaterialLook()` pushes
+it into the viewport on every `appStateChanged`, and the card closes itself when the material
+it is about stops being the live one — a card editing something the viewport is not showing
+is editing in the dark.
+
+**Render quality, and the middle tier (item 16).** `RenderQuality{Simple, Balanced, Deep}` is
+a picker over the probe's answer: `effectiveRenderTier()` maps the choice onto the tier list,
+so Deep is what the probe found and Balanced is the rasterizing tier below it. The two-state
+`setRenderQuick()` spelling is kept because callers use it.
+
+**Sketch work is drawn on top (item 8 of the list).** `mySketchTopLayer` +
+`markOnTopOfBodies()` puts the outline, the marks, the cursor ring and the dimension above the
+bodies. The modeling preview and the mirror plane deliberately **stay depth-tested**: a ghost
+that floats through the body it is about is not showing where the body will be.
+
+**WASD flies the camera.** `isFlyKey()`/`stepFly()` on a 16 ms timer (`kFlyPerSecond = 1.1`,
+`kFlyFastFactor = 3.0`), claimed through `ShortcutOverride` **only while orbiting**, so the
+keys belong to a live gesture rather than to the viewport at all times — typing in a field is
+not flying.
+
+**The grid fades as you square up to it (item 7).** `uFaceOnFade` in the grid's fragment
+shader, ramping from 1 to `kFaceOnFloor` (0.45) over the last 25 degrees with a `smoothstep`,
+measured as the **eye's real height above the plane against its distance** rather than the
+turntable's elevation angle — which is why a locked vertical face gets the same treatment for
+free. Two `gui_smoke` checks had to change with it, and the change is a lesson rather than a
+chore: **a check that counts EXACT TOKEN PIXELS cannot see an alpha-blended line.** Both now
+capture the same frame with the grid switched off and count what moved, which answers the
+question each was actually asking ("is the grid drawn over this face", "did raising the
+detail put more lines in the frame") in a way no future change to the grid's colour or alpha
+can quietly answer for.
+
+**Naming a furniture (item 4).** The `+` card no longer makes `Furniture 03` and opens it: it
+asks. `NameFurnitureCard` is `UnsavedCloseCard`'s shape — a scrim, an app-wide key claim, and
+it hides **before** reporting its answer so a toast lands on a clear viewport — and it creates
+nothing until the question is answered. Every route to a new furniture goes through it,
+including the eight places `gui_smoke` presses `+`.
+
+**Duplicate does not move the copy (item 15).** It used to sit one grid step away in X and Y
+so it read as a second object; the user's point is that a duplicate is the start of a
+deliberate move, so an automatic one is just something to undo first. One consequence landed
+somewhere non-obvious and is recorded rather than quietly absorbed: duplicating a body that is
+itself a mirror SOURCE used to leave the copy unpaired, because the nudge pushed it across the
+gesture's own tangent plane and `pairWithMirror()` skips a straddling body. With no nudge the
+copy is where its source is — wholly on one side — so the ordinary new-body rule fires and the
+copy gets a **fresh twin of its own**, which is what the rule always said should happen.
+
+**Ctrl+double-click is gone (item 9)**, **the `mm` chip is gone (item 18)**, and the outline's
+line has **its own colour token** (`dimensionLine`, item 17 — *"i mean this purple line, which
+is using the accent, i want a separate color for it"*). The token ships at the shipped
+accent's own violet, so splitting it off moved no pixel: what the user asked for was a
+control, not a new colour.
+
+**Small things that are still contracts.** Save dialogs remember the folder they last wrote
+to (`saveDialogPath()`/`rememberSaveDialogPath()`), a clicked point in the UI during a sketch
+does not become a sketch point, and Join plus a face pick no longer disables joinery — that
+last is item 2, written up where the joint card lives.
 
 ### Qt plugin deployment - do not remove
 
@@ -1780,7 +2049,7 @@ size — with a tab bar under the title and a `QStackedWidget` below it.
 
 | Tab | Rows |
 |---|---|
-| Colours | 28 colour swatches (scrolled) · Save/Load colours · Reset |
+| Colours | 27 colour swatches (scrolled; 29 tokens less the two retired) · Save/Load colours · Reset |
 | Text & lines | Text size · Font · Edge lines · Outline lines · Button border |
 | Viewport | Show the grid · **Grid detail** · Show sizes around a selection · Projection · **Gizmo size** · Show notifications |
 | Units | Sizes in (Millimetres/Centimetres) · Snap to Grid · Magnet |
@@ -1900,29 +2169,31 @@ rather than floating beside it:
   `ViewportOverlay`-anchored card now, and `ViewportOverlay::relayout()` already rounds every
   anchored card's size up through `Theme::wholeDevicePixels()` for free; only the status bar
   is still a real window-spanning strip needing that function's own bespoke fix.
-- **The four view controls that used to live as bar buttons moved to a dedicated icon-only
+- **The view controls that used to live as bar buttons moved to a dedicated icon-only
   `ToolCluster`, anchored `Anchor::TopRight` under the axis gizmo card** (stacking one gap
   below it, the exact mechanism the Appearance and RenderSettings cards already share that
   slot through - see `ViewportOverlay.h`'s "clusters sharing an anchor stack downward in the
-  order they were added"). The **Persp/Ortho toggle** (it triggers the checkable
-  `Orthographic` action and holds no state, exactly as the unit chip does; it does **not**
-  snap to Axonometric, which belongs to the gizmo, keys 0-3 and the View menu, and it
-  records no `view.changed`, because a projection flip is not a look in a named direction and
-  would otherwise retire the hint teaching the gizmo), the **unit chip** (triggers the
-  *other* unit's existing action - it holds no state of its own, the identical contract the
-  old bar button had), **Wireframe** and **Fit All** are all reachable exactly as before, just
-  as 34px icon-only chips instead of text buttons - three of the four are plain
-  `ToolChip(action, IconSet::Glyph, ChipMode::IconOnly)` calls, mirroring their actions the
-  same way every rail chip already does (`IconSet::Glyph::Projection/Wireframe/FitAll`, all
-  new - the projection toggle never had an icon before, since it used to paint its own word).
-  The **unit chip is the one exception**: a unit is a word, not a shape, so it uses
-  `ToolChip`'s text-glyph constructor (`ToolChip(action, QString, ChipMode)`) - a second
-  constructor on the SAME class per this task's own ruling, not a sibling button class -
-  paints `"mm"`/`"cm"` centred in the icon-only square in place of a rasterised `QIcon`, and
-  (being action-less, on the identical contract the old bar's unit button already had) has
-  its text pushed in on every `appStateChanged` the same way `AppBar::setUnitLabel()` used
-  to be called, rather than mirroring a `QAction::changed()` the way the other three do.
-  This cluster is deliberately **not** hidden by render mode - the four controls stayed
+  order they were added"). **THREE chips, not four, since improvements item 18** - the
+  **Persp/Ortho toggle** (it triggers the checkable `Orthographic` action and holds no state;
+  it does **not** snap to Axonometric, which belongs to the gizmo, keys 0-3 and the View
+  menu, and it records no `view.changed`, because a projection flip is not a look in a named
+  direction and would otherwise retire the hint teaching the gizmo), **Wireframe** and
+  **Fit All** - all three plain `ToolChip(action, IconSet::Glyph, ChipMode::IconOnly)` calls
+  mirroring their actions the same way every rail chip already does
+  (`IconSet::Glyph::Projection/Wireframe/FitAll`, all added when the bar's text buttons went;
+  the projection toggle never had an icon before, since it used to paint its own word).
+  **The unit chip is gone** (the user's own call: "remove the mm button, keep mm in the View
+  tab"). It was the one chip in this app that painted a WORD instead of an icon - a `mm`/`cm`
+  glyph through `ToolChip`'s text-glyph constructor, with its text pushed in on every
+  `appStateChanged` rather than mirroring a `QAction::changed()` - and a unit is a thing you
+  set once and then read off a number, not a tool you reach for beside Fit All. The unit
+  itself did not move anywhere secret: it is the View menu's two entries and the Settings
+  drawer's Units tab, both of which already existed and both of which are where the rest of
+  this app's settings live. `ToolChip`'s text-glyph constructor STAYS - it is a real second
+  spelling of a chip and the next word-shaped control should use it rather than inventing a
+  sibling class - but nothing constructs one today, which is stated here so its absence from
+  the shell does not read as the constructor being dead.
+  This cluster is deliberately **not** hidden by render mode - these controls stayed
   reachable through render mode when they lived in the bar, and moving them onto chips does
   not change that; if the gizmo above it hides, the cluster simply reflows up into the
   gizmo's own slot, which `ViewportOverlay`'s existing "hidden entries occupy no slot" rule
@@ -2137,6 +2408,20 @@ draws a widget at 1:1 into an image of exactly its logical size, where the offen
 cannot exist - and because mapping a widget's rect into a capture that includes Windows 11's
 invisible resize frame needs a scale *and* an offset, and a region a few pixels out reports
 clean exactly as loudly as a clean window does.
+
+**An EXACT-TOKEN pixel count measures the token as much as the thing, so it dies the day
+anything blends.** Two checks read zero the moment the grid gained its face-on alpha
+(improvements item 7) — "the work-plane grid is drawn ON TOP of the face it is locked to"
+and "raising Grid detail densifies the LIVE grid" — and both were still true: the grid was
+plainly there, every line of it just arrived as the token blended with whatever was behind
+it rather than as the token. Each now captures the same frame with the grid switched **off**
+and counts the pixels that moved, which is what each was asking all along and which no
+future change to the grid's colour, width or alpha can quietly answer for. The general rule:
+count exact token pixels when the token IS the subject (a gizmo arm must be its axis colour,
+and a fully covered pixel resolves to exactly that colour even under MSAA); **differ two
+frames when PRESENCE is the subject** — is it drawn, is there more of it, is it in front.
+The differ is also cheaper to keep honest, because it needs no threshold argument: a pixel
+either moved when the feature was switched off or it did not.
 
 ### CMake note
 
@@ -2547,12 +2832,15 @@ inference is gone.
   second click of a double-click aimed at the body lands — so `arrowHit()` swallowed it and
   every such gesture was a no-op. The guard stands down in auto: an arrow has no CLICK meaning
   at all (it is press-drag-release), and the gesture's own first press/release pair has
-  already offered it that gesture and been answered. **The stand-down is for the PLAIN
-  gesture only** — the fix wave found that a blanket exemption let a *Ctrl*+double-click on a
-  live bevel arrow fall past the lock branch (which needs a detected FACE and finds an edge)
-  and take the whole body out from under the arrow, which is the precise harm the exemption's
-  own comment names. Ctrl means "lock this face" and nothing else; if the detection is not a
-  face it means nothing at all, so it keeps the pre-phase guard in auto as in the seam modes.
+  already offered it that gesture and been answered. **The stand-down used to be for the
+  PLAIN gesture only**, and the reason is worth keeping although the case is gone: a blanket
+  exemption let a *Ctrl*+double-click on a live bevel arrow fall past the lock branch (which
+  needs a detected FACE and finds an edge) and take the whole body out from under the arrow,
+  so Ctrl kept the pre-phase guard. **Improvements item 9 deleted the Ctrl route entirely**,
+  which deletes the asymmetry with it: there is no lock branch left for a modifier to aim at,
+  Ctrl means nothing here, and the stand-down is now unconditional in auto. The `gui_smoke`
+  probe that pinned the old guard pins the new answer on the same pixel and the same live
+  arrow — Ctrl takes the whole body, exactly as no modifier does.
 - **A Shift+double-click over a gizmo arm must still add the body underneath.** In the
   manipulator era `AIS_ManipulatorOwner` outranked a shape's owner and the double-click
   added nothing, so both `mouseDoubleClickEvent()` and the additive release carried a
@@ -2623,12 +2911,15 @@ under the face it decorates (measured: 0 of 5616 grid pixels).
 
 **Gestures**: plain double-click selects the whole body — performed by the viewport itself
 since the auto-selection switch, there being no mode action left to announce it to;
-**Ctrl+double-click on a face** locks the sketch plane (the old plain double-click route);
-`L`/`Shift+L`/menu unchanged. The Ctrl exemption from the pull-arrow's double-click guard
-names the face-lock BRANCH rather than the modifier, which is what stopped a
-Ctrl+double-click on an edge inheriting it; under auto the guard stands down for the
-whole-body route as well — see "Selection" for the two press-swallowing hazards the re-key
-opened and how each is closed.
+**Ctrl+double-click locks nothing** — it was Lock to Face's second route and improvements
+item 9 removed it, so Ctrl is an ordinary modifier there now and the double-click means what
+a plain one means. `L`/`Shift+L`/menu are the routes that remain, and they were always the
+ones the tooltip and the shortcut sheet named. The pull-arrow's double-click guard used to
+carry an exemption naming the face-lock BRANCH rather than the modifier — that is what kept a
+Ctrl+double-click on an EDGE from inheriting it — and with the route gone **nothing is exempt
+at all**: under auto the guard stands down for the whole-body route and for every modifier
+alike. See "Selection" for the two press-swallowing hazards the re-key opened and how each is
+closed.
 
 **Notes can be silenced, Failures cannot.** `View → Show notifications` drops
 `Toast::Kind::Note` only; a refusal that reports nowhere would violate the

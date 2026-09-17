@@ -48,6 +48,7 @@
 #include "JointsPanel.h"
 #include "MainWindow.h"
 #include "MitreTool.h"
+#include "NameFurnitureCard.h"
 #include "ReMeasureTool.h"
 #include "Measure.h"
 #include "ModelingOps.h"
@@ -561,8 +562,12 @@ void skipByEnvironment(int checks, const QString& why)
 //       body and a double-click each leaving the gesture and the selection
 //       untouched, Escape still ending it, and the probe's own body taken back
 //   +2  Ctrl+double-click on a live bevel arrow: the arrow is proved to claim
-//       that pixel, and the body is proved NOT to be taken - the half the old
-//       comment claimed was asserted and was not
+//       that pixel, and what the gesture does there is proved rather than
+//       assumed. (Its subject changed with improvements item 9, which deleted
+//       the Ctrl route the guard existed for: the check now pins that Ctrl is
+//       an ordinary modifier and the body IS taken, the same as a plain
+//       double-click. Same two checks, opposite expectation - the point of
+//       the probe is that the answer is measured.)
 //   +2  a successful Shift+double-click leaves no refusal standing, on the
 //       viewport AND in the status bar - the painted half a cleared member
 //       cannot answer for
@@ -681,7 +686,25 @@ void skipByEnvironment(int checks, const QString& why)
 // accounted total, exactly. It was measured rather than computed on purpose:
 // a floor six below the real total lets six checks stop running unnoticed,
 // which is the whole failure this constant exists to catch.
-constexpr int kCheckFloor = 4126;
+// RE-RATCHETED (2026-09-17, the improvements branch's closing official runs):
+// the eighteen-item list and its follow-ups, and the fifty suite repairs the
+// list's own contract changes made necessary. TWO consecutive unfiltered runs
+// measured 4781 checks + 1 environment skip, agreeing to the digit; the second
+// ran against the binary this branch ships, built minutes before it (the
+// crash-hunt diagnostics were removed in between, and the counts did not move,
+// which is what says they were inert). The floor is that accounted total,
+// exactly - 4782 - and it CLEARS THE DEBT the joinery merge left: that floor
+// sat about four below its own true total because two commits landed after the
+// run that measured it, and this one was taken on the final tree.
+//
+// The one environment skip is still the RayTracing floor-blend measurement,
+// which does not apply when PathTracing is the session's tier.
+//
+// Measured, never computed. Fifty checks changed their expectation on this
+// branch and a dozen were added; adding a predicted delta to 4126 would have
+// produced a number nobody had watched the suite print, which is the exact
+// mistake this comment has now recorded three times.
+constexpr int kCheckFloor = 4782;
 
 void check(bool condition, const QString& what)
 {
@@ -1259,9 +1282,10 @@ QAction* action(MainWindow& window, const QString& label)
     return nullptr;
 }
 
-// The four view controls (Milestone 5, item 3) - Persp/Ortho, the unit chip,
-// Wireframe, Fit All, in that fixed construction order (see
-// MainWindow::buildOverlay()) - live in one icon-only ToolCluster, distinct
+// The view controls (Milestone 5, item 3) - Persp/Ortho, Wireframe, Fit All,
+// in that fixed construction order (see MainWindow::buildOverlay(); the unit
+// chip was the second of four until improvements item 18 removed it) - live
+// in one icon-only ToolCluster, distinct
 // from the rail, exposed as MainWindow::viewControls(). Indexing by position
 // rather than hunting by text mirrors exactly how the rail's own block below
 // asserts ITS chips: comparing by pointer/position is what makes a reworded
@@ -1274,10 +1298,14 @@ ToolChip* viewControlChip(MainWindow& window, int index)
     const QVector<ToolChip*>& chips = cluster->chips();
     return index >= 0 && index < chips.size() ? chips[index] : nullptr;
 }
+// THE UNIT CHIP IS GONE (improvements item 18, the user's own call: "remove
+// the mm button, keep mm in the View tab"), so the cluster is three chips and
+// the two that used to follow the unit have moved up one. The unit itself did
+// not move anywhere secret - it is the View menu's two entries and the
+// Settings drawer's Units tab, both of which this file already drives.
 ToolChip* projectionChip(MainWindow& window) { return viewControlChip(window, 0); }
-ToolChip* unitChip(MainWindow& window)       { return viewControlChip(window, 1); }
-ToolChip* wireframeChip(MainWindow& window)  { return viewControlChip(window, 2); }
-ToolChip* fitAllChip(MainWindow& window)     { return viewControlChip(window, 3); }
+ToolChip* wireframeChip(MainWindow& window)  { return viewControlChip(window, 1); }
+ToolChip* fitAllChip(MainWindow& window)     { return viewControlChip(window, 2); }
 
 // The persistent right-hand readout - a permanent widget on the status bar,
 // which MainWindow keeps no accessor for, so it is found the same way the
@@ -1371,6 +1399,35 @@ SelectorWindow* wireSelector(MainWindow& window, EditorSelectorHandoff::Hooks ho
 // same way a user would get one: by wiring a real SelectorWindow and
 // clicking its real "+ New furniture" button. One driver, so the click
 // sequence cannot drift between the twenty-odd call sites that need it.
+// THE NAME QUESTION every route to a new furniture goes through since
+// improvements item 4: the + card no longer makes "Furniture 03" and opens
+// it, it asks what to call it and creates NOTHING until that is answered. So
+// every probe that presses + has to answer, exactly as a user does.
+//
+// Found by scanning the live windows rather than taken as an argument: the
+// card belongs to whichever SelectorWindow asked, several probes here build
+// their own, and a helper that had to be handed the right one would be a
+// second thing for each of them to get right. At most one card can be asking,
+// since a second press of + lands on that card's own scrim.
+//
+// `name` empty accepts the suggestion the card opened with - which is the
+// name FurnitureStore::nextFurnitureName() would have produced anyway, so a
+// probe that does not care about the name gets the name it always got.
+bool answerNameCard(const QString& name = QString())
+{
+    for (QWidget* top : QApplication::topLevelWidgets()) {
+        auto* card = top->findChild<NameFurnitureCard*>();
+        if (!card || !card->isAsking()) continue;
+        if (!name.isEmpty() && card->field()) card->field()->setText(name);
+        QAbstractButton* create = card->createButton();
+        if (!create) return false;
+        clickAt(create, QPointF(create->width() / 2.0, create->height() / 2.0));
+        settle(150);
+        return true;
+    }
+    return false;
+}
+
 void enterFreshFurniture(MainWindow& window)
 {
     SelectorWindow* selector = wireSelector(window);
@@ -1381,6 +1438,9 @@ void enterFreshFurniture(MainWindow& window)
         return;
     }
     clickAt(newButton, QPointF(newButton->width() / 2.0, newButton->height() / 2.0));
+    // The name question this press now opens - see answerNameCard().
+    answerNameCard();
+    settle(150);
     settle(200);
 }
 
@@ -1409,6 +1469,15 @@ QPushButton* firstVisibleRowToggle(QWidget* drawer)
 {
     if (!drawer) return nullptr;
     for (QPushButton* button : drawer->findChildren<QPushButton*>()) {
+        // NOT THE + IN THE TITLE ROW. It is a QPushButton too since the
+        // folders work (improvements item 11), it is always visible, and it
+        // is added to the panel BEFORE any row exists - so it is the first
+        // thing this scan reaches, and a probe that clicked it was not
+        // hiding a body, it was making a folder called "Folder" that every
+        // later row-index check in the shared window then read as row 0.
+        // Told apart structurally rather than by icon: an eye belongs to a
+        // ROW, the + is a child of the panel itself.
+        if (button->parentWidget() == drawer) continue;
         if (button->isVisible()) return button;
     }
     return nullptr;
@@ -2327,6 +2396,57 @@ void checkCardCorners(QWidget* w, const QString& label, bool circular = false)
 
 }  // namespace
 
+
+// --- a stack overflow names itself ------------------------------------------
+// This suite dies of a stack overflow if anything ever recurses, and there is
+// no debugger installed on this machine - so it catches the fault itself and
+// prints the frames that caused it rather than vanishing with an exit code.
+// It earned its keep once already: the frames it printed are what showed the
+// crash at the first GL context creation was NOT recursion at all but this
+// file's own thirty-thousand-line main() frame against a 1 MB default stack,
+// which is the finding /STACK: below acts on. Kept because the next one will
+// be just as invisible without it.
+//
+// SetThreadStackGuarantee() in main() is what makes it possible: it reserves
+// stack for the handler to run in, which a stack overflow has by definition
+// just run out of. The report goes to STDERR, not to a file - a hard-coded
+// path is a diagnostic that works on one machine, and stderr is unbuffered by
+// the standard, which is the whole property a dying process needs.
+#ifdef _WIN32
+#include <windows.h>
+#include <dbghelp.h>
+
+static LONG CALLBACK traceStackOverflow(EXCEPTION_POINTERS* info)
+{
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW)
+        return EXCEPTION_CONTINUE_SEARCH;
+    static bool reported = false;
+    if (reported) return EXCEPTION_CONTINUE_SEARCH;
+    reported = true;
+
+    void* frames[62] = {};
+    const USHORT count = CaptureStackBackTrace(0, 62, frames, nullptr);
+    const HANDLE process = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(process, nullptr, TRUE);
+
+    std::fprintf(stderr, "\n=== STACK OVERFLOW, %u frames ===\n", unsigned(count));
+    char buffer[sizeof(SYMBOL_INFO) + 512] = {};
+    auto* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 500;
+    for (USHORT i = 0; i < count; ++i) {
+        DWORD64 displacement = 0;
+        if (SymFromAddr(process, reinterpret_cast<DWORD64>(frames[i]), &displacement, symbol))
+            std::fprintf(stderr, "  %02u %s\n", unsigned(i), symbol->Name);
+        else
+            std::fprintf(stderr, "  %02u <%p>\n", unsigned(i), frames[i]);
+    }
+    std::fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 int main(int argc, char* argv[])
 {
     // Unbuffered, deliberately. This suite drives a real GL window through a
@@ -2336,6 +2456,13 @@ int main(int argc, char* argv[])
     // fault. A crash whose location you cannot read costs far more than the
     // syscall per line this gives up.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+#ifdef _WIN32
+    {
+        ULONG guarantee = 128 * 1024;
+        SetThreadStackGuarantee(&guarantee);
+        AddVectoredExceptionHandler(1, traceStackOverflow);
+    }
+#endif
     // `--list` answers "what can I filter to" without touching Qt, a window
     // or a GL context at all - every name printed here is exactly the string
     // blockEnabled() matches a filter substring against.
@@ -2522,6 +2649,9 @@ int main(int argc, char* argv[])
                       newButton,
                   "childAt() at its centre finds the button itself");
             clickAt(newButton, QPointF(newButton->width() / 2.0, newButton->height() / 2.0));
+            // The name question this press now opens - see answerNameCard().
+            answerNameCard();
+            settle(150);
             settle(300);
         }
         check(!window.isShowingInitScreen(), "New furniture leaves the init screen");
@@ -2702,6 +2832,9 @@ int main(int argc, char* argv[])
         if (freshNewButton) {
             clickAt(freshNewButton, QPointF(freshNewButton->width() / 2.0,
                                             freshNewButton->height() / 2.0));
+            // The name question this press now opens - see answerNameCard().
+            answerNameCard();
+            settle(150);
             settle(300);
         }
         check(!libraryProbe.isShowingInitScreen() && libraryProbe.document().count() == 0,
@@ -3001,6 +3134,9 @@ int main(int argc, char* argv[])
         if (createFailButton) {
             clickAt(createFailButton,
                    QPointF(createFailButton->width() / 2.0, createFailButton->height() / 2.0));
+            // The name question this press now opens - see answerNameCard().
+            answerNameCard();
+            settle(150);
             settle(200);
         }
         check(createFailProbe.isShowingInitScreen(),
@@ -3280,6 +3416,12 @@ int main(int argc, char* argv[])
             QList<QPushButton*> eyeButtons;
             if (items) {
                 for (QPushButton* b : items->findChildren<QPushButton*>()) {
+                    // The + in the title row is a QPushButton too since
+                    // improvements item 10 (it makes a folder), and it is not
+                    // an eye. Told apart by the one thing that distinguishes
+                    // them structurally: an eye belongs to a ROW, the + is a
+                    // child of the panel itself.
+                    if (b->parentWidget() == items) continue;
                     if (b->isVisible()) eyeButtons << b;
                 }
             }
@@ -3319,12 +3461,7 @@ int main(int argc, char* argv[])
                 // because visibility is part of its signature - replaced the
                 // row `eye` belonged to with a new one, on the same terms
                 // documented above.
-                QPushButton* eyeAgain = nullptr;
-                if (items) {
-                    for (QPushButton* b : items->findChildren<QPushButton*>()) {
-                        if (b->isVisible()) { eyeAgain = b; break; }
-                    }
-                }
+                QPushButton* eyeAgain = firstVisibleRowToggle(items);
                 check(eyeAgain != nullptr, "a fresh, visible eye button exists to click again");
                 if (eyeAgain) {
                     clickAt(eyeAgain, QPointF(eyeAgain->width() / 2.0, eyeAgain->height() / 2.0));
@@ -3485,6 +3622,9 @@ int main(int argc, char* argv[])
         if (handoffNewButton) {
             clickAt(handoffNewButton,
                    QPointF(handoffNewButton->width() / 2.0, handoffNewButton->height() / 2.0));
+            // The name question this press now opens - see answerNameCard().
+            answerNameCard();
+            settle(150);
             settle(250);
         }
         check(handoffWindow.isVisible(), "choosing a furniture shows the editor");
@@ -3642,6 +3782,9 @@ int main(int argc, char* argv[])
         if (saveFailNewButton) {
             clickAt(saveFailNewButton,
                    QPointF(saveFailNewButton->width() / 2.0, saveFailNewButton->height() / 2.0));
+            // The name question this press now opens - see answerNameCard().
+            answerNameCard();
+            settle(150);
             settle(250);
         }
         check(!saveFailProbe.isShowingInitScreen(), "a fresh furniture is open for the probe");
@@ -4044,6 +4187,9 @@ int main(int argc, char* argv[])
         check(askNew != nullptr, "the ask probe's selector offers New furniture");
         if (askNew) {
             clickAt(askNew, QPointF(askNew->width() / 2.0, askNew->height() / 2.0));
+            // The name question this press now opens - see answerNameCard().
+            answerNameCard();
+            settle(150);
             settle(250);
         }
         check(!ask.isShowingInitScreen(), "the ask probe has a furniture open");
@@ -4336,6 +4482,9 @@ int main(int argc, char* argv[])
         QPushButton* libNew = libSelector ? libSelector->newFurnitureButton() : nullptr;
         if (libNew) {
             clickAt(libNew, QPointF(libNew->width() / 2.0, libNew->height() / 2.0));
+            // The name question this press now opens - see answerNameCard().
+            answerNameCard();
+            settle(150);
             settle(250);
         }
         check(!lib.isShowingInitScreen() &&
@@ -5127,13 +5276,21 @@ int main(int argc, char* argv[])
         // action. textGlyph(), not text() - QAbstractButton::text() stays
         // empty for this variant since syncFromAction() is what would set
         // it, and this chip is built action-less (see ToolChip.h).
-        ToolChip* unitButton = unitChip(window);
-        check(unitButton != nullptr && unitButton->textGlyph() == QStringLiteral("mm"),
-              "the unit chip reads the display unit");
-        if (unitButton) {
-            check(view->childAt(unitButton->mapTo(view, unitButton->rect().center())) ==
-                      unitButton,
-                  "childAt() at the unit chip's centre finds it too");
+        // AND THE UNIT CHIP IS NOT THERE - checked as an absence, because
+        // "we removed it" is a claim about what the shell does NOT carry, and
+        // the only way that stays true is to assert it. The text-glyph
+        // variant is the thing being looked for: it is the one chip in this
+        // app that paints a word instead of an icon, so nothing else can
+        // answer this question by accident.
+        {
+            bool anyTextGlyph = false;
+            if (ToolCluster* cluster = window.viewControls()) {
+                for (ToolChip* chip : cluster->chips()) {
+                    if (chip && !chip->textGlyph().isEmpty()) anyTextGlyph = true;
+                }
+            }
+            check(!anyTextGlyph, "no unit chip in the view controls - the unit lives in "
+                                 "the View menu and Settings");
         }
 
         // Wireframe and Fit All left the viewport-spanning bar for the
@@ -5670,8 +5827,8 @@ int main(int argc, char* argv[])
 
         if (viewControls) {
             const QVector<ToolChip*>& vcChips = viewControls->chips();
-            check(vcChips.size() == 4,
-                  QStringLiteral("the view-controls cluster carries exactly four chips "
+            check(vcChips.size() == 3,
+                  QStringLiteral("the view-controls cluster carries exactly three chips "
                                  "(found %1)")
                       .arg(vcChips.size()));
 
@@ -6589,12 +6746,10 @@ int main(int argc, char* argv[])
         // number of rebuilds between here and the last one (outlines becoming
         // document items did exactly that). isVisible() is also the honest
         // question: the toggle under test is the one a user could click.
-        auto firstEye = [&]() -> QPushButton* {
-            if (!drawer) return nullptr;
-            for (QPushButton* button : drawer->findChildren<QPushButton*>())
-                if (button->isVisible()) return button;
-            return nullptr;
-        };
+        // firstVisibleRowToggle() is the ONE implementation of this scan
+        // (see its own comment for the + in the title row, which this local
+        // copy did not know about and duly clicked).
+        auto firstEye = [&]() -> QPushButton* { return firstVisibleRowToggle(drawer); };
         QPushButton* eye = firstEye();
         check(eye != nullptr, "the row carries a visibility toggle");
         if (eye && drawer) {
@@ -8589,16 +8744,26 @@ int main(int argc, char* argv[])
                               .arg(inner.width()).arg(inner.height()));
 
                     if (haveRect && inner.width() > 40 && inner.height() >= 4) {
-                        int gridOverFace = 0, facePaint = 0;
+                        // A DIFFER, not a token match, and the change is the
+                        // whole reason: improvements item 7 gave the grid an
+                        // alpha that ramps down as the eye squares up to the
+                        // plane it is drawn on ("Alpha in the grid when i look
+                        // down"), and locking a face flies the camera dead-on
+                        // to exactly that plane - so every line over this face
+                        // is now the token BLENDED with the face underneath,
+                        // and an exact-token count reads zero on a grid that
+                        // is plainly there. Turning the grid off and comparing
+                        // the same pixels asks the question the check was
+                        // always about - is the grid painting over this face
+                        // or behind it - and it asks it in a way no future
+                        // change to the grid's own colour or alpha can quietly
+                        // answer for.
+                        int facePaint = 0;
                         for (int y = inner.top(); y <= inner.bottom(); ++y) {
                             for (int x = inner.left(); x <= inner.right(); ++x) {
-                                const QColor c = lockedShot.pixelColor(x, y);
-                                if (colorDistance(c, Theme::gridMinor()) < 8.0 ||
-                                    colorDistance(c, Theme::gridMajor()) < 8.0) {
-                                    ++gridOverFace;
-                                } else if (colorDistance(c, Theme::viewport()) > 25.0) {
+                                if (colorDistance(lockedShot.pixelColor(x, y),
+                                                  Theme::viewport()) > 25.0)
                                     ++facePaint;
-                                }
                             }
                         }
                         const int total = inner.width() * inner.height();
@@ -8608,10 +8773,39 @@ int main(int argc, char* argv[])
                         check(facePaint * 2 > total,
                               QStringLiteral("that interior really is the face's own paint "
                                              "(%1 of %2 px)").arg(facePaint).arg(total));
+
+                        QAction* gridToggle = action(window, QStringLiteral("Grid"));
+                        check(gridToggle != nullptr && gridToggle->isChecked(),
+                              "the grid is on, so turning it off is a real change");
+                        int gridOverFace = 0;
+                        if (gridToggle && gridToggle->isChecked()) {
+                            gridToggle->trigger();
+                            settle(250);
+                            view->saveSnapshot(outDir + "/h-locked-face-nogrid.png");
+                            const QImage bareShot(outDir + "/h-locked-face-nogrid.png");
+                            check(!bareShot.isNull() && bareShot.size() == lockedShot.size(),
+                                  "the grid-off dump is the same size, so the two can be "
+                                  "compared pixel for pixel");
+                            if (!bareShot.isNull() && bareShot.size() == lockedShot.size()) {
+                                for (int y = inner.top(); y <= inner.bottom(); ++y) {
+                                    for (int x = inner.left(); x <= inner.right(); ++x) {
+                                        if (colorDistance(lockedShot.pixelColor(x, y),
+                                                          bareShot.pixelColor(x, y)) > 6.0)
+                                            ++gridOverFace;
+                                    }
+                                }
+                            }
+                            gridToggle->trigger();
+                            settle(250);
+                            check(gridToggle->isChecked(),
+                                  "and the grid is put back for the blocks that follow");
+                        }
                         check(gridOverFace >= 40 && gridOverFace * 100 >= total,
                               QStringLiteral("and the work-plane grid is drawn ON TOP of "
                                              "the face it is locked to - an underlay would "
-                                             "be hidden behind it (%1 of %2 px)")
+                                             "be hidden behind it, and these pixels would "
+                                             "not move when it is switched off (%1 of %2 "
+                                             "px)")
                                   .arg(gridOverFace).arg(total));
                     }
                 }
@@ -9803,8 +9997,9 @@ int main(int argc, char* argv[])
             check(!tip.contains(QStringLiteral("Ctrl+Z")),
                   "and no longer sends the user to a Ctrl+Z that the next change takes over");
         }
-        // The other surface: the Failure toast on the Ctrl+double-click route,
-        // which consults no action's enabled state. Any face reaches it - the
+        // The other surface: the Failure toast on lockToFace() itself, which
+        // consults no action's enabled state (it is the route the menu entry
+        // and both shortcuts land on). Any face reaches it - the
         // pending-outline refusal is asked before the flatness test.
         TopoDS_Face anyFace;
         if (!window.document().solids().empty()) {
@@ -12527,31 +12722,24 @@ int main(int argc, char* argv[])
         // Asserting the menu action's checked state after each click is what
         // proves that - a private toggle inside the chip would move the
         // label and leave the menu behind.
-        ToolChip* unitButton = unitChip(window);
-        check(unitButton != nullptr && unitButton->textGlyph() == QStringLiteral("mm"),
-              "the unit chip starts on millimetres");
-        if (unitButton && mm && cm) {
-            clickAt(unitButton, QPointF(unitButton->width() / 2.0,
-                                        unitButton->height() / 2.0));
+        // THE UNIT IS SWITCHED FROM THE ACTIONS now (improvements item 18 took
+        // the chip away), and these are the same two actions the chip used to
+        // trigger - so what this block ever really proved, that one route
+        // moves the unit everywhere, is proved on the route that remains.
+        check(mm != nullptr && cm != nullptr, "both Units actions exist");
+        if (mm && cm) {
+            check(mm->isChecked() && !cm->isChecked(), "the unit starts on millimetres");
+            cm->trigger();
             settle(200);
-            check(unitButton->textGlyph() == QStringLiteral("cm"),
-                  QStringLiteral("clicking it switches to centimetres (\"%1\")")
-                      .arg(unitButton->textGlyph()));
-            check(cm->isChecked() && !mm->isChecked(),
-                  "and it went through the Units actions, not a private toggle");
+            check(cm->isChecked() && !mm->isChecked(), "Centimetres takes over");
             check(window.statusBar()->currentMessage().contains(QStringLiteral("cm")),
-                  QStringLiteral("the status bar follows the chip (\"%1\")")
+                  QStringLiteral("the status bar follows the unit (\"%1\")")
                       .arg(window.statusBar()->currentMessage()));
-
-            clickAt(unitButton, QPointF(unitButton->width() / 2.0,
-                                        unitButton->height() / 2.0));
+            mm->trigger();
             settle(200);
-            check(unitButton->textGlyph() == QStringLiteral("mm"),
-                  "clicking it again cycles back to millimetres");
-            check(mm->isChecked() && !cm->isChecked(),
-                  "the Units actions came back with it");
+            check(mm->isChecked() && !cm->isChecked(), "and Millimetres takes it back");
             check(window.statusBar()->currentMessage().contains(QStringLiteral("mm")),
-                  "and so did the status bar");
+                  "and so does the status bar");
         }
 
         if (cm) {
@@ -14098,7 +14286,9 @@ int main(int argc, char* argv[])
             check(barTexts.contains(sweptBar->wordmark()) && barTexts.size() >= 1,
                   QStringLiteral("the pill exposes its painted copy - the wordmark (%1)")
                       .arg(barTexts.join(QStringLiteral(", "))));
-            if (ToolChip* unit = unitChip(window)) barTexts << unit->toolTip();
+            // (The unit chip's tooltip used to be swept here; the chip is
+            // gone - improvements item 18 - and its words moved to the View
+            // menu's own entries, which this sweep already reads as actions.)
             QStringList barOffenders;
             for (const QString& text : barTexts) {
                 for (const QString& word : banned) {
@@ -16106,6 +16296,10 @@ int main(int argc, char* argv[])
                 // mockup's own light blue and light violet.
                 {QStringLiteral("sizesOneBody"), QStringLiteral("#6fb6ff")},
                 {QStringLiteral("sizesGroup"), QStringLiteral("#c89bff")},
+                // Improvements item 17, the outline's own line: it ships at
+                // the shipped accent's violet, so splitting it off moved no
+                // pixel - the token exists so the user can move it.
+                {QStringLiteral("dimensionLine"), QStringLiteral("#6a00ff")},
             };
             const Theme::Spec shippedSpec = Theme::defaultSpec();
             QStringList drifted;
@@ -16133,7 +16327,7 @@ int main(int argc, char* argv[])
                       .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
             check(drifted.isEmpty(),
                   QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
-                      .arg(drifted.isEmpty() ? QStringLiteral("all 28 exact")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 29 exact")
                                              : drifted.join(QStringLiteral(", "))));
             check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
                   QStringLiteral("and the shipped base size is still 10pt (%1)")
@@ -17766,15 +17960,51 @@ int main(int argc, char* argv[])
                         // RENDERED proof that an edit through this row actually
                         // rebuilds the grid, not merely that the pure function
                         // returns a different number.
-                        auto isGridColour = [](const QColor& c) {
-                            return colorDistance(c, Theme::gridMinor()) < 8.0 ||
-                                   colorDistance(c, Theme::gridMajor()) < 8.0;
-                        };
+                        // GRID INK IS MEASURED AGAINST THE SAME FRAME WITH
+                        // THE GRID OFF, not against the colour tokens.
+                        // Improvements item 7 gave the grid an alpha that
+                        // ramps down as the eye squares up to its plane ("Alpha
+                        // in the grid when i look down"), and this probe sits
+                        // at 88 degrees of elevation on purpose - dead-on is
+                        // the pose that gives a regular grid to scan, and it is
+                        // also the pose the fade is deepest at, so an exact-
+                        // token match reads zero on a grid that is plainly
+                        // there. One bare capture answers for both densities,
+                        // since with the grid off there is nothing to be dense
+                        // about; and comparing frames counts the grid's OWN ink
+                        // whatever colour or alpha it is drawn at, which is the
+                        // property this check is actually about.
+                        QAction* densityGridToggle =
+                            action(persisting, QStringLiteral("Grid"));
+                        check(densityGridToggle != nullptr && densityGridToggle->isChecked(),
+                              "the grid is on, so switching it off is a real change");
+                        QImage bareGrid;
+                        if (densityGridToggle && densityGridToggle->isChecked()) {
+                            densityGridToggle->trigger();
+                            settle(200);
+                            const QString barePath =
+                                outDir + QStringLiteral("/grid-density-nogrid.png");
+                            check(densityView->saveSnapshot(barePath),
+                                  "a grid-off reference frame is captured");
+                            bareGrid = QImage(barePath);
+                            densityGridToggle->trigger();
+                            settle(200);
+                            check(densityGridToggle->isChecked(), "and the grid comes back");
+                        }
+                        check(!bareGrid.isNull(),
+                              "the reference frame loaded, so the counts below cannot "
+                              "vanish quietly");
                         auto countCrossings = [&](const QString& path) -> int {
                             check(densityView->saveSnapshot(path),
                                   QStringLiteral("a snapshot is captured (%1)").arg(path));
                             const QImage shot(path);
-                            if (shot.isNull()) return -1;
+                            if (shot.isNull() || bareGrid.isNull() ||
+                                shot.size() != bareGrid.size())
+                                return -1;
+                            auto isGridColour = [&](int x, int y) {
+                                return colorDistance(shot.pixelColor(x, y),
+                                                     bareGrid.pixelColor(x, y)) > 6.0;
+                            };
                             // A QUARTER down, not dead centre - the target
                             // sits at the world origin, which projects to
                             // the exact row the RED X-axis line is drawn on
@@ -17791,7 +18021,7 @@ int main(int argc, char* argv[])
                             int crossings = 0;
                             bool inRun = false;
                             for (int x = 0; x < shot.width(); ++x) {
-                                const bool grid = isGridColour(shot.pixelColor(x, row));
+                                const bool grid = isGridColour(x, row);
                                 if (grid && !inRun) ++crossings;
                                 inRun = grid;
                             }
@@ -18168,44 +18398,62 @@ int main(int argc, char* argv[])
                     view->setSelectedSolids({});
                     settle(120);
 
-                    // --- Ctrl: the lock, on the same pixel -----------------
+                    // --- Ctrl IS NOT A ROUTE ANY MORE, on the same pixel ---
+                    //
+                    // Ctrl+double-click used to be Lock to Face's second
+                    // route; improvements item 9 removed it, on the user's
+                    // call. So this is now an ABSENCE check, and it is worth
+                    // more than the presence check it replaces: "we removed a
+                    // gesture" is a claim about what the app no longer does,
+                    // and the only way that stays true is to assert it. Ctrl
+                    // is an ordinary modifier here now, so the double-click
+                    // means exactly what a plain one means - the whole body.
                     clickAt(view, QPointF(at));
                     settle(150);
                     const TopoDS_Face again = view->selectedFace();
                     check(!again.IsNull() && again.IsSame(under),
-                          "the same face is picked again for the Ctrl route");
+                          "the same face is picked again for the Ctrl probe");
                     if (!again.IsNull() && again.IsSame(under)) {
                         check(BRepAdaptor_Surface(again).GetType() == GeomAbs_Plane,
-                              "and it is flat, so the lock has something to accept");
+                              "and it is flat, so a lock would have had something to "
+                              "accept");
                         doubleClickAt(view, QPointF(at), Qt::ControlModifier);
                         settle(300);
-                        check(window.isFaceLocked(),
-                              "Ctrl+double-clicking a face locks the sketch plane onto it");
+                        check(!window.isFaceLocked(),
+                              "Ctrl+double-clicking a face locks NOTHING - that route is "
+                              "removed, and L, Shift+L and the Model menu are the ones "
+                              "that remain");
+                        const std::vector<int> tookIds = view->selectedSolidIds();
+                        check(view->selectionKind() == OcctViewWidget::PickKind::Body &&
+                                  tookIds.size() == 1 && tookIds.front() == owner,
+                              QStringLiteral("and it takes the whole body, exactly as a "
+                                             "plain double-click does - Ctrl is an "
+                                             "ordinary modifier here now (%1 of kind %2)")
+                                  .arg(tookIds.size())
+                                  .arg(static_cast<int>(view->selectionKind())));
                     }
 
-                    // Back to the ground and the startup pose - locking flies
-                    // the camera square onto the face and borrows an
-                    // orthographic look, exactly as the lock probes further up
-                    // restore for themselves.
+                    // The lock is untouched above, but the camera is not: put
+                    // the pose back exactly as the lock probes further up
+                    // restore theirs.
                     if (window.isFaceLocked()) {
                         trigger(window, QStringLiteral("Unlock Face"));
                         settle(150);
                     }
 
-                    // --- Ctrl on an EDGE takes nothing and locks nothing ---
+                    // --- Ctrl on an EDGE is a plain double-click too --------
                     //
-                    // The exemption is the LOCK's, not Ctrl's. It used to be
-                    // provable by watching the selection MODE fail to change,
-                    // and when that assertion was dropped in the switch the
-                    // half it stood for stopped holding: Ctrl set lockGesture,
-                    // the lock branch found an edge rather than a face and
-                    // skipped, and the auto exemption then let the gesture
-                    // through to the whole-body route - taking the body out
-                    // from under a live bevel arrow, which is the precise harm
-                    // the exemption's own comment names. The guard is back for
-                    // Ctrl (a PLAIN double-click still gives it up, which is
-                    // the sibling probe above), and BOTH halves are asserted
-                    // here rather than one of them merely claimed.
+                    // This probe used to pin a guard that only Ctrl kept: the
+                    // lock route needed an exemption from the arrow's own
+                    // press-swallowing, the exemption twice turned into a bug
+                    // of its own, and the guard existed to hold the line
+                    // between the two. Item 9 deleted the route, so there is
+                    // no exemption left to hold a line against, and Ctrl means
+                    // here what no modifier means - in Auto, the whole body.
+                    // The arrow's claim on the pixel is still asserted, so
+                    // this is a real gesture landing on a real arrow rather
+                    // than a click into empty space that would pass either
+                    // way.
                     view->setSelectedSolids({});
                     settle(150);
                     QPoint edgeAt;
@@ -18223,16 +18471,23 @@ int main(int argc, char* argv[])
                         check(view->bevelArrowClaimsPoint(edgeAt),
                               "and the arrow's own screen-space hit test claims that "
                               "pixel, so the guard is genuinely in the way");
-                        const std::vector<TopoDS_Edge> heldEdges = view->selectedEdges();
                         doubleClickAt(view, QPointF(edgeAt), Qt::ControlModifier);
                         settle(200);
-                        check(view->selectionKind() == OcctViewWidget::PickKind::Edge &&
-                                  view->selectedEdges().size() == heldEdges.size() &&
-                                  view->hasBevelArrow(),
-                              "Ctrl+double-clicking on a live bevel arrow takes NO body - "
-                              "the edge is still selected and the arrow is still up");
+                        const std::vector<int> edgeTook = view->selectedSolidIds();
+                        check(view->selectionKind() == OcctViewWidget::PickKind::Body &&
+                                  edgeTook.size() == 1 && edgeTook.front() == owner &&
+                                  !view->hasBevelArrow(),
+                              QStringLiteral("Ctrl+double-clicking on a live bevel arrow "
+                                             "takes the whole body, the same as a plain "
+                                             "one - no modifier is special here since "
+                                             "item 9 (%1 of kind %2, arrow %3)")
+                                  .arg(edgeTook.size())
+                                  .arg(static_cast<int>(view->selectionKind()))
+                                  .arg(view->hasBevelArrow() ? QStringLiteral("up")
+                                                             : QStringLiteral("gone")));
                         check(!window.isFaceLocked(),
-                              "and it locks nothing either, there being no face in it");
+                              "and it locks nothing either - there is no lock route on "
+                              "this gesture at all any more");
                     }
                     view->setSelectedSolids({});
                     settle(120);
@@ -26414,13 +26669,20 @@ int main(int argc, char* argv[])
         GProp_GProps propsACopy;
         BRepGProp::VolumeProperties(probe.document().shapeOf(idACopy), propsACopy);
         const gp_Pnt comACopy = propsACopy.CentreOfMass();
-        const double step = dupView->snapStep();
-        check(std::fabs(comACopy.X() - (comABeforeDup.X() + step)) < 1.0e-6 &&
-                  std::fabs(comACopy.Y() - (comABeforeDup.Y() + step)) < 1.0e-6 &&
+        // THE COPY DOES NOT MOVE (improvements item 15, the user's own line:
+        // "Dont Change position when duplicating"). It used to be nudged one
+        // grid step in X and Y so it was visibly a second object; the user
+        // wants it where the original is, because a duplicate is the start of
+        // a deliberate move and an automatic one has to be undone first.
+        // Asserted to the micron on all three axes, which is what makes this
+        // "exactly on top of" rather than "roughly near".
+        check(std::fabs(comACopy.X() - comABeforeDup.X()) < 1.0e-6 &&
+                  std::fabs(comACopy.Y() - comABeforeDup.Y()) < 1.0e-6 &&
                   std::fabs(comACopy.Z() - comABeforeDup.Z()) < 1.0e-6,
-              QStringLiteral("the copy sits exactly one grid step (%1) away in X and Y, "
-                             "unmoved in Z")
-                  .arg(step));
+              QStringLiteral("the copy sits exactly where its source does, on all three "
+                             "axes (%1, %2, %3 against %4, %5, %6)")
+                  .arg(comACopy.X()).arg(comACopy.Y()).arg(comACopy.Z())
+                  .arg(comABeforeDup.X()).arg(comABeforeDup.Y()).arg(comABeforeDup.Z()));
 
         check(dupView->selectedSolidIds().size() == 1 &&
                   dupView->selectedSolidIds().front() == idACopy,
@@ -26542,11 +26804,11 @@ int main(int argc, char* argv[])
         // P is the mirror SOURCE, placed so the gesture's own default plane -
         // tangent to P's bounding box, per beginMirrorPlacement() - sits
         // exactly at P's own far edge. R is a second, unrelated body placed
-        // well clear of that plane, on the same side, with enough margin that
-        // shifting it by one grid step never brings it near the plane. Both
-        // bodies live entirely on one side of the plane, at different
-        // distances from it - which is what lets duplicating each one land on
-        // a DIFFERENT branch of the same rule.
+        // well clear of that plane, on the same side. Both bodies live
+        // entirely on one side of the plane, at different distances from it.
+        // Duplicating each one goes through the same rule from a different
+        // starting point: R is unpaired, P is the pairing's own source, and
+        // the copy is treated identically either way.
         trigger(probe, QStringLiteral("Start Sketch"));
         sketchQuadWorld(-30.0, -10.0, -10.0, 10.0);
         trigger(probe, QStringLiteral("Finish Sketch"));
@@ -26597,32 +26859,50 @@ int main(int argc, char* argv[])
         check(probe.document().twinOf(idR) == -1,
               "R itself is still exactly as unpaired as it was - only its COPY got a twin");
 
-        // P: the mirror SOURCE itself. Its own copy does not inherit P's
-        // twin (duplicateSourceId() carries none of duplicateLinkedCopy()'s
-        // exclusions), and - because the gesture's own tangent plane sits
-        // exactly at P's far edge - shifting the copy by one grid step
-        // genuinely straddles that plane, so the ordinary new-body rule does
-        // not fire either. Both routes to a twin are closed for this one, by
-        // real geometry rather than a special case: the copy is born
-        // unpaired, which is the outcome CLAUDE.md's own ruling names.
+        // P: the mirror SOURCE itself. Its copy does NOT inherit P's twin -
+        // duplicateSourceId() carries none of duplicateLinkedCopy()'s
+        // exclusions, so nothing about P's pairing travels with the copy -
+        // and the twin it does get is one the ORDINARY new-body rule makes
+        // for it, from scratch, exactly as R's copy got one. That is the
+        // whole point of running this case beside R's: R proves the rule
+        // fires for an unpaired source, P proves the source's OWN pairing
+        // changes nothing about it.
+        //
+        // This case used to land the other way, and it landed there for a
+        // reason that no longer exists: the copy was nudged one grid step in
+        // X and Y, and the gesture's default plane sits exactly at P's far
+        // edge, so the nudged copy straddled it and pairWithMirror() skipped
+        // it. Improvements item 15 took the nudge away ("Dont Change position
+        // when duplicating"), so the copy is where P is - wholly on one side,
+        // touching the plane rather than crossing it - and the rule fires.
+        // Recorded rather than quietly rewritten, because the old outcome was
+        // real geometry too, and this is what changed it.
         dupView->setSelectedSolids({idP});
         settle(80);
         const std::size_t bodiesBeforeP = probe.document().count();
         check(probe.canDuplicate(), "P, mirror-paired, can still be plain-duplicated");
         check(probe.duplicateSelectedBody(), "duplicating P succeeds");
-        check(probe.document().count() == bodiesBeforeP + 1,
-              "exactly one new body - no twin this time");
-        const int idPCopy = probe.document().solids().back().id;
-        check(probe.document().twinOf(idPCopy) == -1,
-              "P's own copy is born unpaired - straddling the tangent plane after the "
-              "grid-step offset closes the ordinary new-body route too");
+        check(probe.document().count() == bodiesBeforeP + 2,
+              "the copy AND a fresh twin of its own arrived, the same ordinary rule R's "
+              "copy went through");
+        const int idPCopy =
+            dupView->selectedSolidIds().empty() ? 0 : dupView->selectedSolidIds().front();
+        const int idPCopyTwin = probe.document().solids().back().id;
+        check(idPCopy != 0 && idPCopyTwin != idPCopy,
+              "the copy is the selected one, and its twin is a distinct body");
+        check(probe.document().twinOf(idPCopy) == idPCopyTwin,
+              "the copy is paired with that fresh twin");
+        check(probe.document().twinOf(idPCopy) != probe.document().twinOf(idP) &&
+                  idPCopyTwin != probe.document().twinOf(idP),
+              "and NOT with P's own twin - a duplicate inherits no pairing, it earns a "
+              "new one");
         check(probe.document().twinOf(idP) > 0, "P itself is still paired with its ORIGINAL twin");
         check(dupToasts != nullptr &&
                   dupToasts->currentText() ==
-                      QStringLiteral("%1 duplicated")
-                          .arg(QString::fromStdString(probe.document().nameOf(idPCopy))),
-              QStringLiteral("the toast is the plain single-body message, not the paired "
-                             "one (\"%1\")")
+                      QStringLiteral("%1 and %2 created")
+                          .arg(QString::fromStdString(probe.document().nameOf(idPCopy)),
+                               QString::fromStdString(probe.document().nameOf(idPCopyTwin))),
+              QStringLiteral("and the toast names both bodies the gesture made (\"%1\")")
                   .arg(dupToasts ? dupToasts->currentText() : QString()));
 
         // --- the shortcut sheet picks the new binding up automatically ------
@@ -30737,11 +31017,22 @@ int main(int argc, char* argv[])
                           QStringLiteral("drawer: closed, only the SELECTED joint is drawn (%1 joints, "
                                          "%2 pieces of hardware)")
                               .arg(dv->jointsShown()).arg(dv->jointItemsShown()));
+                    // A SELECTION CHANGE NO LONGER ENDS THE JOINT SELECTION
+                    // (improvements item 2 made the joint a live gesture - see
+                    // MainWindow::jointChipJointId()), so the hardware stays
+                    // drawn through one. What ends it is asking for no joint,
+                    // which is where the hardware goes.
                     dv->clearSelection();
                     settle(200);
+                    check(dw.selectedJointId() == jDowel && dv->jointsShown() == 1,
+                          QStringLiteral("drawer: clearing the body selection leaves the joint "
+                                         "selected and its hardware drawn (%1 shown)")
+                              .arg(dv->jointsShown()));
+                    dw.setSelectedJoint(0);
+                    settle(200);
                     check(dw.selectedJointId() == 0 && dv->jointsShown() == 0,
-                          "drawer: clearing the body selection ends the joint selection, and its "
-                          "hardware goes");
+                          QStringLiteral("drawer: and ending the joint selection is what takes "
+                                         "the hardware away (%1 shown)").arg(dv->jointsShown()));
                     drawerAction->trigger();
                     settle(250);
                     check(panel->isVisible() &&
@@ -32261,14 +32552,33 @@ int main(int argc, char* argv[])
                 chip->setMoreOpen(true);
                 settle(200);
                 check(chip->moreOpen(), "chip: (More is open on this joint)");
+
+                // A SELECTION CHANGE DOES NOT END THIS CARD ANY MORE, and
+                // that is improvements item 2 in one check: "having Join
+                // activated and press the face selector disables the joinery
+                // mode". Under auto selection the card's old "the selection
+                // IS the joint's two pieces" term meant the first click
+                // anywhere - a face, an edge, empty space - retired the card
+                // the user was working in. The card is a live gesture now, so
+                // clearing the selection leaves it exactly where it was.
                 cv->clearSelection();
                 settle(250);
+                check(chip->isVisible() && cw.selectedJointId() == jPocket &&
+                          cw.jointChipJointId() == jPocket,
+                      "chip: clearing the selection leaves the card up - it is a gesture, not "
+                      "a reading of the selection");
+
+                // What DOES end it is a key, because a gesture no click ends
+                // has to have one. Escape with nothing typed is that key (the
+                // x in the corner is the same route).
+                sendKeyTo(cv, Qt::Key_Escape);
+                settle(250);
                 check(!chip->isVisible() && cw.selectedJointId() == 0,
-                      "chip: clearing the selection takes the card away with the joint selection");
+                      "chip: and Escape with nothing typed is what takes it away");
                 cw.setSelectedJoint(jPocket);
                 settle(250);
                 check(chip->isVisible() && !chip->moreOpen(),
-                      "chip: and it comes back SMALL - More does not persist across a deselection");
+                      "chip: and it comes back SMALL - More does not persist across a close");
             }
 
             // --- disjoint from every other gesture, one claim at a time ---------
@@ -32280,15 +32590,25 @@ int main(int argc, char* argv[])
                                      "Enter/Escape claim (%1)")
                           .arg(claimants()));
 
+                // THE DISJOINTNESS ARGUMENT RUNS THE OTHER WAY NOW, and this
+                // is the cost improvements item 2 named when it made the card
+                // a live gesture: the card used to fall to whichever pick came
+                // next, so "at most one claim" fell out of the selection term
+                // for free. It does not any more, so the pull arrow, the bevel
+                // arrow, the transform gizmo, Mitre, Re-Measure and a Mirror
+                // placement each carry an explicit stand-down while this card
+                // is up - and these checks are where those terms are proved to
+                // exist, one gesture at a time. A run that merely found "the
+                // chip is not visible" would now be measuring the OLD rule.
                 QPoint at;
                 TopoDS_Edge edge;
                 const bool pickedEdge = pickEdgeOf(cw, shelf, at, edge);
                 settle(250);
                 BevelArrow* bevel = cw.findChild<BevelArrow*>();
-                check(pickedEdge && bevel != nullptr && bevel->isVisible(),
-                      "chip: (an edge is picked, so the bevel arrow is up)");
-                check(!chip->isVisible() && cw.jointChipJointId() == 0,
-                      "chip: the joint chip and the bevel arrow are never both visible");
+                check(pickedEdge && chip->isVisible() && cw.jointChipJointId() == jDowel,
+                      "chip: picking an edge leaves the card exactly where it was");
+                check(bevel == nullptr || !bevel->isVisible(),
+                      "chip: and the bevel arrow stands down - the two are never both up");
                 check(claimants() == 1,
                       QStringLiteral("chip: still exactly one claim (%1)").arg(claimants()));
 
@@ -32296,71 +32616,66 @@ int main(int argc, char* argv[])
                 const bool pickedFace = pickFaceOf(cw, shelf, at, face);
                 settle(250);
                 PullArrow* pull = cw.findChild<PullArrow*>();
-                check(pickedFace && pull != nullptr && pull->isVisible() && !chip->isVisible(),
-                      "chip: nor it and the face pull");
+                check(pickedFace && chip->isVisible() &&
+                          (pull == nullptr || !pull->isVisible()),
+                      "chip: nor it and the face pull - the arrow is the one that gives way");
                 check(claimants() == 1,
                       QStringLiteral("chip: still exactly one claim (%1)").arg(claimants()));
 
                 const bool pickedBody = pickBodyOf(cw, shelf);
                 settle(250);
-                check(pickedBody && cw.moveToolBodyId() == shelf && !chip->isVisible(),
-                      QStringLiteral("chip: nor it and the transform gizmo, which needs exactly one "
-                                     "body (gizmo on %1, shelf is %2)")
-                          .arg(cw.moveToolBodyId()).arg(shelf));
-                // MoveTool's own CARD only appears once a drag has a value to
-                // show (MoveTool::updateVisibility()), so with a gizmo merely
-                // standing on a body there is no key claim at all - and the
-                // joint chip must not be the one filling that gap.
-                check(claimants() == 0,
-                      QStringLiteral("chip: and no Enter/Escape claim is installed at all there (%1)")
+                check(pickedBody && chip->isVisible() && cw.moveToolBodyId() == 0,
+                      QStringLiteral("chip: nor it and the transform gizmo, which stands down on "
+                                     "exactly the one body it would otherwise take (gizmo on %1)")
+                          .arg(cw.moveToolBodyId()));
+                check(claimants() == 1,
+                      QStringLiteral("chip: and the card is still the only claim (%1)")
                           .arg(claimants()));
 
-                // ...and the card comes back when the joint is asked for again,
-                // even though the joint selection itself never changed.
-                cw.setSelectedJoint(jDowel);
-                settle(250);
-                check(chip->isVisible() && chip->jointId() == jDowel && claimants() == 1,
-                      "chip: asking for the same joint again re-selects its pieces and brings the "
-                      "card back");
-
-                // THE SELECTION-CONTENT TERM ITSELF, tested without clearing the
-                // selection. The three checks above cannot see it: pickEdgeOf(),
-                // pickFaceOf() and pickBodyOf() each CLEAR the selection before
-                // they pick, and an empty selection ends the joint selection on
-                // its own (onSelectionChanged()), so they would pass unchanged
-                // if jointChipJointId()'s "the selection is the joint's own two
-                // pieces" term were deleted outright - which a mutation proved.
-                //
-                // One piece of the pair, selected alone, is the case only the
-                // term can answer: the joint is still selected, the kind is
-                // still Body, and the card must still go down - which is also
-                // exactly the state the transform gizmo owns.
-                cv->setSelectedSolids({shelf});
-                settle(250);
-                check(cw.selectedJointId() == jDowel,
-                      "chip: (one piece of the pair alone - the joint selection itself survives it)");
-                check(cw.jointChipJointId() == 0 && !chip->isVisible(),
-                      "chip: and the card goes down, because the selection is no longer the joint's "
-                      "own two pieces");
-                check(cw.moveToolBodyId() == shelf && claimants() == 0,
-                      QStringLiteral("chip: leaving that body to the transform gizmo, with no key "
-                                     "claim of this card's (gizmo on %1, claims %2)")
-                          .arg(cw.moveToolBodyId()).arg(claimants()));
-                cw.setSelectedJoint(jDowel);
-                settle(250);
-                check(chip->isVisible(), "chip: (and the card is back for the checks below)");
-
-                // A live Mirror placement owns the keys instead.
+                // A Mirror placement cannot begin over it either - and this is
+                // the half that keeps the key claims disjoint, since a
+                // placement installs one of its own.
                 trigger(cw, QStringLiteral("Mirror"));
                 settle(250);
-                check(cv->mirrorPlacementActive() && !chip->isVisible(),
-                      "chip: a live Mirror placement takes the card down");
+                check(!cv->mirrorPlacementActive() && chip->isVisible(),
+                      "chip: and Mirror does not begin over it - a placement's own key claim "
+                      "would be a second one");
                 check(claimants() == 1,
-                      QStringLiteral("chip: and is the only claim while it runs (%1)")
-                          .arg(claimants()));
+                      QStringLiteral("chip: still one claim after that (%1)").arg(claimants()));
+
+                // NON-VACUITY, and it is what makes the three stand-downs
+                // above mean something: close the card and the very same body
+                // pick raises the gizmo, so those checks were measuring the
+                // card's term rather than a gizmo that was never coming.
                 sendKeyTo(cv, Qt::Key_Escape);
+                settle(250);
+                check(!chip->isVisible() && cw.selectedJointId() == 0,
+                      "chip: Escape closes the card");
+                const bool pickedAgain = pickBodyOf(cw, shelf);
+                settle(250);
+                check(pickedAgain && cw.moveToolBodyId() == shelf,
+                      QStringLiteral("chip: and with the card down the same pick raises the "
+                                     "transform gizmo (gizmo on %1, shelf is %2)")
+                          .arg(cw.moveToolBodyId()).arg(shelf));
+                // MoveTool's own CARD only appears once a drag has a value to
+                // show (MoveTool::updateVisibility()), so a gizmo merely
+                // standing on a body installs no key claim at all.
+                check(claimants() == 0,
+                      QStringLiteral("chip: with no Enter/Escape claim installed at all there (%1)")
+                          .arg(claimants()));
+
+                // And a Mirror placement DOES begin once the card is gone -
+                // the same non-vacuity, for the refusal above.
+                cv->setSelectedSolids({shelf});
+                settle(150);
+                trigger(cw, QStringLiteral("Mirror"));
+                settle(250);
+                check(cv->mirrorPlacementActive(),
+                      "chip: a Mirror placement begins freely with the card down");
+                sendKeyTo(cv, Qt::Key_Escape);
+                settle(150);
                 check(!cv->mirrorPlacementActive(),
-                      "chip: (Escape ends the placement - the chip did not swallow it)");
+                      "chip: (Escape ends the placement)");
 
                 // An outline waiting to be extruded owns them too.
                 cw.setSelectedJoint(jDowel);
@@ -34317,7 +34632,16 @@ int main(int argc, char* argv[])
                   "re-measure: and nothing changed");
         }
 
-        // --- a MITRED end refuses, with its own sentence ----------------------
+        // --- a MITRED end is STRETCHED, not refused ---------------------------
+        //
+        // Improvements item 13, in the user's own words: "is like for example
+        // if I add bevel or a cut angle in the shape i could not use the re
+        // measure tool". It used to refuse - a mitred end is not one flat face
+        // square to the axis, so there was nothing to pull - and the length
+        // comes out of the board's straight MIDDLE now instead, which leaves
+        // the 45 exactly the 45 it was. So this block asserts the opposite of
+        // what it used to, and its last two checks are what keep the change
+        // from reading as "any size works now".
         {
             frameOn(gp_Pnt(300.0, -1050.0, 9.0), 1500.0);
             check(pickBodyOf(mw, b3), "re-measure: the mitred board is taken");
@@ -34328,35 +34652,67 @@ int main(int argc, char* argv[])
             pressThenReleaseAt(rv, QPointF(mitreLabel), QPointF(mitreLabel), Qt::RightButton);
             settle(200);
             check(mw.reMeasureActive() && mw.reMeasureBodyId() == b3,
-                  "re-measure: the gesture opens on the mitred board - a size can be TYPED "
-                  "before anything is known to refuse");
+                  "re-measure: the gesture opens on the mitred board");
             const int revisionBefore = mw.document().revision();
+            const double mitredBefore = sizeOf(b3, 0);
+            const double mitredVolumeBefore = ModelingOps::volume(mw.document().shapeOf(b3));
             typeSize(QStringLiteral("450"));
+            check(rv->hasModelingPreview(),
+                  "re-measure: 450 previews on the mitred board - the mitred end no longer "
+                  "stops the tool");
+            check(mw.reMeasureTool() && mw.reMeasureTool()->reasonText().isEmpty(),
+                  QStringLiteral("re-measure: and the chip has nothing to refuse (\"%1\")")
+                      .arg(mw.reMeasureTool() ? mw.reMeasureTool()->reasonText() : QString()));
+            sendKeyTo(&mw, Qt::Key_Return);
+            settle(300);
+            check(mw.document().revision() != revisionBefore &&
+                      std::fabs(sizeOf(b3, 0) - 450.0) < 0.01,
+                  QStringLiteral("re-measure: Enter makes it 450 mm (%1, was %2)")
+                      .arg(sizeOf(b3, 0)).arg(mitredBefore));
+            // THE MITRE SURVIVED, measured rather than looked at: the corner a
+            // 45 removes does not depend on the board's length, so shortening
+            // by 150 must take exactly 150 x 300 x 18 of straight board and
+            // nothing else. A stretch that sheared the mitre off would hand
+            // back a bigger body than this.
+            const double removed = 150.0 * 300.0 * 18.0;
+            check(std::fabs(ModelingOps::volume(mw.document().shapeOf(b3)) -
+                            (mitredVolumeBefore - removed)) < 1.0,
+                  QStringLiteral("re-measure: and the 45 is still exactly the 45 it was - only "
+                                 "straight board came out (%1, expected %2)")
+                      .arg(ModelingOps::volume(mw.document().shapeOf(b3)))
+                      .arg(mitredVolumeBefore - removed));
+            trigger(mw, QStringLiteral("Undo"));
+            settle(250);
+            check(std::fabs(sizeOf(b3, 0) - mitredBefore) < 0.01,
+                  "re-measure: one undo puts the mitred board back");
+
+            // WHAT IS STILL REFUSED, so the stretch is not read as "any size
+            // works": the length comes out of the straight middle, and asking
+            // for 150 from a 600 board means taking 450 out of a middle that
+            // is not 450 long. This is the block's remaining refusal path, and
+            // it carries its own sentence on screen and in the toast.
+            check(pickBodyOf(mw, b3), "re-measure: the mitred board is taken again");
+            settle(200);
+            const QPoint againLabel = labelAt(0);
+            pressThenReleaseAt(rv, QPointF(againLabel), QPointF(againLabel), Qt::RightButton);
+            settle(200);
+            check(mw.reMeasureActive(), "re-measure: the gesture opens again");
+            const int revisionBeforeRefusal = mw.document().revision();
+            typeSize(QStringLiteral("150"));
             check(!rv->hasModelingPreview(),
-                  "re-measure: a size the mitred end cannot take shows NO ghost");
+                  "re-measure: a size with no straight part left to take shows NO ghost");
             check(mw.reMeasureTool() &&
-                      mw.reMeasureTool()->reasonText() == MainWindow::reMeasureEndRefusalText(),
+                      mw.reMeasureTool()->reasonText() ==
+                          MainWindow::reMeasureStraightRefusalText(),
                   QStringLiteral("re-measure: and the chip says why (\"%1\")")
                       .arg(mw.reMeasureTool() ? mw.reMeasureTool()->reasonText() : QString()));
             sendKeyTo(&mw, Qt::Key_Return);
             settle(250);
-            check(mw.document().revision() == revisionBefore,
+            check(mw.document().revision() == revisionBeforeRefusal,
                   "re-measure: Enter on a refused size writes nothing");
-            check(reToastText() == MainWindow::reMeasureEndRefusalText(),
+            check(reToastText() == MainWindow::reMeasureStraightRefusalText(),
                   QStringLiteral("re-measure: and a Failure toast carries the same sentence "
                                  "(\"%1\")").arg(reToastText()));
-            // The refusal is about the END THAT MOVES, not about the body: pin
-            // the MITRED end and the square one moves instead, which the
-            // geometry accepts - so the very size that showed no ghost a
-            // moment ago shows one now.
-            mw.setReMeasureAnchor(2);
-            settle(200);
-            check(mw.reMeasureAnchor() == ModelingOps::ResizeAnchor::High,
-                  "re-measure: the mitred end is pinned");
-            check(rv->hasModelingPreview(),
-                  "re-measure: with the mitred end pinned the square end moves, and 450 previews");
-            check(mw.reMeasureTool() && mw.reMeasureTool()->reasonText().isEmpty(),
-                  "re-measure: and the chip has nothing left to refuse");
             mw.cancelReMeasure();
             settle(150);
             check(!mw.reMeasureActive(), "re-measure: the mitred gesture is cancelled");
@@ -34367,7 +34723,8 @@ int main(int argc, char* argv[])
             QStringList offenders;
             QStringList texts = mw.reMeasureTool() ? mw.reMeasureTool()->paintedTexts()
                                                    : QStringList();
-            texts << MainWindow::reMeasureSizeRefusalText() << MainWindow::reMeasureEndRefusalText()
+            texts << MainWindow::reMeasureSizeRefusalText()
+                  << MainWindow::reMeasureStraightRefusalText()
                   << MainWindow::reMeasureKernelRefusalText()
                   << MainWindow::reMeasureGroupRefusalText();
             check(texts.size() >= 8, "re-measure: there is painted copy to sweep");
