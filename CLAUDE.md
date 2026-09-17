@@ -180,14 +180,15 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 4782, measured twice on the tree that carries it.** The improvements
+**`kCheckFloor` is 4873, measured twice on the tree that carries it.** The improvements
 branch re-ratcheted it and **the joinery merge's ~4-check debt is settled with it**: that
 floor sat below its own true total because two commits landed after the run that measured
 it, and this one was taken on the final tree. Two consecutive unfiltered runs measured
 **4781 checks + 1 environment skip = 4782**, agreeing to the digit, and the second ran
 against the binary the branch ships — built minutes before it, after the crash-hunt
 diagnostics came out, and the counts did not move, which is what says those diagnostics were
-inert rather than merely believed to be. The one environment skip is the RayTracing
+inert rather than merely believed to be. (It was 4782 at the improvements merge; the boolean
+rework's own block and repairs took it to a twice-measured **4872 + 1 = 4873**.) The one environment skip is the RayTracing
 floor-blend measurement, which does not apply when PathTracing is the session's tier.
 
 **Measured, never computed** — this project has now chosen measuring over arithmetic three
@@ -319,6 +320,8 @@ Source files under `src/`, plus `tests/`:
 | `ui/SlatsTool.{h,cpp}` | the slats chip - Width/Gap/Depth/Flip and a live count, bottom-centre |
 | `ui/LoadingCard.{h,cpp}` | the app mark, the name and a progress bar while a heavy furniture opens |
 | `ui/MaterialCard.{h,cpp}` | one material's colour and brightness, bottom-left, over a live viewport |
+| `ui/BooleanBadgeRenderer.{h,cpp}` | the KEEP/USED pills a live boolean puts on each body; a click picks the survivor |
+| `ui/BooleanTool.{h,cpp}` | the boolean chip - the verb, one switch and the two keys; the smallest chip here, deliberately |
 
 ### The vocabulary — enforced by test
 
@@ -1882,6 +1885,115 @@ add up to: **a mutation counts only when it produces a real red line naming the 
 and a run that produces no output file, or a check that simply vanishes from the output, is a
 failure to apply rather than a pass.
 
+### Booleans: roles on the wood, and the region drawn
+
+The user's report is the whole specification: *"right now works poorly, for example i
+cant decide with one substract and which one keep, so would be great make this a real
+polished high end tool"*. Two separate gaps behind that sentence, and only the first is
+about the interface.
+
+**Which body survived was decided by `std::sort(ids)`** — the LOWER DOCUMENT ID, so the
+answer depended on the order the bodies were drawn in, possibly months earlier, and no
+control anywhere could change it. **The default is now the BIGGEST body**, which is at
+least a fact about the furniture: a cut is nearly always a small tool into a large piece.
+And when the default is wrong, the badge saying so is sitting on the wood.
+
+**The design is option B of a mockup round** (`docs`-less; the canvas is the user's).
+Option A put named Base/Tool slots on a chip; B puts the answer ON THE BODIES and was
+picked. So there is nothing to read off a panel and match back to wood by name:
+
+- **`BooleanBadgeRenderer`** draws one stadium pill per body in the gesture, reading
+  **KEEP** or **USED**, standing at that body's own **centre of mass** — a hollow or
+  L-shaped piece's bounding-box middle can sit in fresh air outside the wood, and a badge
+  there names nothing the user can see. Screen-sized under `Graphic3d_TMF_ZoomRotatePers`,
+  in the sizes layer (Immediate, no depth test), so a label always reads over the body it
+  names. A click on one says which body survives; the press is claimed in SCREEN space and
+  **its release is swallowed too**, because the viewport picks on the release and a re-pick
+  there would change the selection and so end the very gesture the click was adjusting.
+  It carries the BODY ID rather than an index: the badges are rebuilt on every camera move.
+- **"USED", not "REMOVE"** — a Union removes nothing, it joins in, and an Intersect narrows
+  a body rather than taking it away. One word that is honest on all three beats three words
+  that each need a lookup. The words are `MainWindow`'s, not the renderer's: painted copy
+  invented inside a renderer is copy the banned-word sweep never reaches.
+- **The region** is the volume the operation will act on, drawn before it happens so the
+  hole is visible before it is made — the user's own follow-up ("highlight the part that is
+  being substracted"). ONE shape for all three kinds and the COLOUR says what happens to it:
+  Subtract's overlap is coming out, Union's doubled wood and Intersect's surviving volume
+  are staying. Translucent, with its boundary at full strength, in the JOINTS' layer —
+  depth-cleared, which is exactly "ghosted geometry seen THROUGH the wood", and a cut volume
+  lives inside the board it is cutting. Reusing that layer also avoids a second custom
+  depth-clearing layer, each of which carries the shadow-map trap in Pitfalls.
+
+**Two `Theme` tokens, and neither borrows the accent.** `booleanOut` (#ff5a4a) and
+`booleanStay` (#2ad4b0). `accent()` already means *state* — what is selected, what is live —
+and a user who themes their accent red would otherwise have "selected" and "about to be cut
+away" render identically, on the one gesture in this app where confusing those two destroys
+wood. Named in the Colours tab by what happens to the wood (*Material coming out* /
+*Material staying*) rather than by an operation, because the same pair serves all three and
+"Subtract colour" would be wrong on two of them.
+
+**The geometry is `ModelingOps`, Qt-free, headless first** (`tests/boolean_multi.cpp`, 35
+checks, volume arithmetic throughout):
+
+- **`applyBooleanMulti(kind, base, tools)`** — one base, any number of tools, ONE build, so
+  six dowel holes are one operation, one checkpoint and one undo.
+  `BRepAlgoAPI_BooleanOperation` already takes argument and tool LISTS, so Subtract and Union
+  are the call `applyBoolean()` already made with a longer list, never a loop around it.
+- **INTERSECT IS A FOLD, and that is a ruling.** OCCT's multi-tool `Common` answers
+  `base ∧ (A ∨ B)` — the union of the overlaps — while the word means the volume common to
+  EVERY body picked, `((base ∧ A) ∧ B)`. The two differ the moment the tools do not overlap
+  each other, and the fixture is shaped so they differ by 8,000 mm³, which is what lets a
+  check tell them apart.
+- **AN EMPTY RESULT IS A REFUSAL**, and this closed a real hole in the old two-body path
+  rather than a hypothetical one: Intersect on bodies that never touch builds *cleanly* and
+  hands back an empty compound, which the app would have added to the document as a body with
+  no volume — nameable, selectable, never visible. "Never surface a failed boolean as a
+  success" covers the kernel reporting failure; this is the case where it reports success and
+  the ANSWER is empty.
+- **`booleanRegion(kind, base, tools)`** is what the preview draws: for Subtract and Union
+  the base's own SHARE of the tools, **not the tools themselves** — those coincide until a
+  tool sticks out past the base, which is the normal case for a dowel — and for Intersect the
+  result itself. An empty region is `ok` with an empty shape, never a refusal: a tool that
+  misses has nothing to highlight, which is a picture and not a failure.
+
+**The gesture has the shape every other tool here has**: begin, look at it, adjust, Enter or
+Escape; `booleanGestureStillHolds()` prunes it in `updateActions()` on any document change, a
+sketch, render mode, a compare pane, the close question or a body going away — one predicate
+rather than a cancel at every site. The prune clears state **in place** rather than calling
+`cancelBoolean()`, which calls `updateActions()` and would recurse.
+
+**Disjointness cost more terms than it used to.** A boolean stands on TWO OR MORE bodies, and
+since the multi-body transform so does the gizmo — so the two want exactly the same selection
+rather than merely similar ones. `transformableBodyId()` and `canBeginMirrorPlacement()` each
+carry a `myBooleanActive` stand-down. **Both were documented in the header before they were
+written, and the suite's own disjointness checks caught the lie on their first run** — which
+is the argument for writing the check and the claim at the same time.
+
+**An outline waiting is NOT a reason to refuse, and that had to be re-learned.** Every
+direct-modeling gate shuts while an outline waits; booleans and Delete are the two that do
+not, deliberately, because the outline's only exits are Extrude and Delete and the operations
+that stay open are what keep a user from being trapped. The first build of this gesture gated
+on `hasPendingFace()` and quietly closed that door; the suite's own *"booleans were never
+gated on it"* check said so. The real risk was narrower: a second application-wide Enter
+claim, which exists only while the extrude PANEL is up. So the term is the panel, and
+`Extrude` stands down while a boolean is live — between them the two can never both be open.
+
+**`applyBooleanToSelection()` is 22 lines now, not 170.** It begins the gesture and applies
+it, so the linked-group refusal, the twin follow, the link propagation, the single checkpoint
+and the toast all live in exactly one place. Two copies of that would drift, and the one that
+drifted would be the one nobody was reading. It takes an optional `keepId`, and callers that
+care which body survives pass it: a caller that leans on a default is a caller that breaks
+when the default is improved, which is precisely what this rework did to the old rule.
+
+**Honest limits.** Union and Intersect are commutative, so they have no "which survives"
+question — the badge there marks whose NAME and id the result inherits. They still take the
+same Enter, because a tool that commits instantly for two operations and asks for
+confirmation on the third is harder to learn than one that always behaves the same way; that
+is a judgement, not a measurement, and it is the one part of this a user could reasonably
+want changed. A twin pair's Union now keeps one of the two ids where it used to remove both
+and add a fresh body — better, since the survivor keeps its name, but it was a consequence
+rather than an aim and the suite says so where it is pinned.
+
 ### Improvements: eighteen items, and the follow-ups that came out of testing them
 
 One user-written list, worked top to bottom, then a run of asks that came out of the user
@@ -2422,6 +2534,21 @@ and a fully covered pixel resolves to exactly that colour even under MSAA); **di
 frames when PRESENCE is the subject** — is it drawn, is there more of it, is it in front.
 The differ is also cheaper to keep honest, because it needs no threshold argument: a pixel
 either moved when the feature was switched off or it did not.
+
+**And a ratio between two pixel COUNTS is a threshold in disguise — it encodes the geometry
+that happened to be on screen the day it was written.** The auto-hover block asserted
+`faceTint > edgeTint * 3` for "the middle of a face glows the whole face, not a line", which
+held at 1216/226 and broke at 1933/692 — **on an unchanged, committed binary**, an hour
+apart, because this machine's display arrangement moved that window onto a differently-scaled
+monitor and the block's search then picked a longer edge. The A/B is what established that
+(the same commit, rebuilt and re-run, failed identically), and it is the reason the rule in
+Pitfalls about proving "pre-existing" with a comparison run exists. The repair was to measure
+the CLAIM instead: flood the tinted pixels' own bounding box inward from its border, and
+whatever the flood cannot reach is enclosed BY the tint. A face highlight closes a loop and
+encloses its face (0.92 of its box); an edge highlight is an open line and encloses nothing
+(0.00), however long, diagonal or thick. Scale-free, angle-free, monitor-free — and it
+asserts BOTH directions, so the measure is proved to discriminate rather than to be satisfied
+by any picture with the hover tint in it.
 
 ### CMake note
 

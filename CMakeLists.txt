@@ -143,6 +143,8 @@ if(FURNIFYME_BUILD_APP)
       src/ui/JointRenderer.cpp
       src/ui/SelectionSizesRenderer.cpp
       src/ui/ResizePinRenderer.cpp
+      src/ui/BooleanBadgeRenderer.cpp
+      src/ui/BooleanTool.cpp
       src/ui/Theme.cpp
       src/ui/IconSet.cpp
       src/ui/ToolChip.cpp

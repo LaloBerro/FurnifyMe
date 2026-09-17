@@ -34,6 +34,7 @@
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <gp_Circ.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -767,6 +768,7 @@ void OcctViewWidget::releaseGlResources()
     mySelectionSizes.detach();
     mySizesWanted = false;
     myResizePin.detach();
+    myBooleanBadges.detach();
     myResizeSizeIndex = -1;
 
     // OCCT's own order: remove every presentation, drop the context, destroy
@@ -1100,6 +1102,13 @@ void OcctViewWidget::initializeViewer()
         mySelectionSizes.setZLayer(mySizesLayer);
         myResizePin.attach(myContext);
         myResizePin.setZLayer(mySizesLayer);
+        // The badges share the sizes' layer, which is Immediate with NO depth
+        // test: a badge names a body and has to read over it whatever angle
+        // the camera is at, which is the same reason the boxed size numbers
+        // live there. The REGION is the one that needs the joints' layer
+        // instead - it is a volume inside the wood rather than a label on it.
+        myBooleanBadges.attach(myContext);
+        myBooleanBadges.setZLayer(mySizesLayer);
     }
 
     // The field of view is fixed at kFovyDeg for ordinary modeling; render
@@ -1910,6 +1919,85 @@ void OcctViewWidget::setModelingPreviews(const std::vector<std::pair<int, TopoDS
     }
 
     scheduleRedraw();
+}
+
+void OcctViewWidget::setBooleanRegion(const TopoDS_Shape& region, bool staying)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+
+    // Render mode is "the furniture alone", and a region is feedback about an
+    // edit - the grid's own rule, and the hole updateSymmetryIndicator()'s
+    // comment describes. A clear rather than a bare return, so nothing can be
+    // left standing either way.
+    if (myRenderModeActive) {
+        clearBooleanRegion();
+        return;
+    }
+
+    // An EMPTY region is an answer, not a shape: a tool that misses has
+    // nothing to highlight. Cleared rather than displayed, so the channel
+    // never holds an invisible object that hasBooleanRegion() would call
+    // present.
+    bool anySolid = false;
+    if (!region.IsNull()) {
+        TopExp_Explorer it(region, TopAbs_SOLID);
+        anySolid = it.More() == Standard_True;
+    }
+    if (!anySolid) {
+        clearBooleanRegion();
+        return;
+    }
+
+    clearBooleanRegion();
+
+    // Tessellate before display, or a curved region draws faceted or not at
+    // all - the same rule every shape on this side of the bridge follows.
+    BRepMesh_IncrementalMesh(region, 0.1);
+
+    Handle(AIS_Shape) drawing = new AIS_Shape(region);
+    const QColor token = staying ? Theme::booleanStay() : Theme::booleanOut();
+    const Quantity_Color colour(token.redF(), token.greenF(), token.blueF(),
+                                Quantity_TOC_sRGB);
+    drawing->SetColor(colour);
+    // Translucent, so the region reads as a volume INSIDE the wood rather
+    // than as a solid sitting on top of it. This is an OCCT material, not a
+    // Qt widget painting over the GL surface, so the TOMBSTONE rule about
+    // translucency does not apply - that one is about Qt children compositing
+    // over the viewport, and this is geometry in the scene.
+    drawing->SetTransparency(0.45f);
+    drawing->SetDisplayMode(AIS_Shaded);
+    // The edges of the region in the same token at full strength: the
+    // boundary is what tells the user where the cut lands, and a 45%
+    // transparent fill alone reads as a haze rather than an edge.
+    const Handle(Prs3d_Drawer)& look = drawing->Attributes();
+    look->SetFaceBoundaryDraw(Standard_True);
+    look->SetFaceBoundaryAspect(new Prs3d_LineAspect(colour, Aspect_TOL_SOLID, 2.0));
+
+    // See the header for why this shares the joints' layer.
+    drawing->SetZLayer(myJointsLayer);
+
+    myBooleanRegion = drawing;
+    myBooleanRegionStaying = staying;
+    // Selection mode -1: feedback only, never pickable. A region the user can
+    // select is a shape that exists in no document - the worst thing a
+    // preview can produce, and the rule every other channel here follows.
+    myContext->Display(myBooleanRegion, AIS_Shaded, -1, Standard_False);
+    scheduleRedraw();
+}
+
+void OcctViewWidget::clearBooleanRegion()
+{
+    if (myBooleanRegion.IsNull()) return;
+    if (!myContext.IsNull()) myContext->Remove(myBooleanRegion, Standard_False);
+    myBooleanRegion.Nullify();
+    scheduleRedraw();
+}
+
+TopoDS_Shape OcctViewWidget::booleanRegionShape() const
+{
+    if (myBooleanRegion.IsNull()) return TopoDS_Shape();
+    return myBooleanRegion->Shape();
 }
 
 void OcctViewWidget::clearModelingPreview()
@@ -2792,6 +2880,57 @@ int OcctViewWidget::resizePinMarkAt(const QPoint& logical) const
         bestDistance = distance;
     }
     return best;
+}
+
+void OcctViewWidget::showBooleanBadges(const std::vector<BooleanBadgeRenderer::Badge>& badges)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+    // Render mode is the furniture alone, and a badge is feedback about an
+    // edit - showJoints()'s own guard, and a clear rather than a bare return
+    // so nothing can be left standing.
+    if (myRenderModeActive) {
+        clearBooleanBadges();
+        return;
+    }
+    if (myBooleanBadges.show(badges)) scheduleRedraw();
+}
+
+void OcctViewWidget::clearBooleanBadges()
+{
+    if (myBooleanBadges.clear()) scheduleRedraw();
+}
+
+bool OcctViewWidget::booleanBadgePoint(int index, QPoint& out) const
+{
+    gp_Pnt point;
+    if (!myBooleanBadges.badgePoint(index, point)) return false;
+    return projectToScreen(point, out);
+}
+
+int OcctViewWidget::booleanBadgeAt(const QPoint& logical) const
+{
+    if (!myBooleanBadges.isShowing() || !viewReady()) return -1;
+    int best = -1;
+    double bestDistance = BooleanBadgeRenderer::kGrabRadiusPx;
+    for (int index = 0; index < myBooleanBadges.count(); ++index) {
+        QPoint at;
+        if (!booleanBadgePoint(index, at)) continue;
+        const QPoint d = logical - at;
+        const double distance = std::sqrt(static_cast<double>(d.x() * d.x() + d.y() * d.y()));
+        if (distance > bestDistance) continue;
+        best = index;
+        bestDistance = distance;
+    }
+    return best;
+}
+
+QStringList OcctViewWidget::booleanBadgeTexts() const
+{
+    QStringList out;
+    for (const std::string& text : myBooleanBadges.paintedTexts())
+        out << QString::fromStdString(text);
+    return out;
 }
 
 void OcctViewWidget::updateSymmetryIndicator()
@@ -4999,6 +5138,14 @@ void OcctViewWidget::applyTheme()
     mySelectionSizes.reapplyTheme();
     // ...and the Re-Measure pin, which bakes the accent and the same token.
     myResizePin.reapplyTheme();
+    myBooleanBadges.reapplyTheme();
+    // The region's colour is baked into its own presentation's aspects too,
+    // so a theme edit has to rebuild it rather than recolour it in place.
+    if (!myBooleanRegion.IsNull()) {
+        const TopoDS_Shape shape = myBooleanRegion->Shape();
+        const bool staying = myBooleanRegionStaying;
+        setBooleanRegion(shape, staying);
+    }
 
     scheduleRedraw();
 }
@@ -6919,6 +7066,29 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
         }
     }
 
+    // A boolean role badge, on exactly the pin's terms and for exactly its
+    // reason: a screen-space claim that takes the press OUTRIGHT, so clicking
+    // a badge says which body survives instead of re-picking whatever is
+    // behind it - and a re-pick there would change the selection, which ends
+    // the very gesture the click was adjusting.
+    //
+    // The badges are only ever up over a WHOLE BODY selection of two or more,
+    // where no arrow is (the pull arrow needs one face, the bevel arrow
+    // edges) and where the transform gizmo has stood down, so the order among
+    // these branches is not load-bearing.
+    //
+    // The RELEASE is swallowed too (myBooleanBadgePressTaken, below): the
+    // viewport picks on the release, and a gesture that claims a press owns
+    // the release that ends it - the rule every drag in this file keeps.
+    if (event->button() == Qt::LeftButton && !mySketchMode && myBooleanBadges.isShowing()) {
+        const int badge = booleanBadgeAt(myLastPos);
+        if (badge >= 0) {
+            myBooleanBadgePressTaken = true;
+            emit booleanBadgePicked(myBooleanBadges.badgeBodyId(badge));
+            return;
+        }
+    }
+
     // The mirror-placement handle, on the same terms as the two arrows below
     // it - including claiming the gesture at an angle the maths refuses.
     // Checked ahead of them rather than after: a mirror gesture needs whole
@@ -7217,6 +7387,14 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     // replace the body selection the gesture is standing on.
     if (myResizePinPressTaken && event->button() == Qt::LeftButton) {
         myResizePinPressTaken = false;
+        return;
+    }
+
+    // The boolean badge's release, on identical terms: the press was aimed at
+    // the badge, and re-picking here would replace the body selection the
+    // gesture is standing on - which would end it.
+    if (myBooleanBadgePressTaken && event->button() == Qt::LeftButton) {
+        myBooleanBadgePressTaken = false;
         return;
     }
 

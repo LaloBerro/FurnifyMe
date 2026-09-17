@@ -47,6 +47,7 @@
 #include "JointChip.h"
 #include "JointsPanel.h"
 #include "MainWindow.h"
+#include "BooleanTool.h"
 #include "MitreTool.h"
 #include "NameFurnitureCard.h"
 #include "ReMeasureTool.h"
@@ -704,7 +705,20 @@ void skipByEnvironment(int checks, const QString& why)
 // branch and a dozen were added; adding a predicted delta to 4126 would have
 // produced a number nobody had watched the suite print, which is the exact
 // mistake this comment has now recorded three times.
-constexpr int kCheckFloor = 4782;
+// RE-RATCHETED (2026-09-17, the boolean rework): the new gesture's own block,
+// the repairs its contract changes made necessary, and the auto-hover check
+// rewritten to measure an enclosed area rather than a pixel-count multiplier.
+// TWO consecutive unfiltered runs measured 4872 checks + 1 environment skip,
+// agreeing to the digit, against the binary this carries.
+//
+// The hover rewrite is worth naming here because it is why this number is
+// trustworthy on a machine whose displays move: the old check encoded one
+// window size and one chosen edge, and the SAME committed binary measured
+// 1216/226 one hour and 1933/692 the next, with nothing but the desktop
+// changed between them. A floor is only as good as the checks under it, and a
+// check that reports the monitor rather than the app is one the floor cannot
+// protect.
+constexpr int kCheckFloor = 4873;
 
 void check(bool condition, const QString& what)
 {
@@ -892,6 +906,7 @@ constexpr BlockInfo kBlocks[] = {
     { "selection-sizes-around-the-selection", false, true },
     { "and-the-show-sizes-preference-persists", false, true },
     { "re-measure-right-click-a-size-and-type-a-new-one", false, true },
+    { "booleans-roles-on-the-wood-and-the-region-drawn", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -1481,6 +1496,31 @@ QPushButton* firstVisibleRowToggle(QWidget* drawer)
         if (button->isVisible()) return button;
     }
     return nullptr;
+}
+
+// A BOOLEAN, END TO END, through the gesture it became. The three actions
+// BEGIN a gesture now - badges on the wood saying which body survives, the
+// region drawn, Enter to commit - so a probe that only triggers the action
+// has begun something and committed nothing.
+//
+// `keepId` says which body survives. Pass it wherever WHICH body survives
+// matters to the check: the default is the BIGGEST body, and a check that
+// leans on a default is a check that breaks when the default is improved -
+// which is exactly what this rework did to the old "lowest document id" rule.
+// 0 takes the default.
+//
+// Driven through the window's own API rather than the Enter key, because
+// these are SETUP for other checks; the block that owns the gesture drives
+// the real keys and the real badge clicks.
+bool applyBoolean(MainWindow& window, const QString& action, int keepId = 0)
+{
+    if (!trigger(window, action)) return false;
+    settle(120);
+    if (!window.booleanActive()) return false;
+    if (keepId > 0) window.setBooleanKeepId(keepId);
+    const bool ok = window.booleanApply();
+    settle(200);
+    return ok;
 }
 
 // Sketch-quad-then-extrude, for probes that only care about ending up with a
@@ -8160,7 +8200,18 @@ int main(int argc, char* argv[])
     }
 
     if (view->selectedSolidIds().size() == 2) {
-        check(window.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Cut)),
+        // WHICH body survives is PINNED, not left to the default. The
+        // boolean rework made the biggest body the default survivor (it was
+        // the lowest document id, which is the order they were drawn in), and
+        // here the second body is far bigger than the first - so the default
+        // would cut the other way round and this check's own reference
+        // number, volumeA, would no longer be the base. A check that leans on
+        // a default is a check that breaks when the default is improved; this
+        // one's subject is that a Cut REMOVES MATERIAL, so it says which body
+        // it is removing from.
+        const int cutBaseId = window.document().solids().front().id;
+        check(window.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Cut),
+                                             cutBaseId),
               "Cut reports success");
         check(window.document().count() == 1, "the two operands became one result");
 
@@ -16300,6 +16351,12 @@ int main(int argc, char* argv[])
                 // the shipped accent's violet, so splitting it off moved no
                 // pixel - the token exists so the user can move it.
                 {QStringLiteral("dimensionLine"), QStringLiteral("#6a00ff")},
+                // The boolean region pair: a warm red for wood leaving, a cool
+                // teal for wood staying. Pinned here as much for what they are
+                // NOT - neither is accent(), highlightSelected() or caution() -
+                // as for what they are.
+                {QStringLiteral("booleanOut"), QStringLiteral("#ff5a4a")},
+                {QStringLiteral("booleanStay"), QStringLiteral("#2ad4b0")},
             };
             const Theme::Spec shippedSpec = Theme::defaultSpec();
             QStringList drifted;
@@ -16327,7 +16384,7 @@ int main(int argc, char* argv[])
                       .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
             check(drifted.isEmpty(),
                   QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
-                      .arg(drifted.isEmpty() ? QStringLiteral("all 29 exact")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 31 exact")
                                              : drifted.join(QStringLiteral(", "))));
             check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
                   QStringLiteral("and the shipped base size is still 10pt (%1)")
@@ -18734,19 +18791,48 @@ int main(int argc, char* argv[])
                           "and it still brings the body back");
                 }
 
-                // A REFUSAL, with notifications off. Two bodies are required
-                // for a Union and one is selected, so this is the app's own
-                // path rather than a toast posted by the probe.
-                view->setSelectedSolids({victim});
+                // A REFUSAL, with notifications off. THE VEHICLE CHANGED with
+                // the boolean rework and the reason is a taxonomy rather than
+                // a convenience: "a Union with one body selected" is no longer
+                // a FAILURE at all, it is a gesture that cannot begin, which
+                // beginMitreEnd() established says so in the status bar and
+                // does not shout - nothing failed, there was simply nothing to
+                // run. So this needs an operation that genuinely fails, and an
+                // Intersect of two bodies that share no volume is one: the
+                // kernel is asked, it answers honestly that nothing would be
+                // left, and THAT is a Failure.
+                //
+                // The subject is unchanged and is the point of the block: a
+                // Failure bypasses the notifications toggle unconditionally,
+                // because a refusal that reports nowhere is a silent failure.
+                trigger(window, QStringLiteral("Start Sketch"));
+                sketchQuad(window, 0.10, 0.70, 0.18, 0.78);
+                trigger(window, QStringLiteral("Finish Sketch"));
+                const bool farBuilt = window.extrudePendingFace(20.0);
+                check(farBuilt, "a second body, well clear of the first, is built");
+                const int farId = window.document().solids().back().id;
+                const int nearId = window.document().solids().front().id;
+                view->setSelectedSolids({nearId, farId});
                 settle(150);
                 const bool refused =
+                    nearId != farId &&
                     !window.applyBooleanToSelection(
-                        static_cast<int>(ModelingOps::BooleanKind::Fuse));
-                check(refused, "a Union with one body selected is refused");
+                        static_cast<int>(ModelingOps::BooleanKind::Common));
+                check(refused,
+                      "an Intersect of two bodies that share no volume is refused - the "
+                      "kernel is asked and answers that nothing would be left");
                 check(noteHost->isShowing(),
                       QStringLiteral("and the refusal is reported even with notifications "
                                      "off - a refusal that reports nowhere is a silent "
                                      "failure (\"%1\")").arg(noteHost->currentText()));
+                // The gesture is left live by a refusal (the user's next move
+                // is another body or Escape), so it is ended here rather than
+                // left standing over the blocks that follow.
+                window.cancelBoolean();
+                view->setSelectedSolids({farId});
+                settle(120);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
 
                 notes->setChecked(true);
                 settle(150);
@@ -18870,21 +18956,38 @@ int main(int argc, char* argv[])
 
             // A REFUSAL, with the bar hidden - the same "force the app's own
             // path, not a toast this probe posts" shape the notifications
-            // block above uses. Selecting one body and asking for a Union
-            // (which needs two) is refused by MainWindow's own guard.
+            // block above uses, and the same VEHICLE it had to change to.
+            // "A Union with one body" is no longer a Failure: it is a gesture
+            // that cannot begin, which says so in the status bar rather than
+            // shouting (beginMitreEnd()'s taxonomy). An Intersect of two
+            // bodies that share no volume genuinely fails - the kernel is
+            // asked, and answers that nothing would be left - so that is what
+            // carries the refusal here.
+            //
+            // Which makes this check sharper than it was, not weaker: the bar
+            // being hidden is exactly the state where a status-bar sentence
+            // would reach nobody, so the operation under test has to be one
+            // whose refusal is a real Failure.
             ToastHost* barHost = window.findChild<ToastHost*>();
             check(barHost != nullptr, "a toast host exists to carry the refusal");
-            if (barHost && !window.document().solids().empty()) {
-                const int victim = window.document().solids().back().id;
-                view->setSelectedSolids({victim});
+            if (barHost && window.document().solids().size() >= 2) {
+                const std::vector<DocumentModel::Solid> barSolids = window.document().solids();
+                const int barA = barSolids.front().id;
+                const int barB = barSolids.back().id;
+                view->setSelectedSolids({barA, barB});
                 settle(150);
                 const bool refused =
+                    barA != barB &&
                     !window.applyBooleanToSelection(
-                        static_cast<int>(ModelingOps::BooleanKind::Fuse));
-                check(refused, "a Union with one body selected is refused, bar or no bar");
+                        static_cast<int>(ModelingOps::BooleanKind::Common));
+                check(refused,
+                      "an Intersect of two bodies sharing no volume is refused, bar or no bar");
                 check(barHost->isShowing(),
                       QStringLiteral("...and a Failure toast still reaches the user with the "
                                      "bottom bar hidden (\"%1\")").arg(barHost->currentText()));
+                // A refusal leaves the gesture live by contract, so it is
+                // ended here rather than left standing over what follows.
+                window.cancelBoolean();
                 view->setSelectedSolids({});
                 settle(120);
             }
@@ -21739,23 +21842,36 @@ int main(int argc, char* argv[])
         probe.view()->setSelectedSolids({idA, idB});
         settle(80);
         const std::size_t bodiesBeforeUnion = probe.document().count();
-        trigger(probe, QStringLiteral("Union"));
+        check(applyBoolean(probe, QStringLiteral("Union")),
+              "the twin pair's Union runs");
         check(probe.document().count() == bodiesBeforeUnion - 1,
               "unioning a twin pair collapses it to one body");
-        check(!probe.document().contains(idA) && !probe.document().contains(idB),
-              "both original ids are gone");
-        const int unionedId = probe.document().solids().back().id;
+        // ONE of the two ids survives now, where the old spelling removed both
+        // and added a fresh body. That is the boolean rework's doing and it is
+        // an improvement rather than a side effect: the surviving body keeps
+        // its own name, which a user who renamed it would otherwise lose to an
+        // operation they think of as joining two things they already have.
+        // What the pair's collapse is really ABOUT is the check below - the
+        // result is UNPAIRED, because a symmetric whole needs no mirror - and
+        // that is unchanged.
+        const bool oneSurvives = probe.document().contains(idA) !=
+                                 probe.document().contains(idB);
+        check(oneSurvives,
+              "exactly one of the two ids survives, carrying its own name with it");
+        const int unionedId = probe.document().contains(idA) ? idA : idB;
         check(probe.document().twinOf(unionedId) == -1,
               "...and the result is UNPAIRED - the symmetric whole needs no mirror");
 
         // --- boolean: BOTH operands paired to DIFFERENT third parties -----
         // Not brief-required, added in fix round 1 review: G is paired to H,
         // I is paired to J - two independent pairs, neither operand the
-        // other's own twin. The tie-break (applyBooleanToSelection's own
-        // comment) prefers the lower id, so G survives with its OWN pairing
-        // untouched; I is removed, and removeSolid()'s own pairing cleanup
-        // must leave J - I's former partner - cleanly unpaired rather than
-        // pointing at a ghost id.
+        // other's own twin. G is PINNED as the survivor rather than left to a
+        // default: this check's subject is that G keeps its own pairing while
+        // J - I's former partner - is cleanly unpaired rather than left
+        // pointing at a ghost id, and which body a default happens to prefer
+        // is no part of that. It used to lean on the old "lowest id wins"
+        // rule, which the boolean rework replaced, and a check that leans on
+        // a default is a check that breaks when the default is improved.
         trigger(probe, QStringLiteral("Start Sketch"));
         sketchQuadWorld(-150.0, -150.0, -90.0, -90.0);
         trigger(probe, QStringLiteral("Finish Sketch"));
@@ -21773,17 +21889,17 @@ int main(int argc, char* argv[])
         const int idI = solidsIJ[solidsIJ.size() - 2].id;
         const int idJ = solidsIJ[solidsIJ.size() - 1].id;
         check(probe.document().twinOf(idI) == idJ, "I/J is paired");
-        check(idG < idI, "G was created before I, so the sort inside "
-                         "applyBooleanToSelection puts G first - what this check assumes");
+        check(idG != idI, "G and I are two distinct bodies");
 
         probe.view()->setSelectedSolids({idG, idI});
         settle(80);
         const std::size_t bodiesBeforeCrossUnion = probe.document().count();
-        trigger(probe, QStringLiteral("Union"));
+        check(applyBoolean(probe, QStringLiteral("Union"), idG),
+              "the cross-paired Union runs, with G pinned as the survivor");
         check(probe.document().count() == bodiesBeforeCrossUnion - 1,
               "unioning two operands paired to DIFFERENT partners still collapses to one body");
         check(probe.document().contains(idG) && !probe.document().contains(idI),
-              "the lower id (G) survives; I is gone");
+              "the PINNED body (G) survives; I is gone");
         check(probe.document().twinOf(idG) == idH,
               "G keeps its OWN pairing, untouched by the boolean");
         check(probe.document().twinOf(idJ) == -1,
@@ -27705,11 +27821,80 @@ int main(int argc, char* argv[])
                              "against %2 with the cursor clear)")
                   .arg(edgeTint)
                   .arg(baseTint));
-        check(faceTint > edgeTint * 3,
-              QStringLiteral("and the middle of a face glows the whole face, not a line "
-                             "(%1 tinted pixels against the edge's %2)")
-                  .arg(faceTint)
-                  .arg(edgeTint));
+        // AN AREA, NOT A MULTIPLIER. This used to read `faceTint > edgeTint *
+        // 3`, and that number was never a property of the app - it was a
+        // property of which edge the search above happened to land on and how
+        // large the window happened to be. Both changed when this machine's
+        // display arrangement did (the same committed code measured 1216/226
+        // one hour and 1933/692 the next, on an unchanged binary), and a gate
+        // that goes red because a window moved to another monitor has stopped
+        // being a gate.
+        //
+        // So it now measures the thing the sentence actually claims. A face
+        // highlight is a CLOSED LOOP around the face; an edge highlight is an
+        // open line. Flood the tinted pixels' own bounding box inward from its
+        // border: whatever the flood cannot reach is enclosed BY the tint. A
+        // loop encloses its face; a line, however long, diagonal or thick,
+        // encloses nothing. That is scale-free, geometry-free, and true of
+        // every camera angle.
+        const auto enclosedFraction = [&hoverTint](const QString& path) {
+            const QImage shot(path);
+            if (shot.isNull()) return -1.0;
+            const int w = shot.width(), h = shot.height();
+            std::vector<char> tinted(static_cast<std::size_t>(w) * h, 0);
+            int minX = w, minY = h, maxX = -1, maxY = -1;
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    if (colorDistance(shot.pixelColor(x, y), hoverTint) >= 60.0) continue;
+                    tinted[static_cast<std::size_t>(y) * w + x] = 1;
+                    minX = std::min(minX, x); maxX = std::max(maxX, x);
+                    minY = std::min(minY, y); maxY = std::max(maxY, y);
+                }
+            }
+            if (maxX < minX || maxY < minY) return -1.0;
+            const int bw = maxX - minX + 1, bh = maxY - minY + 1;
+            if (bw < 3 || bh < 3) return 0.0;
+            std::vector<char> seen(static_cast<std::size_t>(bw) * bh, 0);
+            std::vector<std::pair<int, int>> stack;
+            const auto push = [&](int x, int y) {
+                if (x < 0 || y < 0 || x >= bw || y >= bh) return;
+                const std::size_t i = static_cast<std::size_t>(y) * bw + x;
+                if (seen[i] || tinted[static_cast<std::size_t>(y + minY) * w + (x + minX)])
+                    return;
+                seen[i] = 1;
+                stack.push_back({x, y});
+            };
+            for (int x = 0; x < bw; ++x) { push(x, 0); push(x, bh - 1); }
+            for (int y = 0; y < bh; ++y) { push(0, y); push(bw - 1, y); }
+            while (!stack.empty()) {
+                const std::pair<int, int> at = stack.back();
+                stack.pop_back();
+                push(at.first + 1, at.second);
+                push(at.first - 1, at.second);
+                push(at.first, at.second + 1);
+                push(at.first, at.second - 1);
+            }
+            int enclosed = 0, untinted = 0;
+            for (int y = 0; y < bh; ++y) {
+                for (int x = 0; x < bw; ++x) {
+                    if (tinted[static_cast<std::size_t>(y + minY) * w + (x + minX)]) continue;
+                    ++untinted;
+                    if (!seen[static_cast<std::size_t>(y) * bw + x]) ++enclosed;
+                }
+            }
+            return untinted > 0 ? static_cast<double>(enclosed) / untinted : 0.0;
+        };
+        const double faceEnclosed = faceOk ? enclosedFraction(autoFaceShot) : -1.0;
+        const double edgeEnclosed = edgeOk ? enclosedFraction(autoEdgeShot) : -1.0;
+        check(faceEnclosed > 0.5,
+              QStringLiteral("and the middle of a face glows the WHOLE FACE - its highlight "
+                             "closes a loop that encloses %1 of its own bounding box")
+                  .arg(faceEnclosed, 0, 'f', 2));
+        // The other direction, so the measure is proved to discriminate rather
+        // than to be satisfied by anything with tinted pixels in it.
+        check(edgeEnclosed >= 0.0 && edgeEnclosed < 0.1,
+              QStringLiteral("while an edge's highlight is a LINE and encloses nothing "
+                             "(%1)").arg(edgeEnclosed, 0, 'f', 2));
 
         // THE CONTRACT: a click takes exactly what glows. Read the hovered
         // shape first, then click the same pixel and compare - the assertion
@@ -34277,6 +34462,350 @@ int main(int argc, char* argv[])
     // volume alone cannot tell from either end-anchored case - every commit
     // check below reads the CENTRE OF MASS), and the ghost is built by the
     // very call Enter commits.
+    // --- booleans: roles on the wood, and the region drawn -------------------
+    //
+    // The user's report is the whole subject: "right now works poorly, for
+    // example i cant decide with one substract and which one keep". The three
+    // operations used to sort the ids and keep the LOWEST - the order the
+    // bodies were drawn in - and no control could change it.
+    //
+    // Independent: its own store, its own window, its own bodies. The fixture
+    // is shaped so every number below is a DIFFERENT number, which is what
+    // lets a wrong implementation read as wrong rather than as plausible:
+    //
+    //   panel  300 x 300 x 20 at the origin              = 1,800,000
+    //   peg    40 x 40 x 40 at (30,30,10)                =    64,000,
+    //                                                      overlapping the
+    //                                                      panel by 40x40x10
+    //                                                      = 16,000
+    //   peg2   40 x 40 x 40 at (200,30,10)               = the same again
+    //
+    // The panel is far bigger than either peg, so "the biggest body survives"
+    // has an unambiguous answer, and the two pegs are identical so a check
+    // that confused them would still have to explain the panel.
+    if (blockEnabled("booleans-roles-on-the-wood-and-the-region-drawn")) {
+        RequiredTempDir boolDir;
+        QString boolId;
+        {
+            FurnitureStore seedStore(boolDir.path());
+            boolId = seedStore.createFurniture(QStringLiteral("Boolean bench"));
+            DocumentModel seedDoc;
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 300.0, 300.0, 20.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(30.0, 30.0, 10.0), 40.0, 40.0, 40.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(200.0, 30.0, 10.0), 40.0, 40.0, 40.0));
+            check(!boolId.isEmpty() && seedStore.saveFurniture(boolId, seedDoc, QImage()),
+                  "bool: a panel and two pegs are seeded");
+        }
+
+        MainWindow bw(nullptr, /*persistProgress=*/false, boolDir.path());
+        bw.setAttribute(Qt::WA_ShowWithoutActivating);
+        bw.resize(1100, 800);
+        bw.show();
+        settle(300);
+        OcctViewWidget* bv = bw.view();
+        bv->setAnimationsEnabled(false);
+        ToastHost* boolToasts = bw.findChild<ToastHost*>();
+        const auto boolToastText = [&]() {
+            return boolToasts ? boolToasts->currentText() : QString();
+        };
+        check(bw.openFurniture(boolId), "bool: the seeded furniture opens");
+        settle(300);
+        trigger(bw, QStringLiteral("Fit All"));
+        settle(200);
+
+        const std::vector<DocumentModel::Solid> boolSolids = bw.document().solids();
+        check(boolSolids.size() == 3, "bool: three bodies opened");
+        const int panelId = boolSolids.size() > 0 ? boolSolids[0].id : 0;
+        const int pegId = boolSolids.size() > 1 ? boolSolids[1].id : 0;
+        const int peg2Id = boolSolids.size() > 2 ? boolSolids[2].id : 0;
+        const double panelVolume = ModelingOps::volume(bw.document().shapeOf(panelId));
+        check(std::fabs(panelVolume - 1800000.0) < 1.0,
+              QStringLiteral("bool: the panel is 1,800,000 (%1)").arg(panelVolume));
+
+        // --- it does not begin on one body --------------------------------
+        bv->setSelectedSolids({panelId});
+        settle(150);
+        check(!bw.canBeginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)),
+              "bool: one body is not enough to begin");
+        check(!bw.booleanUnavailableReason().isEmpty(),
+              QStringLiteral("bool: and it says what is missing (\"%1\")")
+                  .arg(bw.booleanUnavailableReason()));
+
+        // --- the default survivor is the BIGGEST body, not the lowest id ---
+        //
+        // The peg was created AFTER the panel, so under the old rule the
+        // panel (lower id) survived by luck of the draw. This check is only
+        // worth something because the fixture separates the two answers: the
+        // peg is selected FIRST and is the smaller body, so an implementation
+        // that kept "the first picked" or "the lowest id" would still keep
+        // the panel here for the wrong reason. So the SECOND half is the real
+        // one - with the pegs alone, the two candidates are the same size and
+        // the survivor must still be one of exactly those two.
+        bv->setSelectedSolids({panelId, pegId});
+        settle(150);
+        check(bw.canBeginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)),
+              "bool: two bodies is enough");
+        const int revisionBeforeBegin = bw.document().revision();
+        const std::size_t undoBeforeBegin = bw.document().undoDepth();
+        check(bw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)),
+              "bool: Subtract begins a gesture rather than committing");
+        check(bw.booleanActive() && bw.booleanKeepId() == panelId,
+              QStringLiteral("bool: and the BIGGEST body is kept by default, not the "
+                             "lowest id (kept %1, panel %2, peg %3)")
+                  .arg(bw.booleanKeepId()).arg(panelId).arg(pegId));
+        check(bw.document().revision() == revisionBeforeBegin &&
+                  bw.document().undoDepth() == undoBeforeBegin,
+              "bool: and BEGINNING IS NOT COMMITTING - no checkpoint, no revision move");
+
+        // --- the badges are on the wood, one per body ----------------------
+        check(bv->booleanBadgeCount() == 2,
+              QStringLiteral("bool: one badge per body (%1)").arg(bv->booleanBadgeCount()));
+        int keepBadges = 0;
+        for (int i = 0; i < bv->booleanBadgeCount(); ++i)
+            if (bv->booleanBadgeKeeps(i)) ++keepBadges;
+        check(keepBadges == 1,
+              QStringLiteral("bool: exactly ONE of them says KEEP (%1)").arg(keepBadges));
+        check(bv->booleanBadgeTexts().contains(MainWindow::booleanKeepBadgeText()) &&
+                  bv->booleanBadgeTexts().contains(MainWindow::booleanConsumeBadgeText()),
+              QStringLiteral("bool: and they carry the window's own two words (%1)")
+                  .arg(bv->booleanBadgeTexts().join(QStringLiteral(", "))));
+
+        // --- the region is the overlap, in the COMING OUT token ------------
+        check(bv->hasBooleanRegion(), "bool: Subtract draws a region");
+        check(!bv->booleanRegionStaying(),
+              "bool: and it wears the material-coming-out token, since a Subtract "
+              "takes the overlap away");
+        const double regionVolume = ModelingOps::volume(bv->booleanRegionShape());
+        check(std::fabs(regionVolume - 16000.0) < 1.0,
+              QStringLiteral("bool: the region is the OVERLAP (%1, expected 16,000) - not "
+                             "the whole peg, which is 64,000")
+                  .arg(regionVolume));
+
+        // --- a real click on a badge moves the role ------------------------
+        //
+        // Through the viewport's own press handler at the badge's PROJECTED
+        // point, not by calling setBooleanKeepId(): the subject here is that
+        // a click on the pill lands on it and is claimed, which a direct call
+        // cannot answer.
+        int pegBadge = -1;
+        for (int i = 0; i < bv->booleanBadgeCount(); ++i)
+            if (!bv->booleanBadgeKeeps(i)) pegBadge = i;
+        QPoint pegBadgeAt;
+        const bool pegBadgeOnScreen =
+            pegBadge >= 0 && bv->booleanBadgePoint(pegBadge, pegBadgeAt) &&
+            bv->rect().contains(pegBadgeAt);
+        check(pegBadgeOnScreen,
+              "bool: the peg's badge is on screen, so the click below is not aimed at "
+              "nothing");
+        if (pegBadgeOnScreen) {
+            // Non-vacuity: the badge must actually CLAIM this pixel, or a
+            // click that changed the role by some other route would pass.
+            check(bv->booleanBadgeAt(pegBadgeAt) == pegBadge,
+                  "bool: and the badge claims that pixel");
+            const std::vector<int> heldBefore = bv->selectedSolidIds();
+            clickAt(bv, QPointF(pegBadgeAt));
+            settle(200);
+            check(bw.booleanKeepId() == pegId,
+                  QStringLiteral("bool: clicking the peg's badge makes the PEG the one "
+                                 "kept (%1, peg %2)")
+                      .arg(bw.booleanKeepId()).arg(pegId));
+            check(bw.booleanActive(), "bool: and the gesture is still live");
+            // The press AND its release are claimed: the viewport picks on the
+            // release, and a re-pick there would change the selection and so
+            // end the very gesture the click was adjusting.
+            check(bv->selectedSolidIds() == heldBefore,
+                  "bool: and the selection is untouched - the release was swallowed too");
+            // The region follows the role: with the peg kept, Subtract now
+            // takes the overlap out of the PEG, which is the same 16,000 - so
+            // the number cannot prove this. The ROLE can.
+            check(bv->hasBooleanRegion(), "bool: the region is still drawn after the flip");
+        }
+
+        // put the panel back, for the commit below
+        bw.setBooleanKeepId(panelId);
+        settle(150);
+        check(bw.booleanKeepId() == panelId, "bool: (the panel is the survivor again)");
+
+        // --- Escape cancels, writing nothing ------------------------------
+        const int revisionBeforeEscape = bw.document().revision();
+        const std::size_t undoBeforeEscape = bw.document().undoDepth();
+        sendKeyTo(bv, Qt::Key_Escape);
+        settle(200);
+        check(!bw.booleanActive(), "bool: Escape ends the gesture");
+        check(!bv->hasBooleanRegion() && bv->booleanBadgeCount() == 0,
+              "bool: and the region and the badges go with it");
+        check(bw.document().revision() == revisionBeforeEscape &&
+                  bw.document().undoDepth() == undoBeforeEscape,
+              "bool: Escape took no checkpoint and changed nothing");
+
+        // --- Enter commits, once ------------------------------------------
+        bv->setSelectedSolids({panelId, pegId});
+        settle(150);
+        check(bw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)),
+              "bool: Subtract begins again");
+        const std::size_t undoBeforeEnter = bw.document().undoDepth();
+        // Enter with focus on the VIEWPORT, not on the card: the claim is
+        // application-wide precisely because an orbit takes focus away, and a
+        // focus-scoped filter would pass this check while failing the user.
+        sendKeyTo(bv, Qt::Key_Return);
+        settle(300);
+        check(!bw.booleanActive(), "bool: Enter ends the gesture");
+        check(bw.document().undoDepth() == undoBeforeEnter + 1,
+              QStringLiteral("bool: through exactly ONE checkpoint (%1 -> %2)")
+                  .arg(static_cast<int>(undoBeforeEnter))
+                  .arg(static_cast<int>(bw.document().undoDepth())));
+        check(bw.document().contains(panelId) && !bw.document().contains(pegId),
+              "bool: the kept body survives under its own id; the other is used up");
+        const double afterCut = ModelingOps::volume(bw.document().shapeOf(panelId));
+        check(std::fabs(afterCut - (1800000.0 - 16000.0)) < 1.0,
+              QStringLiteral("bool: and exactly the overlap came out (%1, expected %2)")
+                  .arg(afterCut).arg(1800000.0 - 16000.0));
+        check(bv->selectedSolidIds().size() == 1 && bv->selectedSolidIds().front() == panelId,
+              "bool: the result is left selected, so the transform gizmo is already on it");
+        trigger(bw, QStringLiteral("Undo"));
+        settle(250);
+        check(std::fabs(ModelingOps::volume(bw.document().shapeOf(panelId)) - 1800000.0) < 1.0 &&
+                  bw.document().contains(pegId),
+              "bool: one undo restores the panel AND the peg together");
+
+        // --- three bodies, ONE build, ONE undo ----------------------------
+        bv->setSelectedSolids({panelId, pegId, peg2Id});
+        settle(150);
+        check(bw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)),
+              "bool: Subtract begins on THREE bodies");
+        check(bv->booleanBadgeCount() == 3, "bool: three badges");
+        const double threeRegion = ModelingOps::volume(bv->booleanRegionShape());
+        check(std::fabs(threeRegion - 32000.0) < 1.0,
+              QStringLiteral("bool: the region is BOTH overlaps (%1, expected 32,000)")
+                  .arg(threeRegion));
+        const std::size_t undoBeforeThree = bw.document().undoDepth();
+        check(bw.booleanApply(), "bool: and it builds");
+        settle(250);
+        check(bw.document().undoDepth() == undoBeforeThree + 1,
+              "bool: two pegs in ONE checkpoint, not two");
+        check(std::fabs(ModelingOps::volume(bw.document().shapeOf(panelId)) -
+                        (1800000.0 - 32000.0)) < 1.0,
+              "bool: with both overlaps gone");
+        check(!bw.document().contains(pegId) && !bw.document().contains(peg2Id),
+              "bool: and both pegs used up");
+        trigger(bw, QStringLiteral("Undo"));
+        settle(250);
+        check(bw.document().contains(pegId) && bw.document().contains(peg2Id),
+              "bool: ONE undo brings both pegs back");
+
+        // --- Keep the other bodies ----------------------------------------
+        bv->setSelectedSolids({panelId, pegId});
+        settle(150);
+        check(bw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)),
+              "bool: Subtract begins for the keep-the-others case");
+        check(!bw.booleanKeepTool(), "bool: the others are used up by default");
+        bw.setBooleanKeepTool(true);
+        settle(120);
+        check(bw.booleanApply(), "bool: and it builds with them kept");
+        settle(250);
+        check(bw.document().contains(pegId),
+              "bool: the peg is still in the document - a cutter is usually a real part too");
+        check(std::fabs(ModelingOps::volume(bw.document().shapeOf(panelId)) -
+                        (1800000.0 - 16000.0)) < 1.0,
+              "bool: and the panel was still cut by it");
+        trigger(bw, QStringLiteral("Undo"));
+        settle(250);
+
+        // --- Union and Intersect wear the STAYING token -------------------
+        bv->setSelectedSolids({panelId, pegId});
+        settle(150);
+        check(bw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Fuse)),
+              "bool: Union begins");
+        check(bv->hasBooleanRegion() && bv->booleanRegionStaying(),
+              "bool: Union's region wears the material-staying token - the doubled wood "
+              "becomes one piece rather than leaving");
+        sendKeyTo(bv, Qt::Key_Escape);
+        settle(150);
+
+        check(bw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Common)),
+              "bool: Intersect begins");
+        check(bv->hasBooleanRegion() && bv->booleanRegionStaying(),
+              "bool: and so does Intersect's - the overlap is all that survives");
+        const double commonRegion = ModelingOps::volume(bv->booleanRegionShape());
+        check(std::fabs(commonRegion - 16000.0) < 1.0,
+              QStringLiteral("bool: which IS the result (%1)").arg(commonRegion));
+        sendKeyTo(bv, Qt::Key_Escape);
+        settle(150);
+
+        // --- a refusal names itself, and LEAVES THE GESTURE LIVE -----------
+        //
+        // The two pegs never touch, so there is no volume common to both.
+        // What matters as much as the refusal is what happens next: the user's
+        // move is to pick a different body to keep or to Escape, and both need
+        // the badges still on screen.
+        bv->setSelectedSolids({pegId, peg2Id});
+        settle(150);
+        check(bw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Common)),
+              "bool: Intersect begins on two bodies that never touch");
+        check(!bv->hasBooleanRegion(),
+              "bool: no region is drawn for an operation that cannot happen - a highlight "
+              "has nothing honest to say about one");
+        check(!bw.booleanRefusalFor().isEmpty(),
+              QStringLiteral("bool: and the window knows why (\"%1\")")
+                  .arg(bw.booleanRefusalFor()));
+        const int revisionBeforeRefusal = bw.document().revision();
+        const QString expectedRefusal = bw.booleanRefusalFor();
+        sendKeyTo(bv, Qt::Key_Return);
+        settle(250);
+        check(bw.document().revision() == revisionBeforeRefusal,
+              "bool: Enter on a refused combination writes nothing");
+        check(boolToastText() == expectedRefusal,
+              QStringLiteral("bool: and the Failure toast carries the SAME sentence the "
+                             "chip has (\"%1\")").arg(boolToastText()));
+        check(bw.booleanActive() && bv->booleanBadgeCount() == 2,
+              "bool: and the gesture is STILL LIVE with its badges up, because the next "
+              "move is to pick a different body or to Escape");
+        sendKeyTo(bv, Qt::Key_Escape);
+        settle(150);
+        check(!bw.booleanActive(), "bool: Escape ends it");
+
+        // --- disjoint from every other gesture -----------------------------
+        bv->setSelectedSolids({panelId, pegId});
+        settle(150);
+        check(bw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)),
+              "bool: Subtract begins for the disjointness checks");
+        check(bw.transformableBodyId() == 0,
+              QStringLiteral("bool: the transform gizmo stands down on a live boolean "
+                             "(gizmo on %1)").arg(bw.transformableBodyId()));
+        check(!bw.canBeginMirrorPlacement(),
+              "bool: and a Mirror placement cannot begin over it - its own key claim "
+              "would be a second one");
+        // NON-VACUITY: end the gesture and the very same selection raises the
+        // gizmo, so the stand-down above was measuring this gesture's term
+        // rather than a gizmo that was never coming.
+        sendKeyTo(bv, Qt::Key_Escape);
+        settle(200);
+        bv->setSelectedSolids({panelId});
+        settle(150);
+        check(bw.transformableBodyId() == panelId,
+              "bool: with the gesture down, one body raises the gizmo as usual");
+
+        // --- the copy this gesture paints ----------------------------------
+        {
+            QStringList offenders;
+            QStringList texts = bv->booleanBadgeTexts();
+            if (bw.booleanTool()) texts << bw.booleanTool()->paintedTexts();
+            texts << MainWindow::booleanKeepBadgeText()
+                  << MainWindow::booleanConsumeBadgeText();
+            check(texts.size() >= 4, "bool: there is painted copy to sweep");
+            for (const QString& text : texts)
+                for (const QString& word : bannedWords())
+                    if (usesBannedWord(text, word))
+                        offenders << text + QStringLiteral(": ") + word;
+            check(offenders.isEmpty(),
+                  QStringLiteral("bool: its painted copy uses no banned word (%1)")
+                      .arg(offenders.join(QStringLiteral("; "))));
+        }
+
+        check(bw.findChildren<QDialog*>().isEmpty(),
+              "bool: the whole gesture raised no modal dialog at any point");
+    }
+
     if (blockEnabled("re-measure-right-click-a-size-and-type-a-new-one")) {
         RequiredTempDir reDir;
         QString reId;

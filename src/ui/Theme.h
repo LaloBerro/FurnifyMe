@@ -105,6 +105,25 @@ struct Spec {
     // somebody picks a colour for it.
     QColor dimensionLine;
 
+    // THE TWO BOOLEAN REGION COLOURS: the volume a Subtract, Union or
+    // Intersect is about to act on, drawn before it is committed so the hole
+    // is visible before it is made. ONE region - the overlap the operation
+    // works on - and the COLOUR is what says what happens to it, which is why
+    // these are two tokens and not two shapes:
+    //
+    //   booleanOut   Subtract's cut-away volume. Material leaving.
+    //   booleanStay  Union's doubled wood, and Intersect's surviving volume.
+    //                Material staying.
+    //
+    // NEITHER BORROWS THE ACCENT, deliberately. accent() already marks state -
+    // what is selected, what is live - and a user who themes the accent red
+    // would otherwise have "selected" and "about to be cut away" render the
+    // same, on the one gesture in the app where mistaking those two destroys
+    // wood. Same argument dimensionLine's own comment makes, one step
+    // further: that one merely read confusingly, this one would read wrong.
+    QColor booleanOut;
+    QColor booleanStay;
+
     // Empty means "whatever apply() managed to load", which is the bundled DM
     // Sans when the resource is present and the platform default when it is
     // not. defaultSpec() fills it in with the real family name once apply()
@@ -299,6 +318,8 @@ QColor highlightSelected(); // and its selection tint
 QColor dimensionLine();     // the measuring line and its number - see Spec
 QColor sizesOneBody();      // selection sizes around one body - see Spec
 QColor sizesGroup();        // selection sizes around a group - see Spec
+QColor booleanOut();        // a boolean's material coming out - see Spec
+QColor booleanStay();       // a boolean's material staying - see Spec
 
 double chipStrokePx();      // ToolChip border width - see Spec::chipStrokePx
 double gridDensity();       // grid line density multiplier - see Spec::gridDensity

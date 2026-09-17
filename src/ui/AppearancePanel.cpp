@@ -283,6 +283,11 @@ QString AppearancePanel::nameForToken(const QString& id)
         {QStringLiteral("dimensionLine"), QObject::tr("Measuring line")},
         {QStringLiteral("sizesOneBody"), QObject::tr("Sizes — one body")},
         {QStringLiteral("sizesGroup"), QObject::tr("Sizes — several bodies")},
+        // Named by what happens to the wood, not by the operation - the same
+        // pair serves Subtract, Union and Intersect, and "Subtract colour"
+        // would be wrong on two of the three.
+        {QStringLiteral("booleanOut"), QObject::tr("Material coming out")},
+        {QStringLiteral("booleanStay"), QObject::tr("Material staying")},
         {QStringLiteral("sketchPointMarker"), QObject::tr("Outline points")},
         {QStringLiteral("outlineLineColour"), QObject::tr("Outline lines — colour")},
         {QStringLiteral("chrome"), QObject::tr("Top bar and status bar")},

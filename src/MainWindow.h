@@ -67,7 +67,12 @@ public:
     // smoke test drives these directly; a modal QInputDialog cannot be answered
     // from inside the same event loop that raised it.
     bool extrudePendingFace(double height);
-    bool applyBooleanToSelection(int kind);   // ModelingOps::BooleanKind
+    // ModelingOps::BooleanKind. `keepId` names the body that survives, or 0
+    // to take beginBoolean()'s default (the biggest). Pass it wherever WHICH
+    // body survives matters: a caller that leans on the default is a caller
+    // that breaks when the default is improved, which is exactly what this
+    // rework did to the old "lowest document id" rule.
+    bool applyBooleanToSelection(int kind, int keepId = 0);
 
     // Makes `face`'s own plane the sketch plane, so the next outline is drawn
     // on the face and extrudes perpendicular to it. False - with a toast
@@ -129,6 +134,62 @@ public:
     // no render mode, no compare pane, no mirror placement and no mitre
     // already live. updateActions() enables the action off this and writes
     // the disabled tooltip off mitreUnavailableReason().
+    // --- booleans as a live gesture ----------------------------------------
+    //
+    // Subtract, Union and Intersect stopped being one-shot actions. The
+    // user's report is why: "i cant decide with one substract and which one
+    // keep" - applyBooleanToSelection() sorted the ids and made the LOWER
+    // DOCUMENT ID the base, so which body survived depended on the order they
+    // were drawn in, and no control could change it.
+    //
+    // Now it is a gesture with the shape every other tool here has: begin,
+    // look at it, adjust, Enter or Escape. What it shows while it is live is
+    // BooleanBadgeRenderer's badges (which body is kept, clickable to change)
+    // and OcctViewWidget's region (the volume the operation will act on).
+    //
+    // `kind` is a ModelingOps::BooleanKind as an int, exactly as
+    // applyBooleanToSelection() already takes it, so the three actions keep
+    // their one-line bodies.
+    bool canBeginBoolean(int kind) const;
+    QString booleanUnavailableReason() const;
+    // The action's route. False (with a sentence) when the predicate does not
+    // hold - QAction::trigger() does not consult isEnabled().
+    bool beginBoolean(int kind);
+    // Escape's route, and every derived cancel's. Safe when nothing is live.
+    void cancelBoolean();
+    bool booleanActive() const { return myBooleanActive; }
+    int booleanKind() const { return myBooleanKind; }
+    // The bodies the gesture captured, and which of them survives as itself.
+    std::vector<int> booleanBodyIds() const { return myBooleanIds; }
+    int booleanKeepId() const { return myBooleanKeepId; }
+    // A badge click. Ignored unless `id` is one of the captured bodies, so a
+    // stale id can never re-point the gesture at something it never held.
+    void setBooleanKeepId(int id);
+    bool booleanKeepTool() const { return myBooleanKeepTool; }
+    void setBooleanKeepTool(bool keep);
+    // Enter's route: one build, one checkpoint, one toast, however many
+    // bodies it took.
+    bool booleanApply();
+    // The user-facing name of the live kind - "Subtract" / "Union" /
+    // "Intersect" - read by the chip, the badges' own sentence and the status
+    // label, so the three cannot disagree.
+    QString booleanOperationName() const;
+    // What the kept body's badge says, and what the others say. Static, and
+    // OWNED HERE rather than in the renderer: painted copy invented inside a
+    // renderer is copy the banned-word sweep never reaches.
+    static QString booleanKeepBadgeText();
+    static QString booleanConsumeBadgeText();
+    // Why applyBooleanMulti() would refuse right now, in the user's words -
+    // read by the chip and by the Failure toast, so the two cannot say
+    // different things. Empty when nothing would refuse.
+    QString booleanRefusalFor() const;
+    // Pushes the badges and the region into the viewport. Driven from
+    // appStateChanged AND from cameraChanged, because the badges stand at
+    // world points whose SCREEN position moves with the camera while nothing
+    // about the document changes.
+    void refreshBooleanFeedback();
+    class BooleanTool* booleanTool() const { return myBooleanTool; }
+
     bool canMitreSelectedFace() const;
     QString mitreUnavailableReason() const;
     // The action's route. False (with a status-bar sentence) when the
@@ -2187,6 +2248,24 @@ private:
 
     // --- Mitre end (improvements item 4) -------------------------------------
     // Model -> Mitre end (M) - menu-only, no rail chip (the rail-floor rule).
+    // --- the boolean gesture's state ---------------------------------------
+    // The bodies are captured at beginBoolean(); the revision is what makes
+    // "any change to the document ends it" one comparison in updateActions()
+    // rather than a call at every edit site.
+    bool myBooleanActive = false;
+    int myBooleanKind = 0;
+    std::vector<int> myBooleanIds;
+    int myBooleanKeepId = 0;
+    bool myBooleanKeepTool = false;
+    int myBooleanRevision = -1;
+    class BooleanTool* myBooleanTool = nullptr;
+    // True while the gesture's derived cancel still holds - see updateActions().
+    bool booleanGestureStillHolds() const;
+    // The shapes the live gesture would hand the kernel: the kept body, then
+    // every other captured body. ONE derivation, so the region the user looks
+    // at and the build Enter commits cannot come from two different lists.
+    bool booleanOperands(TopoDS_Shape& base, std::vector<TopoDS_Shape>& tools) const;
+
     QAction* myMitreAction = nullptr;
     MitreTool* myMitreTool = nullptr;
     // THE gesture's state. The face and body are captured at beginMitreEnd();

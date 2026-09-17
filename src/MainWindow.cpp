@@ -35,6 +35,7 @@
 #include "MaterialCard.h"
 #include "NameFurnitureCard.h"
 #include "ReMeasureTool.h"
+#include "BooleanTool.h"
 #include "SlatsTool.h"
 #include "WalkthroughPanel.h"
 #include "WindowChrome.h"
@@ -2716,6 +2717,27 @@ void MainWindow::buildOverlay()
     // slats is put back on screen after they have all run.
     mySlatsTool = new SlatsTool(this, myView);
 
+    // The boolean chip. Constructed AFTER every other chip for the reason
+    // MitreTool's own comment gives: connection order is emission order, and
+    // a chip built earlier would have its feedback cleared by a later one's
+    // refresh() on the way past.
+    myBooleanTool = new BooleanTool(this, myView);
+    connect(this, &MainWindow::appStateChanged, myBooleanTool, &BooleanTool::refresh);
+    connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
+        if (myBooleanTool) myBooleanTool->replace();
+    });
+    // A click on a badge says which body survives. The viewport announces the
+    // BODY ID rather than an index, so a rebuild between the click and the
+    // handler cannot re-point it at a different body.
+    connect(myView, &OcctViewWidget::booleanBadgePicked, this, &MainWindow::setBooleanKeepId);
+    // The badges stand at world points, so their SCREEN position moves with
+    // the camera while nothing about the document changes - and the region is
+    // sized in world units and does not, which is why only the badges need
+    // this. refreshBooleanFeedback() early-outs when nothing is live.
+    connect(myView, &OcctViewWidget::cameraChanged, this, [this] {
+        if (myBooleanActive) refreshBooleanFeedback();
+    });
+
     // The right-click on a size number, and the click on a pin mark - the
     // viewport announces both and this window decides what they mean.
     connect(myView, &OcctViewWidget::sizeLabelRightClicked, this,
@@ -2922,6 +2944,24 @@ void MainWindow::updateActions()
         myMitreBodyId = 0;
     }
 
+    // The boolean gesture ends HERE too, by the same derivation rather than
+    // by a cancel at every site that could end it. NOTE the shape of this
+    // one: it must not call cancelBoolean(), which calls updateActions() and
+    // would recurse - CLAUDE.md's rule that a slot on appStateChanged may not
+    // call back into updateActions(). The state is cleared in place and the
+    // viewport is told, exactly as the mitre's own prune does.
+    if (myBooleanActive && !booleanGestureStillHolds()) {
+        myBooleanActive = false;
+        myBooleanIds.clear();
+        myBooleanKeepId = 0;
+        myBooleanKeepTool = false;
+        myBooleanRevision = -1;
+        if (myView) {
+            myView->clearBooleanBadges();
+            myView->clearBooleanRegion();
+        }
+    }
+
     // ...and a live Re-Measure, on exactly the same terms and in the same
     // place, so the two gestures share one idea of what ends one rather than
     // two lists that could drift apart. ReMeasureTool::refresh() takes the
@@ -2946,14 +2986,26 @@ void MainWindow::updateActions()
     }
 
     const std::size_t selectedCount = myView->selectedSolidIds().size();
-    const bool booleanReady = !mySketching && !atInit && selectedCount == 2;
+    // TWO OR MORE now, not exactly two: the gesture takes one base and any
+    // number of tools in one build (ModelingOps::applyBooleanMulti), so six
+    // dowel holes are one operation and one undo. canBeginBoolean() is the
+    // full predicate - this is the availability half of the same question,
+    // and it defers to it rather than restating the terms.
+    const bool booleanReady = canBeginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut));
 
     myStartSketchAction->setEnabled(!mySketching && !atInit);
     myFinishSketchAction->setEnabled(mySketching && mySketch.canClose());
     myUndoPointAction->setEnabled(mySketching && mySketch.pointCount() > 0);
     myCancelSketchAction->setEnabled(mySketching);
 
-    myExtrudeAction->setEnabled(!mySketching && !atInit && hasPendingFace());
+    // ...and NOT while a boolean gesture is live: ExtrudePreview claims Enter
+    // and Escape application-wide while it is visible, and the boolean chip
+    // claims the same two. This is the other half of the term
+    // canBeginBoolean() carries - between them, the two panels can never both
+    // be up, which is what keeps "at most one application-wide claim" true by
+    // construction rather than by luck.
+    myExtrudeAction->setEnabled(!mySketching && !atInit && hasPendingFace() &&
+                                !myBooleanActive);
     // Add shape wants a furniture open and no sketch in progress - a
     // waiting outline does NOT gate it (booleans and Delete are not gated
     // either; placing a shape consumes nothing the outline owns). Render
@@ -7303,6 +7355,15 @@ int MainWindow::transformableBodyId() const
     // body.
     if (myView->mirrorPlacementActive()) return 0;
 
+    // ...and a LIVE BOOLEAN, which is the newest of these overlaps and the
+    // widest: a boolean gesture stands on TWO OR MORE bodies, and since the
+    // multi-body transform this predicate answers to a multi-body selection
+    // too - so the two want exactly the same selection rather than merely
+    // similar ones. The boolean chip claims Enter and Escape application-wide
+    // and its badges claim presses in screen space, both of which would sit
+    // on top of a gizmo standing on the same wood.
+    if (myBooleanActive) return 0;
+
     // ...and a live Re-Measure (improvements item 8), for exactly the reason
     // above and one more: that gesture stands on ONE whole body too, so its
     // chip and this gizmo would otherwise be up over the same body at once -
@@ -7524,178 +7585,441 @@ void MainWindow::onIntersect() { runBoolean(static_cast<int>(ModelingOps::Boolea
 
 void MainWindow::runBoolean(int kind)
 {
-    applyBooleanToSelection(kind);
+    // The three actions BEGIN A GESTURE now rather than committing outright.
+    // applyBooleanToSelection() is still the two-body commit underneath, and
+    // booleanApply() is what calls it once the user has said which body
+    // survives - see canBeginBoolean().
+    beginBoolean(kind);
 }
 
-bool MainWindow::applyBooleanToSelection(int kind)
-{
-    const QString operationName =
-        kind == static_cast<int>(ModelingOps::BooleanKind::Fuse)   ? tr("Union")
-        : kind == static_cast<int>(ModelingOps::BooleanKind::Cut)  ? tr("Subtract")
-                                                                   : tr("Intersect");
+// --- booleans as a live gesture ---------------------------------------------
 
-    std::vector<int> ids = myView->selectedSolidIds();
-    if (ids.size() != 2) {
-        // A FAILURE for the same reason canChangeSketchPlane()'s refusal is:
-        // this path returns false and changes nothing, and a refusal the
-        // notifications toggle could silence would be an operation that did
-        // nothing and said nothing. See ToastHost::show().
-        myToasts->show(tr("%1 needs exactly two bodies — "
-                          "Click one body, then Shift-click another")
-                          .arg(operationName),
-                      Toast::Kind::Failure, false);
+QString MainWindow::booleanOperationName() const
+{
+    switch (static_cast<ModelingOps::BooleanKind>(myBooleanKind)) {
+        case ModelingOps::BooleanKind::Fuse: return tr("Union");
+        case ModelingOps::BooleanKind::Cut: return tr("Subtract");
+        case ModelingOps::BooleanKind::Common: return tr("Intersect");
+    }
+    return tr("Union");
+}
+
+QString MainWindow::booleanKeepBadgeText()
+{
+    return tr("KEEP");
+}
+
+QString MainWindow::booleanConsumeBadgeText()
+{
+    // Not "REMOVE": on a Union nothing is removed, it is joined in, and on an
+    // Intersect the body is narrowed rather than taken away. "USED" is true
+    // of all three - the body is spent making the result - and one word that
+    // is honest everywhere beats three words that each need a lookup.
+    return tr("USED");
+}
+
+bool MainWindow::canBeginBoolean(int /*kind*/) const
+{
+    // The environment terms every gesture in this window shares, then the
+    // selection term this one adds. Kind plays no part: the three operations
+    // become available together, which is what lets the user try one, Escape
+    // and try another without re-picking.
+    if (!myView || myShowingInitScreen || mySketching) return false;
+    if (myRenderModeOn) return false;
+    if (isCompareOpen() || isAskingBeforeClose()) return false;
+    if (myView->mirrorPlacementActive()) return false;
+    // AN OUTLINE WAITING IS NOT A REASON TO REFUSE, and that is deliberate
+    // rather than an omission. Every direct-modeling gate in this window
+    // shuts while an outline waits; booleans and Delete are the two that do
+    // NOT, and CLAUDE.md records why: the outline's only exits are Extrude
+    // and Delete, and the operations that stay open are what let a user work
+    // on rather than be trapped. Making booleans a gesture must not quietly
+    // close a gate that was deliberately left open - which it did on the
+    // first build, until the suite's own "booleans were never gated on it"
+    // check said so.
+    //
+    // What a pending outline DOES risk is a second application-wide Enter
+    // claim, since ExtrudePreview takes one while it is visible. So the term
+    // is the PANEL being up, not the outline existing - the narrow thing that
+    // actually collides. The other direction is closed in updateActions(),
+    // where Extrude stands down while a boolean is live.
+    if (myExtrudePreview && myExtrudePreview->isVisible()) return false;
+    // The live-gesture stand-downs, each the way it is written at every other
+    // predicate here: at most one application-wide Enter/Escape claim, by
+    // construction rather than by luck.
+    if (myMitreActive || myResizeActive || mySlatsActive) return false;
+    if (jointChipJointId() > 0) return false;
+    // TWO OR MORE WHOLE BODIES. selectedSolidIds() reports the OWNING body of
+    // a selected face or an edge, so a count alone cannot answer this - the
+    // kind term is what makes it a body selection rather than two faces of
+    // one board.
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return false;
+    return myView->selectedSolidIds().size() >= 2;
+}
+
+QString MainWindow::booleanUnavailableReason() const
+{
+    if (myShowingInitScreen || mySketching || hasPendingFace() || myRenderModeOn ||
+        isCompareOpen() || isAskingBeforeClose()) {
+        return QString();
+    }
+    if (!myView) return QString();
+    if (myView->selectionKind() == OcctViewWidget::PickKind::Body &&
+        myView->selectedSolidIds().size() >= 2) {
+        return QString();
+    }
+    // The one reason worth a sentence, because it is the one a user hits by
+    // accident and the one whose remedy is not obvious - bodies accumulate by
+    // Shift+DOUBLE-click here, since a plain click in auto selection lands on
+    // a face or an edge.
+    return tr("This needs two or more bodies — click one body, then "
+              "Shift+double-click another");
+}
+
+bool MainWindow::booleanOperands(TopoDS_Shape& base, std::vector<TopoDS_Shape>& tools) const
+{
+    if (!myBooleanActive || myBooleanKeepId <= 0) return false;
+    base = myDocument.shapeOf(myBooleanKeepId);
+    if (base.IsNull()) return false;
+    tools.clear();
+    for (int id : myBooleanIds) {
+        if (id == myBooleanKeepId) continue;
+        const TopoDS_Shape shape = myDocument.shapeOf(id);
+        if (shape.IsNull()) return false;
+        tools.push_back(shape);
+    }
+    return !tools.empty();
+}
+
+bool MainWindow::beginBoolean(int kind)
+{
+    // Re-checked here, not only in updateActions(): QAction::trigger() does
+    // not consult isEnabled(), and the menu entries and the rail chips both
+    // reach this.
+    if (!canBeginBoolean(kind)) {
+        const QString why = booleanUnavailableReason();
+        if (!why.isEmpty()) statusBar()->showMessage(why);
         return false;
     }
 
-    // Cut is not commutative. The lower document id is the base, so the result is
-    // predictable rather than dependent on pick order, which AIS does not preserve.
-    std::sort(ids.begin(), ids.end());
+    cancelBoolean();
+    myBooleanActive = true;
+    myBooleanKind = kind;
+    myBooleanIds = myView->selectedSolidIds();
+    std::sort(myBooleanIds.begin(), myBooleanIds.end());
+    myBooleanRevision = myDocument.revision();
+    myBooleanKeepTool = false;
 
-    // Linked copies (Milestone 4, Task 4.2): two members of the SAME group
-    // refuse outright, before the kernel is even asked. This is NOT the
-    // mirror-twin case just below, which is allowed and collapses cleanly -
-    // a body fused with its own mirror IS the symmetric whole, so the
-    // result genuinely has no more use for a twin. Two placements of the
-    // SAME linked shape are different: after combining them there is no
-    // longer one honest shape left to propagate FROM (the group's own
-    // "same shape, placed differently" invariant is what a combine would
-    // break), so v1's ruling is simplest-honest: refuse, and say so.
-    if (myDocument.isLinked(ids[0]) && myDocument.isLinked(ids[1]) &&
-        myDocument.linkAnchorOf(ids[0]) == myDocument.linkAnchorOf(ids[1])) {
-        // Not "refused" - the banned-word sweep matches bare substrings
-        // case-insensitively (CLAUDE.md says so), and "refused" carries
-        // "fuse" inside it. See transformRefusalText()'s own comment for the
-        // same finding, one gizmo over.
+    // THE DEFAULT IS THE BIGGEST BODY, and that is the whole point of this
+    // work. It used to be the lowest document id - the order the bodies were
+    // drawn in, which is not a fact about the furniture at all. The biggest
+    // one is: a cut is nearly always a small tool into a large piece, so the
+    // default is right most of the time and, when it is wrong, the badge
+    // saying so is sitting on the wood.
+    double biggest = -1.0;
+    myBooleanKeepId = myBooleanIds.empty() ? 0 : myBooleanIds.front();
+    for (int id : myBooleanIds) {
+        const double volume = ModelingOps::volume(myDocument.shapeOf(id));
+        if (volume <= biggest) continue;
+        biggest = volume;
+        myBooleanKeepId = id;
+    }
+
+    updateActions();
+    refreshBooleanFeedback();
+    return true;
+}
+
+void MainWindow::cancelBoolean()
+{
+    if (!myBooleanActive) return;
+    myBooleanActive = false;
+    myBooleanIds.clear();
+    myBooleanKeepId = 0;
+    myBooleanKeepTool = false;
+    myBooleanRevision = -1;
+    if (myView) {
+        myView->clearBooleanBadges();
+        myView->clearBooleanRegion();
+    }
+    updateActions();
+}
+
+void MainWindow::setBooleanKeepId(int id)
+{
+    if (!myBooleanActive) return;
+    // Validated against the CAPTURED ids: a badge click carries an id, and an
+    // id from a stale badge must never re-point the gesture at a body it
+    // never held.
+    if (std::find(myBooleanIds.begin(), myBooleanIds.end(), id) == myBooleanIds.end()) return;
+    if (myBooleanKeepId == id) return;
+    myBooleanKeepId = id;
+    updateActions();
+    refreshBooleanFeedback();
+}
+
+void MainWindow::setBooleanKeepTool(bool keep)
+{
+    if (!myBooleanActive || myBooleanKeepTool == keep) return;
+    myBooleanKeepTool = keep;
+    updateActions();
+}
+
+bool MainWindow::booleanGestureStillHolds() const
+{
+    if (!myBooleanActive) return false;
+    if (!myView || myShowingInitScreen || mySketching) return false;
+    if (myRenderModeOn) return false;
+    if (isCompareOpen() || isAskingBeforeClose()) return false;
+    if (myView->mirrorPlacementActive()) return false;
+    // The extrude panel, not a waiting outline - canBeginBoolean()'s own
+    // reasoning, and it has to be the same term in both or a gesture could
+    // begin in a state that immediately ends it.
+    if (myExtrudePreview && myExtrudePreview->isVisible()) return false;
+    // Any change to the document ends it: undo, a delete, another boolean, a
+    // restore all move revision(), and the shapes this gesture captured would
+    // no longer be the shapes on screen.
+    if (myDocument.revision() != myBooleanRevision) return false;
+    // Every captured body still has to exist and still be visible - a joint's
+    // own rule, for the same reason: badges floating where a body was are
+    // badges naming nothing.
+    for (int id : myBooleanIds) {
+        if (myDocument.shapeOf(id).IsNull()) return false;
+        if (!myView->isSolidVisible(id)) return false;
+    }
+    return myBooleanKeepId > 0;
+}
+
+void MainWindow::refreshBooleanFeedback()
+{
+    if (!myView) return;
+    if (!myBooleanActive) {
+        myView->clearBooleanBadges();
+        myView->clearBooleanRegion();
+        return;
+    }
+
+    // THE BADGES: one per captured body, standing at that body's own centre
+    // of mass rather than its bounding-box middle - a hollow or L-shaped
+    // piece's box centre can sit in fresh air outside the wood, and a badge
+    // there names nothing the user can see.
+    std::vector<BooleanBadgeRenderer::Badge> badges;
+    badges.reserve(myBooleanIds.size());
+    for (int id : myBooleanIds) {
+        const TopoDS_Shape shape = myDocument.shapeOf(id);
+        if (shape.IsNull()) continue;
+        BooleanBadgeRenderer::Badge badge;
+        badge.at = ModelingOps::centreOfMass(shape);
+        badge.bodyId = id;
+        badge.keep = id == myBooleanKeepId;
+        badge.text = (badge.keep ? booleanKeepBadgeText() : booleanConsumeBadgeText())
+                         .toStdString();
+        badges.push_back(badge);
+    }
+    myView->showBooleanBadges(badges);
+
+    // THE REGION: the volume the operation will act on, in the token that
+    // says what happens to it. Subtract's overlap is coming OUT; Union's
+    // doubled wood and Intersect's surviving volume are STAYING.
+    TopoDS_Shape base;
+    std::vector<TopoDS_Shape> tools;
+    if (!booleanOperands(base, tools)) {
+        myView->clearBooleanRegion();
+        return;
+    }
+    const ModelingOps::BooleanKind kind = static_cast<ModelingOps::BooleanKind>(myBooleanKind);
+    const ModelingOps::BooleanResult region = ModelingOps::booleanRegion(kind, base, tools);
+    // A refused region draws nothing rather than drawing a guess. The chip's
+    // own reason row and the Failure toast on Enter are where a refusal is
+    // reported; a highlight has nothing honest to say about an operation that
+    // cannot happen.
+    myView->setBooleanRegion(region.ok ? region.shape : TopoDS_Shape(),
+                             kind != ModelingOps::BooleanKind::Cut);
+}
+
+QString MainWindow::booleanRefusalFor() const
+{
+    if (!myBooleanActive) return QString();
+    TopoDS_Shape base;
+    std::vector<TopoDS_Shape> tools;
+    if (!booleanOperands(base, tools)) return QString();
+    const ModelingOps::BooleanResult result = ModelingOps::applyBooleanMulti(
+        static_cast<ModelingOps::BooleanKind>(myBooleanKind), base, tools);
+    if (result.ok) return QString();
+    // ONE sentence per reason, and never the kernel's own `error` - that
+    // string is written for ModelingOps and a caller matching substrings of
+    // it would break the first time it was reworded (checkMitre()'s contract).
+    if (static_cast<ModelingOps::BooleanKind>(myBooleanKind) ==
+        ModelingOps::BooleanKind::Common) {
+        return tr("%1 needs a volume every one of these bodies shares — "
+                  "move them so they overlap, then try again")
+            .arg(booleanOperationName());
+    }
+    return tr("%1 couldn't combine these bodies — this usually means they only touch at a "
+              "single edge or corner, which the geometry engine can't resolve. Move one so "
+              "they overlap properly, then try again")
+        .arg(booleanOperationName());
+}
+
+
+
+bool MainWindow::booleanApply()
+{
+    if (!myBooleanActive) return false;
+
+    TopoDS_Shape base;
+    std::vector<TopoDS_Shape> tools;
+    if (!booleanOperands(base, tools)) {
+        cancelBoolean();
+        return false;
+    }
+
+    const QString operationName = booleanOperationName();
+    const int keepId = myBooleanKeepId;
+    const std::vector<int> ids = myBooleanIds;
+
+    // LINKED COPIES: two members of the SAME group refuse outright, before
+    // the kernel is asked - applyBooleanToSelection()'s own v1 ruling, and
+    // for its reason. After combining two placements of one linked shape
+    // there is no longer one honest shape left to propagate FROM.
+    for (int id : ids) {
+        if (id == keepId) continue;
+        if (!myDocument.isLinked(keepId) || !myDocument.isLinked(id)) continue;
+        if (myDocument.linkAnchorOf(keepId) != myDocument.linkAnchorOf(id)) continue;
+        // Not "refused": the banned-word sweep matches bare substrings, and
+        // that word carries "fuse" inside it.
         myToasts->show(tr("%1 can't combine two copies of the same linked group — "
                           "Unlink one first, then try again")
-                          .arg(operationName),
-                      Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operationName));
+                           .arg(operationName),
+                       Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("%1 didn't run — nothing was changed").arg(operationName));
         return false;
     }
 
-    const std::string nameA = myDocument.nameOf(ids[0]);
-    const std::string nameB = myDocument.nameOf(ids[1]);
-    const TopoDS_Shape a = myDocument.shapeOf(ids[0]);
-    const TopoDS_Shape b = myDocument.shapeOf(ids[1]);
-    if (a.IsNull() || b.IsNull()) return false;
-
-    const ModelingOps::BooleanResult result =
-        ModelingOps::applyBoolean(static_cast<ModelingOps::BooleanKind>(kind), a, b);
-
+    const ModelingOps::BooleanResult result = ModelingOps::applyBooleanMulti(
+        static_cast<ModelingOps::BooleanKind>(myBooleanKind), base, tools);
     if (!result.ok) {
-        // Never present a failed boolean as a success. The engine's error text is
-        // genuinely useful for debugging, so keep it in the log, not the toast.
+        // Never present a failed boolean as a success. The kernel's own text
+        // is genuinely useful for debugging, so it goes to the log; the user
+        // gets the one sentence booleanRefusalFor() authors, which is the
+        // same sentence the chip is already showing.
         qWarning("%s failed: %s", qPrintable(operationName), result.error.c_str());
-        myToasts->show(tr("%1 failed — The two bodies couldn't be combined — "
-                          "This usually means they only touch at a single edge or "
-                          "corner, which the geometry engine can't resolve. Move one "
-                          "body so they overlap properly, then try again")
-                          .arg(operationName),
-                      Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("%1 failed — nothing was changed").arg(operationName));
+        myToasts->show(booleanRefusalFor(), Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("%1 didn't run — nothing was changed").arg(operationName));
+        // The gesture stays LIVE, the mitre's own rule: the user's next move
+        // is to pick a different body to keep or to Escape, and both need the
+        // badges still on screen.
         return false;
     }
 
-    // Symmetry: an operand pair that IS each other's own twin collapses to
-    // ONE unpaired result (the plan's own ruling - the symmetric whole no
-    // longer needs a mirror, since it already contains both halves). A
-    // paired operand combined with something unrelated instead KEEPS that
-    // operand's own id, so its twin can be replaced with the mirrored
-    // result rather than left standing for a body that no longer exists.
-    // Determined BEFORE anything is removed, from the two ids the boolean
-    // actually consumed.
-    //
-    // Gated on symmetryOn(), same rule as commitReplaceBody's and
-    // onDeleteSelected's own guards (fix round 1): the pairing map survives
-    // undo while the on/off mode does not, so a stale pairing must never
-    // drive behaviour once symmetry is off.
-    const bool operandsAreTwins =
-        myDocument.symmetryOn() && myDocument.twinOf(ids[0]) == ids[1];
-    int survivingId = 0;
-    if (myDocument.symmetryOn() && !operandsAreTwins) {
-        if (myDocument.twinOf(ids[0]) > 0) survivingId = ids[0];
-        else if (myDocument.twinOf(ids[1]) > 0) survivingId = ids[1];
-    }
-    // Linked copies (Milestone 4, Task 4.2): the identical reasoning one
-    // paragraph up, for link groups instead of a mirror twin - keep
-    // whichever operand belongs to a group, so propagateLinkedEdit() below
-    // has a valid member id to re-derive the rest of the group from. The
-    // same-group case was already refused above, so at most ONE of the two
-    // can be linked here, and a body can never carry a twin AND a group at
-    // once (the v1 exclusion), so this can never collide with the branch
-    // just above.
-    if (survivingId == 0) {
-        if (myDocument.isLinked(ids[0])) survivingId = ids[0];
-        else if (myDocument.isLinked(ids[1])) survivingId = ids[1];
-    }
+    // The mirror twin follows, on the same terms applyBooleanToSelection()
+    // sets out: the KEPT body is the one that survives, so if it carries a
+    // twin the twin is replaced by the mirror of the result. Gated on
+    // symmetryOn(), since the pairing map survives an undo while the mode
+    // does not.
+    const QString keepName = QString::fromStdString(myDocument.nameOf(keepId));
 
     checkpointDocument();
     myView->clearSelection();
 
-    int id = 0;
+    myDocument.replaceSolid(keepId, result.shape);
+    myView->displaySolid(keepId, result.shape);
+
+    int used = 0;
+    if (!myBooleanKeepTool) {
+        for (int id : ids) {
+            if (id == keepId) continue;
+            // removeSolid() drops that body's own pairing and group
+            // bookkeeping, and every joint touching it, inside this same
+            // checkpoint - so one undo restores the piece, its joint and its
+            // drawer row together.
+            myDocument.removeSolid(id);
+            myView->removeSolid(id);
+            ++used;
+        }
+    }
+
     bool twinFollowed = false;
     int linkedOthersUpdated = 0;
-    if (survivingId > 0) {
-        const int otherId = (survivingId == ids[0]) ? ids[1] : ids[0];
-        // removeSolid() drops `otherId`'s own pairing/group bookkeeping (see
-        // DocumentModel.h) - if `otherId` was itself linked to a DIFFERENT
-        // group than `survivingId`'s, that group loses this one member the
-        // same way any other body removal would take it out.
-        myDocument.removeSolid(otherId);
-        myView->removeSolid(otherId);
-        myDocument.replaceSolid(survivingId, result.shape);
-        myView->displaySolid(survivingId, result.shape);
-        id = survivingId;
-
-        const int twin = myDocument.symmetryOn() ? myDocument.twinOf(id) : -1;
-        if (twin > 0) {
-            const ModelingOps::BooleanResult mirrored =
-                ModelingOps::mirrorShape(result.shape, myDocument.symmetryPlane());
-            if (mirrored.ok) {
-                myDocument.replaceSolid(twin, mirrored.shape);
-                myView->displaySolid(twin, mirrored.shape);
-                twinFollowed = true;
-            } else {
-                qWarning("Symmetry: twin mirror failed: %s", mirrored.error.c_str());
-            }
-        } else if (myDocument.isLinked(id)) {
-            // propagateLinkedEdit() takes NO checkpoint of its own (see its
-            // header) - it rides inside the checkpoint taken two lines up,
-            // exactly as commitReplaceBody()'s own linked branch does - and
-            // its refusal is read here on exactly the same terms (M1).
-            const bool propagated = myDocument.propagateLinkedEdit(id, result.shape);
-            const int others = resyncLinkGroupView(id);
-            linkedOthersUpdated = propagated ? others : (others > 0 ? -1 : 0);
+    const int twin = myDocument.symmetryOn() ? myDocument.twinOf(keepId) : -1;
+    if (twin > 0) {
+        const ModelingOps::BooleanResult mirrored =
+            ModelingOps::mirrorShape(result.shape, myDocument.symmetryPlane());
+        if (mirrored.ok) {
+            myDocument.replaceSolid(twin, mirrored.shape);
+            myView->displaySolid(twin, mirrored.shape);
+            twinFollowed = true;
+        } else {
+            qWarning("Symmetry: twin mirror failed: %s", mirrored.error.c_str());
         }
-    } else {
-        // Both unpaired, or the two operands were each other's own twin -
-        // either way the result is a single, freshly unpaired body.
-        // removeSolid() below drops each removed id's own pairing entries,
-        // so the "own twin" case leaves nothing pointing at a ghost id.
-        for (int rid : ids) {
-            myDocument.removeSolid(rid);
-            myView->removeSolid(rid);
-        }
-        id = myDocument.addSolid(result.shape);
-        myView->displaySolid(id, result.shape);
+    } else if (myDocument.isLinked(keepId)) {
+        // propagateLinkedEdit() takes NO checkpoint of its own - it rides
+        // inside the one taken above, exactly as commitReplaceBody()'s linked
+        // branch does - and its refusal is read on the same terms.
+        const bool propagated = myDocument.propagateLinkedEdit(keepId, result.shape);
+        const int others = resyncLinkGroupView(keepId);
+        linkedOthersUpdated = propagated ? others : (others > 0 ? -1 : 0);
     }
+
     recordProgress("boolean.completed");
+
+    // The gesture is over before the report, so the badges and the region are
+    // gone by the time the toast lands - a highlight of an operation that has
+    // already happened is a highlight of nothing.
+    myBooleanActive = false;
+    myBooleanIds.clear();
+    myBooleanKeepId = 0;
+    myBooleanKeepTool = false;
+    myBooleanRevision = -1;
+    myView->clearBooleanBadges();
+    myView->clearBooleanRegion();
+    // The result is left selected, the same visible gesture Duplicate makes -
+    // it is what puts the transform gizmo on the body just made.
+    myView->setSelectedSolids({keepId});
 
     updateActions();
     emit documentChanged();
-    QString message = tr("%1 — %2 and %3 → %4 — %5")
-                          .arg(operationName,
-                               QString::fromStdString(nameA),
-                               QString::fromStdString(nameB),
-                               QString::fromStdString(myDocument.nameOf(id)),
-                               QString::fromStdString(
-                                   Measure::formatDimensions(result.shape)));
+
+    QString message = used > 0
+                          ? tr("%1 — %2 bodies into %3 — %4")
+                                .arg(operationName)
+                                .arg(static_cast<int>(ids.size()))
+                                .arg(QString::fromStdString(myDocument.nameOf(keepId)),
+                                     QString::fromStdString(
+                                         Measure::formatDimensions(result.shape)))
+                          : tr("%1 — %2 kept, the others left in place — %3")
+                                .arg(operationName, keepName,
+                                     QString::fromStdString(
+                                         Measure::formatDimensions(result.shape)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
+}
+
+bool MainWindow::applyBooleanToSelection(int kind, int keepId)
+{
+    // THE WHOLE OPERATION IN ONE CALL, with the default roles - the
+    // programmatic entry point, used by the suite wherever a boolean is
+    // SETUP for some other check rather than the subject of one.
+    //
+    // It is not a second implementation, and that matters: this used to be
+    // 170 lines of commit logic - the operand sort, the linked-group refusal,
+    // the twin follow, the checkpoint, the toast - and booleanApply() now
+    // carries every one of them for any number of bodies. Two copies of that
+    // would drift, and the one that drifted would be the one nobody was
+    // reading. So this begins the gesture and applies it, which runs all of
+    // it exactly once, in one place.
+    //
+    // The default roles are beginBoolean()'s: the BIGGEST body survives. The
+    // old spelling here sorted the ids and kept the lowest - the order the
+    // bodies were drawn in - which is the defect this whole rework exists to
+    // remove, so a caller that wants a specific body kept says so with
+    // setBooleanKeepId() between the two calls rather than relying on this.
+    if (!beginBoolean(kind)) return false;
+    if (keepId > 0) setBooleanKeepId(keepId);
+    return booleanApply();
 }
 
 void MainWindow::onExportStep()
@@ -8111,6 +8435,10 @@ bool MainWindow::canBeginMirrorPlacement() const
     // Enter/Escape claim must not sit beside a second one. The mirror
     // placement's own stand-down precedent, applied to one more gesture.
     if (jointChipJointId() > 0) return false;
+    // ...and a live boolean, on identical terms: it stands on the same
+    // multi-body selection this gesture wants, and each of them installs an
+    // application-wide key claim of its own.
+    if (myBooleanActive) return false;
     // WHOLE BODIES selected, explicitly - selectedSolidIds() reports the
     // owning body of a selected face or edge too, so without this the gesture
     // could be begun beside a face selection and collide with the pull arrow's

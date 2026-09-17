@@ -99,6 +99,12 @@ Spec graphite()
     // split changes no pixel until somebody moves it - which is the point:
     // what the user asked for was a control, not a new colour.
     s.dimensionLine     = QColor("#6a00ff");
+    // The boolean region pair. A warm red for wood leaving and a cool teal
+    // for wood staying: opposite enough to read at a glance on a near-black
+    // ground, and far enough from accent(), highlightSelected() and
+    // caution() that none of the four can be mistaken for another.
+    s.booleanOut        = QColor("#ff5a4a");
+    s.booleanStay       = QColor("#2ad4b0");
     s.basePt = 10.0;
     s.chipStrokePx = 1.0;
     s.gridDensity = 1.0;
@@ -251,6 +257,8 @@ const QVector<ColourToken>& colourTokens()
         {QStringLiteral("highlightHover"), &Spec::highlightHover},
         {QStringLiteral("highlightSelected"), &Spec::highlightSelected},
         {QStringLiteral("dimensionLine"), &Spec::dimensionLine},
+        {QStringLiteral("booleanOut"), &Spec::booleanOut},
+        {QStringLiteral("booleanStay"), &Spec::booleanStay},
         {QStringLiteral("sizesOneBody"), &Spec::sizesOneBody},
         {QStringLiteral("sizesGroup"), &Spec::sizesGroup},
         {QStringLiteral("sketchPointMarker"), &Spec::sketchPointMarker},
@@ -464,6 +472,8 @@ QColor focusRingMuted() { return spec().focusRingMuted; }
 QColor highlightHover()    { return spec().highlightHover; }
 QColor highlightSelected() { return spec().highlightSelected; }
 QColor dimensionLine()     { return spec().dimensionLine; }
+QColor booleanOut()        { return spec().booleanOut; }
+QColor booleanStay()       { return spec().booleanStay; }
 QColor sizesOneBody()      { return spec().sizesOneBody; }
 QColor sizesGroup()        { return spec().sizesGroup; }
 

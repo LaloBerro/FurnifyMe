@@ -31,6 +31,7 @@
 #include "JointRenderer.h"
 #include "PullArrow.h"
 #include "SelectionSizesRenderer.h"
+#include "BooleanBadgeRenderer.h"
 #include "ResizePinRenderer.h"
 #include "TransformGizmo.h"
 
@@ -363,6 +364,65 @@ public:
     void setModelingPreviews(const std::vector<std::pair<int, TopoDS_Shape>>& previews);
     void clearModelingPreview();
     bool hasModelingPreview() const;
+
+    // --- a boolean's region: the volume the operation will act on ----------
+    //
+    // ModelingOps::booleanRegion() computes it; this draws it, so the user
+    // sees the hole before making it. Its own channel, never the modeling
+    // preview's: that slot already carries the RESULT of a gesture, and this
+    // carries the part of the INPUT that is about to change - two different
+    // claims about the same scene, and CLAUDE.md records what sharing one
+    // preview slot between two writers cost the last time.
+    //
+    // `staying` picks the token, which is the whole design: one shape, and
+    // the colour says what happens to it. Subtract passes false (the material
+    // is coming out, Theme::booleanOut()), Union and Intersect pass true
+    // (Theme::booleanStay()).
+    //
+    // Drawn in jointsZLayer() rather than a layer of its own. That layer is
+    // Immediate and clears depth, which is exactly "ghosted geometry seen
+    // THROUGH the wood" - and a cut volume lives inside the board it is
+    // cutting, so a depth-tested layer would hide the one thing this draws.
+    // Reusing it also avoids a second custom depth-clearing layer, each of
+    // which carries the shadow-map trap in Pitfalls. Never pickable.
+    //
+    // An EMPTY shape clears the channel rather than displaying nothing: a
+    // tool that misses has no region, and booleanRegion() reports that as a
+    // valid empty answer rather than a refusal.
+    void setBooleanRegion(const TopoDS_Shape& region, bool staying);
+    void clearBooleanRegion();
+    bool hasBooleanRegion() const { return !myBooleanRegion.IsNull(); }
+    // What is on screen, for a probe that must check the SHAPE rather than
+    // only that something is drawn.
+    TopoDS_Shape booleanRegionShape() const;
+    // Which token it is wearing - true for booleanStay(), false for
+    // booleanOut(). A pixel probe can then ask for the right colour rather
+    // than hard-coding one of the two.
+    bool booleanRegionStaying() const { return myBooleanRegionStaying; }
+
+    // --- the role badges on the wood ---------------------------------------
+    //
+    // One pill per body in a live boolean gesture, reading KEEP or REMOVE and
+    // standing at that body's own centre. See src/ui/BooleanBadgeRenderer.h
+    // for why they are drawn in the scene rather than painted over it.
+    //
+    // The WORDS come from the caller: MainWindow owns this app's copy and its
+    // vocabulary sweep already reaches it there, so a string invented in the
+    // renderer would be painted copy nothing sweeps.
+    void showBooleanBadges(const std::vector<BooleanBadgeRenderer::Badge>& badges);
+    void clearBooleanBadges();
+    int booleanBadgeCount() const { return myBooleanBadges.count(); }
+    bool booleanBadgeKeeps(int index) const { return myBooleanBadges.badgeKeeps(index); }
+    // Where badge `index` lands on screen, in logical pixels.
+    bool booleanBadgePoint(int index, QPoint& out) const;
+    // Which badge a press at `logical` claims, or -1. NEAREST wins rather
+    // than first-within-tolerance, resizePinMarkAt()'s own reasoning: two
+    // bodies close together put two badges inside one grab radius, and a
+    // first-match rule would hand the user whichever happened to be checked
+    // first.
+    int booleanBadgeAt(const QPoint& logical) const;
+    // Every word the badges are painting, for the banned-word sweep.
+    QStringList booleanBadgeTexts() const;
     // The one preview shape when exactly one body is being previewed (every
     // gizmo but a cross-body bevel), or a null shape when none is up or more
     // than one is - a multi-body caller built its own shapes and has no need
@@ -890,6 +950,10 @@ signals:
     void sizeLabelRightClicked(int index);
     // A left click landed on pin mark `index` (0 low, 1 centre, 2 high).
     void resizePinPicked(int index);
+    // A click on a boolean role badge. Carries the BODY ID the badge names,
+    // never its index: the badges are rebuilt on every camera move, and an
+    // index read one event later could name a different body.
+    void booleanBadgePicked(int bodyId);
 
 public:
     // How far the cursor may travel between a right press and its release and
@@ -2607,6 +2671,10 @@ private:
     std::vector<Handle(AIS_Shape)> myModelingPreviews;
     std::vector<int> myModelingPreviewSolids;
 
+    // The boolean region - see setBooleanRegion().
+    Handle(AIS_Shape) myBooleanRegion;
+    bool myBooleanRegionStaying = false;
+
     // The sketch point markers - see setSketchPointMarkers()'s comment for
     // why these are not the preview slot above. One object per placed
     // point (each is a single-point marker; see SketchPointMarker in the
@@ -2640,6 +2708,13 @@ private:
     // from the dimension line's own current ends rather than from a remembered
     // pair of points that an orbit has moved out from under.
     ResizePinRenderer myResizePin;
+    // The boolean gesture's role badges - see showBooleanBadges().
+    BooleanBadgeRenderer myBooleanBadges;
+    // A badge press claimed this gesture, so its release is ours to swallow:
+    // the viewport picks on the RELEASE, and letting it through would re-pick
+    // and end the gesture the press was adjusting. myResizePinPressTaken's
+    // own contract, one handle over.
+    bool myBooleanBadgePressTaken = false;
     int myResizeSizeIndex = -1;
     int myResizeAnchor = 1;   // low 0, centre 1, high 2 - starts at the CENTRE
     void updateResizePin();
