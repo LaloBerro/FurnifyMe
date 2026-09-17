@@ -907,6 +907,7 @@ constexpr BlockInfo kBlocks[] = {
     { "and-the-show-sizes-preference-persists", false, true },
     { "re-measure-right-click-a-size-and-type-a-new-one", false, true },
     { "booleans-roles-on-the-wood-and-the-region-drawn", false, true },
+    { "the-rail-and-the-drawer-start-on-one-line", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -34483,6 +34484,75 @@ int main(int argc, char* argv[])
     // The panel is far bigger than either peg, so "the biggest body survives"
     // has an unambiguous answer, and the two pegs are identical so a check
     // that confused them would still have to explain the panel.
+    // --- the rail and the items drawer start on one line ---------------------
+    //
+    // Reported by the user against a build where they did not: "the gap
+    // between the top bar and the drawer, the side bar is a little bit
+    // lower". Nothing pinned it, and the two tops were computed by two
+    // different expressions off the same pill - the rail's from its height as
+    // PLACED, the drawer's from its height as MEASURED one loop earlier, with
+    // relayout()'s rounding to whole device pixels in between. They agreed
+    // only while the pill's natural height was already whole, which it is at
+    // some type scales and is not at others: 3 px out at 10pt, 1 at 13pt,
+    // level at 9 and 11.
+    //
+    // ITS OWN WINDOW, and that is the point of the block rather than a detail
+    // of it. This first went in beside the rail's other layout checks, which
+    // live in a [*shared-state] block - and sweeping the TYPE SCALE there
+    // perturbed the shared window enough that later blocks stopped running
+    // some of their own checks. The floor caught it (4867 against a floor of
+    // 4873) and that is exactly the failure the floor exists for. A probe
+    // that edits global state needs a window nobody else is using.
+    if (blockEnabled("the-rail-and-the-drawer-start-on-one-line")) {
+        RequiredTempDir alignDir;
+        MainWindow aw(nullptr, /*persistProgress=*/false, alignDir.path());
+        aw.setAttribute(Qt::WA_ShowWithoutActivating);
+        aw.resize(1100, 800);
+        aw.show();
+        settle(300);
+        aw.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(aw);
+        settle(200);
+
+        QAction* itemsForAlign = action(aw, QStringLiteral("Items"));
+        if (itemsForAlign && !itemsForAlign->isChecked()) itemsForAlign->trigger();
+        settle(200);
+        ItemsPanel* drawerForAlign = aw.itemsPanel();
+        ToolCluster* railForAlign = aw.findChild<ToolCluster*>();
+        check(drawerForAlign != nullptr && !drawerForAlign->isHidden() &&
+                  railForAlign != nullptr,
+              "align: the drawer is open and the rail is up");
+
+        const Theme::Spec savedForAlign = Theme::spec();
+        QStringList misaligned;
+        int scalesChecked = 0;
+        for (double pt : {9.0, 10.0, 11.0, 12.0, 13.0}) {
+            Theme::Spec scaled = savedForAlign;
+            scaled.basePt = pt;
+            Theme::setSpec(scaled);
+            settle(150);
+            if (!drawerForAlign || drawerForAlign->isHidden() || !railForAlign) continue;
+            ++scalesChecked;
+            if (drawerForAlign->y() != railForAlign->y()) {
+                misaligned << QStringLiteral("%1pt: rail %2, drawer %3")
+                                  .arg(pt).arg(railForAlign->y()).arg(drawerForAlign->y());
+            }
+        }
+        Theme::setSpec(savedForAlign);
+        settle(200);
+
+        // Non-vacuity: a sweep that ran no scales must fail rather than pass
+        // quietly - this file's own guard-that-skips rule.
+        check(scalesChecked == 5,
+              QStringLiteral("align: the sweep really ran every type scale (%1 of 5)")
+                  .arg(scalesChecked));
+        check(misaligned.isEmpty(),
+              QStringLiteral("align: the rail and the items drawer start on the SAME line at "
+                             "every one of them (%1)")
+                  .arg(misaligned.isEmpty() ? QStringLiteral("all level")
+                                            : misaligned.join(QStringLiteral("; "))));
+    }
+
     if (blockEnabled("booleans-roles-on-the-wood-and-the-region-drawn")) {
         RequiredTempDir boolDir;
         QString boolId;

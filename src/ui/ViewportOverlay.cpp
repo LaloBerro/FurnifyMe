@@ -151,6 +151,26 @@ void ViewportOverlay::relayout()
         // Size every widget before measuring: the centring sums below are wrong
         // if a widget is still at its default size on first layout.
         entry.widget->adjustSize();
+        // ...AND ROUND IT HERE, not in the placement loop below, so that every
+        // measurement taken from this loop is taken from the size the widget
+        // will actually BE.
+        //
+        // This is the whole of a bug the user reported as "the gap between the
+        // top bar and the drawer, the side bar is a little bit lower". The
+        // rail's top came from the pill's height as PLACED - after rounding -
+        // while the items drawer's came from `leftEdgeHeaderBottom`,
+        // accumulated HERE from the height before it. The two agree only while
+        // the pill's natural height is already a whole number of device
+        // pixels, which it is at some type scales and is not at others: at
+        // 10pt the rail sat three pixels below the drawer, at 13pt one, at
+        // 9pt and 11pt not at all. Two expressions for one number, and they
+        // drifted exactly as often as the rounding did something.
+        //
+        // `leftX` had the identical fault in the other direction, taking the
+        // rail's width before rounding while the rail is placed at its width
+        // after - so the drawer's LEFT edge could be out by the same slack.
+        // One rounding, before anything measures, fixes both.
+        entry.widget->resize(Theme::wholeDevicePixels(entry.widget->size()));
         // A hidden entry takes up none of an edge - it neither raises the left
         // margin nor occupies a slot in a stack. That has to hold for the
         // CURSORS as well as for leftX below, or a closed items drawer would
@@ -257,6 +277,10 @@ void ViewportOverlay::relayout()
         // AxisGizmo both do, and both therefore round their OWN sizeHint()
         // through wholeDevicePixels() in their constructors. Anything added
         // here that pins its size has to do the same.
+        // Already rounded in the measuring loop above, which is where it has
+        // to happen so the measurements agree with the placements. Kept as a
+        // belt for anything whose size changed between the two loops; it is a
+        // no-op for everything that did not.
         placed->resize(Theme::wholeDevicePixels(placed->size()));
         const int cw = placed->width();
         const int ch = placed->height();
