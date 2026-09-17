@@ -58,6 +58,14 @@ constexpr int kIndentPx = 12;
 // and is about dragging OUT of an application; a row moving inside a 200px
 // drawer wants less.
 constexpr int kDragThresholdPx = 6;
+// What a row keeps between its own rounded background and the content inside
+// it - and therefore what the TITLE row must keep too, or the title and its
+// button do not line up with the list below (see the titleRow margins).
+constexpr int kRowInset = 6;
+// Every small icon button in this drawer - a row's eye, a folder's eye, and
+// the + in the title - is this size. They sit in one column, so a difference
+// between them reads as a misalignment however carefully their edges agree.
+constexpr int kRowButtonPx = 24;
 // What the drawer leaves between its bottom edge and the viewport's -
 // ViewportOverlay::kEdgeMargin plus a hair, so a full-height list still reads
 // as a floating card rather than as something wedged into the corner.
@@ -89,12 +97,25 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     // used to (that x is gone from THIS drawer by the user's call; the rail
     // chip and the menu entry still close it).
     auto* titleRow = new QHBoxLayout();
-    titleRow->setContentsMargins(0, 0, 0, 0);
+    // THE SAME SIDE INSET EVERY ROW TAKES, so the title and its button line up
+    // with the list underneath rather than with the card's own edge. A row
+    // insets its content by kRowInset either side (it paints a rounded
+    // background behind itself, and the content must not touch that shape);
+    // the title row had none, so its + sat kRowInset further right than every
+    // row's own trailing button and the icons did not form a column. Read from
+    // the same constant the rows use rather than repeated as a literal, so the
+    // two cannot drift apart again.
+    titleRow->setContentsMargins(kRowInset, 0, kRowInset, 0);
     titleRow->setSpacing(6);
     myTitle = new QLabel(tr("Items"), this);
     titleRow->addWidget(myTitle, 1);
     myNewFolder = new QPushButton(this);
-    myNewFolder->setFixedSize(20, 20);
+    // THE SAME SIZE THE ROWS' OWN BUTTONS ARE. It was 20 against their 24,
+    // and because a button centres its glyph two right-aligned buttons of
+    // different widths put their ICONS in different columns even when their
+    // edges line up - which is half of why this control never looked square
+    // with the list. One size for one kind of control.
+    myNewFolder->setFixedSize(kRowButtonPx, kRowButtonPx);
     myNewFolder->setCursor(Qt::PointingHandCursor);
     myNewFolder->setFocusPolicy(Qt::NoFocus);
     myNewFolder->setIcon(IconSet::icon(IconSet::Glyph::Folder));
@@ -467,7 +488,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     // The INDENT is the only thing depth changes about a row: everything else
     // - height, fill, the eye, the rename gesture - is identical at every
     // level, because it is the same row in the same list.
-    layout->setContentsMargins(6 + depth * kIndentPx, 4, 6, 4);
+    layout->setContentsMargins(kRowInset + depth * kIndentPx, 4, kRowInset, 4);
     layout->setSpacing(8);
 
     auto* name = new QLabel(itemName, row);
@@ -495,7 +516,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     auto* eye = new QPushButton(row);
     eye->setCheckable(true);
     eye->setChecked(visible);
-    eye->setFixedSize(24, 24);
+    eye->setFixedSize(kRowButtonPx, kRowButtonPx);
     eye->setIcon(IconSet::icon(IconSet::Glyph::Body));
     eye->setToolTip(isOutline ? tr("Show or hide this outline") : tr("Show or hide this body"));
     connect(eye, &QPushButton::toggled, this, [this, id, isOutline](bool show) {
@@ -557,7 +578,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth)
     // it IS a row in the same list, not a header the list happens to contain.
     auto* row = new QWidget(this);
     auto* layout = new QHBoxLayout(row);
-    layout->setContentsMargins(6 + depth * kIndentPx, 4, 6, 4);
+    layout->setContentsMargins(kRowInset + depth * kIndentPx, 4, kRowInset, 4);
     layout->setSpacing(6);
 
     auto* twisty = new QPushButton(row);
@@ -596,7 +617,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth)
         }
     }
     eye->setChecked(allVisible);
-    eye->setFixedSize(24, 24);
+    eye->setFixedSize(kRowButtonPx, kRowButtonPx);
     eye->setIcon(IconSet::icon(IconSet::Glyph::Folder));
     eye->setToolTip(tr("Show or hide everything in this folder"));
     connect(eye, &QPushButton::toggled, this, [this, groupId](bool show) {
