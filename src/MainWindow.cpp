@@ -743,12 +743,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // endGroup() - `settings` is a `const QSettings` (the same guard
         // every preference above already reads through), and beginGroup()
         // is not a const member.
-        myStartRenderRoughness =
-            settings.value(QStringLiteral("renderMode/roughness"), myStartRenderRoughness)
-                .toDouble();
-        myStartRenderMetallic =
-            settings.value(QStringLiteral("renderMode/metallic"), myStartRenderMetallic)
-                .toDouble();
+        // Roughness and metallic are NOT read here any more - they are a
+        // material's, and a material's look is saved in the furniture's own
+        // manifest. The members keep their compiled-in defaults, which is
+        // what a document with no stored look renders with anyway, and
+        // applyMaterialLook() overwrites both from the live material on the
+        // first appStateChanged regardless.
         myStartRenderLightAngleDeg =
             settings
                 .value(QStringLiteral("renderMode/lightAngleDeg"), myStartRenderLightAngleDeg)
@@ -790,16 +790,20 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
                 ? storedQuality
                 : static_cast<int>(OcctViewWidget::RenderQuality::Deep);
         myStartGridOn = settings.value(QStringLiteral("view/gridOn"), true).toBool();
-        myStartRenderWood =
-            settings.value(QStringLiteral("renderMode/wood"), false).toBool();
+        // WOOD IS ALWAYS ON now that Matte, Satin and Metal are gone - there is
+        // no other kind of material left to be in. The key is still read so a
+        // settings file written by an older build cannot switch it off, but
+        // it can only ever turn it on.
+        myStartRenderWood = true;
+        (void)settings.value(QStringLiteral("renderMode/wood"), true);
         myStartRenderWoodName =
             settings.value(QStringLiteral("renderMode/woodName")).toString();
         myStartRenderWoodPath =
             settings.value(QStringLiteral("renderMode/woodPath")).toString();
-        myStartRenderWoodTile =
-            settings.value(QStringLiteral("renderMode/woodTile"), 300.0).toDouble();
-        myStartRenderWoodAngle =
-            settings.value(QStringLiteral("renderMode/woodAngle"), 0.0).toDouble();
+        // Grain size and angle likewise. What IS still read is WHICH wood was
+        // last chosen, because that is a choice about the app rather than
+        // about one furniture - the numbers that describe it come from
+        // whatever furniture is open.
     }
 
     // The title bar's and the taskbar's mark, painted rather than loaded - see
@@ -2935,8 +2939,8 @@ void MainWindow::buildOverlay()
         if (myMaterialCard && myMaterialCard->isOpen()) myMaterialCard->replace();
     });
     connect(myMaterialCard, &MaterialCard::changed, this,
-            [this](QString material, QColor colour, double brightness) {
-                onMaterialLookChanged(material, colour, brightness);
+            [this](const QString& material, const MaterialCard::Look& look) {
+                onMaterialLookChanged(material, look);
             });
 
     myNameCard = new NameFurnitureCard(myView);
@@ -3791,8 +3795,15 @@ void MainWindow::writeRenderSettingsNow()
     // own reason to be a single function rather than inlined at both call
     // sites (the debounce timer and closeEvent()'s flush).
     QSettings settings;
-    settings.setValue(QStringLiteral("renderMode/roughness"), myView->renderSurfaceRoughness());
-    settings.setValue(QStringLiteral("renderMode/metallic"), myView->renderMetal());
+    // ROUGHNESS, METALLIC, GRAIN SIZE AND GRAIN ANGLE ARE NOT WRITTEN HERE ANY
+    // MORE. They belong to a MATERIAL now, and a material's look belongs to
+    // the furniture - DocumentModel::MaterialLook, saved in its manifest.
+    // Keeping an app-wide copy beside that would be a second source of truth
+    // for the same four numbers, and the one that lost would be whichever the
+    // next reader did not know about. The keys are simply no longer read or
+    // written; a settings file that still carries them from an older build is
+    // left alone rather than cleared, since clearing a key nothing reads buys
+    // nothing and a downgrade would then have lost it for real.
     settings.setValue(QStringLiteral("renderMode/lightAngleDeg"), myView->renderLightAngleDeg());
     settings.setValue(QStringLiteral("renderMode/lightStrength"), myView->renderLightStrength());
     // Empty string for "no override" - renderBackgroundOverride()'s own
@@ -3813,8 +3824,6 @@ void MainWindow::writeRenderSettingsNow()
                       myRenderSettingsPanel ? myRenderSettingsPanel->woodSelection()
                                             : QString());
     settings.setValue(QStringLiteral("renderMode/woodPath"), myView->renderTextureFile());
-    settings.setValue(QStringLiteral("renderMode/woodTile"), myView->renderWoodTileMm());
-    settings.setValue(QStringLiteral("renderMode/woodAngle"), myView->renderWoodAngleDeg());
     settings.setValue(QStringLiteral("view/gridOn"),
                       myGridAction ? myGridAction->isChecked() : true);
 }
@@ -5774,16 +5783,16 @@ void MainWindow::onUngroupSelection()
 
 QString MainWindow::activeMaterialName() const
 {
-    if (!myRenderSettingsPanel) return QStringLiteral("Matte");
-    // A wood names itself. Everything else is one of the three presets, and
-    // WHICH one is derived from the live gloss/metal exactly as the tiles'
-    // own highlight is (syncPresetTiles()) - so the name this returns is the
-    // tile the user can see is current, never a fourth opinion.
-    if (myRenderSettingsPanel->wood()) return myRenderSettingsPanel->woodSelection();
-    const double metal = myView->renderMetal();
-    if (metal > 0.5) return QStringLiteral("Metal");
-    return myView->renderSurfaceRoughness() < 0.45 ? QStringLiteral("Satin")
-                                                   : QStringLiteral("Matte");
+    if (!myRenderSettingsPanel) return QStringLiteral("Wood");
+    // A WOOD NAMES ITSELF, and since Matte/Satin/Metal were removed that is
+    // the whole derivation. It used to have a second half: with no wood
+    // chosen the name was worked out from the live gloss and metal, exactly
+    // as the three preset tiles' own highlight was. That half could not
+    // survive those two numbers becoming per material - the name would have
+    // been derived from the values it was selecting - and it did not need to,
+    // because the tiles it named are gone.
+    const QString wood = myRenderSettingsPanel->woodSelection();
+    return wood.isEmpty() ? QStringLiteral("Wood") : wood;
 }
 
 void MainWindow::applyMaterialLook()
@@ -5795,27 +5804,49 @@ void MainWindow::applyMaterialLook()
     // has never opened the editor gets exactly what it always got.
     myDocument.materialLook(activeMaterialName().toStdString(), look);
     myView->setRenderMaterialLook(look.red, look.green, look.blue, look.brightness);
+    // AND THE FOUR THAT ARE PER MATERIAL NOW. Pushed from here rather than
+    // from the card's own signal, so choosing a DIFFERENT wood brings its own
+    // numbers with it - which is the entire point of them being per material,
+    // and would not happen if only an edit wrote them. This runs on every
+    // appStateChanged, so a tile click is enough.
+    //
+    // The glossiness/roughness inversion lives here, at this one site, as it
+    // always has: nothing above this line says "roughness" and nothing below
+    // it says "glossy".
+    myView->setRenderSurfaceRoughness(1.0 - look.surface);
+    myView->setRenderMetal(look.metal);
+    myView->setRenderWoodTileMm(look.grainSize);
+    myView->setRenderWoodAngleDeg(look.grainAngle);
 }
 
 void MainWindow::onMaterialEditRequested(const QString& material)
 {
     if (!myMaterialCard || material.isEmpty()) return;
-    DocumentModel::MaterialLook look;
-    myDocument.materialLook(material.toStdString(), look);
-    myMaterialCard->open(material,
-                         QColor::fromRgbF(look.red, look.green, look.blue), look.brightness);
+    DocumentModel::MaterialLook stored;
+    myDocument.materialLook(material.toStdString(), stored);
+    MaterialCard::Look look;
+    look.colour = QColor::fromRgbF(stored.red, stored.green, stored.blue);
+    look.brightness = stored.brightness;
+    look.surface = stored.surface;
+    look.metal = stored.metal;
+    look.grainSize = stored.grainSize;
+    look.grainAngle = stored.grainAngle;
+    myMaterialCard->open(material, look);
 }
 
-void MainWindow::onMaterialLookChanged(const QString& material, const QColor& colour,
-                                       double brightness)
+void MainWindow::onMaterialLookChanged(const QString& material, const MaterialCard::Look& edited)
 {
     if (material.isEmpty() || myShowingInitScreen) return;
     DocumentModel::MaterialLook look;
     look.material = material.toStdString();
-    look.red = colour.redF();
-    look.green = colour.greenF();
-    look.blue = colour.blueF();
-    look.brightness = brightness;
+    look.red = edited.colour.redF();
+    look.green = edited.colour.greenF();
+    look.blue = edited.colour.blueF();
+    look.brightness = edited.brightness;
+    look.surface = edited.surface;
+    look.metal = edited.metal;
+    look.grainSize = edited.grainSize;
+    look.grainAngle = edited.grainAngle;
     // NO CHECKPOINT: a material's look is presentation, the same category as
     // visibility - it is persisted with the furniture but it is not an edit
     // to undo (CLAUDE.md's own line on what checkpoint() is for). It bumps

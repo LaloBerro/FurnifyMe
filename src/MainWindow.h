@@ -14,6 +14,10 @@
 #include <set>
 
 #include "DocumentModel.h"
+// For MaterialCard::Look, which is a NESTED type and so cannot be
+// forward-declared - the one reason this header is included rather than the
+// class being named ahead.
+#include "ui/MaterialCard.h"
 #include "FurnitureStore.h"
 #include "Measure.h"
 #include "SketchController.h"
@@ -976,6 +980,10 @@ public:
     // The frame overlay, for the suite: what it is drawing is the same rect
     // the export reproduces, so a check can compare the two.
     class RenderFrameGuides* renderFrame() const { return myRenderFrame; }
+    // The per-material editor, for the suite: the four dials that used to be
+    // on the render panel live here now, so a check about them has to drive
+    // this rather than that.
+    MaterialCard* materialCard() const { return myMaterialCard; }
     // The Add-shape flyout (Milestone 5, pick A) - gui_smoke's seam.
     class ShapeFlyout* shapeFlyout() const { return myShapeFlyout; }
     // Places one ready-made shape: standing on the ground at the point the
@@ -1906,7 +1914,11 @@ private:
     // material change, after an edit, and after a furniture opens.
     void applyMaterialLook();
     void onMaterialEditRequested(const QString& material);
-    void onMaterialLookChanged(const QString& material, const QColor& colour, double brightness);
+    // The whole look in one, because the card reports it in one - see
+    // MaterialCard::Look. MainWindow is the single place the card's own POD
+    // is mapped onto DocumentModel::MaterialLook, so neither side has to know
+    // about the other.
+    void onMaterialLookChanged(const QString& material, const MaterialCard::Look& look);
     // File -> New furniture: asks about unsaved work first when there is any,
     // then the name, then creates and opens. Split in three so each half is
     // reachable from the answer that precedes it.

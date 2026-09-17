@@ -1,6 +1,14 @@
 #pragma once
-// The little editor a material tile opens on a double-click: what colour this
-// material is on THIS furniture, and how bright.
+// The little editor a material tile opens on a double-click: everything about
+// what this material looks like on THIS furniture - its colour, how bright it
+// is, how glossy, how metallic, and how its grain is scaled and turned.
+//
+// The last four moved here from the render panel, where they were ONE GLOBAL
+// SET. The user's ask: "the data from the image should be per material, so
+// add that into the material setting". They were right that it is a defect
+// and not a preference - oak and walnut do not share a grain size any more
+// than they share a colour, and choosing a second wood used to inherit the
+// first one's numbers with no way to tell that had happened.
 //
 // It is not a QDialog - this app has none, and gui_smoke asserts as much.
 // UnsavedCloseCard's shape, minus the scrim: this one does NOT cover the
@@ -32,16 +40,42 @@ class MaterialCard : public QWidget {
 public:
     explicit MaterialCard(QWidget* viewport);
 
-    // Opens the card for `material`, seeded with the colour and brightness it
-    // currently has. Opening it again for another material re-seeds rather
-    // than stacking a second card.
-    void open(const QString& material, const QColor& colour, double brightness);
+    // EVERYTHING one material looks like, in the card's own terms. A POD
+    // rather than DocumentModel::MaterialLook: this is a ui class and has no
+    // business including the document, which is the same line every other
+    // card here draws (RenderSettingsPanel's Quality and ExportSize mirrors
+    // are the precedent). MainWindow maps the two at its one wiring site.
+    //
+    // `surface` is the SLIDER's own sense - 0 matte, 1 glossy, dragging right
+    // reads as glossier - and is the inverse of the kernel-facing roughness
+    // OcctViewWidget deals in. The inversion stays where it always was, at
+    // that one wiring site; nothing here says "roughness".
+    struct Look {
+        QColor colour{178, 178, 173};
+        double brightness = 1.0;
+        double surface = 0.45;
+        double metal = 0.0;
+        double grainSize = 300.0;
+        double grainAngle = 0.0;
+    };
+
+    // Opens the card for `material`, seeded with everything it currently
+    // looks like. Opening it again for another material re-seeds rather than
+    // stacking a second card.
+    void open(const QString& material, const Look& look);
+    // THE ONE EDIT PATH, and it is both what a drag lands in and what the
+    // suite drives - RenderSettingsPanel's own rule, one card over. It
+    // clamps, pushes every control and reports the change, so a test that
+    // calls it exercises exactly what a user moving a slider exercises.
+    // open() deliberately does NOT report: seeding is not an edit.
+    void setLook(const Look& look);
     void close();
     bool isOpen() const { return !isHidden(); }
     QString material() const { return myMaterial; }
 
-    QColor colour() const { return myColour; }
-    double brightness() const { return myBrightness; }
+    Look look() const { return myLook; }
+    QColor colour() const { return myLook.colour; }
+    double brightness() const { return myLook.brightness; }
 
     // Re-places the card against the viewport's bottom left.
     void replace();
@@ -49,9 +83,14 @@ public:
     QStringList paintedTexts() const;
 
 signals:
-    // Live, on every move of the slider and every colour picked: the render
+    // Live, on every move of any slider and every colour picked: the render
     // is the preview, so there is nothing to apply afterwards.
-    void changed(QString material, QColor colour, double brightness);
+    //
+    // ONE signal carrying the whole look rather than one per dial. The
+    // listener writes a single record and pushes a single set of values at
+    // the viewport, so splitting this would have been six ways to say the
+    // same sentence and six chances for two of them to disagree.
+    void changed(QString material, MaterialCard::Look look);
     void closed();
 
 protected:
@@ -62,17 +101,34 @@ protected:
 
 private:
     void layoutCard();
+    // Every readout re-derived from myLook in one place, so a number on the
+    // card and the value it describes cannot be two different answers.
+    void syncReadouts();
     void applyStyles();
     void pickColour();
     void emitChange();
 
     QString myMaterial;
-    QColor myColour{178, 178, 173};
-    double myBrightness = 1.0;
+    Look myLook;
 
     QPointer<QAbstractButton> mySwatch;
     QPointer<QSlider> mySlider;
     QPointer<QAbstractButton> myDone;
     QPointer<QLabel> myValue;
+    // The four that moved here. Each is a slider and a readout, built by the
+    // same helper, and each reports through the one `changed` signal above.
+    struct Dial {
+        QPointer<QSlider> slider;
+        QPointer<QLabel> value;
+        QPointer<QLabel> name;
+    };
+    Dial mySurface;
+    Dial myMetal;
+    Dial myGrainSize;
+    Dial myGrainAngle;
+    // Guards the seeding pass in open(), so pushing a value into a slider
+    // does not report it straight back out as a user edit - RenderSettingsPanel's
+    // mySyncing, the same problem one card over.
+    bool mySeeding = false;
     bool myClaimInstalled = false;
 };

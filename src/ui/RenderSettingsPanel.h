@@ -219,6 +219,10 @@ public:
     // The note row itself, so the suite can assert it appears and
     // disappears rather than trusting the flag.
     QWidget* materialNoteRow() const;
+    // Every material tile's own name, in the order the grid holds them - for
+    // the suite, which has to be able to say that the three non-wood tiles
+    // really went rather than that some tile or other is present.
+    QStringList materialTileNames() const;
 
     // The six controls, for childAt() hit tests and direct suite drives -
     // AppearancePanel's own sizeControl()/swatchFor() shape.

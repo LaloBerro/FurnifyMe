@@ -55,6 +55,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "PullArrow.h"
+#include "MaterialCard.h"
 #include "RenderFrameGuides.h"
 #include "RenderSettingsPanel.h"
 #include "SelectorWindow.h"
@@ -24774,34 +24775,37 @@ int main(int argc, char* argv[])
         // panel's footer, not the old floating circle.
         if (shutter) checkCardCorners(shutter, QStringLiteral("RenderShutterButton"));
 
-        // --- Surface and Metal are read by the deepest tier alone, and the
-        // card says so whenever the active tier is not it. An ENABLED
-        // control that silently does nothing reads exactly as broken as a
-        // disabled one that will not say why, and on most hardware two of
-        // these six sliders moved and changed nothing with no cue at all.
-        // Asserted BOTH ways off the tier the probe actually landed on, so
-        // this cannot pass by never running: the note is up exactly when
-        // renderMaterialControlsApply() is false.
+        // --- the tier gate is still one written-down copy ---------------------
+        // Surface and Metal are still read by the deepest tier alone, and the
+        // gate is still renderMaterialControlsApply() rather than a second
+        // tier list. What moved is WHERE the caveat is said: the two rows are
+        // on the material card now, per material, so the note that used to
+        // sit under them on this panel went with them and each dial's own
+        // tooltip carries it. The panel's note is a different sentence doing
+        // a different job - it says where those rows went - so it is always
+        // up rather than tier-gated.
         {
             const bool materialsApply = rview->renderMaterialControlsApply();
             check(materialsApply ==
                       (rview->renderModeTier() == OcctViewWidget::RenderTier::PathTracing),
                   "the card's own condition IS the tier gate the two setters are wrapped "
                   "in - one written-down copy, not a second tier list");
-            check(panel != nullptr && panel->materialRowsApply() == materialsApply,
-                  "the card is told the truth about the active tier");
             QWidget* materialNote = panel ? panel->materialNoteRow() : nullptr;
-            check(materialNote != nullptr, "the card carries a material note row");
-            check(materialNote != nullptr && materialNote->isVisible() == !materialsApply,
-                  materialsApply
-                      ? QStringLiteral("...hidden on this tier, which does apply Surface "
-                                       "and Metal")
-                      : QStringLiteral("...and shown on this tier, which does not"));
-            check(panel != nullptr && panel->surfaceControl() != nullptr &&
-                      panel->surfaceControl()->isEnabled() && panel->metalControl() != nullptr &&
-                      panel->metalControl()->isEnabled(),
-                  "both controls stay live either way - the value they hold is real and "
-                  "takes effect on a tier that reads it");
+            check(materialNote != nullptr && materialNote->isVisible(),
+                  "the panel points at the material card, where the four dials moved");
+            // AND THE THREE NON-WOOD TILES ARE GONE - "only left the wood
+            // materials, remove the other ones". Checked by name against
+            // everything the grid actually holds, in both directions: the
+            // woods are still there and the three are not.
+            const QStringList tiles = panel ? panel->materialTileNames() : QStringList();
+            check(!tiles.isEmpty() && tiles.contains(QStringLiteral("Wood")),
+                  QStringLiteral("the wood tiles are still here (%1)")
+                      .arg(tiles.join(QStringLiteral(", "))));
+            check(!tiles.contains(QStringLiteral("Matte")) &&
+                      !tiles.contains(QStringLiteral("Satin")) &&
+                      !tiles.contains(QStringLiteral("Metal")),
+                  QStringLiteral("and Matte, Satin and Metal are not (%1)")
+                      .arg(tiles.join(QStringLiteral(", "))));
         }
 
         // --- real hit-testing, not merely isVisible() -------------------------
@@ -24941,8 +24945,24 @@ int main(int argc, char* argv[])
         const bool pbrTier = tier == OcctViewWidget::RenderTier::PathTracing ||
                              tier == OcctViewWidget::RenderTier::RayTracing;
         if (pbrTier) {
+            // DRIVEN THROUGH THE MATERIAL CARD, because that is where these
+            // two dials are now - per material, not per scene. The card's
+            // setLook() is both what a drag lands in and what the suite
+            // drives, so this exercises the same path a user does; it
+            // reports, MainWindow writes the document and applyMaterialLook()
+            // pushes the value at the viewport, which is the whole chain the
+            // check below is about.
+            MaterialCard* mcard = probe.materialCard();
+            check(mcard != nullptr, "there is a material card to drive the dials through");
+            const QString liveWood = panel ? panel->woodSelection() : QString();
+            MaterialCard::Look drivenLook;
+            if (mcard) mcard->open(liveWood.isEmpty() ? QStringLiteral("Wood") : liveWood,
+                                   drivenLook);
+            settle(120);
+
             const QImage beforeSurface = snapshot(QStringLiteral("surface-before"));
-            panel->setSurfaceGlossiness(0.98);
+            drivenLook.surface = 0.98;
+            if (mcard) mcard->setLook(drivenLook);
             settle(200);
             // The review's own gap, closed: the skip branch below CLAIMS
             // "renderSurfaceRoughness() itself read back the new value" in
@@ -24969,7 +24989,8 @@ int main(int argc, char* argv[])
             }
 
             const QImage beforeMetal = snapshot(QStringLiteral("metal-before"));
-            panel->setMetal(1.0);
+            drivenLook.metal = 1.0;
+            if (mcard) mcard->setLook(drivenLook);
             settle(200);
             check(std::fabs(rview->renderMetal() - 1.0) < 1e-6,
                   QStringLiteral("renderMetal() reads back the new value (%1) regardless of "
@@ -25218,8 +25239,11 @@ int main(int argc, char* argv[])
             RenderSettingsPanel* pPanel = persisting.renderSettingsPanel();
             check(pPanel != nullptr, "the persisting probe has a render settings panel");
             if (pPanel) {
-                pPanel->setSurfaceGlossiness(0.80);
-                pPanel->setMetal(0.65);
+                // FOUR values now, not six. Surface and Metal stopped being
+                // app-wide settings when they became a material's - they are
+                // saved in the furniture's own manifest instead, where a
+                // second app-wide copy would have been a rival answer to the
+                // same question.
                 pPanel->setLightAngle(200.0);
                 pPanel->setLightStrength(3.25);
                 pPanel->setBackground(QColor(11, 22, 33));
@@ -25235,12 +25259,14 @@ int main(int argc, char* argv[])
             settle(MainWindow::kRenderSettingsWriteMs * 2);
 
             QSettings written;
-            check(std::fabs(written.value(QStringLiteral("renderMode/roughness")).toDouble() -
-                            0.20) < 1e-6,
-                  "roughness persists as 1 - glossiness (0.20, from a glossiness of 0.80)");
-            check(std::fabs(written.value(QStringLiteral("renderMode/metallic")).toDouble() -
-                            0.65) < 1e-6,
-                  "metallic persists");
+            // And the two that MOVED are not written here at all - checked
+            // rather than assumed, because "it stopped being stored" and "it
+            // is stored in two places that can disagree" look identical from
+            // the outside until one of them is wrong.
+            check(!written.contains(QStringLiteral("renderMode/roughness")) &&
+                      !written.contains(QStringLiteral("renderMode/metallic")),
+                  "Surface and Metal are NOT app-wide settings any more - they belong to a "
+                  "material, and a material's look is saved with the furniture");
             check(std::fabs(written.value(QStringLiteral("renderMode/lightAngleDeg")).toDouble() -
                             200.0) < 1e-6,
                   "light angle persists");
@@ -25265,19 +25291,12 @@ int main(int argc, char* argv[])
             returning.resize(900, 700);
             returning.show();
             settle(300);
-            check(std::fabs(returning.view()->renderSurfaceRoughness() - 0.20) < 1e-6 &&
-                      std::fabs(returning.view()->renderMetal() - 0.65) < 1e-6 &&
-                      std::fabs(returning.view()->renderLightAngleDeg() - 200.0) < 1e-6 &&
+            check(std::fabs(returning.view()->renderLightAngleDeg() - 200.0) < 1e-6 &&
                       std::fabs(returning.view()->renderLightStrength() - 3.25) < 1e-6 &&
                       returning.view()->renderBackgroundOverride() == QColor(11, 22, 33) &&
                       std::fabs(returning.view()->renderFov() - 72.0) < 1e-6,
-                  "a fresh window applies every one of the six stored values to the "
+                  "a fresh window applies every one of the four stored values to the "
                   "viewport, before render mode has ever been entered");
-            RenderSettingsPanel* returningPanel = returning.renderSettingsPanel();
-            check(returningPanel != nullptr &&
-                      std::fabs(returningPanel->surfaceGlossiness() - 0.80) < 1e-6 &&
-                      std::fabs(returningPanel->metal() - 0.65) < 1e-6,
-                  "and the card's own controls reflect them too");
             returning.close();
             settle(150);
         }

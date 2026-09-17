@@ -663,26 +663,19 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         // stretch column soaks the slack, so a row of one or two tiles
         // does not spread them across the panel.
         myTileGrid->setColumnStretch(kTileColumns, 1);
-        // Each gloss/metal tile IS its two slider values - clicking writes
-        // them through the same setters a drag uses, so the signals, the
-        // persistence and the tier gate all come along for free. Which tile
-        // reads as current is DERIVED in syncPresetTiles(), never stored.
-        const struct { const char* name; double gloss; double metal; } presets[] = {
-            {"Matte", 0.25, 0.0}, {"Satin", 0.65, 0.05}, {"Metal", 0.80, 1.0}};
-        for (const auto& preset : presets) {
-            auto* tile = new MaterialTile(tr(preset.name), preset.gloss, preset.metal, grid);
-            connect(tile, &QAbstractButton::clicked, this, [this, tile] {
-                // A gloss/metal pick takes wood off in the same gesture -
-                // one material at a time, said once here.
-                if (myWood) {
-                    setWood(false);
-                    emit woodChanged(false);
-                }
-                setSurfaceGlossiness(tile->glossiness());
-                setMetal(tile->metallic());
-            });
-            addTile(tile);
-        }
+        // MATTE, SATIN AND METAL ARE GONE. The user's call, in as many words:
+        // "only left the wood materials, remove the other ones". They were
+        // never materials in the way a wood is - each was a gloss/metal pair
+        // wearing a name - and once those two numbers moved onto the material
+        // card, per material, a tile whose whole content was a pair of them
+        // had nothing left to be.
+        //
+        // What that buys beyond the user's own reason: activeMaterialName()
+        // used to DERIVE which of the three was current from the live gloss
+        // and metal, so moving those values per material would have made the
+        // name depend on the very values it was selecting. With woods only,
+        // the live material simply names itself.
+        //
         // The built-in Wood tile: a material flag, not a slider pair - see
         // setWood(). File-backed materials join the same grid through
         // addTextureMaterials().
@@ -697,68 +690,22 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         addTile(woodTile);
         outer->addWidget(grid);
     }
-    mySurfaceSlider = addRow(QStringLiteral("surface"), tr("Surface"), 0, 100, 45);
-    connect(mySurfaceSlider, &QSlider::valueChanged, this, [this](int v) {
-        if (mySyncing) return;
-        emit surfaceGlossinessChanged(v / 100.0);
-    });
-    myMetalSlider = addRow(QStringLiteral("metal"), tr("Metal"), 0, 100, 0);
-    connect(myMetalSlider, &QSlider::valueChanged, this, [this](int v) {
-        if (mySyncing) return;
-        emit metalChanged(v / 100.0);
-    });
-    connect(mySurfaceSlider, &QSlider::valueChanged, this,
-            &RenderSettingsPanel::syncPresetTiles);
-    connect(myMetalSlider, &QSlider::valueChanged, this,
-            &RenderSettingsPanel::syncPresetTiles);
-
-    // The material's own two dials (user feedback on the wood): how much
-    // real material one image tile covers, and which way the grain runs.
-    // They shape the TEXTURED materials - the gloss/metal presets ignore
-    // them - but they stay visible either way: two rows that appear and
-    // vanish with the active tile would bounce the whole section.
-    // DEBOUNCED, unlike every other slider here: these two rebuild every
-    // body's textured overlay mesh - and on the ray-traced tiers pay the
-    // rasterize-and-back round trip plus a path-tracing accumulation
-    // restart - per value, and a QSlider fires per mouse-move pixel, so a
-    // raw connect made one drag across the range hundreds of full scene
-    // rebuilds (the branch review's finding). A short trailing timer keeps
-    // the preview live at ~8 updates a second; the release flushes
-    // immediately so the final value never waits.
-    auto debouncedDial = [this](QSlider* slider, auto emitValue) {
-        auto* debounce = new QTimer(this);
-        debounce->setSingleShot(true);
-        debounce->setInterval(120);
-        connect(debounce, &QTimer::timeout, this,
-                [slider, emitValue] { emitValue(slider->value()); });
-        connect(slider, &QSlider::valueChanged, this, [this, debounce](int) {
-            if (mySyncing) return;
-            debounce->start();
-        });
-        connect(slider, &QSlider::sliderReleased, this, [this, slider, debounce, emitValue] {
-            if (mySyncing) return;
-            debounce->stop();
-            emitValue(slider->value());
-        });
-    };
-    myWoodTileSlider = addRow(QStringLiteral("woodTile"), tr("Grain size"), 50, 1000, 300);
-    debouncedDial(myWoodTileSlider,
-                  [this](int v) { emit woodTileChanged(static_cast<double>(v)); });
-    myWoodAngleSlider = addRow(QStringLiteral("woodAngle"), tr("Grain angle"), 0, 359, 0);
-    debouncedDial(myWoodAngleSlider,
-                  [this](int v) { emit woodAngleChanged(static_cast<double>(v)); });
-
-    // The muted note under those two rows - shown only while the active
-    // tier does not read them (see setMaterialRowsApply()). Word-wrapped
-    // rather than elided: the card's width is fixed, and a truncated
-    // explanation explains nothing. Built here, hidden, so nothing about
-    // its existence depends on which tier the session happens to probe
-    // into.
+    // SURFACE, METAL, GRAIN SIZE AND GRAIN ANGLE ARE NOT HERE ANY MORE. They
+    // are on the material card, per material - "the data from the image
+    // should be per material, so add that into the material setting" - which
+    // is where they always belonged: they describe ONE wood, and this panel
+    // describes the studio the wood is standing in. Double-click a tile to
+    // reach them.
+    //
+    // The muted note that used to sit under them, saying which tier reads
+    // Surface and Metal, went with them: it was about those two rows and
+    // there are no rows here for it to be about. The tier caveat itself is
+    // unchanged and is stated on each dial's tooltip on the card instead,
+    // which is where the user now is when it matters.
     myMaterialNote = new QLabel(
-        tr("Surface and Metal apply in the deepest render tier"), this);
+        tr("Double-click a wood to set its colour, surface and grain"), this);
     myMaterialNote->setObjectName(QStringLiteral("renderSettingsMaterialNote"));
     myMaterialNote->setWordWrap(true);
-    myMaterialNote->hide();
     outer->addWidget(myMaterialNote);
 
     addRule();
@@ -1291,13 +1238,29 @@ QWidget* RenderSettingsPanel::materialNoteRow() const
     return myMaterialNote;
 }
 
+QStringList RenderSettingsPanel::materialTileNames() const
+{
+    QStringList names;
+    for (MaterialTile* tile : myPresetTiles) {
+        if (tile) names << tile->name();
+    }
+    return names;
+}
+
 void RenderSettingsPanel::setMaterialRowsApply(bool apply)
 {
     myMaterialRowsApply = apply;
-    // Derived, never a one-shot: this is called on every appStateChanged,
-    // so the note's visibility follows the tier rather than remembering
-    // whatever it was told once.
-    if (myMaterialNote) myMaterialNote->setVisible(!apply);
+    // IT NO LONGER MOVES THE NOTE. This used to hide the note on the one tier
+    // that does read Surface and Metal, because the note was about those two
+    // rows - and those rows are on the material card now, per material, with
+    // the tier caveat on each dial's own tooltip where the user actually is
+    // when it matters. The panel's note says where they went, which is true
+    // on every tier.
+    //
+    // The flag itself is kept and still answered: MainWindow pushes the
+    // gate's own answer here on every appStateChanged, the suite reads it to
+    // pin that the gate is one written-down copy rather than a second tier
+    // list, and the next control that needs the same question has it.
 }
 
 void RenderSettingsPanel::applyTheme()

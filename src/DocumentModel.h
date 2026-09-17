@@ -504,6 +504,20 @@ public:
         double blue = 0.68;
         // 0.25 .. 2.0, 1.0 being the material as it comes.
         double brightness = 1.0;
+        // THE FOUR DIALS THAT USED TO BE THE WHOLE SCENE'S. The user's ask:
+        // "the data from the image should be per material, so add that into
+        // the material setting" - and they are right, because oak and walnut
+        // do not share a grain size any more than they share a colour. They
+        // sat on the render panel as one global set, so choosing a second
+        // wood inherited the first one's numbers.
+        //
+        // Every default here is exactly what the panel's own sliders started
+        // at, so a furniture that never opens this editor renders precisely
+        // as it did before the move.
+        double surface = 0.45;     // 0..1, glossiness as the slider means it
+        double metal = 0.0;        // 0..1
+        double grainSize = 300.0;  // mm of real wood across one image tile
+        double grainAngle = 0.0;   // degrees
     };
     const std::vector<MaterialLook>& materialLooks() const { return myMaterialLooks; }
     // False (and `out` left at its defaults) when this furniture has never

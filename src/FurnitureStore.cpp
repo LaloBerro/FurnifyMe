@@ -4,6 +4,7 @@
 #include "FurnifySerial.h"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 
 #include <QDir>
@@ -243,6 +244,10 @@ QJsonObject materialsToJson(const DocumentModel::DocumentMeta& meta)
         entry[QStringLiteral("g")] = look.green;
         entry[QStringLiteral("b")] = look.blue;
         entry[QStringLiteral("brightness")] = look.brightness;
+        entry[QStringLiteral("surface")] = look.surface;
+        entry[QStringLiteral("metal")] = look.metal;
+        entry[QStringLiteral("grainSize")] = look.grainSize;
+        entry[QStringLiteral("grainAngle")] = look.grainAngle;
         arr.append(entry);
     }
     QJsonObject obj;
@@ -269,6 +274,20 @@ void jsonToMaterials(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
         look.blue = clamp01(entry.value(QStringLiteral("b")).toDouble(0.68));
         look.brightness =
             std::clamp(entry.value(QStringLiteral("brightness")).toDouble(1.0), 0.25, 2.0);
+        // The four dials, on the same absent-key-is-the-default rule as
+        // everything above: a furniture saved before they were per material
+        // decodes to the numbers the one global set started at, which is
+        // exactly what it was rendered with.
+        look.surface = clamp01(entry.value(QStringLiteral("surface")).toDouble(0.45));
+        look.metal = clamp01(entry.value(QStringLiteral("metal")).toDouble(0.0));
+        look.grainSize =
+            std::clamp(entry.value(QStringLiteral("grainSize")).toDouble(300.0), 50.0, 1000.0);
+        // WRAPPED, not clamped - an angle is a heading, and 370 in a file
+        // means 10 rather than 359.
+        double angle = entry.value(QStringLiteral("grainAngle")).toDouble(0.0);
+        angle = std::fmod(angle, 360.0);
+        if (angle < 0.0) angle += 360.0;
+        look.grainAngle = angle;
         meta.materialLooks.push_back(look);
     }
 }
