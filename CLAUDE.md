@@ -180,7 +180,7 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 4873, measured twice on the tree that carries it.** The improvements
+**`kCheckFloor` is 4914, measured twice on the tree that carries it.** The improvements
 branch re-ratcheted it and **the joinery merge's ~4-check debt is settled with it**: that
 floor sat below its own true total because two commits landed after the run that measured
 it, and this one was taken on the final tree. Two consecutive unfiltered runs measured
@@ -188,7 +188,9 @@ it, and this one was taken on the final tree. Two consecutive unfiltered runs me
 against the binary the branch ships — built minutes before it, after the crash-hunt
 diagnostics came out, and the counts did not move, which is what says those diagnostics were
 inert rather than merely believed to be. (It was 4782 at the improvements merge; the boolean
-rework's own block and repairs took it to a twice-measured **4872 + 1 = 4873**.) The one environment skip is the RayTracing
+rework's own block and repairs took it to a twice-measured **4872 + 1 = 4873**, and the
+UI-review branch's alignment sweep and folder-duplicate block took it to a twice-measured
+**4913 + 1 = 4914**.) The one environment skip is the RayTracing
 floor-blend measurement, which does not apply when PathTracing is the session's tier.
 
 **Measured, never computed** — this project has now chosen measuring over arithmetic three

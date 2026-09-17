@@ -718,7 +718,21 @@ void skipByEnvironment(int checks, const QString& why)
 // changed between them. A floor is only as good as the checks under it, and a
 // check that reports the monitor rather than the app is one the floor cannot
 // protect.
-constexpr int kCheckFloor = 4873;
+//
+// RE-RATCHETED (2026-09-17, the UI-review branch): the rail/drawer alignment
+// sweep in a window of its own, and the folder-duplicate block. TWO
+// consecutive unfiltered runs measured 4913 checks + 1 environment skip,
+// agreeing to the digit, against the binary these commits carry.
+//
+// The alignment sweep is why this particular ratchet is worth a sentence. It
+// first went in beside the rail's other layout checks, which run against the
+// suite's one shared mid-sequence window - and sweeping the TYPE SCALE there
+// perturbed that window enough that later blocks stopped running some of
+// their own checks. The run came back at 4867 against a floor of 4873 and
+// FAILED, which is exactly and only what this constant exists to do: a probe
+// that edits global state needs a window nobody else is using, and nothing
+// else in the suite would have said so.
+constexpr int kCheckFloor = 4914;
 
 void check(bool condition, const QString& what)
 {
