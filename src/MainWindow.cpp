@@ -993,6 +993,17 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         if (isolateActive()) applyIsolation();
         updateActions();
     });
+    // A row's grain mark. The DOCUMENT is the writer and this window is its
+    // one caller, exactly as the eye above is: the drawer announces the
+    // gesture and never writes. NO CHECKPOINT - presentation, like
+    // visibility and a material's colour - and updateActions() is what pushes
+    // the new list at the viewport, so the drawing follows by derivation
+    // rather than by a second write here.
+    connect(myItemsPanel, &ItemsPanel::grainToggled, this, [this](int bodyId) {
+        if (myShowingInitScreen || bodyId <= 0) return;
+        myDocument.setBodyGrainAcross(bodyId, !myDocument.bodyGrainAcross(bodyId));
+        updateActions();
+    });
     // The versions drawer, on the same terms - built in buildOverlay(),
     // which has already run by this point in the constructor.
     if (myVersionsPanel)
@@ -1121,6 +1132,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             // setting or by opening another furniture, and all three land
             // here.
             applyMaterialLook();
+            // WHICH BODIES RUN ACROSS, pushed on every state change rather
+            // than at the click - so an undo that brings a body back, a
+            // freshly opened furniture and a toggled row all reach the
+            // viewport by the one derived route.
+            myView->setBodyGrainAcross(myDocument.grainAcrossBodies());
             // The editor closes when the material it is about stops being the
             // live one - a card editing something the viewport is no longer
             // showing would be editing in the dark.

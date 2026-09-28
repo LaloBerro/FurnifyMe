@@ -81,6 +81,16 @@ public:
         return index >= 0 && index < static_cast<int>(myRowList.size()) ? myRowList[index].id
                                                                         : 0;
     }
+    // The grain mark on a BODY row, or null for an outline or a folder row
+    // (neither carries one - see addItemRow()). Asked of the panel rather
+    // than found by scanning for a button of the right shape, which is the
+    // failure this file has already been bitten by twice.
+    class QPushButton* grainMarkAt(int index) const
+    {
+        return index >= 0 && index < static_cast<int>(myRowList.size())
+                   ? myRowList[index].grain
+                   : nullptr;
+    }
     bool rowIsOutlineAt(int index) const
     {
         return index >= 0 && index < static_cast<int>(myRowList.size())
@@ -165,6 +175,11 @@ signals:
     // dimming - the eye's direct view write stays for immediacy, but the
     // composed answer is re-derived at the one writer.
     void visibilityToggled();
+    // A row's grain mark was clicked: that body should run the other way.
+    // Announced rather than written here, because the document owns it and
+    // MainWindow is the one writer - the eye button's own arrangement one
+    // line up, and for the same reason.
+    void grainToggled(int bodyId);
     void solidActivated(int id);
     // WHAT THE SELECTION SHOULD BE after a click on a body row, worked out
     // here rather than at the receiving end: plain click replaces, Ctrl
@@ -243,6 +258,9 @@ private:
         QWidget* widget = nullptr;
         class QLabel* name = nullptr;
         class QPushButton* eye = nullptr;
+        // The grain mark, on BODY rows only - null on an outline and on a
+        // folder. See addItemRow() for why those two do not carry one.
+        class QPushButton* grain = nullptr;
         int id = 0;
         // Outline rows come first and are not part of the viewport selection -
         // showSelection() must not highlight one, and the eye toggles a

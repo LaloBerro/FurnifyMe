@@ -1591,6 +1591,19 @@ public:
     // the overlays live while wood is up.
     void setRenderWoodTileMm(double mm);
     double renderWoodTileMm() const { return myWoodTileMm; }
+    // WHICH BODIES RUN ACROSS THE GRAIN. The material's own Grain angle turns
+    // the whole run; this is the per-piece exception - a rail or a drawer
+    // front cut the other way out of the same board - and it is a quarter
+    // turn rather than an angle, because "the other direction" is what was
+    // asked for and an arbitrary per-body angle would be a second, finer copy
+    // of the control one level up.
+    //
+    // The wood overlay is already built ONE PER BODY, each with its own
+    // angleDeg, so this costs nothing but the lookup: see
+    // refreshWoodOverlays().
+    void setBodyGrainAcross(const std::vector<int>& bodyIds);
+    bool bodyGrainAcross(int bodyId) const;
+
     void setRenderWoodAngleDeg(double degrees);
     double renderWoodAngleDeg() const { return myWoodAngleDeg; }
 
@@ -3099,6 +3112,7 @@ private:
     bool myRenderWood = false;
     double myWoodTileMm = 300.0;
     double myWoodAngleDeg = 0.0;
+    std::vector<int> myGrainAcross;
     QString myWoodTextureFile;
     Handle(Graphic3d_TextureMap) myWoodTexture;
     void ensureWoodTexture();

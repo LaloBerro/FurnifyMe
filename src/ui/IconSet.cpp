@@ -102,6 +102,16 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(5, 12, 11, 18);
             p.drawLine(5, 12, 19, 12);
             break;
+        case Glyph::GrainAlong:                   // three lines lying down
+            p.drawLine(5, 8, 19, 8);
+            p.drawLine(5, 12, 19, 12);
+            p.drawLine(5, 16, 19, 16);
+            break;
+        case Glyph::GrainAcross:                  // three lines standing up
+            p.drawLine(8, 5, 8, 19);
+            p.drawLine(12, 5, 12, 19);
+            p.drawLine(16, 5, 16, 19);
+            break;
         case Glyph::Items:                        // stacked list rows
             p.drawLine(5, 7, 19, 7);
             p.drawLine(5, 12, 19, 12);

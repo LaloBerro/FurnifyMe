@@ -52,6 +52,13 @@ enum class Glyph {
     // The label lives in the tooltip, which mirrors the action like every
     // other chip's does.
     Back,
+    // Which way the grain runs on one body, for the Items drawer's per-row
+    // mark (the user's pick from a drawn round). Two glyphs rather than one
+    // rotated: the mark has to read as a STATE at a glance down a column of
+    // rows, and three lines lying down against three standing up is the
+    // clearest possible version of that.
+    GrainAlong,
+    GrainAcross,
     // The four view controls (Milestone 5, item 3) that moved off the old
     // text-button app bar onto icon-only chips under the axis gizmo. The
     // unit chip is not here - it paints its own text ("mm"/"cm") as the

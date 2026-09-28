@@ -252,6 +252,14 @@ QJsonObject materialsToJson(const DocumentModel::DocumentMeta& meta)
     }
     QJsonObject obj;
     obj[QStringLiteral("materials")] = arr;
+    // WHICH BODIES RUN ACROSS THE GRAIN, by index into this document's own
+    // body list rather than by id - the same positional matching every other
+    // block in this manifest uses, because an id is a live document's
+    // bookkeeping and a file has to survive being loaded into a document that
+    // numbers its bodies differently.
+    QJsonArray grain;
+    for (int index : meta.grainAcrossBodies) grain.append(index);
+    obj[QStringLiteral("grainAcross")] = grain;
     return obj;
 }
 
@@ -289,6 +297,12 @@ void jsonToMaterials(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
         if (angle < 0.0) angle += 360.0;
         look.grainAngle = angle;
         meta.materialLooks.push_back(look);
+    }
+    // Absent decodes to "none across", which is what every furniture saved
+    // before this existed genuinely was.
+    for (const QJsonValue& value : obj.value(QStringLiteral("grainAcross")).toArray()) {
+        const int index = value.toInt(-1);
+        if (index >= 0) meta.grainAcrossBodies.push_back(index);
     }
 }
 

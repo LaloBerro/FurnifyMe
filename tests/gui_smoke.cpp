@@ -904,6 +904,7 @@ constexpr BlockInfo kBlocks[] = {
     { "milestone-5-item-6-edge-and-outline-line-width-rows", false, true },
     { "milestone-5-item-8-plain-duplicate-ctrl-d", false, true },
     { "ctrl-d-on-a-folder-duplicates-the-folder", false, true },
+    { "the-grain-runs-the-other-way-on-one-body", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
@@ -1511,6 +1512,15 @@ QPushButton* firstVisibleRowToggle(QWidget* drawer)
         // Told apart structurally rather than by icon: an eye belongs to a
         // ROW, the + is a child of the panel itself.
         if (button->parentWidget() == drawer) continue;
+        // AND NOT THE GRAIN MARK, which is the second QPushButton on every
+        // body row since the per-body grain work. Told apart structurally
+        // again, and by a difference that is real rather than incidental: the
+        // eye is CHECKABLE because it mirrors a persisted on/off, and the
+        // grain mark deliberately is not - neither direction is "special", so
+        // a checked pill would say one of them was. This file has now been
+        // bitten twice by "the first widget of type T"; the predicate is the
+        // property the caller actually needs, not the type.
+        if (!button->isCheckable()) continue;
         if (button->isVisible()) return button;
     }
     return nullptr;
@@ -3480,6 +3490,12 @@ int main(int argc, char* argv[])
                     // them structurally: an eye belongs to a ROW, the + is a
                     // child of the panel itself.
                     if (b->parentWidget() == items) continue;
+                    // Nor the grain mark, which is a second QPushButton on
+                    // every body row now. Same structural tell the shared
+                    // firstVisibleRowToggle() helper uses: the eye is
+                    // checkable because it mirrors a persisted on/off, and
+                    // the grain mark deliberately is not.
+                    if (!b->isCheckable()) continue;
                     if (b->isVisible()) eyeButtons << b;
                 }
             }
@@ -27559,6 +27575,161 @@ int main(int argc, char* argv[])
                       probe.document().groupNameOf(innerClones.front()) ==
                           probe.document().groupNameOf(sub),
                   "the subfolder keeps its own name - only the folder you picked is renamed");
+        }
+
+        probe.close();
+    }
+
+
+    // --- the grain runs the other way on ONE body ---------------------------
+    //
+    // The user's report is the whole specification: "sometimes the direction
+    // of the material is right but sometimes i wanted the other direction is
+    // some part." They picked the drawer-glyph shape from a drawn round over
+    // a dial on the wood and a row in the material card, for the reason the
+    // drawing gave: every piece's direction visible at once, without
+    // selecting anything.
+    //
+    // Its own window: it makes bodies and toggles a per-body presentation
+    // flag the shared window's later checks would then be reading.
+    if (blockEnabled("the-grain-runs-the-other-way-on-one-body")) {
+        RequiredTempDir grainLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, grainLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 700);
+        probe.show();
+        settle(200);
+        probe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+
+        check(buildBody(probe, 0.10, 0.10, 0.28, 0.28, 30.0), "body A for the grain probe");
+        const int grainA = probe.document().solids().back().id;
+        check(buildBody(probe, 0.45, 0.10, 0.63, 0.28, 30.0), "body B for the grain probe");
+        const int grainB = probe.document().solids().back().id;
+
+        QAction* itemsAction = action(probe, QStringLiteral("Items"));
+        if (itemsAction && !itemsAction->isChecked()) itemsAction->trigger();
+        settle(200);
+        ItemsPanel* drawer = probe.itemsPanel();
+        check(drawer != nullptr && !drawer->isHidden(), "the drawer is open");
+
+        // --- with the grain, until somebody says otherwise --------------------
+        check(!probe.document().bodyGrainAcross(grainA) &&
+                  !probe.document().bodyGrainAcross(grainB),
+              "both bodies run WITH the grain to start - the default needs no record");
+        check(probe.document().grainAcrossBodies().empty(),
+              "so an untouched furniture stores nothing at all");
+
+        // --- the mark is on every BODY row, and only on those -----------------
+        // Found structurally: the grain mark is the row button that is NOT
+        // checkable (the eye is, because it mirrors a persisted on/off).
+        const auto grainMarkFor = [&](int bodyId) -> QPushButton* {
+            if (!drawer) return nullptr;
+            for (int i = 0; i < drawer->rowCount(); ++i) {
+                if (drawer->rowIdAt(i) == bodyId) return drawer->grainMarkAt(i);
+            }
+            return nullptr;
+        };
+        QPushButton* markA = grainMarkFor(grainA);
+        QPushButton* markB = grainMarkFor(grainB);
+        check(markA != nullptr && markB != nullptr,
+              "every body row carries a grain mark");
+        // Reachable by a real click - asserting isVisible() alone passes
+        // against a control no user can hit.
+        if (markA) {
+            QWidget* hit = drawer->childAt(markA->mapTo(drawer, markA->rect().center()));
+            check(hit == markA, "and childAt() at its centre finds it");
+        }
+
+        // --- clicking it turns that body, and ONLY that body ------------------
+        const int revisionBefore = probe.document().revision();
+        const std::size_t checkpointsBefore = probe.document().undoDepth();
+        if (markA) clickAt(markA, QPointF(markA->width() / 2.0, markA->height() / 2.0));
+        settle(200);
+        check(probe.document().bodyGrainAcross(grainA),
+              "clicking A's mark turns A across the grain");
+        check(!probe.document().bodyGrainAcross(grainB),
+              "and leaves B exactly as it was - the whole point of it being per body");
+        check(probe.document().grainAcrossBodies().size() == 1,
+              QStringLiteral("only the exception is recorded (%1 stored)")
+                  .arg(probe.document().grainAcrossBodies().size()));
+
+        // PRESENTATION, not an edit: the revision moves so autosave and the
+        // unsaved dot notice, and the undo stack does not, because which way
+        // a grain runs is not a change to the wood. Both halves, because
+        // "nothing happened" would satisfy only one of them.
+        check(probe.document().revision() > revisionBefore,
+              "the revision moves, so autosave and the unsaved dot notice");
+        check(probe.document().undoDepth() == checkpointsBefore,
+              QStringLiteral("and NO checkpoint is taken - presentation, like visibility "
+                             "(%1 against %2)")
+                  .arg(probe.document().undoDepth())
+                  .arg(checkpointsBefore));
+
+        // --- it reaches the viewport, by derivation --------------------------
+        check(probe.view()->bodyGrainAcross(grainA) && !probe.view()->bodyGrainAcross(grainB),
+              "the viewport has been told, through the same appStateChanged push that "
+              "carries the material's own look");
+
+        // --- and the mark says so ---------------------------------------------
+        // The glyph IS the state - there is no checked pill, deliberately,
+        // because neither direction is the special one. So the tooltip is
+        // what a test can read, and it is the same string the user hovers.
+        QPushButton* markAAfter = grainMarkFor(grainA);
+        check(markAAfter != nullptr && markAAfter->toolTip().contains(QStringLiteral("across")),
+              QStringLiteral("the mark now reads as across (\"%1\")")
+                  .arg(markAAfter ? markAAfter->toolTip() : QString()));
+
+        // --- clicking again turns it back -------------------------------------
+        if (markAAfter)
+            clickAt(markAAfter, QPointF(markAAfter->width() / 2.0, markAAfter->height() / 2.0));
+        settle(200);
+        check(!probe.document().bodyGrainAcross(grainA), "clicking it again turns A back");
+        check(probe.document().grainAcrossBodies().empty(),
+              "and the record goes with it rather than being kept as a false");
+
+        // --- it survives a save and a load ------------------------------------
+        // BY INDEX in the manifest, never by id - ids restart at 1 in every
+        // document, so a file carrying them would put the grain on whichever
+        // bodies landed on those numbers next time. Checked by turning the
+        // SECOND body, so a positional bug that happened to work for index 0
+        // cannot pass.
+        QPushButton* markBNow = grainMarkFor(grainB);
+        if (markBNow) clickAt(markBNow, QPointF(markBNow->width() / 2.0, markBNow->height() / 2.0));
+        settle(200);
+        check(probe.document().bodyGrainAcross(grainB) &&
+                  !probe.document().bodyGrainAcross(grainA),
+              "B is across and A is not - a lopsided state a positional bug cannot fake");
+        // Round-tripped through the document's own serialization rather than
+        // through the library: this is a claim about the MANIFEST, and a
+        // scratch document is where the translation can actually be caught
+        // being wrong - it hands out its own ids starting at 1, so a file
+        // that carried the live ids would land the grain on whichever body
+        // happened to get that number.
+        {
+            DocumentModel::DocumentMeta meta;
+            const FurnifySerial::SerializedDocument serial = probe.document().toSerialized(meta);
+            check(meta.grainAcrossBodies.size() == 1 && meta.grainAcrossBodies.front() == 1,
+                  QStringLiteral("the manifest records the INDEX of the across body, not its "
+                                 "id (%1 entries, first %2, while its live id is %3)")
+                      .arg(meta.grainAcrossBodies.size())
+                      .arg(meta.grainAcrossBodies.empty() ? -1 : meta.grainAcrossBodies.front())
+                      .arg(grainB));
+
+            DocumentModel scratch;
+            check(scratch.fromSerialized(serial, meta), "a scratch document loads it back");
+            const std::vector<DocumentModel::Solid>& reloaded = scratch.solids();
+            check(reloaded.size() == 2,
+                  QStringLiteral("both bodies came back (%1)").arg(reloaded.size()));
+            if (reloaded.size() == 2) {
+                check(reloaded[1].id != grainB,
+                      QStringLiteral("and the scratch document numbered them ITSELF (%1, not "
+                                     "%2) - which is what makes this check able to fail")
+                          .arg(reloaded[1].id).arg(grainB));
+                check(!scratch.bodyGrainAcross(reloaded[0].id) &&
+                          scratch.bodyGrainAcross(reloaded[1].id),
+                      "the SECOND body is still the one running across");
+            }
         }
 
         probe.close();

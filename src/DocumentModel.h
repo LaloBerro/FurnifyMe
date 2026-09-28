@@ -519,6 +519,26 @@ public:
         double grainSize = 300.0;  // mm of real wood across one image tile
         double grainAngle = 0.0;   // degrees
     };
+    // WHICH WAY THE GRAIN RUNS ON ONE BODY. The user's report is the whole
+    // specification: "sometimes the direction of the material is right but
+    // sometimes i wanted the other direction is some part."
+    //
+    // A body is either with the grain or across it - two answers, not an
+    // angle. The material's own Grain angle already turns the whole run, and
+    // what this adds is the ONE exception a real piece of furniture needs: a
+    // rail or a drawer front cut the other way out of the same board. An
+    // arbitrary per-body angle would be a second, finer copy of a control
+    // that already exists one level up.
+    //
+    // PRESENTATION, not undoable content - the same category as visibility
+    // and a material's look, and stored outside State for the same reason: it
+    // is saved with the furniture and it bumps revision() (autosave notices,
+    // the unsaved dot lights) but it takes NO checkpoint, because which way a
+    // grain runs is not an edit to the wood.
+    bool bodyGrainAcross(int bodyId) const;
+    void setBodyGrainAcross(int bodyId, bool across);
+    const std::vector<int>& grainAcrossBodies() const { return myGrainAcross; }
+
     const std::vector<MaterialLook>& materialLooks() const { return myMaterialLooks; }
     // False (and `out` left at its defaults) when this furniture has never
     // been told what that material should look like.
@@ -617,6 +637,7 @@ public:
         // a material is not an item in a list this document owns, it is a
         // thing the app offers, and the name is what both ends already use.
         std::vector<MaterialLook> materialLooks;
+        std::vector<int> grainAcrossBodies;
     };
 
     // Walks mySolids/myOutlines in order, building the kernel-side shapes
@@ -767,6 +788,10 @@ private:
     // See MaterialLook. Keyed by the material's own name, and deliberately
     // not in State - presentation, persisted, never undone.
     std::vector<MaterialLook> myMaterialLooks;
+    // Sorted, and holding only the bodies that are ACROSS - with the grain is
+    // the default and needs no record, so an untouched furniture stores an
+    // empty list and an older file decodes to exactly that.
+    std::vector<int> myGrainAcross;
     int myNextId = 1;
     // Its own counter, never rolled back by undo - the same rule myNextId
     // itself follows (see the header note at the top of this file): a

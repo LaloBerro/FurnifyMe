@@ -5818,6 +5818,21 @@ void OcctViewWidget::ensureWoodTexture()
     myWoodTexture = texture;
 }
 
+void OcctViewWidget::setBodyGrainAcross(const std::vector<int>& bodyIds)
+{
+    if (myGrainAcross == bodyIds) return;
+    myGrainAcross = bodyIds;
+    // The overlays carry the angle, so they are what has to be rebuilt -
+    // and only while wood is actually on, which is the only time they
+    // exist. Outside render mode this is a stored answer and nothing else.
+    if (!myWoodOverlays.empty()) applyWoodTexture(true);
+}
+
+bool OcctViewWidget::bodyGrainAcross(int bodyId) const
+{
+    return std::find(myGrainAcross.begin(), myGrainAcross.end(), bodyId) != myGrainAcross.end();
+}
+
 void OcctViewWidget::applyWoodTexture(bool on)
 {
     // Kept as the one switchboard the material appliers call; the actual
@@ -5860,7 +5875,12 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
         overlay->texture = myWoodTexture;
         overlay->material = material;
         overlay->tileMm = std::max(10.0, myWoodTileMm);
-        overlay->angleDeg = myWoodAngleDeg;
+        // A QUARTER TURN for a body the user has flipped. Added to the
+        // material's own angle rather than replacing it, so turning the
+        // whole run still turns both: "across" means across THIS wood, not
+        // across the world.
+        overlay->angleDeg =
+            myWoodAngleDeg + (bodyGrainAcross(entry.first) ? 90.0 : 0.0);
         myContext->Display(overlay, 0, -1, Standard_False);   // never pickable
 
         // The real presentation steps aside - two shaded meshes at one

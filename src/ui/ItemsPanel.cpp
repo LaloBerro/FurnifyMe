@@ -381,6 +381,16 @@ void ItemsPanel::refresh()
                          // regression that lesson was learned from.
                          ((myView && myView->isSolidVisible(solid.id)) ? QLatin1Char('1')
                                                                        : QLatin1Char('0')) +
+                         // AND WHICH WAY ITS GRAIN RUNS - the third time this one
+                         // lesson has had to be applied to a new field: a body row
+                         // draws the grain mark from the document, so a row shows
+                         // it, so the early-out has to compare it. Without this
+                         // term the mark kept whatever glyph and tooltip it was
+                         // built with and the click appeared to do nothing - caught
+                         // by the check that reads the tooltip back, not by the one
+                         // that reads the document.
+                         (myDocument->bodyGrainAcross(solid.id) ? QLatin1Char('1')
+                                                               : QLatin1Char('0')) +
                          QLatin1Char('\x1e');
         }
     }
@@ -538,6 +548,33 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     });
     layout->addWidget(eye);
 
+    // WHICH WAY THE GRAIN RUNS, on every BODY row. The user picked this shape
+    // from a drawn round over a dial on the wood and a row in the material
+    // card: "Every piece's direction visible at once, without selecting
+    // anything." That is what the column buys and it is why the mark is on
+    // the row rather than anywhere else - a whole cabinet reads down one
+    // list.
+    //
+    // Not on an OUTLINE row: an outline is not wood yet, and a control that
+    // does nothing on half the rows in a list is worse than one that is only
+    // on the rows it means something for.
+    QPushButton* grainButton = nullptr;
+    if (!isOutline) {
+        auto* grain = new QPushButton(row);
+        grain->setFixedSize(kRowButtonPx, kRowButtonPx);
+        const bool across = myDocument && myDocument->bodyGrainAcross(id);
+        grain->setIcon(IconSet::icon(across ? IconSet::Glyph::GrainAcross
+                                            : IconSet::Glyph::GrainAlong));
+        grain->setToolTip(across ? tr("The grain runs across this body — click to turn it back")
+                                 : tr("The grain runs along this body — click to turn it"));
+        // NOT checkable, deliberately: a checked pill would say "this body is
+        // special", and neither direction is. The GLYPH is the whole state,
+        // which is also what makes the column readable at a glance.
+        connect(grain, &QPushButton::clicked, this, [this, id] { emit grainToggled(id); });
+        layout->addWidget(grain);
+        grainButton = grain;
+    }
+
     // Clicking anywhere on the row activates that item - a body row
     // selects it in the viewport, an outline row makes it the one Extrude
     // will consume.
@@ -563,6 +600,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     entry.widget = row;
     entry.name = name;
     entry.eye = eye;
+    entry.grain = grainButton;
     entry.id = id;
     entry.isOutline = isOutline;
     entry.depth = depth;

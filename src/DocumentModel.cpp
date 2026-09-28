@@ -132,6 +132,7 @@ void DocumentModel::clear()
     // Materials too: clear() wipes the whole document, and a look belongs to
     // the furniture that set it.
     myMaterialLooks.clear();
+    myGrainAcross.clear();
     ++myRevision;
     // Ids are not reused: a stale id must never silently resolve to a new solid.
 }
@@ -987,6 +988,31 @@ bool DocumentModel::isVisible(int id) const
     return it == myVisibility.end() ? true : it->second;
 }
 
+bool DocumentModel::bodyGrainAcross(int bodyId) const
+{
+    return std::find(myGrainAcross.begin(), myGrainAcross.end(), bodyId) != myGrainAcross.end();
+}
+
+void DocumentModel::setBodyGrainAcross(int bodyId, bool across)
+{
+    const auto at = std::find(myGrainAcross.begin(), myGrainAcross.end(), bodyId);
+    const bool had = at != myGrainAcross.end();
+    if (had == across) return;
+    if (across) {
+        myGrainAcross.push_back(bodyId);
+        // Sorted, so the manifest a save writes does not depend on the order
+        // the user happened to click rows in - two identical documents must
+        // produce identical files, which is what makes a byte comparison a
+        // usable oracle anywhere in this project.
+        std::sort(myGrainAcross.begin(), myGrainAcross.end());
+    } else {
+        myGrainAcross.erase(at);
+    }
+    // NO CHECKPOINT - presentation, like visibility. The revision moves so
+    // autosave and the unsaved dot notice.
+    ++myRevision;
+}
+
 bool DocumentModel::materialLook(const std::string& material, MaterialLook& out) const
 {
     for (const MaterialLook& look : myMaterialLooks) {
@@ -1153,6 +1179,17 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
 
     // How each material looks on this furniture - straight across, by name.
     meta.materialLooks = myMaterialLooks;
+    // BY INDEX, never by id. An id is a live document's bookkeeping and
+    // restarts at 1 in every document, so a file carrying ids would put the
+    // grain on whichever bodies happened to land on those numbers next time -
+    // the same hazard a live mirror placement hit once across the editor
+    // handoff. Positional is what every other block in this manifest is, and
+    // index i here means mySolids[i].
+    meta.grainAcrossBodies.clear();
+    for (std::size_t i = 0; i < mySolids.size(); ++i) {
+        if (bodyGrainAcross(mySolids[i].id))
+            meta.grainAcrossBodies.push_back(static_cast<int>(i));
+    }
 
     return serial;
 }
@@ -1314,6 +1351,10 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     // A second load onto the same instance must not keep the OLD furniture's
     // materials - the same reasoning every block above it carries.
     myMaterialLooks = meta.materialLooks;
+    // Cleared here and filled from the indices AFTER the bodies have been
+    // added below and have ids - the same two-step symmetryPairs, linkGroups
+    // and joints each take, and for the same reason.
+    myGrainAcross.clear();
     ++myRevision;
 
     std::vector<int> bodyIds;
@@ -1324,6 +1365,16 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         setVisible(id, meta.bodyVisible[i]);
         bodyIds.push_back(id);
     }
+
+    // The grain list, translated from the file's indices onto the ids this
+    // document has just handed out. An index the file names that this
+    // document has no body for is dropped rather than refused: a truncated
+    // or hand-edited manifest should lose a grain direction, not a furniture.
+    for (int index : meta.grainAcrossBodies) {
+        if (index >= 0 && index < static_cast<int>(bodyIds.size()))
+            myGrainAcross.push_back(bodyIds[index]);
+    }
+    std::sort(myGrainAcross.begin(), myGrainAcross.end());
     std::vector<int> outlineIds;
     outlineIds.reserve(serial.outlineFaces.size());
     for (std::size_t i = 0; i < serial.outlineFaces.size(); ++i) {
