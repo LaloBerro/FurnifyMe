@@ -1092,6 +1092,15 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         if (myRenderSettingsPanel) {
             myRenderSettingsPanel->setVisible(hiddenForRenderMode);
             myRenderSettingsPanel->setCutout(myView->renderCutout());
+            // The saved shots, by name. setShots() rebuilds only when the
+            // list actually changed, which matters because this runs on
+            // every appStateChanged.
+            {
+                QStringList names;
+                for (const DocumentModel::Shot& shot : myDocument.shots())
+                    names << QString::fromStdString(shot.name);
+                myRenderSettingsPanel->setShots(names);
+            }
             myRenderSettingsPanel->setAspect(
                 static_cast<RenderSettingsPanel::Aspect>(myView->renderAspect()));
             myRenderSettingsPanel->setGuides(
@@ -2516,6 +2525,38 @@ void MainWindow::buildOverlay()
                 myView->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(aspect));
                 updateActions();
             });
+    // The shots. Saving READS the viewport, applying WRITES it, and both go
+    // through currentShot()/applyShot() so the list of what a shot holds is
+    // written down exactly once.
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::shotSaveRequested, this, [this] {
+        if (myShowingInitScreen) return;
+        const QString name = nextShotName();
+        myDocument.addShot(currentShot(name));
+        // No checkpoint - a shot is presentation (DocumentModel::addShot says
+        // so). A Note carries no Undo for the same reason: there is nothing on
+        // the undo stack for one to pop, and the row's own x is how a shot is
+        // taken back.
+        statusBar()->showMessage(tr("%1 saved").arg(name));
+        myToasts->show(tr("%1 saved").arg(name), Toast::Kind::Note, false);
+        updateActions();
+    });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::shotApplied, this, [this](int index) {
+        const std::vector<DocumentModel::Shot>& shots = myDocument.shots();
+        if (index < 0 || index >= static_cast<int>(shots.size())) return;
+        const DocumentModel::Shot shot = shots[static_cast<std::size_t>(index)];
+        applyShot(shot);
+        statusBar()->showMessage(tr("%1 — camera, frame, lens and light")
+                                     .arg(QString::fromStdString(shot.name)));
+    });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::shotRemoved, this, [this](int index) {
+        if (index < 0) return;
+        const std::vector<DocumentModel::Shot>& shots = myDocument.shots();
+        if (index >= static_cast<int>(shots.size())) return;
+        const QString name = QString::fromStdString(shots[static_cast<std::size_t>(index)].name);
+        if (myDocument.removeShot(static_cast<std::size_t>(index)))
+            statusBar()->showMessage(tr("%1 forgotten").arg(name));
+        updateActions();
+    });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::guidesChanged, this,
             [this](RenderSettingsPanel::Guides guides) {
                 myView->setRenderGuides(static_cast<OcctViewWidget::RenderGuides>(guides));
@@ -4578,6 +4619,55 @@ void MainWindow::setRenderModeEnabled(bool on)
     // gizmo predicates all re-derive themselves off myRenderModeOn from the
     // appStateChanged this ends by emitting.
     updateActions();
+}
+
+DocumentModel::Shot MainWindow::currentShot(const QString& name) const
+{
+    DocumentModel::Shot shot;
+    shot.name = name.toStdString();
+    if (!myView) return shot;
+    shot.camera = myView->camera().state();
+    shot.orthographic =
+        myView->camera().baseProjection() == CameraController::Projection::Orthographic;
+    shot.fovDeg = myView->renderFov();
+    shot.aspect = static_cast<int>(myView->renderAspect());
+    shot.lightAngleDeg = myView->renderLightAngleDeg();
+    shot.lightStrength = myView->renderLightStrength();
+    return shot;
+}
+
+void MainWindow::applyShot(const DocumentModel::Shot& shot)
+{
+    if (!myView) return;
+    // The projection BEFORE the pose: setBaseProjection() is the user-facing
+    // route that also hands back a temporary-ortho loan (see CameraController's
+    // own note), and applying it after the pose would drop a loan the pose
+    // never took while leaving the camera where it already was. Order settled
+    // by that rule rather than by taste.
+    myView->setBaseProjection(shot.orthographic ? CameraController::Projection::Orthographic
+                                                : CameraController::Projection::Perspective);
+    myView->setCameraStateNow(shot.camera);
+    myView->setRenderFov(shot.fovDeg);
+    myView->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(shot.aspect));
+    myView->setRenderLightAngleDeg(shot.lightAngleDeg);
+    myView->setRenderLightStrength(shot.lightStrength);
+    updateActions();
+}
+
+QString MainWindow::nextShotName() const
+{
+    // The first free number rather than count + 1: deleting the middle shot
+    // and saving again would otherwise make a second row with the same name,
+    // and a name is how a shot is picked.
+    for (int n = 1; n < 1000; ++n) {
+        const QString candidate = tr("Shot %1").arg(n);
+        bool taken = false;
+        for (const DocumentModel::Shot& shot : myDocument.shots()) {
+            if (QString::fromStdString(shot.name) == candidate) taken = true;
+        }
+        if (!taken) return candidate;
+    }
+    return tr("Shot");
 }
 
 void MainWindow::setRenderDockOpen(bool open)

@@ -133,6 +133,7 @@ void DocumentModel::clear()
     // the furniture that set it.
     myMaterialLooks.clear();
     myGrainAcross.clear();
+    myShots.clear();
     ++myRevision;
     // Ids are not reused: a stale id must never silently resolve to a new solid.
 }
@@ -988,6 +989,23 @@ bool DocumentModel::isVisible(int id) const
     return it == myVisibility.end() ? true : it->second;
 }
 
+void DocumentModel::addShot(const Shot& shot)
+{
+    myShots.push_back(shot);
+    // NO CHECKPOINT - a shot is presentation, like a material's look and a
+    // body's grain: saved with the furniture, noticed by autosave, and not an
+    // edit to the wood that Ctrl+Z should take back.
+    ++myRevision;
+}
+
+bool DocumentModel::removeShot(std::size_t index)
+{
+    if (index >= myShots.size()) return false;
+    myShots.erase(myShots.begin() + static_cast<std::ptrdiff_t>(index));
+    ++myRevision;
+    return true;
+}
+
 bool DocumentModel::bodyGrainAcross(int bodyId) const
 {
     return std::find(myGrainAcross.begin(), myGrainAcross.end(), bodyId) != myGrainAcross.end();
@@ -1179,6 +1197,7 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
 
     // How each material looks on this furniture - straight across, by name.
     meta.materialLooks = myMaterialLooks;
+    meta.shots = myShots;
     // BY INDEX, never by id. An id is a live document's bookkeeping and
     // restarts at 1 in every document, so a file carrying ids would put the
     // grain on whichever bodies happened to land on those numbers next time -
@@ -1351,6 +1370,7 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     // A second load onto the same instance must not keep the OLD furniture's
     // materials - the same reasoning every block above it carries.
     myMaterialLooks = meta.materialLooks;
+    myShots = meta.shots;
     // Cleared here and filled from the indices AFTER the bodies have been
     // added below and have ids - the same two-step symmetryPairs, linkGroups
     // and joints each take, and for the same reason.

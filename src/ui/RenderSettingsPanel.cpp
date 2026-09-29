@@ -50,6 +50,9 @@ namespace {
 // any render of the widget on its own, which is the whole reason CLAUDE.md
 // says to measure the composited window.
 constexpr int kWidth = 296;
+// The x on a shot row: square enough to read as a dismiss rather than as a
+// second, nameless shot beside the one it belongs to.
+constexpr int kShotDropWidth = 26;
 constexpr int kRadius = 10;
 constexpr int kPad = 12;
 constexpr int kRowSpacing = 10;
@@ -472,14 +475,17 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     sectionScroll->setWidgetResizable(true);
     sectionScroll->setFrameShape(QFrame::NoFrame);
     sectionScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    // AND THE VERTICAL ONE OFF TOO, which is the Items drawer's own answer
-    // and the user's own words there: "can you add an invisible scroll bar?"
-    // - invisible literally, nothing drawn and nothing clickable, the wheel
-    // being the whole interaction. It did not matter while this was a card
-    // that sized itself to its content; the Frame section pushed the docked
-    // panel past the window's height, and a real scrollbar appeared down the
-    // edge of a shot the user is composing.
-    sectionScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // THE VERTICAL ONE APPEARS ONLY WHEN IT IS NEEDED, and that is a reversal
+    // worth stating. It was turned fully off first, borrowing the Items
+    // drawer's "invisible scroll bar" - which is right for a card that sizes
+    // itself to its content, because there is then never anything below the
+    // fold. This panel is a fixed height (the window's) with a growing list
+    // of sections, and the Shots section pushed Quality, the cut-out switch
+    // and every export size off the bottom: an invisible bar did not keep a
+    // shot clean, it hid five controls with nothing on screen to say they
+    // were there. A bar that appears only when something is genuinely out of
+    // reach says the one true thing, and says it only when it is true.
+    sectionScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     makeTransparent(sectionScroll, QStringLiteral("renderSettingsScroll"));
     makeTransparent(sectionScroll->viewport(),
                     QStringLiteral("renderSettingsScrollViewport"));
@@ -632,6 +638,45 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     }
     setAspect(Aspect::Free);
     setGuides(Guides::Thirds);
+
+    addRule();
+
+    // --- Shots ------------------------------------------------------------
+    // "can you add a menu to save camera positions and settings? so i can do
+    // multiple images using those settings and always be the same." Directly
+    // under Frame, because a shot restores the frame too - the two rows above
+    // are part of what one of these rows puts back.
+    addSection(tr("Shots"));
+    {
+        auto* row = new QWidget(this);
+        makeTransparent(row, QStringLiteral("renderSettingsShotSaveRow"));
+        auto* line = new QHBoxLayout(row);
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setSpacing(5);
+        auto* save = new SegChip(tr("Save this view"), row);
+        save->setToolTip(tr("Remember where the camera is, the picture's shape, the lens "
+                            "and the light — so the next image can be taken the same way"));
+        connect(save, &QAbstractButton::clicked, this,
+                [this] { emit shotSaveRequested(); });
+        mySaveShot = save;
+        line->addWidget(save);
+        line->addStretch(1);
+        outer->addWidget(row);
+
+        myShotRows = new QWidget(this);
+        makeTransparent(myShotRows, QStringLiteral("renderSettingsShotRows"));
+        auto* rows = new QVBoxLayout(myShotRows);
+        rows->setContentsMargins(0, 0, 0, 0);
+        rows->setSpacing(4);
+        outer->addWidget(myShotRows);
+
+        // The empty state says what the button above is for, rather than
+        // leaving a heading over nothing.
+        myShotEmpty = new QLabel(tr("No shots saved yet"), this);
+        myShotEmpty->setObjectName(QStringLiteral("renderSettingsShotEmpty"));
+        myShotEmpty->setWordWrap(true);
+        outer->addWidget(myShotEmpty);
+    }
 
     addRule();
 
@@ -1032,6 +1077,63 @@ QSize RenderSettingsPanel::sizeHint() const
     return QSize(w, chrome + rows);
 }
 
+void RenderSettingsPanel::setShots(const QStringList& names)
+{
+    // REBUILT ONLY WHEN THE LIST ACTUALLY CHANGED. MainWindow pushes this on
+    // every appStateChanged - which fires on every selection click and once
+    // per mouse-move of a colour drag - and tearing down and rebuilding a
+    // column of buttons at that rate would put a layout pass on the app's
+    // hottest path for no visible difference. ItemsPanel::refresh()'s own
+    // signature guard, in the one shape this list needs: the names ARE
+    // everything a row draws.
+    if (names == myShotNames) return;
+    myShotNames = names;
+    if (!myShotRows) return;
+
+    auto* rows = qobject_cast<QVBoxLayout*>(myShotRows->layout());
+    if (!rows) return;
+    myShotApply.clear();
+    myShotDrop.clear();
+    while (QLayoutItem* item = rows->takeAt(0)) {
+        if (QWidget* w = item->widget()) w->deleteLater();
+        delete item;
+    }
+
+    for (int i = 0; i < myShotNames.size(); ++i) {
+        auto* row = new QWidget(myShotRows);
+        makeTransparent(row, QStringLiteral("renderSettingsShotRow"));
+        auto* line = new QHBoxLayout(row);
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setSpacing(4);
+
+        auto* apply = new SegChip(myShotNames.at(i), row);
+        apply->setToolTip(tr("Put the camera, the picture's shape, the lens and the light "
+                             "back the way they were"));
+        connect(apply, &QAbstractButton::clicked, this, [this, i] { emit shotApplied(i); });
+        line->addWidget(apply, 1);
+        myShotApply.push_back(apply);
+
+        // A shot is FILE data, not document data, so it is deleted rather
+        // than undone - the same taxonomy a version's delete follows (that
+        // one asks twice on the row; this one is a single click, because a
+        // shot holds no work and taking it again is one press of the button
+        // above).
+        auto* drop = new SegChip(QStringLiteral("\u00d7"), row);
+        drop->setToolTip(tr("Forget this shot"));
+        drop->setFixedWidth(kShotDropWidth);
+        connect(drop, &QAbstractButton::clicked, this, [this, i] { emit shotRemoved(i); });
+        line->addWidget(drop);
+        myShotDrop.push_back(drop);
+
+        rows->addWidget(row);
+    }
+    if (myShotEmpty) myShotEmpty->setVisible(myShotNames.isEmpty());
+    myShotRows->setVisible(!myShotNames.isEmpty());
+    // The card sizes itself from its content (see sizeHint()), and the
+    // content just changed height by a whole row.
+    updateGeometry();
+}
+
 void RenderSettingsPanel::setAspect(Aspect aspect)
 {
     myAspect = aspect;
@@ -1236,6 +1338,20 @@ void RenderSettingsPanel::syncPresetTiles()
 QWidget* RenderSettingsPanel::materialNoteRow() const
 {
     return myMaterialNote;
+}
+
+QAbstractButton* RenderSettingsPanel::shotControlAt(int index) const
+{
+    return index >= 0 && index < static_cast<int>(myShotApply.size())
+               ? myShotApply[static_cast<std::size_t>(index)]
+               : nullptr;
+}
+
+QAbstractButton* RenderSettingsPanel::shotRemoveAt(int index) const
+{
+    return index >= 0 && index < static_cast<int>(myShotDrop.size())
+               ? myShotDrop[static_cast<std::size_t>(index)]
+               : nullptr;
 }
 
 QStringList RenderSettingsPanel::materialTileNames() const

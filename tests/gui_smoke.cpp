@@ -905,6 +905,7 @@ constexpr BlockInfo kBlocks[] = {
     { "milestone-5-item-8-plain-duplicate-ctrl-d", false, true },
     { "ctrl-d-on-a-folder-duplicates-the-folder", false, true },
     { "the-grain-runs-the-other-way-on-one-body", false, true },
+    { "a-saved-shot-puts-the-picture-back", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
@@ -27729,6 +27730,238 @@ int main(int argc, char* argv[])
                 check(!scratch.bodyGrainAcross(reloaded[0].id) &&
                           scratch.bodyGrainAcross(reloaded[1].id),
                       "the SECOND body is still the one running across");
+            }
+        }
+
+        probe.close();
+    }
+
+
+    // --- a saved shot puts the picture back ---------------------------------
+    //
+    // "can you add a menu to save camera positions and settings? so i can do
+    // multiple images using those settings and always be the same."
+    //
+    // WHAT A SHOT HOLDS IS THE USER'S OWN LIST: camera pose, aspect,
+    // perspective and light. So the checks move every one of those to a value
+    // nothing would land on by accident, save, move them all somewhere else,
+    // and ask for them back - and separately assert that the MATERIALS did not
+    // come back with them, because a shot taken last week must not undo a
+    // colour changed today, and "it restored everything" and "it restored the
+    // right things" are two different claims.
+    if (blockEnabled("a-saved-shot-puts-the-picture-back")) {
+        RequiredTempDir shotLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, shotLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1100, 800);
+        probe.show();
+        settle(300);
+        probe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+        check(buildBody(probe, 0.30, 0.30, 0.55, 0.55, 40.0), "a body for the shots probe");
+        settle(150);
+
+        OcctViewWidget* sview = probe.view();
+        QAction* renderAction = action(probe, QStringLiteral("Render mode"));
+        check(renderAction != nullptr, "there is a Render mode action for the shots probe");
+        if (renderAction) renderAction->trigger();
+        settle(300);
+        RenderSettingsPanel* panel = probe.renderSettingsPanel();
+        check(panel != nullptr && panel->isVisible(), "the render panel is up");
+
+        check(probe.document().shots().empty(), "a fresh furniture has no shots");
+        check(panel != nullptr && panel->shotEmptyRow() != nullptr &&
+                  panel->shotEmptyRow()->isVisible(),
+              "and the panel says so rather than leaving a heading over nothing");
+        check(panel != nullptr && panel->saveShotControl() != nullptr &&
+                  panel->saveShotControl()->isVisible(),
+              "there is a control to save one");
+
+        // --- the picture, set to values nothing lands on by accident ---------
+        CameraState pose;
+        pose.target = gp_Pnt(123.0, -45.0, 67.0);
+        pose.azimuthDeg = -117.0;
+        pose.elevationDeg = 41.0;
+        pose.distance = 1234.0;
+        sview->setCameraStateNow(pose);
+        sview->setBaseProjection(CameraController::Projection::Orthographic);
+        sview->setRenderAspect(OcctViewWidget::RenderAspect::FourFive);
+        sview->setRenderFov(72.0);
+        sview->setRenderLightAngleDeg(200.0);
+        sview->setRenderLightStrength(3.25);
+        settle(150);
+
+        // CAPTURED BEFORE THE SAVE, not after. It was after, and a mutation
+        // that made saving take a checkpoint did not redden a single line -
+        // the check read the depth once the save had already happened, so it
+        // only ever covered APPLYING a shot while its own message claimed
+        // "anywhere in any of that". Taken here, it covers the save, the
+        // apply and the delete.
+        const std::size_t depthBeforeShots = probe.document().undoDepth();
+
+        // Saved by CLICKING the control, not by emitting the signal behind it.
+        if (panel && panel->saveShotControl()) {
+            QAbstractButton* save = panel->saveShotControl();
+            clickAt(save, QPointF(save->width() / 2.0, save->height() / 2.0));
+        }
+        settle(200);
+        check(probe.document().shots().size() == 1,
+              QStringLiteral("clicking it saves one shot (%1)")
+                  .arg(probe.document().shots().size()));
+        check(!probe.document().shots().empty() &&
+                  probe.document().shots().front().name == "Shot 1",
+              QStringLiteral("named Shot 1 (\"%1\")")
+                  .arg(probe.document().shots().empty()
+                           ? QString()
+                           : QString::fromStdString(probe.document().shots().front().name)));
+        check(panel != nullptr && panel->shotControlAt(0) != nullptr &&
+                  panel->shotControlAt(0)->text() == QStringLiteral("Shot 1"),
+              "and the panel grew a row carrying that name");
+        check(panel != nullptr && panel->shotEmptyRow() != nullptr &&
+                  !panel->shotEmptyRow()->isVisible(),
+              "the empty note went away");
+
+        // PRESENTATION, not an edit - the revision moves so autosave and the
+        // unsaved dot notice, and the undo stack does not, because taking a
+        // photograph is not a change to the furniture. Both halves, because
+        // "nothing happened" satisfies only one of them.
+        check(probe.document().undoDepth() == depthBeforeShots,
+              QStringLiteral("SAVING one takes no checkpoint (%1 against %2)")
+                  .arg(probe.document().undoDepth()).arg(depthBeforeShots));
+
+        // --- everything moved somewhere else, materials included -------------
+        CameraState elsewhere;
+        elsewhere.target = gp_Pnt(0.0, 0.0, 0.0);
+        elsewhere.azimuthDeg = 10.0;
+        elsewhere.elevationDeg = 5.0;
+        elsewhere.distance = 400.0;
+        sview->setCameraStateNow(elsewhere);
+        sview->setBaseProjection(CameraController::Projection::Perspective);
+        sview->setRenderAspect(OcctViewWidget::RenderAspect::SixteenNine);
+        sview->setRenderFov(30.0);
+        sview->setRenderLightAngleDeg(15.0);
+        sview->setRenderLightStrength(0.75);
+        settle(150);
+
+        // A material edited AFTER the shot was taken, through the card a user
+        // edits it with. This is the one the shot must not touch.
+        const QString shotWood = panel && !panel->woodSelection().isEmpty()
+                                     ? panel->woodSelection()
+                                     : QStringLiteral("Wood");
+        MaterialCard* shotCard = probe.materialCard();
+        check(shotCard != nullptr, "there is a material card to edit a wood through");
+        MaterialCard::Look afterShot;
+        afterShot.colour = QColor::fromRgbF(0.11, 0.22, 0.33);
+        afterShot.brightness = 1.75;
+        afterShot.grainSize = 610.0;
+        if (shotCard) {
+            shotCard->open(shotWood, MaterialCard::Look{});
+            shotCard->setLook(afterShot);
+        }
+        settle(150);
+        // --- ask for it back, by clicking the row ----------------------------
+        if (panel && panel->shotControlAt(0)) {
+            QAbstractButton* row = panel->shotControlAt(0);
+            clickAt(row, QPointF(row->width() / 2.0, row->height() / 2.0));
+        }
+        settle(250);
+
+        const CameraState back = sview->camera().state();
+        check(std::fabs(back.target.X() - 123.0) < 1e-6 &&
+                  std::fabs(back.target.Y() + 45.0) < 1e-6 &&
+                  std::fabs(back.target.Z() - 67.0) < 1e-6,
+              QStringLiteral("the camera's target came back (%1, %2, %3)")
+                  .arg(back.target.X()).arg(back.target.Y()).arg(back.target.Z()));
+        check(std::fabs(back.azimuthDeg + 117.0) < 1e-6 &&
+                  std::fabs(back.elevationDeg - 41.0) < 1e-6 &&
+                  std::fabs(back.distance - 1234.0) < 1e-6,
+              QStringLiteral("and so did its pose (az %1, el %2, d %3)")
+                  .arg(back.azimuthDeg).arg(back.elevationDeg).arg(back.distance));
+        check(sview->camera().baseProjection() == CameraController::Projection::Orthographic,
+              "PERSPECTIVE came back - the projection half of the word");
+        check(std::fabs(sview->renderFov() - 72.0) < 1e-6,
+              QStringLiteral("and the lens half too (%1)").arg(sview->renderFov()));
+        check(sview->renderAspect() == OcctViewWidget::RenderAspect::FourFive,
+              "the picture's shape came back");
+        check(std::fabs(sview->renderLightAngleDeg() - 200.0) < 1e-6 &&
+                  std::fabs(sview->renderLightStrength() - 3.25) < 1e-6,
+              QStringLiteral("and the light (%1 degrees at %2)")
+                  .arg(sview->renderLightAngleDeg()).arg(sview->renderLightStrength()));
+
+        // THE MATERIALS DID NOT. This is the half that makes the feature safe
+        // to use on a furniture you are still working on.
+        DocumentModel::MaterialLook nowLook;
+        probe.document().materialLook(shotWood.toStdString(), nowLook);
+        // The two COLOUR channels get a looser tolerance than the two plain
+        // numbers beside them, and the reason is worth a line: a colour goes
+        // through QColor, whose channels are integers, so 0.11 comes back as
+        // 0.110002 and a 1e-6 bound fails on the round trip rather than on
+        // the claim. Brightness and grain size are plain doubles all the way
+        // and are held to the exact value.
+        check(std::fabs(nowLook.red - 0.11) < 1e-3 && std::fabs(nowLook.blue - 0.33) < 1e-3 &&
+                  std::fabs(nowLook.brightness - 1.75) < 1e-9 &&
+                  std::fabs(nowLook.grainSize - 610.0) < 1e-9,
+              QStringLiteral("and the colour changed AFTER the shot was taken survived it - a "
+                             "shot puts the picture back, never the furniture (rgb %1/%2, "
+                             "brightness %3, grain %4)")
+                  .arg(nowLook.red).arg(nowLook.blue).arg(nowLook.brightness)
+                  .arg(nowLook.grainSize));
+
+        check(probe.document().undoDepth() == depthBeforeShots,
+              QStringLiteral("and neither does applying one - no checkpoint anywhere in any "
+                             "of that (%1 against %2)")
+                  .arg(probe.document().undoDepth()).arg(depthBeforeShots));
+
+        // --- the name is the first FREE number, not the count ----------------
+        if (panel && panel->saveShotControl()) {
+            QAbstractButton* save = panel->saveShotControl();
+            clickAt(save, QPointF(save->width() / 2.0, save->height() / 2.0));
+        }
+        settle(200);
+        check(probe.document().shots().size() == 2 &&
+                  probe.document().shots().back().name == "Shot 2",
+              "a second shot is Shot 2");
+        if (panel && panel->shotRemoveAt(0)) {
+            QAbstractButton* drop = panel->shotRemoveAt(0);
+            clickAt(drop, QPointF(drop->width() / 2.0, drop->height() / 2.0));
+        }
+        settle(200);
+        check(probe.document().shots().size() == 1 &&
+                  probe.document().shots().front().name == "Shot 2",
+              "the x forgets the one it belongs to, and only that one");
+        if (panel && panel->saveShotControl()) {
+            QAbstractButton* save = panel->saveShotControl();
+            clickAt(save, QPointF(save->width() / 2.0, save->height() / 2.0));
+        }
+        settle(200);
+        check(probe.document().shots().size() == 2 &&
+                  probe.document().shots().back().name == "Shot 1",
+              QStringLiteral("and the next one reuses the freed number rather than counting "
+                             "to 3 (\"%1\")")
+                  .arg(QString::fromStdString(probe.document().shots().back().name)));
+
+        // --- it survives the file --------------------------------------------
+        {
+            DocumentModel::DocumentMeta meta;
+            const FurnifySerial::SerializedDocument serial = probe.document().toSerialized(meta);
+            check(meta.shots.size() == 2,
+                  QStringLiteral("both shots reach the manifest (%1)").arg(meta.shots.size()));
+            DocumentModel scratch;
+            check(scratch.fromSerialized(serial, meta), "a scratch document loads them back");
+            check(scratch.shots().size() == 2, "both came back");
+            if (scratch.shots().size() == 2) {
+                const DocumentModel::Shot& first = scratch.shots().front();
+                check(first.name == "Shot 2", "in order, by name");
+                check(std::fabs(first.camera.distance - 1234.0) < 1e-6 &&
+                          std::fabs(first.camera.azimuthDeg + 117.0) < 1e-6,
+                      QStringLiteral("with the pose intact (az %1, d %2)")
+                          .arg(first.camera.azimuthDeg).arg(first.camera.distance));
+                check(first.orthographic && std::fabs(first.fovDeg - 72.0) < 1e-6 &&
+                          first.aspect == static_cast<int>(OcctViewWidget::RenderAspect::FourFive),
+                      "the perspective and the shape intact");
+                check(std::fabs(first.lightAngleDeg - 200.0) < 1e-6 &&
+                          std::fabs(first.lightStrength - 3.25) < 1e-6,
+                      "and the light intact");
             }
         }
 

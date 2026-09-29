@@ -1263,6 +1263,23 @@ public:
     // out. The ONE place the central widget changes for render mode, so the
     // reparent and its explicit resize cannot drift apart.
     void setRenderDockOpen(bool open);
+
+    // THE ONE PLACE A SHOT IS READ OFF THE LIVE VIEWPORT, and the one place
+    // one is put back. The panel lists names and reports a click; the
+    // document stores a record; neither of them knows what the numbers mean,
+    // and this is the seam between them.
+    //
+    // What a shot carries is the user's own list: camera pose, aspect,
+    // perspective and light. Both halves of "perspective" - whether the
+    // camera projects perspectively and how wide its lens is - because a
+    // picture retaken through a different lens is a different picture, which
+    // is the thing being asked for. NOT the materials: a shot taken last week
+    // must not undo a colour changed today.
+    DocumentModel::Shot currentShot(const QString& name) const;
+    void applyShot(const DocumentModel::Shot& shot);
+    // "Shot 3" - the first number not already taken, so deleting the middle
+    // one and saving again does not make two rows with one name.
+    QString nextShotName() const;
     bool renderModeEnabled() const { return myRenderModeOn; }
 
     // THE predicate behind View -> Render mode's own enabled state: a

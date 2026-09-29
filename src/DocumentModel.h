@@ -23,6 +23,9 @@
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
+// For CameraState, which a saved Shot holds whole. Both live in
+// furnify_geometry, so this costs the headless build nothing.
+#include "CameraController.h"
 #include "FurnifySerial.h"
 #include "Joinery.h"
 
@@ -535,6 +538,43 @@ public:
     // is saved with the furniture and it bumps revision() (autosave notices,
     // the unsaved dot lights) but it takes NO checkpoint, because which way a
     // grain runs is not an edit to the wood.
+    // A SAVED SHOT: everything about how a picture is TAKEN, so the same
+    // furniture can be photographed several times and come back identical.
+    // The user's ask: "can you add a menu to save camera positions and
+    // settings? so i can do multiple images using those settings and always
+    // be the same."
+    //
+    // WHAT IT STORES IS THE USER'S OWN LIST, verbatim: camera pose, aspect,
+    // perspective and light. Perspective is BOTH halves of the word -
+    // whether the camera projects perspectively at all, and how wide its lens
+    // is - because a shot that came back at the right angle through the wrong
+    // lens would not be the same picture, which is the whole thing being
+    // asked for.
+    //
+    // What it deliberately does NOT store is the materials. A shot taken last
+    // week must not undo a colour changed today; the furniture's look belongs
+    // to the furniture, and the shot belongs to the photograph.
+    //
+    // `aspect` is OcctViewWidget::RenderAspect's ordinal. This library has
+    // never seen that enum and must not - it is the viewport's - so the int
+    // is the seam, exactly as RenderSettingsPanel mirrors the same enum with
+    // one of its own. MainWindow maps them at its one wiring site.
+    struct Shot {
+        std::string name;
+        CameraState camera;
+        bool orthographic = false;
+        double fovDeg = 45.0;
+        int aspect = 0;
+        double lightAngleDeg = 142.0;
+        double lightStrength = 2.0;
+    };
+    const std::vector<Shot>& shots() const { return myShots; }
+    // Appends. The name is the caller's - this does not invent one, because
+    // "Shot 3" is a sentence the user reads and so belongs where the app's
+    // other copy lives.
+    void addShot(const Shot& shot);
+    bool removeShot(std::size_t index);
+
     bool bodyGrainAcross(int bodyId) const;
     void setBodyGrainAcross(int bodyId, bool across);
     const std::vector<int>& grainAcrossBodies() const { return myGrainAcross; }
@@ -637,6 +677,7 @@ public:
         // a material is not an item in a list this document owns, it is a
         // thing the app offers, and the name is what both ends already use.
         std::vector<MaterialLook> materialLooks;
+        std::vector<Shot> shots;
         std::vector<int> grainAcrossBodies;
     };
 
@@ -788,6 +829,7 @@ private:
     // See MaterialLook. Keyed by the material's own name, and deliberately
     // not in State - presentation, persisted, never undone.
     std::vector<MaterialLook> myMaterialLooks;
+    std::vector<Shot> myShots;
     // Sorted, and holding only the bodies that are ACROSS - with the grain is
     // the default and needs no record, so an untouched furniture stores an
     // empty list and an older file decodes to exactly that.

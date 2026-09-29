@@ -260,6 +260,30 @@ QJsonObject materialsToJson(const DocumentModel::DocumentMeta& meta)
     QJsonArray grain;
     for (int index : meta.grainAcrossBodies) grain.append(index);
     obj[QStringLiteral("grainAcross")] = grain;
+
+    // THE SAVED SHOTS. Written flat rather than nested, one key per number,
+    // because every one of them is read back with its own default below - a
+    // manifest from a build that stored fewer of them has to open, and the
+    // shot it produces has to be a usable picture rather than a camera at the
+    // origin looking at nothing.
+    QJsonArray shots;
+    for (const DocumentModel::Shot& shot : meta.shots) {
+        QJsonObject entry;
+        entry[QStringLiteral("name")] = QString::fromStdString(shot.name);
+        entry[QStringLiteral("targetX")] = shot.camera.target.X();
+        entry[QStringLiteral("targetY")] = shot.camera.target.Y();
+        entry[QStringLiteral("targetZ")] = shot.camera.target.Z();
+        entry[QStringLiteral("azimuth")] = shot.camera.azimuthDeg;
+        entry[QStringLiteral("elevation")] = shot.camera.elevationDeg;
+        entry[QStringLiteral("distance")] = shot.camera.distance;
+        entry[QStringLiteral("orthographic")] = shot.orthographic;
+        entry[QStringLiteral("fov")] = shot.fovDeg;
+        entry[QStringLiteral("aspect")] = shot.aspect;
+        entry[QStringLiteral("lightAngle")] = shot.lightAngleDeg;
+        entry[QStringLiteral("lightStrength")] = shot.lightStrength;
+        shots.append(entry);
+    }
+    obj[QStringLiteral("shots")] = shots;
     return obj;
 }
 
@@ -303,6 +327,40 @@ void jsonToMaterials(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
     for (const QJsonValue& value : obj.value(QStringLiteral("grainAcross")).toArray()) {
         const int index = value.toInt(-1);
         if (index >= 0) meta.grainAcrossBodies.push_back(index);
+    }
+
+    // The shots, each number clamped to the range the control that sets it
+    // allows - a file is not a way around a bound the UI enforces, which is
+    // the same rule the materials block above keeps. A shot with no name is
+    // dropped rather than stored nameless: the name is how it is picked, and
+    // a row nobody can tell from its neighbour is not a saved shot.
+    for (const QJsonValue& value : obj.value(QStringLiteral("shots")).toArray()) {
+        const QJsonObject entry = value.toObject();
+        DocumentModel::Shot shot;
+        shot.name = entry.value(QStringLiteral("name")).toString().toStdString();
+        if (shot.name.empty()) continue;
+        shot.camera.target =
+            gp_Pnt(entry.value(QStringLiteral("targetX")).toDouble(0.0),
+                   entry.value(QStringLiteral("targetY")).toDouble(0.0),
+                   entry.value(QStringLiteral("targetZ")).toDouble(0.0));
+        shot.camera.azimuthDeg = entry.value(QStringLiteral("azimuth")).toDouble(-45.0);
+        shot.camera.elevationDeg =
+            std::clamp(entry.value(QStringLiteral("elevation")).toDouble(30.0),
+                       CameraController::kMinElevation, CameraController::kMaxElevation);
+        shot.camera.distance =
+            std::clamp(entry.value(QStringLiteral("distance")).toDouble(700.0),
+                       CameraController::kMinDistance, CameraController::kMaxDistance);
+        shot.orthographic = entry.value(QStringLiteral("orthographic")).toBool(false);
+        shot.fovDeg = std::clamp(entry.value(QStringLiteral("fov")).toDouble(45.0), 10.0, 90.0);
+        shot.aspect = std::clamp(entry.value(QStringLiteral("aspect")).toInt(0), 0, 4);
+        // WRAPPED, not clamped - a light angle is a compass heading, and the
+        // control that sets it wraps too.
+        double angle = std::fmod(entry.value(QStringLiteral("lightAngle")).toDouble(142.0), 360.0);
+        if (angle < 0.0) angle += 360.0;
+        shot.lightAngleDeg = angle;
+        shot.lightStrength =
+            std::clamp(entry.value(QStringLiteral("lightStrength")).toDouble(2.0), 0.25, 4.0);
+        meta.shots.push_back(shot);
     }
 }
 

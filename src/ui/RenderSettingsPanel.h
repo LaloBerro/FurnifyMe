@@ -143,6 +143,13 @@ public:
     void setAspect(Aspect aspect);
     Aspect aspect() const { return myAspect; }
 
+    // THE SAVED SHOTS, as names alone. This card knows nothing about what a
+    // shot holds - a camera pose, a lens, a light - only how to list them and
+    // which one was clicked, exactly as it knows nothing about tiers or GPUs
+    // behind the Quality chips. MainWindow owns the record and the meaning.
+    void setShots(const QStringList& names);
+    QStringList shots() const { return myShotNames; }
+
     enum class Guides { Off, Thirds, Centre };
     void setGuides(Guides guides);
     Guides guides() const { return myGuides; }
@@ -219,6 +226,14 @@ public:
     // The note row itself, so the suite can assert it appears and
     // disappears rather than trusting the flag.
     QWidget* materialNoteRow() const;
+    // The shot controls, so the suite clicks what a user clicks rather than
+    // emitting the signal behind them - surfaceControl()'s own arrangement
+    // one row down. shotControlAt() is the row's own name button; the x
+    // beside it is shotRemoveAt().
+    class QAbstractButton* saveShotControl() const { return mySaveShot; }
+    class QAbstractButton* shotControlAt(int index) const;
+    class QAbstractButton* shotRemoveAt(int index) const;
+    QWidget* shotEmptyRow() const { return myShotEmpty ? (QWidget*)myShotEmpty : nullptr; }
     // Every material tile's own name, in the order the grid holds them - for
     // the suite, which has to be able to say that the three non-wood tiles
     // really went rather than that some tile or other is present.
@@ -242,6 +257,14 @@ signals:
     void quickChanged(bool quick);
     void qualityChanged(Quality quality);
     void cutoutChanged(bool cutout);
+    // "Save this view" was pressed. It carries nothing: what a shot IS gets
+    // read off the live viewport by the listener, which is the only thing
+    // that can see it.
+    void shotSaveRequested();
+    // A saved shot's row was clicked, or its x was.
+    void shotApplied(int index);
+    void shotRemoved(int index);
+
     void aspectChanged(Aspect aspect);
     void guidesChanged(Guides guides);
     void exportSizeChanged(ExportSize size);
@@ -316,6 +339,13 @@ private:
     std::array<class SegChip*, 5> myExportChips{};
     std::array<class SegChip*, 5> myAspectChips{};
     std::array<class SegChip*, 3> myGuideChips{};
+    QStringList myShotNames;
+    class QAbstractButton* mySaveShot = nullptr;
+    // Parallel to myShotNames by index - rebuilt with the rows in setShots().
+    std::vector<class QAbstractButton*> myShotApply;
+    std::vector<class QAbstractButton*> myShotDrop;
+    class QWidget* myShotRows = nullptr;
+    class QLabel* myShotEmpty = nullptr;
     Aspect myAspect = Aspect::Free;
     Guides myGuides = Guides::Thirds;
     class QLabel* myExportNote = nullptr;
