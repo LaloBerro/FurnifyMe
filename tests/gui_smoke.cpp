@@ -908,6 +908,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-grain-runs-the-other-way-on-one-body", false, true },
     { "a-saved-shot-puts-the-picture-back", false, true },
     { "the-store-keeps-scenes-beside-the-furniture", false, true },
+    { "two-bodies-can-wear-two-different-woods", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
@@ -28141,6 +28142,133 @@ int main(int argc, char* argv[])
         check(store.listScenes().isEmpty(), "and is gone from the listing");
         check(store.listFurniture().size() == 1,
               "while the furniture beside it is untouched");
+    }
+
+
+    // --- two bodies can wear two different woods -----------------------------
+    //
+    // refreshWoodOverlays() already builds ONE overlay per body, each with its
+    // own material - it was simply handed the same one every time. A scene
+    // needs the table in its wood and the chairs in theirs, so a body may now
+    // carry its own, falling back to the single live material when it does
+    // not. The furniture editor sets none and is unchanged, which is the half
+    // this block checks second.
+    //
+    // The two bodies are FOUND rather than guessed at: each one's measured-box
+    // centre is projected to screen and sampled around, so a camera that
+    // frames the scene differently on another machine cannot make this probe
+    // read the backdrop and call it a wood.
+    if (blockEnabled("two-bodies-can-wear-two-different-woods")) {
+        RequiredTempDir woodLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, woodLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 700);
+        probe.show();
+        settle(300);
+        probe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+        OcctViewWidget* wview = probe.view();
+
+        check(buildBody(probe, 0.12, 0.35, 0.34, 0.62, 40.0), "the left body");
+        const int leftId = probe.document().solids().back().id;
+        check(buildBody(probe, 0.60, 0.35, 0.82, 0.62, 40.0), "the right body");
+        const int rightId = probe.document().solids().back().id;
+        check(leftId != rightId, "two distinct bodies");
+
+        trigger(probe, QStringLiteral("Fit All"));
+        settle(250);
+
+        QAction* renderAction = action(probe, QStringLiteral("Render mode"));
+        check(renderAction != nullptr, "there is a Render mode action");
+        if (renderAction) renderAction->trigger();
+        settle(500);
+
+        // Where each body actually IS on screen, from its own measured box
+        // rather than from the fractions it was sketched at - the camera has
+        // moved since.
+        const auto centreOf = [&probe, wview](int bodyId, QPoint& out) {
+            const ModelingOps::MeasuredBox box =
+                ModelingOps::measuredBox({probe.document().shapeOf(bodyId)});
+            if (!box.ok) return false;
+            return wview->projectToScreen(box.centre, out);
+        };
+        QPoint leftAt;
+        QPoint rightAt;
+        check(centreOf(leftId, leftAt) && centreOf(rightId, rightAt),
+              "both bodies project onto the viewport, so the samples below have "
+              "something to measure");
+
+        // Deliberately far apart, so a pixel from one cannot be mistaken for a
+        // pixel from the other at any blend.
+        OcctViewWidget::BodyWood dark;
+        dark.red = 0.18; dark.green = 0.10; dark.blue = 0.05; dark.brightness = 1.0;
+        OcctViewWidget::BodyWood pale;
+        pale.red = 0.92; pale.green = 0.88; pale.blue = 0.74; pale.brightness = 1.0;
+        wview->setBodyWood(leftId, dark);
+        wview->setBodyWood(rightId, pale);
+        check(wview->hasBodyWood(leftId) && wview->hasBodyWood(rightId),
+              "both bodies carry their own wood");
+        // TURNED ON HERE, deliberately. A window built with no persisted
+        // settings starts with wood off - which is not "no material", it is
+        // the plain body material - and a scene window will turn it on itself
+        // for the same reason this does: per-body wood is about WHICH wood,
+        // not about whether there is one.
+        wview->setRenderWood(true);
+        settle(300);
+        // THE PREMISE EVERY CHECK BELOW RESTS ON. With wood off there are no
+        // overlays at all, both bodies read the same ordinary body material,
+        // and the comparison below would pass or fail for a reason that has
+        // nothing to do with per-body wood.
+        check(wview->renderWood(),
+              "wood is on, so the two samples below are measuring woods at all");
+        settle(600);
+
+        const QString path = outDir + QStringLiteral("/two-woods.png");
+        check(wview->saveSnapshot(path), "a snapshot is taken");
+        const QImage shot(path);
+        check(!shot.isNull(), "and it loads back");
+
+        // A MEDIAN over a small box around the projected centre: this tier is
+        // path-traced and grainy, and a median does not care.
+        const auto medianAround = [](const QImage& image, const QPoint& at, int half) {
+            std::vector<int> levels;
+            for (int x = at.x() - half; x <= at.x() + half; ++x) {
+                for (int y = at.y() - half; y <= at.y() + half; ++y) {
+                    if (x < 0 || y < 0 || x >= image.width() || y >= image.height()) continue;
+                    levels.push_back(qGray(image.pixel(x, y)));
+                }
+            }
+            if (levels.empty()) return -1;
+            std::sort(levels.begin(), levels.end());
+            return levels[levels.size() / 2];
+        };
+        const int leftLevel = shot.isNull() ? -1 : medianAround(shot, leftAt, 12);
+        const int rightLevel = shot.isNull() ? -1 : medianAround(shot, rightAt, 12);
+        check(leftLevel >= 0 && rightLevel >= 0,
+              QStringLiteral("both bodies are in frame (%1, %2)").arg(leftLevel).arg(rightLevel));
+        check(rightLevel - leftLevel > 40,
+              QStringLiteral("and they render as two DIFFERENT woods - the pale one reads "
+                             "well above the dark one (%1 against %2)")
+                  .arg(rightLevel).arg(leftLevel));
+
+        // AND THE FALLBACK IS INTACT: with no per-body entry both go back to
+        // the single live material, which is what the furniture editor relies
+        // on and what this change must not have altered.
+        wview->clearBodyWood();
+        check(!wview->hasBodyWood(leftId) && !wview->hasBodyWood(rightId),
+              "the per-body woods are cleared");
+        settle(600);
+        const QString plainPath = outDir + QStringLiteral("/one-wood.png");
+        check(wview->saveSnapshot(plainPath), "a second snapshot is taken");
+        const QImage plain(plainPath);
+        const int plainLeft = plain.isNull() ? -1 : medianAround(plain, leftAt, 12);
+        const int plainRight = plain.isNull() ? -1 : medianAround(plain, rightAt, 12);
+        check(plainLeft >= 0 && plainRight >= 0 && std::abs(plainLeft - plainRight) < 25,
+              QStringLiteral("with no per-body wood set, both read the same single live "
+                             "material again (%1 against %2)")
+                  .arg(plainLeft).arg(plainRight));
+
+        probe.close();
     }
 
     // --- Milestone 5, item 10: Autosave modes and the two timed-save laws ----

@@ -1604,6 +1604,27 @@ public:
     void setBodyGrainAcross(const std::vector<int>& bodyIds);
     bool bodyGrainAcross(int bodyId) const;
 
+    // ONE BODY'S OWN WOOD. refreshWoodOverlays() already builds an overlay per
+    // body with its own material; this is where that material comes from when
+    // a body has one. A body with NO entry falls back to the single live
+    // material, so the furniture editor - which sets none - is unchanged.
+    //
+    // A scene is what needs this: the table renders in the wood it was saved
+    // with and the chairs in theirs. It is deliberately NOT generalised into
+    // per-body materials inside one furniture, which is a feature with its own
+    // assignment gesture and its own design round; nothing here forecloses it.
+    struct BodyWood {
+        double red = 0.70, green = 0.70, blue = 0.68;
+        double brightness = 1.0;
+        double surface = 0.45;     // 0..1, glossiness as the slider means it
+        double metal = 0.0;
+        double grainSize = 300.0;  // mm of real wood across one image tile
+        double grainAngle = 0.0;   // degrees
+    };
+    void setBodyWood(int bodyId, const BodyWood& wood);
+    void clearBodyWood();
+    bool hasBodyWood(int bodyId) const;
+
     void setRenderWoodAngleDeg(double degrees);
     double renderWoodAngleDeg() const { return myWoodAngleDeg; }
 
@@ -3113,6 +3134,7 @@ private:
     double myWoodTileMm = 300.0;
     double myWoodAngleDeg = 0.0;
     std::vector<int> myGrainAcross;
+    std::map<int, BodyWood> myBodyWood;
     QString myWoodTextureFile;
     Handle(Graphic3d_TextureMap) myWoodTexture;
     void ensureWoodTexture();

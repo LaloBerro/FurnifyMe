@@ -2119,6 +2119,19 @@ private:
     int myStartRenderQuality = 2;   // = RenderQuality::Deep
     bool myStartRenderCutout = false;
     int myStartRenderExportSize = 0;   // = ExportSize::Viewport
+    // FALSE here, and turned on by the settings-read path - which is every
+    // real run of the app, so a user always gets wood (Matte, Satin and Metal
+    // were removed and a wood is the only material left to choose).
+    //
+    // Raising this default to true was tried and REVERTED, with the reason
+    // worth keeping: wood off is not "no material", it is the plain body
+    // material, which renders perfectly well. What forcing it on does change
+    // is that the wood overlay ERASES each real body and displays an overlay
+    // in its place - so every probe built without settings would report zero
+    // bodies displayed, and a wood body casts a darker shadow than the plain
+    // one. Nineteen render-mode checks are calibrated against the plain
+    // material, and recalibrating them is its own piece of work rather than a
+    // side effect of something else.
     bool myStartRenderWood = false;
     QString myStartRenderWoodName;
     QString myStartRenderWoodPath;

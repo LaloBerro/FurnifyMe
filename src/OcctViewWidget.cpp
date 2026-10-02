@@ -5833,6 +5833,27 @@ bool OcctViewWidget::bodyGrainAcross(int bodyId) const
     return std::find(myGrainAcross.begin(), myGrainAcross.end(), bodyId) != myGrainAcross.end();
 }
 
+void OcctViewWidget::setBodyWood(int bodyId, const BodyWood& wood)
+{
+    myBodyWood[bodyId] = wood;
+    // The overlays carry the material, so they are what has to be rebuilt -
+    // and only while wood is actually on, which is the only time they exist.
+    // Outside render mode this is a stored answer and nothing else.
+    if (!myWoodOverlays.empty()) applyWoodTexture(true);
+}
+
+void OcctViewWidget::clearBodyWood()
+{
+    if (myBodyWood.empty()) return;
+    myBodyWood.clear();
+    if (!myWoodOverlays.empty()) applyWoodTexture(true);
+}
+
+bool OcctViewWidget::hasBodyWood(int bodyId) const
+{
+    return myBodyWood.find(bodyId) != myBodyWood.end();
+}
+
 void OcctViewWidget::applyWoodTexture(bool on)
 {
     // Kept as the one switchboard the material appliers call; the actual
@@ -5873,14 +5894,43 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
         Handle(WoodBodyObject) overlay = new WoodBodyObject();
         overlay->shape = entry.second->Shape();
         overlay->texture = myWoodTexture;
-        overlay->material = material;
-        overlay->tileMm = std::max(10.0, myWoodTileMm);
-        // A QUARTER TURN for a body the user has flipped. Added to the
-        // material's own angle rather than replacing it, so turning the
-        // whole run still turns both: "across" means across THIS wood, not
-        // across the world.
-        overlay->angleDeg =
-            myWoodAngleDeg + (bodyGrainAcross(entry.first) ? 90.0 : 0.0);
+        // THIS BODY'S OWN WOOD when it has one, the single live material when
+        // it does not. The fallback is what keeps the furniture editor
+        // identical: it sets no entries at all, so every body takes the
+        // `material` the caller derived, exactly as before.
+        //
+        // A QUARTER TURN for a body the user has flipped, added to whichever
+        // grain angle applies rather than replacing it, so turning the whole
+        // run still turns both: "across" means across THIS wood, not across
+        // the world.
+        const double across = bodyGrainAcross(entry.first) ? 90.0 : 0.0;
+        const auto own = myBodyWood.find(entry.first);
+        if (own == myBodyWood.end()) {
+            overlay->material = material;
+            overlay->tileMm = std::max(10.0, myWoodTileMm);
+            overlay->angleDeg = myWoodAngleDeg + across;
+        } else {
+            const BodyWood& wood = own->second;
+            Graphic3d_MaterialAspect mine(Graphic3d_NameOfMaterial_UserDefined);
+            mine.SetColor(Quantity_Color(wood.red * wood.brightness,
+                                         wood.green * wood.brightness,
+                                         wood.blue * wood.brightness, Quantity_TOC_sRGB));
+            Graphic3d_PBRMaterial pbr;
+            pbr.SetColor(mine.Color());
+            pbr.SetMetallic(static_cast<float>(wood.metal));
+            pbr.SetRoughness(static_cast<float>(1.0 - wood.surface));
+            mine.SetPBRMaterial(pbr);
+            // The BSDF beside the PBR material, never instead of it:
+            // SetPBRMaterial() is an inline that writes myPBRMaterial and
+            // nothing else, and the BSDF is the ONLY description OCCT's path
+            // tracer integrates - without this line the body renders black on
+            // the top tier (CLAUDE.md's Pitfalls, which this cost three fix
+            // rounds to learn once already).
+            mine.SetBSDF(Graphic3d_BSDF::CreateMetallicRoughness(pbr));
+            overlay->material = mine;
+            overlay->tileMm = std::max(10.0, wood.grainSize);
+            overlay->angleDeg = wood.grainAngle + across;
+        }
         myContext->Display(overlay, 0, -1, Standard_False);   // never pickable
 
         // The real presentation steps aside - two shaded meshes at one
