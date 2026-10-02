@@ -1,6 +1,7 @@
 #include "EditorSelectorHandoff.h"
 
 #include "MainWindow.h"
+#include "ui/SceneWindow.h"
 #include "SelectorWindow.h"
 
 #include <QCoreApplication>
@@ -8,7 +9,8 @@
 
 namespace EditorSelectorHandoff {
 
-void wire(MainWindow& window, SelectorWindow& selector, Hooks hooks)
+void wire(MainWindow& window, SelectorWindow& selector, SceneWindow* scene,
+          Hooks hooks)
 {
     if (!hooks.quit) hooks.quit = [] { QCoreApplication::quit(); };
 
@@ -65,6 +67,39 @@ void wire(MainWindow& window, SelectorWindow& selector, Hooks hooks)
     // ("dont show project selector when app closes") - MainWindow emits
     // quitRequested() only once its close-time save has succeeded, so a
     // refused save never reaches the hook.
+    // Leg three, the scene editor - the same two directions and the same
+    // show-the-target-first law, written here beside the other two rather
+    // than anywhere else, because a leg wired somewhere else is a leg free
+    // to get that order wrong on its own.
+    if (scene) {
+        QObject::connect(&selector, &SelectorWindow::sceneChosen, scene,
+                         [scene, &selector, hooks](const QString& id) {
+                             scene->show();
+                             scene->raise();
+                             if (hooks.onOpenSceneMidpoint) hooks.onOpenSceneMidpoint();
+                             selector.hide();
+                             // After the midpoint and after the window is
+                             // genuinely on screen, for the same reason the
+                             // editor leg loads its furniture last: the
+                             // viewer attaches on a real first show.
+                             scene->openScene(id);
+                         });
+
+        QObject::connect(scene, &SceneWindow::closeRequested, &selector,
+                         [scene, &selector, hooks] {
+                             selector.refresh();
+                             selector.show();
+                             selector.raise();
+                             if (hooks.onReturnSceneMidpoint) hooks.onReturnSceneMidpoint();
+                             scene->hide();
+                         });
+
+        // And the scene window's own X quits, exactly as the editor's does
+        // since Milestone 5 - it is not a third route back to the library.
+        QObject::connect(scene, &SceneWindow::quitRequested, &selector,
+                         [hooks] { hooks.quit(); });
+    }
+
     QObject::connect(&selector, &SelectorWindow::closing, &window,
                      [hooks] { hooks.quit(); });
     QObject::connect(&window, &MainWindow::quitRequested, &selector,

@@ -1424,7 +1424,11 @@ SelectorWindow* wireSelector(MainWindow& window, EditorSelectorHandoff::Hooks ho
     // but "harmless" is not a contract - the suite substitutes a no-op so no
     // probe can ever reach Qt's actual quit machinery by closing a window.
     if (!hooks.quit) hooks.quit = [] {};
-    EditorSelectorHandoff::wire(window, *selector, std::move(hooks));
+    // Explicitly NO scene window: these probes test the editor pair, and a
+    // SceneWindow each would stand up thirteen more GL contexts for a leg
+    // none of them drives. The handoff block below passes a real one and is
+    // where all three legs are pinned.
+    EditorSelectorHandoff::wire(window, *selector, nullptr, std::move(hooks));
     QObject::connect(&window, &QObject::destroyed, selector, [selector] { delete selector; });
 
     selector->show();
@@ -3687,7 +3691,29 @@ int main(int argc, char* argv[])
                 handoffWindow.isVisible() && handoffSelector->isVisible();
         };
         handoffHooks.quit = [&quitHookCalls] { ++quitHookCalls; };
-        EditorSelectorHandoff::wire(handoffWindow, *handoffSelector, handoffHooks);
+
+        // THE THIRD WINDOW, in the same one call. A scene is not wired by a
+        // second entry point: the whole reason this file exists is that one
+        // function owns every leg, so a leg added anywhere else is a leg
+        // free to get its show-before-hide order wrong.
+        auto* handoffScene = new SceneWindow(&handoffWindow.furnitureStore());
+        handoffScene->setAttribute(Qt::WA_ShowWithoutActivating);
+        bool openSceneMidpointBothVisible = false;
+        bool returnSceneMidpointBothVisible = false;
+        handoffHooks.onOpenSceneMidpoint = [handoffScene, handoffSelector,
+                                            &openSceneMidpointBothVisible] {
+            openSceneMidpointBothVisible =
+                handoffScene->isVisible() && handoffSelector->isVisible();
+        };
+        handoffHooks.onReturnSceneMidpoint = [handoffScene, handoffSelector,
+                                              &returnSceneMidpointBothVisible] {
+            returnSceneMidpointBothVisible =
+                handoffScene->isVisible() && handoffSelector->isVisible();
+        };
+        EditorSelectorHandoff::wire(handoffWindow, *handoffSelector, handoffScene,
+                                    handoffHooks);
+        QObject::connect(&handoffWindow, &QObject::destroyed, handoffScene,
+                         [handoffScene] { delete handoffScene; });
         QObject::connect(&handoffWindow, &QObject::destroyed, handoffSelector,
                          [handoffSelector] { delete handoffSelector; });
 
@@ -3818,15 +3844,85 @@ int main(int argc, char* argv[])
               "the selector's own refresh (on returnedToSelector()) lists the furniture "
               "the native X saved and the menu route closed");
 
+        // --- handoff, leg three: a scene card opens the SCENE window ----------
+        // Same law as the other two, which is the point of putting it here
+        // rather than in a block of its own: the target is shown FIRST and
+        // the source hidden SECOND, instrumented at the midpoint inside the
+        // wiring, so a future ordering mistake in this leg reads as the same
+        // quit trap the file's own comment is about.
+        const QString handoffSceneId =
+            handoffWindow.furnitureStore().createScene(QStringLiteral("Dining set"));
+        check(!handoffSceneId.isEmpty(), "a scene exists in the same library");
+        handoffSelector->refresh();
+        settle(150);
+        check(handoffSelector->sceneCount() == 1,
+              QStringLiteral("the selector lists it (%1 scene card)")
+                  .arg(handoffSelector->sceneCount()));
+
+        QWidget* handoffSceneCard = handoffSelector->sceneCardAt(0);
+        check(handoffSceneCard != nullptr, "...and that card is reachable");
+        if (handoffSceneCard) {
+            // The press has to land on whatever is actually under the card's
+            // centre, not on the cell: a selector card's activation comes
+            // from its nested thumbnail, so a press sent at the cell reaches
+            // nothing at all. Finding the child IS half this check.
+            const QPoint handoffSceneCentre =
+                handoffSceneCard->rect().center();
+            QWidget* handoffSceneHit = handoffSceneCard->childAt(handoffSceneCentre);
+            check(handoffSceneHit != nullptr,
+                  "...and something under its centre takes a press");
+            if (handoffSceneHit) {
+                clickAt(handoffSceneHit,
+                        QPointF(handoffSceneHit->width() / 2.0,
+                                handoffSceneHit->height() / 2.0));
+                settle(300);
+            }
+        }
+        check(handoffScene->isVisible(), "choosing a scene shows the scene window");
+        check(!handoffSelector->isVisible(), "...and hides the selector");
+        check(openSceneMidpointBothVisible,
+              "...and at the instrumented midpoint BOTH were visible at once - the "
+              "scene window was shown before the selector was hidden, the same law "
+              "the other two legs keep");
+        check(handoffScene->sceneId() == handoffSceneId,
+              "...with that scene actually loaded into it");
+        check(!handoffWindow.isVisible(),
+              "...and the editor stayed out of it - a scene is not opened in the editor");
+
+        // --- leg three, the way back: File -> Close scene ---------------------
+        QAction* handoffCloseScene = nullptr;
+        for (QAction* candidate : handoffScene->findChildren<QAction*>()) {
+            if (candidate->text().remove(QLatin1Char('&')) == QStringLiteral("Close scene"))
+                handoffCloseScene = candidate;
+        }
+        check(handoffCloseScene != nullptr, "the scene window offers Close scene");
+        if (handoffCloseScene) handoffCloseScene->trigger();
+        settle(250);
+        check(handoffSelector->isVisible(), "...which brings the selector back");
+        check(!handoffScene->isVisible(), "...and hides the scene window");
+        check(returnSceneMidpointBothVisible,
+              "...in that order too, instrumented at the midpoint - never a moment "
+              "where neither window was visible");
+        check(quitHookCalls == 1,
+              "and neither direction of the scene leg asked for a quit - the three "
+              "handoff legs and the quit gestures stay distinct");
+
+        // --- the scene window's own X is a quit, like the editor's ------------
+        handoffScene->close();
+        settle(150);
+        check(quitHookCalls == 2,
+              "closing the scene window requests QUIT through the same one hook - it "
+              "is not a third route back to the library");
+
         // --- the selector's own close is still the other quit gesture --------
         // With quitOnLastWindowClosed() disabled (main.cpp), NOTHING hides
         // the app by accident - quitting is these two explicit wires and no
         // more.
         handoffSelector->close();
         settle(120);
-        check(quitHookCalls == 2,
-              "closing the selector runs the app's own quit hook too - the other of "
-              "the two deliberate quit gestures this model has");
+        check(quitHookCalls == 3,
+              "closing the selector runs the app's own quit hook too - one of the "
+              "three deliberate quit gestures this model now has");
 
         check(handoffWindow.findChild<QDialog*>() == nullptr,
               "none of the handoff - boot, open, the native X - ever opened a QDialog");

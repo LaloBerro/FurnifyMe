@@ -2,6 +2,7 @@
 #include "IconSet.h"
 #include "MainWindow.h"
 #include "OcctViewWidget.h"
+#include "SceneWindow.h"
 #include "SelectorWindow.h"
 #include "Theme.h"
 
@@ -79,6 +80,10 @@ int main(int argc, char* argv[])
     // once already).
     MainWindow window;
     SelectorWindow selector(window.furnitureStore());
+    // The third window, constructed here and never shown until a scene card
+    // is chosen - the same contract the editor keeps above, and for the same
+    // lazy-initializeViewer() reason.
+    SceneWindow sceneWindow(&window.furnitureStore());
 
     // The whole handoff - both directions, and the selector's own close -
     // is ONE shared implementation (EditorSelectorHandoff::wire()), also
@@ -86,7 +91,7 @@ int main(int argc, char* argv[])
     // exactly what ships rather than a close cousin of it. See that
     // function's own comments for what each leg does and why the ORDER
     // (show the target, then hide the source) is load-bearing.
-    EditorSelectorHandoff::wire(window, selector);
+    EditorSelectorHandoff::wire(window, selector, &sceneWindow);
 
     // The shell's entrance, triggered HERE and nowhere else. The editor window
     // is shown by the handoff above, which gui_smoke drives verbatim - so an

@@ -42,6 +42,7 @@
 #include <functional>
 
 class MainWindow;
+class SceneWindow;
 class SelectorWindow;
 
 namespace EditorSelectorHandoff {
@@ -54,6 +55,13 @@ struct Hooks {
     // (main.cpp) never sets these.
     std::function<void()> onOpenMidpoint;     // editor shown, selector not yet hidden
     std::function<void()> onReturnMidpoint;   // selector shown, editor not yet hidden
+    // The scene leg's own two, for the same reason and read at the same two
+    // instants. They are SEPARATE from the pair above rather than shared
+    // with it: a test that could not tell which leg fired a midpoint could
+    // not tell a correctly ordered scene leg from an unordered one that
+    // happened to run while the editor leg was being exercised.
+    std::function<void()> onOpenSceneMidpoint;    // scene shown, selector not yet hidden
+    std::function<void()> onReturnSceneMidpoint;  // selector shown, scene not yet hidden
 
     // What runs on either quit gesture (the selector's close, the editor's
     // quit request) - the one quit
@@ -70,7 +78,9 @@ struct Hooks {
 // Wires `window` and `selector` together exactly as the real app's boot
 // does: choosing a card shows the editor then hides the selector; the
 // editor handing back (File -> Close furniture) shows the selector then
-// hides the editor; closing the selector or the editor runs `hooks.quit`. Every connection uses `window`/`selector` as
+// hides the editor; choosing a scene card shows the scene window then hides
+// the selector, and File -> Close scene reverses it; closing the selector,
+// the editor or the scene window runs `hooks.quit`. Every connection uses `window`/`selector` as
 // its own context object, so the wiring tears down on its own if either is
 // destroyed - nothing here retains a pointer beyond the call itself.
 //
@@ -79,6 +89,16 @@ struct Hooks {
 // wire() only ever connects signals, it never shows or constructs anything
 // itself, so it carries no opinion about boot order beyond the handoff's
 // own two legs.
-void wire(MainWindow& window, SelectorWindow& selector, Hooks hooks = Hooks());
+// `scene` may be null, and the scene leg is then simply not wired. That is
+// for the suite, not for production: thirteen of this suite's probes reach
+// wire() through one wireSelector() helper to test the EDITOR pair, and
+// giving each of them a SceneWindow would stand up thirteen more
+// OcctViewWidgets - thirteen more GL contexts - to exercise a leg none of
+// them touches. main.cpp passes a real one, and so does the suite's own
+// handoff block, which is where all three legs are pinned. Null is spelled
+// out at the call site that means it rather than defaulted, so a caller
+// cannot omit the scene window by simply not knowing about it.
+void wire(MainWindow& window, SelectorWindow& selector, SceneWindow* scene,
+          Hooks hooks = Hooks());
 
 }  // namespace EditorSelectorHandoff
