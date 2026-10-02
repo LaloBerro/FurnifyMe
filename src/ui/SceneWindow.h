@@ -46,6 +46,14 @@ class SceneWindow : public QMainWindow {
     Q_OBJECT
 
 public:
+    // THE TWO TOOLS, and there is deliberately no third. The user's fork was
+    // "full move and rotate, and snapping" - Scale is not in it, and a scene
+    // is where its absence matters most: a chair scaled to 1.4x is not a
+    // chair any more, it is a drawing of one. A furniture is resized by
+    // Re-measure, in the editor, where a size means something. So there is no
+    // Tool::Scale, no action, no chip and no renderer - absent, not disabled.
+    enum class Tool { Move, Rotate };
+
     explicit SceneWindow(FurnitureStore* store, QWidget* parent = nullptr);
 
     // Loads `id` from the store and shows it. False - with a failure reported
@@ -66,6 +74,17 @@ public:
     bool renamePiece(int pieceId, const QString& name);
     // The scene-local body ids this piece put in the viewport, in order.
     std::vector<int> bodyIdsForPiece(int pieceId) const;
+    // This piece's shapes WHERE THEY STAND - its saved geometry with its
+    // placement applied. Built on demand rather than kept: it is wanted when
+    // something is measured, which is on a commit, not on every drag step.
+    std::vector<TopoDS_Shape> placedShapesForPiece(int pieceId) const;
+
+    void setTool(Tool tool);
+    Tool tool() const { return myTool; }
+    // Which piece is selected, derived from the live selection rather than
+    // remembered - so a selection cleared anywhere answers 0 with nothing to
+    // keep in step. Clicking ANY body of a piece selects the whole piece.
+    int selectedPieceId() const { return mySelectedPiece; }
 
     OcctViewWidget* view() const { return myView; }
     RenderStudio* studio() const { return myStudio; }
@@ -98,6 +117,21 @@ private:
     // was about a DUPLICATE of one body, where the copy's own position is the
     // thing the user is about to set.
     gp_Trsf placementForNewPiece(const DocumentModel& furniture) const;
+    // Pushes a piece's placement onto every body it owns. The ONE place a
+    // placement reaches the screen.
+    void applyPlacement(int pieceId, const gp_Trsf& placement);
+    // Drops `placement` so the piece's lowest point sits on Z = 0, measured
+    // from its own MEASURED BOX rather than a world bounding box - a piece
+    // turned on the floor has a world box taller than the furniture is, and
+    // settling against that would leave it hovering.
+    gp_Trsf settledOnFloor(int pieceId, const gp_Trsf& placement) const;
+    // Selection -> piece -> gizmo, derived on every selection change.
+    void refreshSelection();
+    void showToolGizmo();
+    // One end for both gestures: settle on the floor, re-stand the gizmo, push
+    // the surfaces. `dragged` false means the press never moved, which is a
+    // pick rather than a placement.
+    void commitDrag(bool dragged);
     // Pushes live state onto every surface that follows it. This window's own
     // appStateChanged, under a plainer name because there is far less of it.
     void refreshSurfaces();
@@ -115,6 +149,18 @@ private:
     QAction* myRenderModeAction = nullptr;
     QAction* myCloseSceneAction = nullptr;
     QAction* myNewPieceAction = nullptr;
+    QAction* mySnapAction = nullptr;
+    Tool myTool = Tool::Move;
+    int mySelectedPiece = 0;
+    // Guards the selection handler against the selection IT sets: picking one
+    // body of a piece selects all of them, which emits selectionChanged()
+    // again. The no-reentry discipline this app keeps everywhere.
+    bool myApplyingSelection = false;
+    // The placement a live drag started from. Frozen at the press, because
+    // every delta the gizmo reports is measured from where the gesture began -
+    // the custom gizmo's own rule.
+    gp_Trsf myDragBase;
+    bool myDragging = false;
     AddPieceCard* myAddPiece = nullptr;
     ToastHost* myToasts = nullptr;
 

@@ -3414,6 +3414,19 @@ bool OcctViewWidget::solidPresentationTransform(int id, gp_Trsf& out) const
     return true;
 }
 
+void OcctViewWidget::setSolidPlacement(int id, const gp_Trsf& placement)
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || it->second.IsNull()) return;
+    if (myContext.IsNull()) return;
+    it->second->SetLocalTransformation(placement);
+    // Recompute the selection geometry too: a placed body has to be pickable
+    // where it now STANDS, not where its shape was built.
+    myContext->Update(it->second, false);
+    myContext->RecomputeSelectionOnly(it->second);
+    scheduleRedraw();
+}
+
 void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
 {
     initializeViewer();

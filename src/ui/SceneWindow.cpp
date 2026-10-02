@@ -5,6 +5,7 @@
 #include "FurnitureStore.h"
 #include "OcctViewWidget.h"
 #include "RenderStudio.h"
+#include "ModelingOps.h"
 #include "ScenePiecesPanel.h"
 #include "Theme.h"
 #include "Toast.h"
@@ -25,6 +26,10 @@ namespace {
 // width of real furniture - enough that the two read as separate objects at
 // the framing a scene opens on.
 constexpr double kNewPieceGapMm = 120.0;
+// The grid a moved piece lands on, and the editor's own step for the same
+// gesture - a scene that snapped to a different number from the furniture
+// inside it would make an aligned cabinet unalignable.
+constexpr double kSnapStepMm = 10.0;
 }  // namespace
 
 SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
@@ -37,6 +42,55 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
 
     buildMenus();
     buildOverlay();
+
+    // WHOLE BODIES, never faces or edges. The editor's auto selection exists
+    // so a click can take the face or the edge a modelling gesture needs;
+    // there is no gesture in a scene that wants either, and leaving it on
+    // would arbitrate between candidates no tool here can use.
+    myView->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+    myView->setSnap(true, kSnapStepMm);
+
+    connect(myView, &OcctViewWidget::selectionChanged, this, [this] { refreshSelection(); });
+
+    // The gizmos are the viewport's own, and so is their snapping - a distance
+    // arrives already rounded when Snap to Grid is on. What this window adds
+    // is which piece the delta belongs to.
+    connect(myView, &OcctViewWidget::moveDragged, this, [this](int axis, double distance) {
+        if (mySelectedPiece == 0 || axis < 0 || axis > 2) return;
+        if (!myDragging) {
+            const SceneModel::Piece* piece = myScene.piece(mySelectedPiece);
+            if (!piece) return;
+            myDragBase = piece->placement;
+            myDragging = true;
+        }
+        gp_Vec along(axis == 0 ? 1.0 : 0.0, axis == 1 ? 1.0 : 0.0, axis == 2 ? 1.0 : 0.0);
+        gp_Trsf step;
+        step.SetTranslation(along * distance);
+        applyPlacement(mySelectedPiece, step.Multiplied(myDragBase));
+    });
+    connect(myView, &OcctViewWidget::moveReleased, this, [this](bool dragged) {
+        commitDrag(dragged);
+    });
+    connect(myView, &OcctViewWidget::rotateDragged, this, [this](int axis, double degrees) {
+        if (mySelectedPiece == 0 || axis < 0 || axis > 2) return;
+        if (!myDragging) {
+            const SceneModel::Piece* piece = myScene.piece(mySelectedPiece);
+            if (!piece) return;
+            myDragBase = piece->placement;
+            myDragging = true;
+        }
+        // About the piece's own pivot, never the world origin: a turn about a
+        // point the piece is not standing on is a move as well as a turn.
+        const gp_Pnt pivot = myView->moveGizmoPivot();
+        const gp_Dir dir(axis == 0 ? 1.0 : 0.0, axis == 1 ? 1.0 : 0.0, axis == 2 ? 1.0 : 0.0);
+        gp_Trsf turn;
+        turn.SetRotation(gp_Ax1(pivot, dir), degrees * M_PI / 180.0);
+        applyPlacement(mySelectedPiece, turn.Multiplied(myDragBase));
+    });
+    connect(myView, &OcctViewWidget::rotateReleased, this, [this](bool dragged) {
+        commitDrag(dragged);
+    });
+
     refreshSurfaces();
 }
 
@@ -73,6 +127,19 @@ void SceneWindow::buildMenus()
         refreshSurfaces();
     });
     view->addAction(myRenderModeAction);
+
+    // Snapping is the user's fork too ("full move and rotate, and snapping"),
+    // and it is ON by default here where it is off-by-default in the editor:
+    // arranging furniture against a grid is the whole gesture, while modelling
+    // a profile freehand is ordinary.
+    mySnapAction = new QAction(tr("Snap to Grid"), this);
+    mySnapAction->setCheckable(true);
+    mySnapAction->setChecked(true);
+    mySnapAction->setToolTip(tr("Land a moved piece on a whole step"));
+    connect(mySnapAction, &QAction::toggled, this, [this](bool on) {
+        if (myView) myView->setSnap(on, kSnapStepMm);
+    });
+    view->addAction(mySnapAction);
 }
 
 void SceneWindow::buildOverlay()
@@ -202,12 +269,12 @@ void SceneWindow::displayPiece(int pieceId, const DocumentModel& furniture,
     for (const DocumentModel::Solid& solid : furniture.solids()) {
         if (solid.shape.IsNull()) continue;
         const int bodyId = myNextBodyId++;
-        TopoDS_Shape placed = solid.shape;
-        if (placement.Form() != gp_Identity) {
-            BRepBuilderAPI_Transform move(solid.shape, placement, true);
-            if (move.IsDone()) placed = move.Shape();
-        }
-        myView->displaySolid(bodyId, placed);
+        // Displayed AS SAVED and then PLACED, never rebuilt somewhere else:
+        // the placement is a presentation transform here (see
+        // OcctViewWidget::setSolidPlacement), so the shape this window holds
+        // stays the furniture's own and a drag costs no tessellation.
+        myView->displaySolid(bodyId, solid.shape);
+        myView->setSolidPlacement(bodyId, placement);
 
         OcctViewWidget::BodyWood wood;
         wood.red = look.red;
@@ -278,9 +345,15 @@ bool SceneWindow::addPiece(const QString& furnitureId)
         return false;
     }
 
-    const gp_Trsf placement = placementForNewPiece(furniture);
+    gp_Trsf placement = placementForNewPiece(furniture);
     myScene.setPlacement(pieceId, placement);
     displayPiece(pieceId, furniture, placement);
+    // ON THE FLOOR from the moment it arrives, not only after it is dragged. A
+    // furniture modelled 500 mm above its own origin would otherwise come into
+    // the scene hovering, and the user would have to discover that the fix is
+    // to drag it and let go.
+    placement = settledOnFloor(pieceId, placement);
+    applyPlacement(pieceId, placement);
     refreshSurfaces();
     return true;
 }
@@ -296,6 +369,148 @@ std::vector<int> SceneWindow::bodyIdsForPiece(int pieceId) const
 {
     const auto at = myPieceBodies.find(pieceId);
     return at == myPieceBodies.end() ? std::vector<int>() : at->second;
+}
+
+void SceneWindow::applyPlacement(int pieceId, const gp_Trsf& placement)
+{
+    myScene.setPlacement(pieceId, placement);
+    if (!myView) return;
+    for (int bodyId : bodyIdsForPiece(pieceId)) myView->setSolidPlacement(bodyId, placement);
+}
+
+std::vector<TopoDS_Shape> SceneWindow::placedShapesForPiece(int pieceId) const
+{
+    std::vector<TopoDS_Shape> out;
+    const auto at = myPieceShapes.find(pieceId);
+    if (at == myPieceShapes.end()) return out;
+    const SceneModel::Piece* piece = myScene.piece(pieceId);
+    const gp_Trsf placement = piece ? piece->placement : gp_Trsf();
+    for (const TopoDS_Shape& shape : at->second) {
+        if (shape.IsNull()) continue;
+        if (placement.Form() == gp_Identity) {
+            out.push_back(shape);
+            continue;
+        }
+        BRepBuilderAPI_Transform move(shape, placement, true);
+        out.push_back(move.IsDone() ? move.Shape() : shape);
+    }
+    return out;
+}
+
+gp_Trsf SceneWindow::settledOnFloor(int pieceId, const gp_Trsf& placement) const
+{
+    const auto at = myPieceShapes.find(pieceId);
+    if (at == myPieceShapes.end() || at->second.empty()) return placement;
+
+    std::vector<TopoDS_Shape> placed;
+    for (const TopoDS_Shape& shape : at->second) {
+        if (shape.IsNull()) continue;
+        if (placement.Form() == gp_Identity) {
+            placed.push_back(shape);
+            continue;
+        }
+        BRepBuilderAPI_Transform move(shape, placement, true);
+        placed.push_back(move.IsDone() ? move.Shape() : shape);
+    }
+    if (placed.empty()) return placement;
+
+    // ITS OWN MEASURED BOX, not a world bounding box - the oriented box is
+    // what "along its own sides" means everywhere else in this app, and a
+    // piece turned on the floor has a world box taller than it is.
+    const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(placed);
+    if (!box.ok) return placement;
+    double lowest = 0.0;
+    bool first = true;
+    for (int w = -1; w <= 1; w += 2) {
+        for (int d = -1; d <= 1; d += 2) {
+            for (int h = -1; h <= 1; h += 2) {
+                const double z = box.corner(w, d, h).Z();
+                lowest = first ? z : std::min(lowest, z);
+                first = false;
+            }
+        }
+    }
+    if (std::fabs(lowest) < 1.0e-9) return placement;
+
+    gp_Trsf drop;
+    drop.SetTranslation(gp_Vec(0.0, 0.0, -lowest));
+    return drop.Multiplied(placement);
+}
+
+void SceneWindow::commitDrag(bool dragged)
+{
+    myDragging = false;
+    if (!dragged || mySelectedPiece == 0) {
+        refreshSurfaces();
+        return;
+    }
+    const SceneModel::Piece* piece = myScene.piece(mySelectedPiece);
+    if (!piece) return;
+    // Settled on the way OUT of the gesture, not on every step: a piece that
+    // climbed back to the floor mid-drag would fight the hand moving it.
+    applyPlacement(mySelectedPiece, settledOnFloor(mySelectedPiece, piece->placement));
+    showToolGizmo();
+    refreshSurfaces();
+}
+
+void SceneWindow::refreshSelection()
+{
+    if (myApplyingSelection || !myView) return;
+
+    int piece = 0;
+    for (int bodyId : myView->selectedSolidIds()) {
+        const auto at = myBodyPiece.find(bodyId);
+        if (at == myBodyPiece.end()) continue;
+        // A selection spanning two pieces is not one piece, and there is no
+        // gesture here that acts on two.
+        if (piece != 0 && piece != at->second) { piece = 0; break; }
+        piece = at->second;
+    }
+
+    mySelectedPiece = piece;
+    if (piece != 0) {
+        // CLICKING ANY BODY SELECTS THE WHOLE PIECE. Guarded, because this
+        // very assignment re-emits selectionChanged().
+        const std::vector<int> bodies = bodyIdsForPiece(piece);
+        if (bodies != myView->selectedSolidIds()) {
+            myApplyingSelection = true;
+            myView->setSelectedSolids(bodies);
+            myApplyingSelection = false;
+        }
+    }
+
+    showToolGizmo();
+    if (myPieces) myPieces->setSelected(piece);
+    refreshSurfaces();
+}
+
+void SceneWindow::showToolGizmo()
+{
+    if (!myView) return;
+    const bool renderMode = myStudio && myStudio->isEnabled();
+    if (mySelectedPiece == 0 || renderMode) {
+        myView->clearBodyGizmos();
+        return;
+    }
+    const std::vector<TopoDS_Shape> placed = placedShapesForPiece(mySelectedPiece);
+    if (placed.empty()) {
+        myView->clearBodyGizmos();
+        return;
+    }
+    const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(placed);
+    const gp_Pnt pivot = box.ok ? box.centre : gp_Pnt(0.0, 0.0, 0.0);
+    // Move or Rotate, and NEVER showScaleGizmo() - there is no Tool that
+    // reaches it, which is the point rather than an omission.
+    if (myTool == Tool::Rotate) myView->showRotateGizmo(pivot);
+    else myView->showMoveGizmo(pivot);
+}
+
+void SceneWindow::setTool(Tool tool)
+{
+    if (myTool == tool) return;
+    myTool = tool;
+    showToolGizmo();
+    refreshSurfaces();
 }
 
 void SceneWindow::refreshSurfaces()

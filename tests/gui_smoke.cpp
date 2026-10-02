@@ -28737,6 +28737,282 @@ int main(int argc, char* argv[])
                   .arg(pieceBanned.isEmpty() ? QStringLiteral("all clean")
                                              : pieceBanned.join(", ")));
 
+
+        // --- Move and Rotate, and the absence of Scale ------------------------
+        // The user's own fork, in their words: "full move and rotate, and
+        // snapping". Scale is not in it, and a scene is where that matters
+        // most - a chair scaled to 1.4x is not a chair any more, it is a
+        // drawing of one. So it is ABSENT rather than disabled.
+        QStringList scaleOffered;
+        for (QAction* candidate : scene.findChildren<QAction*>()) {
+            const QString text = candidate->text().remove(QLatin1Char('&'));
+            if (text.contains(QStringLiteral("Scale"), Qt::CaseInsensitive))
+                scaleOffered << text;
+        }
+        check(scaleOffered.isEmpty(),
+              QStringLiteral("a scene offers no Scale action at all (%1)")
+                  .arg(scaleOffered.isEmpty() ? QStringLiteral("none")
+                                              : scaleOffered.join(", ")));
+
+        // --- clicking ONE body selects the whole PIECE ------------------------
+        // A furniture of TWO bodies, deliberately: every piece above has one,
+        // and against a one-body piece "selecting a body selects the piece" is
+        // satisfied by doing nothing at all. This is the check that has
+        // somewhere to fail.
+        const QString shelfId = winStore.createFurniture(QStringLiteral("Shelf"));
+        {
+            DocumentModel doc;
+            doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 300.0, 18.0).Shape());
+            doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 200.0), 400.0, 300.0, 18.0).Shape());
+            check(!shelfId.isEmpty() && winStore.saveFurniture(shelfId, doc, QImage()),
+                  "a furniture of two bodies is saved");
+        }
+        check(scene.addPiece(shelfId), "...and goes into the scene");
+        settle(200);
+        const int shelfPieceId = scene.scene().pieces().back().id;
+        const std::vector<int> shelfBodies = scene.bodyIdsForPiece(shelfPieceId);
+        check(shelfBodies.size() == 2,
+              QStringLiteral("it put TWO bodies in the viewport (%1)")
+                  .arg(static_cast<int>(shelfBodies.size())));
+        if (shelfBodies.size() == 2) {
+            scene.view()->setSelectedSolids({ shelfBodies.front() });
+            settle(200);
+            check(scene.selectedPieceId() == shelfPieceId,
+                  "selecting ONE of its two bodies selects the piece");
+            std::vector<int> nowSelected = scene.view()->selectedSolidIds();
+            std::sort(nowSelected.begin(), nowSelected.end());
+            std::vector<int> wanted = shelfBodies;
+            std::sort(wanted.begin(), wanted.end());
+            check(nowSelected == wanted,
+                  QStringLiteral("...and BOTH of its bodies end up selected, not just the "
+                                 "one clicked (%1 of 2)")
+                      .arg(static_cast<int>(nowSelected.size())));
+        }
+
+        // --- a piece modelled well off its own origin still lands on the floor
+        // THE CHECK THAT HAS SOMEWHERE TO FAIL. Every piece above is modelled
+        // at Z = 0, so the floor rule is satisfied there by doing nothing at
+        // all - a mutation deleting the settle reddened nothing until this
+        // furniture existed. This one is drawn 500 mm up.
+        const QString highId = winStore.createFurniture(QStringLiteral("High cabinet"));
+        {
+            DocumentModel doc;
+            doc.addSolid(
+                BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 500.0), 300.0, 200.0, 18.0).Shape());
+            check(!highId.isEmpty() && winStore.saveFurniture(highId, doc, QImage()),
+                  "a furniture modelled 500 mm above its own origin is saved");
+        }
+        check(scene.addPiece(highId), "...and goes into the scene");
+        settle(200);
+        const int highPieceId = scene.scene().pieces().back().id;
+        {
+            const std::vector<TopoDS_Shape> shapes = scene.placedShapesForPiece(highPieceId);
+            const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(shapes);
+            double lowest = 9e9;
+            if (box.ok) {
+                for (int w = -1; w <= 1; w += 2)
+                    for (int d = -1; d <= 1; d += 2)
+                        for (int h = -1; h <= 1; h += 2)
+                            lowest = std::min(lowest, box.corner(w, d, h).Z());
+            }
+            check(box.ok && std::fabs(lowest) < 1.0e-6,
+                  QStringLiteral("...and stands ON the floor the moment it arrives, not "
+                                 "500 mm up (lowest corner Z = %1)").arg(lowest, 0, 'f', 4));
+        }
+
+        const int movePieceId = scene.scene().pieces()[0].id;
+        const std::vector<int> movePieceBodies = scene.bodyIdsForPiece(movePieceId);
+        check(movePieceBodies.size() == 1, "the table piece has a body to click");
+        scene.view()->setSelectedSolids({ movePieceBodies.front() });
+        settle(200);
+        check(scene.selectedPieceId() == movePieceId,
+              QStringLiteral("selecting one of a piece's bodies selects the PIECE (%1 "
+                             "against %2)")
+                  .arg(scene.selectedPieceId())
+                  .arg(movePieceId));
+        check(scene.view()->hasMoveGizmo(),
+              "...and the Move gizmo stands on it, Move being the tool a scene opens in");
+        check(!scene.view()->hasScaleGizmo(),
+              "...with no Scale gizmo anywhere - not merely unreachable, never shown");
+
+        // --- a dragged arm lands on a whole grid step -------------------------
+        OcctViewWidget* sv = scene.view();
+        auto scenePieceX = [&scene](int pieceId) {
+            const SceneModel::Piece* piece = scene.scene().piece(pieceId);
+            return piece ? piece->placement.TranslationPart().X() : 0.0;
+        };
+        auto sceneArmPixel = [sv](int axis, double fraction, QPoint& at, gp_Pnt& world) {
+            gp_Pnt tip;
+            if (!sv->moveGizmoArmTip(axis, tip)) return false;
+            const gp_Pnt pivot = sv->moveGizmoPivot();
+            world = pivot.Translated(gp_Vec(pivot, tip) * fraction);
+            return sv->projectToScreen(world, at) &&
+                   sv->rect().adjusted(6, 6, -6, -6).contains(at);
+        };
+
+        QPoint sceneGrabAt;
+        gp_Pnt sceneGrabWorld;
+        const bool sceneHaveGrab = sceneArmPixel(0, 0.65, sceneGrabAt, sceneGrabWorld);
+        check(sceneHaveGrab, "a point on the X arm projects into the scene's viewport");
+        // NON-VACUITY: a drag that starts where the gizmo is not is a drag on
+        // nothing, and would satisfy every "it did not move wrongly" check for
+        // entirely the wrong reason.
+        check(sceneHaveGrab && sv->moveGizmoAxisAt(sceneGrabAt) == 0,
+              QStringLiteral("and the app's own hit test claims that pixel for the X arm "
+                             "(axis %1)")
+                  .arg(sceneHaveGrab ? sv->moveGizmoAxisAt(sceneGrabAt) : -99));
+
+        QPoint sceneDragTo;
+        const bool sceneHaveTarget =
+            sceneHaveGrab &&
+            sv->projectToScreen(sceneGrabWorld.Translated(gp_Vec(37.0, 0.0, 0.0)),
+                                sceneDragTo) &&
+            sv->rect().contains(sceneDragTo);
+        check(sceneHaveTarget, "and a point 37 mm along +X projects in too");
+        if (sceneHaveTarget) {
+            const double beforeX = scenePieceX(movePieceId);
+            const double otherBeforeX = scenePieceX(scene.scene().pieces()[1].id);
+            dragButton(sv, QPointF(sceneGrabAt), QPointF(sceneDragTo), Qt::LeftButton);
+            settle(300);
+            const double afterX = scenePieceX(movePieceId);
+            const double dx = afterX - beforeX;
+            check(dx > 1.0,
+                  QStringLiteral("the piece really moved along +X (%1 mm)").arg(dx));
+            check(std::fabs(dx - std::round(dx / 10.0) * 10.0) < 1.0e-6,
+                  QStringLiteral("...landing on a whole 10 mm step, Snap to Grid being on "
+                                 "(%1 mm)").arg(dx));
+            check(std::fabs(dx - 37.0) < 10.001,
+                  QStringLiteral("...within one step of the 37 mm dragged (%1 mm)").arg(dx));
+            check(std::fabs(scenePieceX(scene.scene().pieces()[1].id) - otherBeforeX) < 1.0e-9,
+                  "and no other piece moved with it");
+            // The placement is the document here, so the presentation CARRYING
+            // it is the two agreeing - the opposite of the editor's bake rule,
+            // and for the opposite reason. See SceneWindow.h.
+            gp_Trsf shown;
+            const bool haveShown =
+                sv->solidPresentationTransform(movePieceBodies.front(), shown);
+            check(haveShown &&
+                      std::fabs(shown.TranslationPart().X() - afterX) < 1.0e-6,
+                  QStringLiteral("...and what is ON SCREEN carries exactly the placement "
+                                 "the scene recorded (%1 against %2)")
+                      .arg(haveShown ? shown.TranslationPart().X() : -999.0, 0, 'f', 3)
+                      .arg(afterX, 0, 'f', 3));
+        }
+
+        // --- the piece sits on the floor, measured along its own sides --------
+        // From its own measured box, never a world bounding box: a piece turned
+        // on the floor has a world box taller than the furniture is.
+        auto pieceFloorGap = [&scene](int pieceId) {
+            const std::vector<TopoDS_Shape> shapes = scene.placedShapesForPiece(pieceId);
+            if (shapes.empty()) return 999.0;
+            const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(shapes);
+            if (!box.ok) return 999.0;
+            double lowest = 0.0;
+            bool first = true;
+            for (int w = -1; w <= 1; w += 2)
+                for (int d = -1; d <= 1; d += 2)
+                    for (int h = -1; h <= 1; h += 2) {
+                        const double z = box.corner(w, d, h).Z();
+                        lowest = first ? z : std::min(lowest, z);
+                        first = false;
+                    }
+            return lowest;
+        };
+        check(std::fabs(pieceFloorGap(movePieceId)) < 1.0e-6,
+              QStringLiteral("after a move the piece still stands ON the floor (lowest "
+                             "corner at Z = %1)").arg(pieceFloorGap(movePieceId), 0, 'f', 4));
+
+        // --- Rotate, on the same selection, snapping to 15 degrees -----------
+        scene.setTool(SceneWindow::Tool::Rotate);
+        settle(200);
+        check(scene.view()->hasRotateGizmo() && !scene.view()->hasMoveGizmo(),
+              "switching to Rotate shows the rings and clears the arrows");
+        check(!scene.view()->hasScaleGizmo(), "...and still never a Scale gizmo");
+
+        // The Z ring, grabbed off the gizmo's own geometry the way the arms are.
+        QPoint ringAt;
+        bool haveRing = false;
+        {
+            // Searched in SCREEN space around the projected pivot, which needs
+            // no world radius at all: the ring IS a screen polyline, the gizmo
+            // is sized in pixels, and the app's own hit test is the oracle for
+            // what belongs to axis 2. Finding such a pixel is itself a check.
+            QPoint pivotAt;
+            if (sv->projectToScreen(sv->moveGizmoPivot(), pivotAt)) {
+                for (int radius = 20; radius <= 200 && !haveRing; radius += 2) {
+                    for (int step = 0; step < 96 && !haveRing; ++step) {
+                        const double a = step * (2.0 * M_PI / 96.0);
+                        const QPoint at(pivotAt.x() + static_cast<int>(radius * std::cos(a)),
+                                        pivotAt.y() + static_cast<int>(radius * std::sin(a)));
+                        if (!sv->rect().adjusted(6, 6, -6, -6).contains(at)) continue;
+                        if (sv->rotateGizmoAxisAt(at) != 2) continue;
+                        ringAt = at;
+                        haveRing = true;
+                    }
+                }
+            }
+        }
+        check(haveRing, "a pixel on the Z ring is found, and the hit test claims it");
+        if (haveRing) {
+            const gp_Trsf beforeTurn = scene.scene().piece(movePieceId)->placement;
+            // WHERE THE PIECE STANDS, not the matrix's translation part: a
+            // rotation ABOUT A PIVOT legitimately rewrites that part while the
+            // furniture has not moved an inch, so reading it would fail a
+            // correct turn. The box centre is what "did not shift" means.
+            auto pieceCentre = [&scene](int pieceId) {
+                const std::vector<TopoDS_Shape> shapes = scene.placedShapesForPiece(pieceId);
+                const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(shapes);
+                return box.ok ? box.centre : gp_Pnt(9e9, 9e9, 9e9);
+            };
+            const gp_Pnt centreBeforeTurn = pieceCentre(movePieceId);
+            // A drag of some pixels around the ring - the exact angle does not
+            // matter, only that what lands is a whole 15 degrees.
+            dragButton(sv, QPointF(ringAt), QPointF(ringAt + QPoint(46, 24)),
+                       Qt::LeftButton);
+            settle(300);
+            const gp_Trsf afterTurn = scene.scene().piece(movePieceId)->placement;
+            gp_XYZ axis;
+            double angleRad = 0.0;
+            const bool turned = afterTurn.GetRotation(axis, angleRad);
+            const double degrees = angleRad * 180.0 / M_PI;
+            check(turned && std::fabs(degrees) > 1.0e-6,
+                  QStringLiteral("the ring drag turned the piece (%1 degrees)")
+                      .arg(degrees, 0, 'f', 3));
+            check(std::fabs(degrees - std::round(degrees / 15.0) * 15.0) < 1.0e-3,
+                  QStringLiteral("...landing on a whole 15 degrees (%1)")
+                      .arg(degrees, 0, 'f', 4));
+            const gp_Pnt centreAfterTurn = pieceCentre(movePieceId);
+            check(std::hypot(centreAfterTurn.X() - centreBeforeTurn.X(),
+                             centreAfterTurn.Y() - centreBeforeTurn.Y()) < 1.0e-6,
+                  QStringLiteral("and a turn does not also shift the piece - it turns "
+                                 "about its own centre (moved %1 mm across the floor)")
+                      .arg(std::hypot(centreAfterTurn.X() - centreBeforeTurn.X(),
+                                      centreAfterTurn.Y() - centreBeforeTurn.Y()),
+                           0, 'f', 6));
+            (void)beforeTurn;
+            check(std::fabs(pieceFloorGap(movePieceId)) < 1.0e-6,
+                  QStringLiteral("...and it is still on the floor after turning (Z = %1)")
+                      .arg(pieceFloorGap(movePieceId), 0, 'f', 4));
+            // A rigid placement, still - SceneModel refuses anything else, and
+            // this is the gesture that could have produced one.
+            check(SceneModel::checkPlacement(afterTurn) == SceneCheck::Ok,
+                  "...and the placement a real drag produced is still RIGID");
+        }
+
+        // --- two pieces naming one furniture move apart ----------------------
+        const int twinA = scene.scene().pieces()[0].id;
+        const int twinB = scene.scene().pieces()[2].id;   // the second Table
+        const double twinBBefore = scenePieceX(twinB);
+        scene.setTool(SceneWindow::Tool::Move);
+        settle(150);
+        check(scene.view()->hasMoveGizmo(), "back to Move for the last probe");
+        check(std::fabs(scenePieceX(twinB) - twinBBefore) < 1.0e-9 &&
+                  std::fabs(scenePieceX(twinA) - scenePieceX(twinB)) > 1.0,
+              QStringLiteral("the two pieces naming one furniture stand apart - nothing "
+                             "keyed off the furniture id (%1 against %2)")
+                  .arg(scenePieceX(twinA), 0, 'f', 1)
+                  .arg(scenePieceX(twinB), 0, 'f', 1));
+
         scene.close();
     }
 

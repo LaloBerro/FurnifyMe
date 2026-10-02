@@ -590,6 +590,18 @@ public:
     // document says it is has exactly the right volume. False for an unknown
     // id.
     bool solidPresentationTransform(int id, gp_Trsf& out) const;
+    // PLACES a displayed body, rather than rebuilding it somewhere else. The
+    // shape is untouched and nothing is re-tessellated, so this is cheap
+    // enough to call on every step of a drag.
+    //
+    // The furniture editor does NOT use this and must not: there, a transform
+    // left on a presentation means the screen and the document disagree, which
+    // is why the suite asserts that editor gestures BAKE. A scene is the
+    // opposite case - SceneModel::Piece::placement IS the document, a
+    // placement is rigid by contract, and a presentation carrying exactly that
+    // placement is the two AGREEING. Same mechanism, opposite meaning, decided
+    // by which of the two owns the truth.
+    void setSolidPlacement(int id, const gp_Trsf& placement);
 
     // THE TEST SEAM. No shipped UI path reaches this - see the enum.
     void setSelectionMode(SelectionMode mode);
