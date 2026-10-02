@@ -28,6 +28,7 @@
 #include <QVector>
 
 class DocumentModel;
+class SceneModel;
 namespace FurnifySerial {
 struct SerializedDocument;
 }
@@ -45,6 +46,19 @@ public:
     struct VersionInfo {
         QString name;
         QDateTime saved;
+    };
+
+    // A SCENE in the library: several furniture arranged in one picture.
+    // Deliberately a second struct rather than a flag on FurnitureInfo - the
+    // hub lists the two in separate sections, and a caller that could hold
+    // either would have to ask which it had before it could do anything with
+    // it.
+    struct SceneInfo {
+        QString id;
+        QString name;
+        QString filePath;    // <root>/scenes/<id>
+        QString thumbPath;   // where thumb.png is/would be - callers check existence
+        QDateTime lastEdited;
     };
 
     explicit FurnitureStore(const QString& rootDir);
@@ -153,6 +167,34 @@ public:
     // furniture or the named version does not exist.
     bool deleteVersion(const QString& id, const QString& name);
 
+    // --- scenes --------------------------------------------------------------
+    // Scenes live under <root>/scenes/, so listFurniture() cannot return one:
+    // it skips any directory with no manifest.json, and a scene has none. That
+    // layout is store-private exactly as the furniture layout is - nothing
+    // outside this class touches a path inside it.
+    QVector<SceneInfo> listScenes() const;
+    // "Scene 03" - the first FREE number, so deleting one and making another
+    // does not produce two rows with one name. nextFurnitureName()'s own rule.
+    QString nextSceneName() const;
+    // Creates an empty scene and returns its id, or an empty string if the
+    // directory or the file could not be written.
+    QString createScene(const QString& name);
+    // SCRATCH-THEN-SWAP, as every load here is: decodes into a fresh
+    // SceneModel and only assigns to `scene` on success, so a refusal leaves
+    // the caller's scene exactly as it was rather than half-filled.
+    //
+    // Refuses outright, rather than guessing, when the file carries a FUTURE
+    // format version, or when a piece's placement is not rigid - a file is not
+    // a way around a bound the UI enforces, and silently drawing a 0.75x chair
+    // would be this app lying about a dimension. `error` carries a sentence
+    // for the UI when it is not null.
+    bool loadScene(const QString& id, SceneModel& scene, QString* error) const;
+    // `thumbnail` may be null, in which case no thumbnail is written and any
+    // existing one is left standing.
+    bool saveScene(const QString& id, const SceneModel& scene, const QImage& thumbnail);
+    bool renameScene(const QString& id, const QString& name);
+    bool deleteScene(const QString& id);
+
 private:
     // `format` (int) is the manifest's own version - bumped only if this
     // task's JSON layout itself ever needs to change shape (separate from
@@ -168,6 +210,15 @@ private:
     QString shapesPath(const QString& id) const;
     QString thumbPath(const QString& id) const;
     QString versionsDir(const QString& id) const;
+
+    // A scene's own format version, independent of the furniture manifest's:
+    // the two files change for different reasons and a shared number would
+    // make one of them lie about the other.
+    static constexpr int kSceneFormatVersion = 1;
+    QString scenesRoot() const;
+    QString sceneDir(const QString& id) const;
+    QString scenePath(const QString& id) const;
+    QString sceneThumbPath(const QString& id) const;
 
     // Parses manifest.json into a QJsonObject; an empty object (rather than
     // a null/error return) for a missing file, unreadable file, or a file

@@ -1,5 +1,8 @@
 #include "FurnitureStore.h"
 
+#include "SceneModel.h"
+#include <QObject>
+
 #include "DocumentModel.h"
 #include "FurnifySerial.h"
 
@@ -364,6 +367,174 @@ void jsonToMaterials(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
     }
 }
 
+// --- scenes ---------------------------------------------------------------
+// A scene is written flat, one key per number, and read back with a default
+// per key: a file from a build that stored fewer of them has to open, and the
+// scene it produces has to be a usable picture rather than a camera at the
+// origin looking at nothing.
+QJsonObject sceneToJson(const SceneModel& scene)
+{
+    QJsonArray pieces;
+    for (const SceneModel::Piece& piece : scene.pieces()) {
+        QJsonObject entry;
+        entry[QStringLiteral("furniture")] = QString::fromStdString(piece.furnitureId);
+        entry[QStringLiteral("name")] = QString::fromStdString(piece.name);
+        // THE PLACEMENT AS ITS TWELVE NUMBERS, in gp_Trsf's own row-major 3x4
+        // order. Written out rather than as a named pose - an axis and an
+        // angle, say - because a rotation has no single honest decomposition
+        // and a round trip through one would not come back to the micron.
+        QJsonArray matrix;
+        for (int row = 1; row <= 3; ++row) {
+            for (int col = 1; col <= 4; ++col) matrix.append(piece.placement.Value(row, col));
+        }
+        entry[QStringLiteral("placement")] = matrix;
+        pieces.append(entry);
+    }
+
+    QJsonObject obj;
+    obj[QStringLiteral("pieces")] = pieces;
+    obj[QStringLiteral("aspect")] = scene.aspect;
+    obj[QStringLiteral("guides")] = scene.guides;
+    obj[QStringLiteral("lightAngle")] = scene.lightAngleDeg;
+    obj[QStringLiteral("lightStrength")] = scene.lightStrength;
+    obj[QStringLiteral("fov")] = scene.fovDeg;
+    obj[QStringLiteral("orthographic")] = scene.orthographic;
+    obj[QStringLiteral("exportSize")] = scene.exportSize;
+    obj[QStringLiteral("quality")] = scene.quality;
+    obj[QStringLiteral("cutout")] = scene.cutout;
+    obj[QStringLiteral("cameraTargetX")] = scene.camera.target.X();
+    obj[QStringLiteral("cameraTargetY")] = scene.camera.target.Y();
+    obj[QStringLiteral("cameraTargetZ")] = scene.camera.target.Z();
+    obj[QStringLiteral("cameraAzimuth")] = scene.camera.azimuthDeg;
+    obj[QStringLiteral("cameraElevation")] = scene.camera.elevationDeg;
+    obj[QStringLiteral("cameraDistance")] = scene.camera.distance;
+
+    QJsonArray shots;
+    for (const DocumentModel::Shot& shot : scene.shots()) {
+        QJsonObject s;
+        s[QStringLiteral("name")] = QString::fromStdString(shot.name);
+        s[QStringLiteral("targetX")] = shot.camera.target.X();
+        s[QStringLiteral("targetY")] = shot.camera.target.Y();
+        s[QStringLiteral("targetZ")] = shot.camera.target.Z();
+        s[QStringLiteral("azimuth")] = shot.camera.azimuthDeg;
+        s[QStringLiteral("elevation")] = shot.camera.elevationDeg;
+        s[QStringLiteral("distance")] = shot.camera.distance;
+        s[QStringLiteral("orthographic")] = shot.orthographic;
+        s[QStringLiteral("fov")] = shot.fovDeg;
+        s[QStringLiteral("aspect")] = shot.aspect;
+        s[QStringLiteral("lightAngle")] = shot.lightAngleDeg;
+        s[QStringLiteral("lightStrength")] = shot.lightStrength;
+        shots.append(s);
+    }
+    obj[QStringLiteral("shots")] = shots;
+    return obj;
+}
+
+// Decodes into `scene` only on success. Returns false, with `error` set and
+// `scene` untouched, on any refusal - the scratch-then-swap law every load in
+// this file keeps.
+bool jsonToScene(const QJsonObject& obj, SceneModel& scene, QString* error)
+{
+    SceneModel scratch;
+
+    for (const QJsonValue& value : obj.value(QStringLiteral("pieces")).toArray()) {
+        const QJsonObject entry = value.toObject();
+        const QString furniture = entry.value(QStringLiteral("furniture")).toString();
+        // A piece naming no furniture could never resolve to anything. Dropped
+        // rather than refusing the whole scene: a truncated or hand-edited file
+        // should cost a piece, not a picture.
+        if (furniture.isEmpty()) continue;
+        const int id =
+            scratch.addPiece(furniture.toStdString(),
+                             entry.value(QStringLiteral("name")).toString().toStdString());
+        if (id == 0) continue;
+
+        const QJsonArray matrix = entry.value(QStringLiteral("placement")).toArray();
+        if (matrix.size() != 12) continue;   // no placement recorded - leave it at the origin
+        gp_Trsf placement;
+        placement.SetValues(matrix.at(0).toDouble(), matrix.at(1).toDouble(),
+                            matrix.at(2).toDouble(), matrix.at(3).toDouble(),
+                            matrix.at(4).toDouble(), matrix.at(5).toDouble(),
+                            matrix.at(6).toDouble(), matrix.at(7).toDouble(),
+                            matrix.at(8).toDouble(), matrix.at(9).toDouble(),
+                            matrix.at(10).toDouble(), matrix.at(11).toDouble());
+        // REFUSED, not normalised. A file asking for a 0.75x chair is corrupt
+        // or from a build that allowed something this one does not, and
+        // drawing it would be a lie about a dimension. The whole scene is
+        // refused rather than the one piece: a picture missing a piece is a
+        // picture the user would believe.
+        if (SceneModel::checkPlacement(placement) != SceneCheck::Ok) {
+            if (error) {
+                *error = QObject::tr("A piece in this scene is not placed squarely — it "
+                                     "carries a size change this app cannot apply to "
+                                     "furniture.");
+            }
+            return false;
+        }
+        scratch.setPlacement(id, placement);
+    }
+
+    scratch.aspect = obj.value(QStringLiteral("aspect")).toInt(0);
+    scratch.guides = obj.value(QStringLiteral("guides")).toInt(1);
+    scratch.exportSize = obj.value(QStringLiteral("exportSize")).toInt(0);
+    scratch.quality = obj.value(QStringLiteral("quality")).toInt(2);
+    scratch.cutout = obj.value(QStringLiteral("cutout")).toBool(false);
+    scratch.orthographic = obj.value(QStringLiteral("orthographic")).toBool(false);
+    // Every number clamped to the range its own control allows - a file is not
+    // a way around a bound the UI enforces.
+    scratch.lightStrength =
+        std::clamp(obj.value(QStringLiteral("lightStrength")).toDouble(2.0), 0.25, 4.0);
+    scratch.fovDeg = std::clamp(obj.value(QStringLiteral("fov")).toDouble(45.0), 10.0, 90.0);
+    // WRAPPED, not clamped: a light angle is a compass heading, so 370 means
+    // 10 rather than 360.
+    double angle = std::fmod(obj.value(QStringLiteral("lightAngle")).toDouble(142.0), 360.0);
+    if (angle < 0.0) angle += 360.0;
+    scratch.lightAngleDeg = angle;
+
+    scratch.camera.target = gp_Pnt(obj.value(QStringLiteral("cameraTargetX")).toDouble(0.0),
+                                   obj.value(QStringLiteral("cameraTargetY")).toDouble(0.0),
+                                   obj.value(QStringLiteral("cameraTargetZ")).toDouble(0.0));
+    scratch.camera.azimuthDeg = obj.value(QStringLiteral("cameraAzimuth")).toDouble(-45.0);
+    scratch.camera.elevationDeg =
+        std::clamp(obj.value(QStringLiteral("cameraElevation")).toDouble(30.0),
+                   CameraController::kMinElevation, CameraController::kMaxElevation);
+    scratch.camera.distance =
+        std::clamp(obj.value(QStringLiteral("cameraDistance")).toDouble(700.0),
+                   CameraController::kMinDistance, CameraController::kMaxDistance);
+
+    for (const QJsonValue& value : obj.value(QStringLiteral("shots")).toArray()) {
+        const QJsonObject entry = value.toObject();
+        DocumentModel::Shot shot;
+        shot.name = entry.value(QStringLiteral("name")).toString().toStdString();
+        // A shot with no name cannot be picked from a list, so it is not a
+        // saved shot - the furniture manifest's own rule for the same record.
+        if (shot.name.empty()) continue;
+        shot.camera.target = gp_Pnt(entry.value(QStringLiteral("targetX")).toDouble(0.0),
+                                    entry.value(QStringLiteral("targetY")).toDouble(0.0),
+                                    entry.value(QStringLiteral("targetZ")).toDouble(0.0));
+        shot.camera.azimuthDeg = entry.value(QStringLiteral("azimuth")).toDouble(-45.0);
+        shot.camera.elevationDeg =
+            std::clamp(entry.value(QStringLiteral("elevation")).toDouble(30.0),
+                       CameraController::kMinElevation, CameraController::kMaxElevation);
+        shot.camera.distance =
+            std::clamp(entry.value(QStringLiteral("distance")).toDouble(700.0),
+                       CameraController::kMinDistance, CameraController::kMaxDistance);
+        shot.orthographic = entry.value(QStringLiteral("orthographic")).toBool(false);
+        shot.fovDeg = std::clamp(entry.value(QStringLiteral("fov")).toDouble(45.0), 10.0, 90.0);
+        shot.aspect = std::clamp(entry.value(QStringLiteral("aspect")).toInt(0), 0, 4);
+        double shotAngle =
+            std::fmod(entry.value(QStringLiteral("lightAngle")).toDouble(142.0), 360.0);
+        if (shotAngle < 0.0) shotAngle += 360.0;
+        shot.lightAngleDeg = shotAngle;
+        shot.lightStrength =
+            std::clamp(entry.value(QStringLiteral("lightStrength")).toDouble(2.0), 0.25, 4.0);
+        scratch.addShot(shot);
+    }
+
+    scene = scratch;
+    return true;
+}
+
 QJsonObject foldersToJson(const DocumentModel::DocumentMeta& meta)
 {
     QJsonArray foldersArr;
@@ -612,6 +783,193 @@ bool FurnitureStore::writeManifestObject(const QString& id, const QJsonObject& m
     const QByteArray bytes = doc.toJson(QJsonDocument::Indented);
     if (file.write(bytes) != bytes.size()) return false;  // commit() never called - temp discarded
     return file.commit();
+}
+
+// --- scenes ---------------------------------------------------------------
+
+QString FurnitureStore::scenesRoot() const
+{
+    return myRootDir + QStringLiteral("/scenes");
+}
+
+QString FurnitureStore::sceneDir(const QString& id) const
+{
+    return scenesRoot() + QLatin1Char('/') + id;
+}
+
+QString FurnitureStore::scenePath(const QString& id) const
+{
+    return sceneDir(id) + QStringLiteral("/scene.json");
+}
+
+QString FurnitureStore::sceneThumbPath(const QString& id) const
+{
+    return sceneDir(id) + QStringLiteral("/thumb.png");
+}
+
+QVector<FurnitureStore::SceneInfo> FurnitureStore::listScenes() const
+{
+    QVector<SceneInfo> result;
+
+    QDir root(scenesRoot());
+    if (!root.exists()) return result;
+
+    const QStringList ids = root.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString& id : ids) {
+        QFile file(scenePath(id));
+        if (!file.exists() || !file.open(QIODevice::ReadOnly)) continue;
+        const QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+        // Unparseable - skip this one, do not hide the rest. listFurniture()'s
+        // own rule for the same situation.
+        if (obj.isEmpty()) continue;
+
+        SceneInfo info;
+        info.id = id;
+        info.name = obj.value(QStringLiteral("name")).toString();
+        info.filePath = sceneDir(id);
+        info.thumbPath = sceneThumbPath(id);
+        info.lastEdited = QDateTime::fromString(
+            obj.value(QStringLiteral("lastEdited")).toString(), Qt::ISODateWithMs);
+        result.push_back(info);
+    }
+
+    std::sort(result.begin(), result.end(), [](const SceneInfo& a, const SceneInfo& b) {
+        return a.lastEdited > b.lastEdited;
+    });
+    return result;
+}
+
+QString FurnitureStore::nextSceneName() const
+{
+    // The first FREE number, not count + 1: deleting one and making another
+    // would otherwise produce two rows carrying one name, and the name is how
+    // a scene is picked out of the hub.
+    const QVector<SceneInfo> existing = listScenes();
+    for (int n = 1; n < 1000; ++n) {
+        const QString candidate = QObject::tr("Scene %1").arg(n, 2, 10, QLatin1Char('0'));
+        bool taken = false;
+        for (const SceneInfo& info : existing) {
+            if (info.name == candidate) taken = true;
+        }
+        if (!taken) return candidate;
+    }
+    return QObject::tr("Scene");
+}
+
+QString FurnitureStore::createScene(const QString& name)
+{
+    if (!QDir().mkpath(scenesRoot())) return QString();
+
+    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!QDir().mkpath(sceneDir(id))) return QString();
+
+    QJsonObject obj = sceneToJson(SceneModel());
+    obj[QStringLiteral("format")] = kSceneFormatVersion;
+    obj[QStringLiteral("name")] = name;
+    obj[QStringLiteral("lastEdited")] =
+        QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+
+    QSaveFile file(scenePath(id));
+    if (!file.open(QIODevice::WriteOnly)) return QString();
+    file.write(QJsonDocument(obj).toJson());
+    if (!file.commit()) return QString();
+    return id;
+}
+
+bool FurnitureStore::loadScene(const QString& id, SceneModel& scene, QString* error) const
+{
+    if (error) error->clear();
+
+    QFile file(scenePath(id));
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+        if (error) *error = QObject::tr("This scene's file could not be opened.");
+        return false;
+    }
+    const QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    if (obj.isEmpty()) {
+        if (error) *error = QObject::tr("This scene's file could not be read.");
+        return false;
+    }
+
+    // REFUSED OUTRIGHT rather than guessed at. Guessing at a newer layout is
+    // exactly how a document silently loses data - the furniture manifest's
+    // own rule, and the reason both files carry a version at all.
+    const int format = obj.value(QStringLiteral("format")).toInt(0);
+    if (format != kSceneFormatVersion) {
+        if (error) {
+            *error = QObject::tr("This scene was saved by a newer version of FurnifyMe.");
+        }
+        return false;
+    }
+
+    return jsonToScene(obj, scene, error);
+}
+
+bool FurnitureStore::saveScene(const QString& id, const SceneModel& scene,
+                               const QImage& thumbnail)
+{
+    if (!QDir().mkpath(sceneDir(id))) return false;
+
+    // The NAME is not the scene's to write - it lives in this file and is
+    // changed by renameScene(), so a save reads the existing one back rather
+    // than dropping it. A scene that has never been created has none, and
+    // starts with an empty one.
+    QString name;
+    {
+        QFile existing(scenePath(id));
+        if (existing.exists() && existing.open(QIODevice::ReadOnly)) {
+            name = QJsonDocument::fromJson(existing.readAll())
+                       .object()
+                       .value(QStringLiteral("name"))
+                       .toString();
+            existing.close();
+        }
+    }
+
+    QJsonObject obj = sceneToJson(scene);
+    obj[QStringLiteral("format")] = kSceneFormatVersion;
+    obj[QStringLiteral("name")] = name;
+    obj[QStringLiteral("lastEdited")] =
+        QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+
+    // QSaveFile: temp-file-then-commit, never a truncate onto the live file.
+    // A failed write leaves the OLD scene standing rather than a half one.
+    QSaveFile file(scenePath(id));
+    if (!file.open(QIODevice::WriteOnly)) return false;
+    file.write(QJsonDocument(obj).toJson());
+    if (!file.commit()) return false;
+
+    // A null thumbnail is not a failure - it means "no picture to record",
+    // and whatever is already there is left alone.
+    if (!thumbnail.isNull()) thumbnail.save(sceneThumbPath(id), "PNG");
+    return true;
+}
+
+bool FurnitureStore::renameScene(const QString& id, const QString& name)
+{
+    QFile file(scenePath(id));
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) return false;
+    QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    if (obj.isEmpty()) return false;
+
+    obj[QStringLiteral("name")] = name;
+    obj[QStringLiteral("lastEdited")] =
+        QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+
+    QSaveFile write(scenePath(id));
+    if (!write.open(QIODevice::WriteOnly)) return false;
+    write.write(QJsonDocument(obj).toJson());
+    return write.commit();
+}
+
+bool FurnitureStore::deleteScene(const QString& id)
+{
+    QDir dir(sceneDir(id));
+    if (!dir.exists()) return false;
+    return dir.removeRecursively();
 }
 
 QVector<FurnitureStore::FurnitureInfo> FurnitureStore::listFurniture() const

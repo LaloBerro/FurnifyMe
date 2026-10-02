@@ -56,6 +56,7 @@
 #include "OcctViewWidget.h"
 #include "PullArrow.h"
 #include "MaterialCard.h"
+#include "SceneModel.h"
 #include "RenderFrameGuides.h"
 #include "RenderSettingsPanel.h"
 #include "SelectorWindow.h"
@@ -906,6 +907,7 @@ constexpr BlockInfo kBlocks[] = {
     { "ctrl-d-on-a-folder-duplicates-the-folder", false, true },
     { "the-grain-runs-the-other-way-on-one-body", false, true },
     { "a-saved-shot-puts-the-picture-back", false, true },
+    { "the-store-keeps-scenes-beside-the-furniture", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
@@ -27966,6 +27968,179 @@ int main(int argc, char* argv[])
         }
 
         probe.close();
+    }
+
+
+    // --- the store keeps scenes beside the furniture -------------------------
+    //
+    // A scene lives in <root>/scenes/<id>/ so listFurniture() can never return
+    // one by accident, and the layout stays store-private exactly as the class
+    // header already promises. This block touches no window at all - it is in
+    // gui_smoke rather than a headless test because FurnitureStore is in the
+    // app target and needs Qt, not because it needs a GPU.
+    if (blockEnabled("the-store-keeps-scenes-beside-the-furniture")) {
+        RequiredTempDir sceneLib;
+        FurnitureStore store(sceneLib.path());
+
+        check(store.listScenes().isEmpty(), "a fresh library has no scenes");
+
+        const QString sceneId = store.createScene(QStringLiteral("Dining set"));
+        check(!sceneId.isEmpty(), "a scene is created");
+        check(store.listScenes().size() == 1, "and it is listed");
+        check(!store.listScenes().isEmpty() &&
+                  store.listScenes().front().name == QStringLiteral("Dining set"),
+              "under the name it was given");
+
+        // THE TWO KINDS CANNOT BE CONFUSED, asserted in both directions - "the
+        // scene is not in the furniture list" and "the furniture is not in the
+        // scene list" are two different mistakes.
+        check(store.listFurniture().isEmpty(), "listFurniture() does not return a scene");
+        const QString furnitureId = store.createFurniture(QStringLiteral("Oak chair"));
+        check(!furnitureId.isEmpty(), "a furniture is created beside it");
+        check(store.listFurniture().size() == 1 && store.listScenes().size() == 1,
+              "and each kind lists exactly its own");
+
+        // --- a scene round trips ---------------------------------------------
+        SceneModel out;
+        const int p1 = out.addPiece(furnitureId.toStdString(), "Chair left");
+        const int p2 = out.addPiece(furnitureId.toStdString(), "Chair right");
+        gp_Trsf left;
+        left.SetTranslation(gp_Vec(-250.0, 0.0, 0.0));
+        gp_Trsf right;
+        right.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 0.75);
+        right.SetTranslationPart(gp_Vec(250.0, 10.0, 0.0));
+        check(out.setPlacement(p1, left) && out.setPlacement(p2, right),
+              "two pieces are placed, one of them turned as well as moved");
+        out.aspect = 2;
+        out.guides = 2;
+        out.lightAngleDeg = 200.0;
+        out.lightStrength = 3.25;
+        out.fovDeg = 72.0;
+        out.orthographic = true;
+        out.exportSize = 3;
+        out.quality = 1;
+        out.cutout = true;
+        out.camera.distance = 4321.0;
+        DocumentModel::Shot shot;
+        shot.name = "Three-quarter";
+        shot.camera.distance = 1234.0;
+        shot.fovDeg = 61.0;
+        out.addShot(shot);
+        check(store.saveScene(sceneId, out, QImage()), "it saves");
+
+        SceneModel back;
+        QString error;
+        check(store.loadScene(sceneId, back, &error),
+              QStringLiteral("and loads again (\"%1\")").arg(error));
+        check(back.pieces().size() == 2, "both pieces came back");
+        check(back.pieces().size() == 2 &&
+                  back.pieces()[0].furnitureId == furnitureId.toStdString() &&
+                  back.pieces()[1].furnitureId == furnitureId.toStdString(),
+              "both naming the same furniture - a REPEATED id survives the file");
+        check(back.pieces().size() == 2 &&
+                  std::fabs(back.pieces()[0].placement.TranslationPart().X() + 250.0) < 1e-6 &&
+                  std::fabs(back.pieces()[1].placement.TranslationPart().X() - 250.0) < 1e-6,
+              "with their own placements, to the micron");
+        // The TURNED one specifically: a rotation has no single honest
+        // decomposition, so it is written as the matrix's own numbers, and
+        // this is what says that round trip is exact rather than approximate.
+        check(back.pieces().size() == 2 &&
+                  std::fabs(back.pieces()[1].placement.Value(1, 1) - right.Value(1, 1)) < 1e-9 &&
+                  std::fabs(back.pieces()[1].placement.Value(1, 2) - right.Value(1, 2)) < 1e-9 &&
+                  std::fabs(back.pieces()[1].placement.Value(2, 1) - right.Value(2, 1)) < 1e-9,
+              "and the turned one's rotation came back exactly, not approximately");
+        check(back.pieces().size() == 2 && back.pieces()[0].name == "Chair left" &&
+                  back.pieces()[1].name == "Chair right",
+              "and their own names");
+        check(back.aspect == 2 && back.guides == 2 && back.exportSize == 3 &&
+                  back.quality == 1 && back.cutout,
+              "every render setting came back");
+        check(std::fabs(back.lightAngleDeg - 200.0) < 1e-9 &&
+                  std::fabs(back.lightStrength - 3.25) < 1e-9 &&
+                  std::fabs(back.fovDeg - 72.0) < 1e-9 && back.orthographic,
+              "including the light and the perspective");
+        check(std::fabs(back.camera.distance - 4321.0) < 1e-9, "and the camera");
+        check(back.shots().size() == 1 &&
+                  std::fabs(back.shots().front().camera.distance - 1234.0) < 1e-9 &&
+                  std::fabs(back.shots().front().fovDeg - 61.0) < 1e-9,
+              "and the shot with it");
+
+        // --- a FUTURE format is refused outright -----------------------------
+        // Guessing at a newer layout is exactly how a document silently loses
+        // data - the furniture manifest's own rule, applied to this file.
+        {
+            const QString path = sceneLib.path() + QStringLiteral("/scenes/") + sceneId +
+                                 QStringLiteral("/scene.json");
+            QFile file(path);
+            check(file.open(QIODevice::ReadOnly), "the scene file is on disk where expected");
+            const QJsonObject original = QJsonDocument::fromJson(file.readAll()).object();
+            file.close();
+            check(!original.isEmpty(), "and parses as a JSON object");
+
+            QJsonObject future = original;
+            future[QStringLiteral("format")] = 9999;
+            QFile write(path);
+            check(write.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                  "the format probe can rewrite it");
+            write.write(QJsonDocument(future).toJson());
+            write.close();
+
+            SceneModel refused;
+            refused.addPiece("sentinel", "Sentinel");
+            QString futureError;
+            check(!store.loadScene(sceneId, refused, &futureError),
+                  "a scene from a FUTURE format refuses to load");
+            check(!futureError.isEmpty(), "and says so rather than failing silently");
+            // SCRATCH-THEN-SWAP: a refusal must leave the caller's scene
+            // exactly as it was, never half-filled.
+            check(refused.pieces().size() == 1 && refused.pieces()[0].name == "Sentinel",
+                  "and leaves the caller's own scene untouched");
+        }
+
+        // --- a NON-RIGID placement in a file is refused ----------------------
+        // A file is not a way around a bound the UI enforces: a scaled chair
+        // would be this app lying about a dimension.
+        {
+            const QString path = sceneLib.path() + QStringLiteral("/scenes/") + sceneId +
+                                 QStringLiteral("/scene.json");
+            QFile file(path);
+            check(file.open(QIODevice::ReadOnly), "the scene file reopens");
+            QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+            file.close();
+            obj[QStringLiteral("format")] = 1;
+            QJsonArray pieces = obj.value(QStringLiteral("pieces")).toArray();
+            check(!pieces.isEmpty(), "it has a piece to corrupt");
+            QJsonObject first = pieces.at(0).toObject();
+            // A uniform 0.75 scale with no rotation.
+            QJsonArray scaled;
+            const double m[12] = {0.75, 0.0, 0.0, 0.0, 0.0, 0.75,
+                                  0.0,  0.0, 0.0, 0.0, 0.75, 0.0};
+            for (double v : m) scaled.append(v);
+            first[QStringLiteral("placement")] = scaled;
+            pieces.replace(0, first);
+            obj[QStringLiteral("pieces")] = pieces;
+            QFile write(path);
+            check(write.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                  "the placement probe can rewrite it");
+            write.write(QJsonDocument(obj).toJson());
+            write.close();
+
+            SceneModel refused;
+            QString placementError;
+            check(!store.loadScene(sceneId, refused, &placementError),
+                  "a scene whose piece is not placed squarely refuses to load");
+            check(!placementError.isEmpty(), "and says so");
+            check(refused.pieces().empty(), "writing nothing into the caller's scene");
+        }
+
+        check(store.renameScene(sceneId, QStringLiteral("Kitchen")), "a scene renames");
+        check(!store.listScenes().isEmpty() &&
+                  store.listScenes().front().name == QStringLiteral("Kitchen"),
+              "and the listing says so");
+        check(store.deleteScene(sceneId), "a scene is deleted");
+        check(store.listScenes().isEmpty(), "and is gone from the listing");
+        check(store.listFurniture().size() == 1,
+              "while the furniture beside it is untouched");
     }
 
     // --- Milestone 5, item 10: Autosave modes and the two timed-save laws ----
