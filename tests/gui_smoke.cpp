@@ -739,7 +739,7 @@ void skipByEnvironment(int checks, const QString& why)
 // FAILED, which is exactly and only what this constant exists to do: a probe
 // that edits global state needs a window nobody else is using, and nothing
 // else in the suite would have said so.
-constexpr int kCheckFloor = 4914;
+constexpr int kCheckFloor = 5200;
 
 void check(bool condition, const QString& what)
 {
@@ -28344,10 +28344,36 @@ int main(int argc, char* argv[])
             std::sort(levels.begin(), levels.end());
             return levels[levels.size() / 2];
         };
-        const int leftLevel = shot.isNull() ? -1 : medianAround(shot, leftAt, 12);
-        const int rightLevel = shot.isNull() ? -1 : medianAround(shot, rightAt, 12);
-        check(leftLevel >= 0 && rightLevel >= 0,
-              QStringLiteral("both bodies are in frame (%1, %2)").arg(leftLevel).arg(rightLevel));
+        // THE DUMP IS NOT THE WIDGET'S PIXEL GRID. projectToScreen() answers in
+        // whole LOGICAL pixels; saveSnapshot() writes a buffer whose size is
+        // the render layer's, measured here at 1062x1096 against a 1000x700
+        // viewport. Indexing the image with widget coordinates therefore
+        // samples the wrong place - which is exactly what this check did, and
+        // it PASSED anyway, on pixels that were never the bodies. Mapped
+        // through the real ratio instead, the way CLAUDE.md's own
+        // capture-mapping note requires.
+        const auto intoImage = [&shot, wview](const QPoint& logical) {
+            if (shot.isNull() || wview->width() <= 0 || wview->height() <= 0) return QPoint(-1, -1);
+            const double sx = shot.width() / static_cast<double>(wview->width());
+            const double sy = shot.height() / static_cast<double>(wview->height());
+            return QPoint(static_cast<int>(logical.x() * sx), static_cast<int>(logical.y() * sy));
+        };
+        const QPoint leftPx = intoImage(leftAt);
+        const QPoint rightPx = intoImage(rightAt);
+        const int leftLevel = shot.isNull() ? -1 : medianAround(shot, leftPx, 12);
+        const int rightLevel = shot.isNull() ? -1 : medianAround(shot, rightPx, 12);
+
+        // NON-VACUOUS, which the old "in frame" check was not: it asked only
+        // that the samples be inside the image, which the backdrop satisfies.
+        // A sample that reads the floor is not a body, and the comparison
+        // below would then be comparing two patches of floor.
+        const int backdropLevel = shot.isNull() ? -1 : medianAround(shot, QPoint(12, 12), 8);
+        check(leftLevel >= 0 && rightLevel >= 0 && backdropLevel >= 0 &&
+                  std::abs(leftLevel - backdropLevel) > 20 &&
+                  std::abs(rightLevel - backdropLevel) > 20,
+              QStringLiteral("both samples land ON a body, not on the studio floor "
+                             "(left %1, right %2, floor %3)")
+                  .arg(leftLevel).arg(rightLevel).arg(backdropLevel));
         check(rightLevel - leftLevel > 40,
               QStringLiteral("and they render as two DIFFERENT woods - the pale one reads "
                              "well above the dark one (%1 against %2)")
@@ -28515,6 +28541,48 @@ int main(int argc, char* argv[])
         check(scene.findChildren<QDialog*>().isEmpty(),
               "it raised no modal dialog - this app has none");
 
+        // --- the pill is a HEADER here, never a spine -------------------------
+        // ViewportOverlay stretches the LAST Anchor::LeftEdge entry to the
+        // viewport's bottom edge, because in the editor that entry is the rail.
+        // This window has no rail, so a LeftEdge pill would be both first and
+        // last, would be stretched to the full height of the viewport, and -
+        // AppBar's corner radius being half its own height - would paint as an
+        // enormous ellipse down the left of the screen. Caught by the user on
+        // the first real launch, which is where a layout this wrong belongs in
+        // a test instead.
+        // A LOOK, not only a measurement. The ellipse this block now guards
+        // against was caught by a user glancing at the window, after a suite
+        // that drove this very window dozens of times reported nothing - every
+        // check asked what it DID and none asked what it looked like. The
+        // capture is written on every run so the chrome can be eyeballed.
+        printWindowCapture(&scene, outDir + QStringLiteral("/scene-window.png"));
+
+        AppBar* sceneBar = scene.findChild<AppBar*>();
+        check(sceneBar != nullptr, "the scene window has an app bar");
+        if (sceneBar) {
+            const int natural = sceneBar->sizeHint().height();
+            check(natural > 0 && sceneBar->height() <= natural + 4,
+                  QStringLiteral("...drawn at its OWN height, not stretched down the "
+                                 "viewport (%1 px against a natural %2, viewport %3)")
+                      .arg(sceneBar->height())
+                      .arg(natural)
+                      .arg(scene.view()->height()));
+            check(sceneBar->height() * 3 < scene.view()->height(),
+                  QStringLiteral("...which is nowhere near the viewport's full height "
+                                 "(%1 against %2)")
+                      .arg(sceneBar->height())
+                      .arg(scene.view()->height()));
+            // And it leads the column the pieces list sits in, rather than
+            // shoving it sideways the way a stretched spine did.
+            check(scene.piecesPanel() != nullptr &&
+                      scene.piecesPanel()->y() >= sceneBar->y() + sceneBar->height(),
+                  QStringLiteral("...with the pieces list stacked BELOW it, not beside it "
+                                 "(pill %1..%2, list at %3)")
+                      .arg(sceneBar->y())
+                      .arg(sceneBar->y() + sceneBar->height())
+                      .arg(scene.piecesPanel() ? scene.piecesPanel()->y() : -1));
+        }
+
         // --- what a scene deliberately CANNOT do -----------------------------
         // Asserted by name rather than by counting actions: a scene arranges
         // furniture, it does not make it, and an action that exists but
@@ -28604,6 +28672,49 @@ int main(int argc, char* argv[])
               QStringLiteral("each row is named after its furniture (\"%1\", \"%2\")")
                   .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(0) : QString())
                   .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(1) : QString()));
+
+        // THE CARD HAS TO BE TALL ENOUGH FOR WHAT IS IN IT. A card that keeps
+        // its empty height while rows are inserted makes QVBoxLayout squeeze
+        // them into space they do not fit, and Qt resolves that by OVERLAPPING
+        // them - which is what the user saw: a row's name drawn across the
+        // title. Measured against the panel's own sizeHint, and against the
+        // bottom of its last row, so neither answer can be a coincidence.
+        if (scene.piecesPanel()) {
+            ScenePiecesPanel* pp = scene.piecesPanel();
+            const int wantH = pp->sizeHint().height();
+            check(pp->height() >= wantH,
+                  QStringLiteral("the pieces card is at least as tall as it asks to be "
+                                 "(%1 against a sizeHint of %2)")
+                      .arg(pp->height()).arg(wantH));
+            // MAPPED INTO THE CARD'S OWN SPACE. A row's y() is relative to its
+            // immediate parent, which since the list gained a scroll area is
+            // the rows' host and not the card - so reading y() directly
+            // measured the wrong coordinate space and passed for no reason.
+            int lowest = 0;
+            for (int i = 0; i < pp->rowCount(); ++i) {
+                if (QWidget* rw = pp->rowWidgetAt(i)) {
+                    const int bottom = rw->mapTo(pp, QPoint(0, rw->height())).y();
+                    lowest = std::max(lowest, bottom);
+                }
+            }
+            check(pp->rowCount() > 0 && lowest > 0 && lowest <= pp->height(),
+                  QStringLiteral("...and every row fits inside it (last row ends at %1, "
+                                 "card is %2 tall)").arg(lowest).arg(pp->height()));
+            // The rows must start BELOW the title rather than on top of it.
+            int firstTop = -1;
+            if (pp->rowCount() > 0 && pp->rowWidgetAt(0))
+                firstTop = pp->rowWidgetAt(0)->mapTo(pp, QPoint(0, 0)).y();
+            const int titleBottom = 24;
+            check(firstTop >= titleBottom,
+                  QStringLiteral("...with the first row clear of the card's own title "
+                                 "(row top %1, title ends near %2)")
+                      .arg(firstTop).arg(titleBottom));
+        }
+
+        // A LOOK with rows in the list - the empty card was the only state
+        // ever eyeballed, and a row overlapping the title is invisible to
+        // every behavioural check in this block.
+        printWindowCapture(&scene, outDir + QStringLiteral("/scene-with-pieces.png"));
 
         // Every body of every piece is on screen, and every one of them
         // carries a wood of its own - the structural half of "its own wood".
@@ -28713,6 +28824,28 @@ int main(int argc, char* argv[])
               "...which opens the add-a-piece card over the viewport");
         check(scene.findChildren<QDialog*>().isEmpty(),
               "...and it is not a dialog - this app has none");
+        printWindowCapture(&scene, outDir + QStringLiteral("/scene-add-card.png"));
+        // THE QUESTION HAS TO BE ON TOP, and in the middle. It came up at 0,0
+        // behind the pill and the pieces list, with its title clipped off the
+        // corner, because the action called relayout() directly and so skipped
+        // both the centring and the raise that follow the layout pass.
+        if (pieceCard && scene.piecesPanel()) {
+            const QRect card = pieceCard->geometry();
+            const QRect list = scene.piecesPanel()->geometry();
+            check(!card.intersects(list),
+                  QStringLiteral("the add-a-piece card does not sit under the pieces list "
+                                 "(card %1,%2 %3x%4 against list %5,%6 %7x%8)")
+                      .arg(card.x()).arg(card.y()).arg(card.width()).arg(card.height())
+                      .arg(list.x()).arg(list.y()).arg(list.width()).arg(list.height()));
+            check(card.x() > list.right(),
+                  QStringLiteral("...standing clear of the left column entirely (x %1 "
+                                 "against the list's right edge %2)")
+                      .arg(card.x()).arg(list.right()));
+            check(card.height() >= pieceCard->sizeHint().height(),
+                  QStringLiteral("...and tall enough for its own title and rows (%1 "
+                                 "against a sizeHint of %2)")
+                      .arg(card.height()).arg(pieceCard->sizeHint().height()));
+        }
         check(pieceCard && pieceCard->entryCount() == 2,
               QStringLiteral("...listing the library's two furniture (%1)")
                   .arg(pieceCard ? pieceCard->entryCount() : -1));
@@ -29099,6 +29232,35 @@ int main(int argc, char* argv[])
         const int expectedCount = static_cast<int>(expected.size());
         check(expectedCount >= 4,
               QStringLiteral("there is a scene worth saving (%1 pieces)").arg(expectedCount));
+        // --- the panel's own shot control, not just the API -------------------
+        // RenderStudio re-emits the panel's three shot signals, so a scene that
+        // left them unconnected would show a Save-shot control and a list of
+        // rows that did nothing. Driven through the REAL control here.
+        scene.studio()->setEnabled(true);
+        settle(300);
+        RenderSettingsPanel* shotPanel = scene.studio()->panel();
+        check(shotPanel != nullptr, "the scene's render panel is reachable");
+        check(scene.scene().shots().empty(), "...with no shots kept yet");
+        if (shotPanel) {
+            emit shotPanel->shotSaveRequested();
+            settle(200);
+        }
+        check(scene.scene().shots().size() == 1,
+              QStringLiteral("the panel's Save-shot control really saves one (%1)")
+                  .arg(static_cast<int>(scene.scene().shots().size())));
+        check(scene.scene().shots().size() == 1 &&
+                  QString::fromStdString(scene.scene().shots().front().name) ==
+                      QStringLiteral("Shot 1"),
+              "...named by the scene's own first-free-number rule");
+        if (shotPanel) {
+            emit shotPanel->shotRemoved(0);
+            settle(200);
+        }
+        check(scene.scene().shots().empty(),
+              "...and the row's own x forgets it again");
+        scene.studio()->setEnabled(false);
+        settle(300);
+
         scene.addShotToScene(shot);
         check(scene.scene().shots().size() == 1, "a shot is kept in the scene");
         check(scene.save(), "the scene saves");

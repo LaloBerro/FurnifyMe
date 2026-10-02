@@ -67,12 +67,18 @@ AddPieceCard::AddPieceCard(QWidget* parent)
 void AddPieceCard::showFor(const QVector<FurnitureStore::FurnitureInfo>& furniture)
 {
     rebuild(furniture);
-    // Sized from the parts, never from the scroll area - see kListMaxHeight.
-    const int listHeight = std::min(kListMaxHeight, myList->sizeHint().height());
-    int height = kPad * 2 + myTitle->sizeHint().height() + myColumn->spacing();
-    if (furniture.isEmpty()) height += myEmpty->sizeHint().height();
-    else height += listHeight;
-    setFixedSize(Theme::wholeDevicePixels(QSize(kWidth, height)));
+    // THE LAYOUT ANSWERS FOR THE HEIGHT, not arithmetic over the parts. The
+    // hand-added version clipped its own title, which is the same class of
+    // mistake this project has already paid for twice with QScrollArea: a
+    // height worked out by adding up what the author remembered is a height
+    // that forgets a margin. activate() first, so the hint is the real one -
+    // ScenePiecesPanel's own lesson, one card over.
+    //
+    // The scroll area inside is capped (kListMaxHeight), so a library of forty
+    // furniture still cannot grow this card past the viewport.
+    myColumn->invalidate();
+    myColumn->activate();
+    setFixedSize(Theme::wholeDevicePixels(QSize(kWidth, sizeHint().height())));
     show();
     raise();
     setFocus(Qt::OtherFocusReason);

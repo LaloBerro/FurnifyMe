@@ -4,6 +4,7 @@
 #include "AppBar.h"
 #include "FurnitureStore.h"
 #include "OcctViewWidget.h"
+#include "RenderSettingsPanel.h"
 #include "RenderStudio.h"
 #include "ModelingOps.h"
 #include "ScenePiecesPanel.h"
@@ -116,7 +117,12 @@ void SceneWindow::buildMenus()
         // Re-read on every open: a furniture made since this window opened is
         // one the user expects to find in the list.
         myAddPiece->showFor(myStore->listFurniture());
-        if (myOverlay) myOverlay->relayout();
+        // refreshSurfaces(), NOT relayout(). The centring and the
+        // after-the-layout raise both live in refreshSurfaces; calling the
+        // overlay directly skipped them, so the card came up at its default
+        // 0,0 - behind the pill and the pieces list, with its own title
+        // clipped off the top-left corner.
+        refreshSurfaces();
     });
     file->addAction(myNewPieceAction);
 
@@ -157,11 +163,19 @@ void SceneWindow::buildOverlay()
 {
     myOverlay = new ViewportOverlay(myView);
 
-    // The pill leads the left column, as it does in the editor - same margin,
-    // so the two read as one column rather than two floating cards.
+    // TopLeft, NOT LeftEdge - and that distinction is the whole of a bug worth
+    // recording. ViewportOverlay treats the LAST LeftEdge entry as the SPINE
+    // and stretches it to the viewport's bottom edge; in the editor that is the
+    // rail, with the pill sitting above it as a header. THIS WINDOW HAS NO
+    // RAIL, so a LeftEdge pill was both the first entry and the last, became
+    // the spine, and was stretched to the full height of the viewport - and
+    // because AppBar's corner radius is half its own height, it painted as an
+    // enormous ellipse down the left of the screen with the menus floating in
+    // the middle of it. A header is only a header when something follows it.
     myAppBar = new AppBar(menuBar(), myView);
-    myOverlay->addWidget(myAppBar, ViewportOverlay::Anchor::LeftEdge);
+    myOverlay->addWidget(myAppBar, ViewportOverlay::Anchor::TopLeft);
 
+    // Added after the pill, so it stacks below it in the same TopLeft column.
     myPieces = new ScenePiecesPanel(myView);
     myOverlay->addWidget(myPieces, ViewportOverlay::Anchor::TopLeft);
 
@@ -171,6 +185,33 @@ void SceneWindow::buildOverlay()
     // exactly and only render mode.
     myStudio = new RenderStudio(myView, this, myOverlay, myAppBar, myRenderModeAction, this);
     connect(myStudio, &RenderStudio::enabledChanged, this, [this](bool) { refreshSurfaces(); });
+
+    // THE SHOT ROWS ARE LIVE HERE TOO. RenderStudio re-emits the panel's three
+    // shot signals, so leaving them unconnected would put a Save-shot control
+    // and a list of rows on screen that did nothing - which is the inert
+    // control this app refuses everywhere else.
+    connect(myStudio, &RenderStudio::shotSaveRequested, this, [this] {
+        const QString name = nextShotName();
+        addShotToScene(currentShot(name));
+        // A Note with no Undo: a shot is presentation, there is no checkpoint
+        // for an undo to pop, and the row's own x is how one is taken back.
+        if (myToasts) myToasts->show(tr("%1 saved").arg(name), Toast::Kind::Note, false);
+    });
+    connect(myStudio, &RenderStudio::shotApplied, this, [this](int index) {
+        const std::vector<DocumentModel::Shot>& shots = myScene.shots();
+        if (index < 0 || index >= static_cast<int>(shots.size())) return;
+        const DocumentModel::Shot shot = shots[static_cast<std::size_t>(index)];
+        applyShot(shot);
+        statusBar()->showMessage(
+            tr("%1 — camera, frame, lens and light").arg(QString::fromStdString(shot.name)));
+    });
+    connect(myStudio, &RenderStudio::shotRemoved, this, [this](int index) {
+        const std::vector<DocumentModel::Shot>& shots = myScene.shots();
+        if (index < 0 || index >= static_cast<int>(shots.size())) return;
+        const QString name = QString::fromStdString(shots[static_cast<std::size_t>(index)].name);
+        if (removeShotFromScene(static_cast<std::size_t>(index)))
+            statusBar()->showMessage(tr("%1 forgotten").arg(name));
+    });
 
     // A REFUSAL HAS TO REPORT, and in this app a refusal reports through a
     // Failure toast - which cannot be silenced - rather than a status line
@@ -707,12 +748,25 @@ void SceneWindow::refreshSurfaces()
         const double dpr = myView->devicePixelRatioF();
         myAddPiece->move(Theme::snapToDevicePixels(std::max(0, cardX), origin.x(), dpr),
                          Theme::snapToDevicePixels(std::max(0, cardY), origin.y(), dpr));
-        myAddPiece->raise();
     }
     if (myNameMark) {
         myNameMark->setState(mySceneName, isSceneDirty());
     }
+    if (myStudio && myStudio->panel()) {
+        // Rebuilt from the scene on every state change, like every other
+        // surface here - setShots() has its own equal-guard.
+        QStringList shotNames;
+        for (const DocumentModel::Shot& shot : myScene.shots())
+            shotNames << QString::fromStdString(shot.name);
+        myStudio->panel()->setShots(shotNames);
+    }
     if (myOverlay) myOverlay->relayout();
+    // RAISED AFTER relayout, never before. relayout() raises every anchored
+    // card as it places it, so a raise beforehand was undone a line later and
+    // the question card came up UNDERNEATH the pieces list and the pill. The
+    // same ordering law CLAUDE.md records for the toast and the balloon:
+    // anything that must sit on top goes after the layout pass, not before.
+    if (myAddPiece && myAddPiece->isVisible()) myAddPiece->raise();
 }
 
 void SceneWindow::closeEvent(QCloseEvent* event)

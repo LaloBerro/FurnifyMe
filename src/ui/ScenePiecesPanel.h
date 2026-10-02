@@ -22,6 +22,7 @@
 
 class QLabel;
 class QMouseEvent;
+class QScrollArea;
 class QPushButton;
 class QVBoxLayout;
 
@@ -62,6 +63,12 @@ public:
     // only the copy this app wrote.
     QStringList paintedTexts() const;
 
+    // Its own height, capped so a busy scene cannot run the card off the
+    // bottom of the viewport. Added up FROM THE PARTS and never asked of the
+    // scroll area, which does not answer for its widget - the trap this
+    // project has now paid for in two other cards.
+    QSize sizeHint() const override;
+
 signals:
     void selectionRequested(int pieceId);
     // A piece carries its own name, independent of the furniture it points
@@ -93,6 +100,9 @@ private:
     // is on screen" - correct, but a reader has to work it out.
     bool myBuilt = false;
     QVBoxLayout* myColumn = nullptr;
+    QScrollArea* myScroll = nullptr;
+    QWidget* myRowsHost = nullptr;
+    QVBoxLayout* myRowsColumn = nullptr;
     QLabel* myTitle = nullptr;
     QLabel* myEmpty = nullptr;
     int mySelected = 0;

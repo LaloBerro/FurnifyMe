@@ -335,6 +335,11 @@ Source files under `src/`, plus `tests/`:
 | `ui/MaterialCard.{h,cpp}` | one material's colour and brightness, bottom-left, over a live viewport |
 | `ui/BooleanBadgeRenderer.{h,cpp}` | the KEEP/USED pills a live boolean puts on each body; a click picks the survivor |
 | `ui/BooleanTool.{h,cpp}` | the boolean chip - the verb, one switch and the two keys; the smallest chip here, deliberately |
+| `SceneModel.{h,cpp}` | a scene: pieces that REFERENCE furniture, plus a rigid placement each; Qt-free, headless-tested |
+| `ui/RenderStudio.{h,cpp}` | the render layer, lifted out of `MainWindow` so a second window can have it; also the ONE place the list of what a shot carries is written |
+| `ui/SceneWindow.{h,cpp}` | the scene editor - a third top-level window; arranges furniture, cannot make it |
+| `ui/ScenePiecesPanel.{h,cpp}` | the pieces in a scene, listed; `ItemsPanel`'s shape at a fraction of its size |
+| `ui/AddPieceCard.{h,cpp}` | which furniture goes into this scene - a card over the viewport, never a dialog |
 
 ### The vocabulary — enforced by test
 
@@ -362,7 +367,19 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | The settings drawer | Settings | preferences, options, config |
 | A named container of items in the drawer | folder | collection, layer, node, bin |
 | A run of evenly spaced thin boards | slats | battens, ribs, louvres, sticks |
+| One furniture standing in a scene | piece | instance, item, object, copy |
 | A material's own colour and brightness | look | shader, finish, skin |
+
+**"item" is in the piece row's Never column but is NOT swept, and the reason is the "Group"
+exception one paragraph down.** This app owns *item* for something else and says it
+constantly: the Items drawer, `ItemsPanel::Row`, `setItemGroup()`, `itemsInGroup()`, and this
+file's own "improvements item 5". A **piece** is one whole furniture standing in a scene; an
+**item** is a row in the editor's drawer — a body or an outline inside one furniture. Two
+concepts, two words. The row says what a piece must not be called *in the scene window's own
+copy*; it does not retire a word the editor needs. Nothing in the enforced list changed: the
+swept words are still `OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, `Join`, `bevel`,
+`symmetry`, `round` and `flatten`, and adding "item" to that list would redden the Items
+drawer, which is correct English for what it holds.
 
 **"Group" is not in the folder row's Never column, deliberately.** This app already owns
 that word for something else and says it constantly: a multi-body selection is a group, and
@@ -1906,6 +1923,180 @@ add up to: **a mutation counts only when it produces a real red line naming the 
 and a run that produces no output file, or a check that simply vanishes from the output, is a
 failure to apply rather than a pass.
 
+### The scene editor: several furniture in one picture
+
+Spec `docs/superpowers/specs/2026-10-02-scene-editor-design.md`, plan
+`docs/superpowers/plans/2026-10-02-scene-editor-phase-1.md`, **phase 1's** eleven tasks, all
+merged. The user's ask: *"i want a new editor separetly, which allows me to select multiple
+furniture in a common scene and make renders like the render mode, this editor is open in the
+hub"*. Four forks were settled by the user before a line was written, and each one is
+load-bearing below: references rather than copies, move and rotate with snapping (**no
+scale**), snapping to four things, and each furniture keeping its own wood.
+
+**PHASE 1 SHIPPED TWO OF THE FOUR SNAP KINDS**, and the spec says so deliberately rather than
+as a shortfall: the grid-and-angle snap and the floor are here; **snapping against another
+piece and on top of another piece are phase 2** and are not implemented — the spec calls them
+"the largest single item in the feature" and gives them their own planning round. What phase 1
+owed them is that it must not foreclose them, and it does not: a placement stays a plain
+rigid transform that a snapper can correct before it is committed. Do not read the rest of
+this section as claiming a piece can be snapped to another piece today.
+
+- **A PIECE REFERENCES ITS FURNITURE; it never copies it.** `SceneModel::Piece` is
+  `{id, furnitureId, name, placement}` and holds not one vertex. The furniture on disk is the
+  single source of truth, so a table edited in the editor is the table the scene shows the
+  next time it opens - and a scene can never display wood the user has since changed. Same
+  argument "twins, not replay" makes for symmetry and "a joint is a relationship" makes for
+  joinery, one layer further out: the alternative is a copy that silently goes stale, and
+  nothing would ever tell the user which of the two they were looking at.
+- **TWO PIECES MAY NAME ONE FURNITURE, and nothing may key off the id as if it were
+  unique.** Six chairs round a table are six pieces naming one `furnitureId`; they rename,
+  move, turn and render independently. Every id this window hands out is **scene-local**
+  (`myNextBodyId`), precisely because the furniture's own body ids are not unique in here.
+  This is the Review Focus item the suite pins hardest, in both directions.
+- **A placement is RIGID, and rigidity is read off the matrix rather than from
+  `gp_Trsf::Form()`.** `SceneModel::checkPlacement()` checks unit-length columns, mutual
+  orthogonality and a determinant of +1. `Form()` cannot answer the question: it reports how a
+  transform was *built*, returning `gp_CompoundTrsf` for an ordinary gizmo
+  rotation-plus-translation **and** for a non-rigid compound alike, so a `Form()`-based guard
+  refuses exactly the placements the gizmo produces. The plan carried that mistake and the
+  headless test caught it on its first run.
+- **A piece's placement lives on the AIS PRESENTATION, which inverts the editor's own law.**
+  `OcctViewWidget::setSolidPlacement()` sets a local transformation; nothing is re-tessellated
+  and the furniture's saved shape is never mutated. The editor's suite asserts the **opposite**
+  — `presentationIsClean()` exists so a modelling drag BAKES its transform — and the reason
+  that law exists does not hold here: in the editor a presentation transform means the screen
+  and the document disagree, while in a scene `Piece::placement` **is** the document and a
+  placement is rigid by contract, so a presentation carrying exactly that placement is the two
+  **agreeing**. Same mechanism, opposite meaning, decided by which side owns the truth.
+  `placedShapesForPiece()` is the one accessor that applies a placement, and every measurement
+  goes through it.
+- **Move and Rotate, and NO SCALE ANYWHERE.** There is no `Tool::Scale`, no action, no
+  renderer reached by any path - absent, not disabled, because a chair scaled to 1.4× is not a
+  chair any more, and a furniture is resized by Re-measure, in the editor, where a size means
+  something. Snap to Grid defaults **on** here and off in the editor (aligning furniture to a
+  grid is the gesture, not an aid) at the editor's own 10 mm step, so a cabinet aligned in one
+  is alignable in the other. A piece **stands on the floor** from the moment it arrives,
+  measured from its own `measuredBox()` and never a world bounding box — a piece turned on the
+  floor has a world box taller than the furniture is, and settling against that leaves it
+  hovering. Settled on the way OUT of a gesture, not per step: a piece climbing back to the
+  floor mid-drag would fight the hand moving it.
+- **A new piece lands clear of what is already there**, not at the origin. That is *not*
+  improvements item 15's deleted nudge, which concerned a duplicate of one body where the
+  copy's position is the thing the user is about to set; two whole furniture dropped on one
+  spot interpenetrate, and a scene whose pieces start inside each other is unusable.
+- **Clicking any body selects the whole PIECE**, and the selection mode is
+  `SelectionMode::Solid`. That makes `SceneWindow` the **first non-test caller of
+  `setSelectionMode()`** — the sentence in `OcctViewWidget.h` and the one under "Selection"
+  below that said nothing in the shipped app calls it were true until this window existed, and
+  both are corrected. A scene has no gesture that wants a face or an edge, so arbitrating
+  between candidates no tool can use would be work for nothing.
+- **Each piece renders in ITS OWN furniture's wood.** `refreshWoodOverlays()` already built one
+  `WoodBodyObject` per body, each with its own material, tile and grain angle, and was simply
+  handed the same material every time; `OcctViewWidget::setBodyWood()` adds a per-body lookup
+  that **falls back to the single live material when a body has no entry**, so the furniture
+  editor sets no entries and behaves exactly as before. The honest limit: a furniture records a
+  look per MATERIAL NAME and records nothing about which was last on screen, so with one entry
+  (the common case) its wood is unambiguous and with several the first recorded is used.
+  Persisting the active wood name would close it and touches `FurnitureStore`'s manifest. This
+  is deliberately **not** generalised into per-body materials inside one furniture — that is a
+  real feature with its own gesture and its own design round.
+- **A BROKEN REFERENCE BREAKS LOUDLY AND SURVIVES.** A piece whose furniture cannot be read
+  keeps its row, prints its reason **where the name goes**, renders nothing at all, and is
+  still in the file after the next save. Each clause answers a different way of being wrong: a
+  row that reads like an ordinary piece and draws nothing is a row the user believes; and a
+  save that wrote only the pieces it could draw would delete the reference permanently, on the
+  next autosave, silently. Joinery's "it breaks loudly, and with no numbers" rule, applied to a
+  file reference.
+- **The library is the hub, and the handoff has three legs.** `EditorSelectorHandoff::wire()`
+  took a third window; choosing a scene card shows the scene window **first** and hides the
+  selector **second**, `File → Close scene` reverses it, and the scene window's X quits through
+  the same single hook the editor's X and the selector's close already use. `scene` is a
+  nullable pointer purely so the suite's thirteen `wireSelector()` probes need not each stand up
+  another `OcctViewWidget`; `main.cpp` and the handoff block both pass a real one.
+- **`RenderStudio` is the render layer with two callers, not two layers that resemble each
+  other.** It came out of `MainWindow` under one gate: the full suite had to report an
+  **identical check count** across the move, which it did (5028 both sides). `MainWindow` keeps
+  its panel pointers as non-owning handles assigned from the studio, which is what let ~40
+  wiring sites move zero lines. It also owns `shotFrom()`/`applyShotTo()` — the ONE place the
+  user's own list of what a shot stores ("camera pose, aspect, perpsective and light") is
+  written down, with `MainWindow` delegating, so a fifth field cannot reach one window and miss
+  the other.
+- **What the scene window deliberately does NOT have** is as much the point as what it does: no
+  sketch, extrude, boolean, joint, mirror, linked copy, version or compare — absent rather than
+  disabled, because an action that exists and refuses reads as broken. The suite asserts that
+  by NAME over every `QAction` the window owns, and a mutation adding one `Union` entry reddens
+  it.
+- **An empty scene is a real state.** The studio floor is built from the lowest *displayed*
+  body, so with no pieces it is legitimately absent — absent rather than wrong — and the export
+  still writes a real PNG.
+- **Out of scope by the spec, and not gestured at anywhere:** no scale, no per-body materials
+  inside one furniture, no lighting rig beyond the studio's, no scene-level joinery, no export
+  of a scene as geometry, and no nesting a scene inside a scene.
+
+**THREE LAYOUT BUGS REACHED THE USER, and all three were invisible to a suite that drove
+this window dozens of times.** Every check written for the scene window asked what it DID -
+does it open, does it list pieces, does a drag snap - and none asked what it LOOKED like. The
+user found each one by glancing at the window.
+
+- **The pill was stretched down the whole viewport and painted as an enormous ellipse.**
+  `ViewportOverlay` treats the LAST `Anchor::LeftEdge` entry as the SPINE and stretches it to
+  the viewport's bottom, because in the editor that entry is the rail with the pill above it
+  as a header. This window has no rail, so the pill was both first and last, became the spine,
+  and - `AppBar`'s corner radius being half its own height - a full-height pill is an ellipse.
+  **A header is only a header when something follows it:** with no spine to lead, the pill is
+  an ordinary `Anchor::TopLeft` card.
+- **The pieces list drew its rows across its own title.** A row inserted into the layout of a
+  parent that is **not visible yet stays hidden**, and a hidden child contributes nothing to
+  `sizeHint()` - so the card measured itself as having no rows, `adjustSize()` had nothing to
+  grow to, and `QVBoxLayout` crushed the title and the rows into 40 px against a `sizeHint` of
+  133. `row->show()` at insertion. Note what this is NOT: `updateGeometry()` was already
+  called and `ViewportOverlay::relayout()` already calls `adjustSize()` on every anchored
+  card. Both were working; the hint itself was wrong.
+- **The add-a-piece card came up at 0,0, behind the pill, with its title clipped.** Its action
+  called `relayout()` directly instead of the window's own `refreshSurfaces()`, skipping both
+  the centring and the raise - and **a raise must come AFTER the layout pass**, because
+  `relayout()` raises every anchored card as it places it. The clipped title was separate: the
+  card added its own height up by hand. **A height worked out by adding up what the author
+  remembered is a height that forgets a margin** - the same lesson `QScrollArea` taught this
+  project twice. It asks its layout now.
+
+**And FOUR of the checks written to catch those bugs passed while the window was visibly
+broken.** "Every row fits inside the card" and "the first row is below the title" were both
+satisfied by a layout crushed into 40 px - the rows genuinely did fit, in a card far too
+small. Then, once the list gained a scroll area, two of them were reading `QWidget::y()`,
+which is relative to the **immediate parent** - the rows' scroll host, not the card - so they
+measured the wrong coordinate space entirely and passed for no reason at all. Only the
+height-against-`sizeHint()` check ever had teeth. **A geometry check must name the space it
+measures in** (`mapTo()` the widget it is making a claim about), and a check that cannot
+distinguish "fits" from "crushed" is not measuring fit.
+
+The standing repair: **the scene block writes composited `printWindowCapture()` images on
+every run** - the empty window, the window with pieces, and the add card open - so this
+window's chrome is looked at rather than only asserted about. Behavioural checks cannot see a
+layout, and this project already knew that ("Verify appearance with measured pixels, never by
+eyeballing a crop"); what it did not have written down is the converse, which is that
+**driving a window is not looking at it**.
+
+**Three vacuous checks were found and closed while building this, each by a mutation that
+reddened nothing**, and the pattern is worth naming because it recurred three times in one
+branch. A `hasBodyWood()` presence check passes while every body wears the same default look —
+a presence check cannot answer a per-thing question. The floor rule had nothing to fail
+against until a furniture modelled 500 mm above its own origin existed, and adding one exposed
+a real defect behind it: `addPiece()` was not settling at all, so such a furniture arrived
+hovering with no discoverable cure. And "clicking a body selects the whole piece" was
+satisfied by doing nothing while every piece had exactly one body. **A check whose fixture
+cannot express the defect is not a check**, and the only way to find out is to make the defect
+and watch for a named red line.
+
+**Two of this branch's own checks also passed while lying**, which is the other half of the
+same discipline: one printed `0 of 6` and still passed, because the message and the
+`loadScene()` call sat in the same `check(...)` invocation and argument evaluation order is
+unspecified, so the message read the model before the load ran; and one was a tautology left as
+a placeholder (`shots().empty() || !shots().empty()`). **Read the numbers a green check prints,
+not only its colour.** A third scare was the *mutation's* own bug rather than the app's — it
+called `removePiece()` while iterating `pieces()` — so a mutation producing nonsense numbers is
+suspect itself before the code is.
+
 ### Booleans: roles on the wood, and the region drawn
 
 The user's report is the whole specification: *"right now works poorly, for example i
@@ -2915,12 +3106,12 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
 `SelectedShape()`.
 
 **Auto selection (spec `docs/superpowers/specs/2026-09-06-auto-selection-design.md`, both
-phases merged) is the app's ONE selection behaviour**: modes 2 AND 4 activated on every body
+phases merged) is the EDITOR's one selection behaviour**: modes 2 AND 4 activated on every body
 at once, so the cursor decides what a click takes — within 8 logical pixels of an edge the
 edge glows, otherwise the face does, and a click takes exactly what glows. `OcctViewWidget`
 is constructed in it. **The three Select Bodies/Faces/Edges actions, their rail chips, their
 menu entries and their glyphs are DELETED**, and `Solid`/`Face`/`Edge` survive as a
-**documented test seam** only: nothing outside `gui_smoke` calls `setSelectionMode()`.
+**documented seam**: within the editor nothing calls `setSelectionMode()` at all, and the only two callers anywhere are `gui_smoke` and **`SceneWindow`**, which picks whole bodies (`Solid`) because a scene has no gesture that wants a face or an edge — see "The scene editor" above.
 `gui_smoke` uses the seam where a check merely needs a selection OF A GIVEN KIND as setup and
 driving the real hover path would add nothing (each use justified in place); a check whose
 SUBJECT is selection or a gizmo drives the real path — `pickFaceOf()`, `pickEdgeOf()` and

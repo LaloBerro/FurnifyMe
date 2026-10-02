@@ -2,12 +2,15 @@
 
 #include "IconSet.h"
 #include "InlineRename.h"
+
+#include <algorithm>
 #include "Theme.h"
 
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QVBoxLayout>
 
 namespace {
@@ -16,6 +19,10 @@ constexpr int kRadius = 12;
 constexpr int kPad = 10;
 constexpr int kRowInset = 6;
 constexpr int kRowButtonPx = 24;
+// The tallest the list of rows may grow. Past this it scrolls - with both
+// bars OFF, so nothing is drawn and the wheel is the whole interaction, the
+// Items drawer's own answer to the same problem (improvements item 12).
+constexpr int kRowsMaxHeight = 420;
 }  // namespace
 
 ScenePiecesPanel::ScenePiecesPanel(QWidget* parent)
@@ -43,7 +50,20 @@ ScenePiecesPanel::ScenePiecesPanel(QWidget* parent)
     myEmpty->setWordWrap(true);
     myColumn->addWidget(myEmpty);
 
-    myColumn->addStretch(1);
+    // The rows live in a scroll area; the title stays outside it, so a long
+    // list scrolls under a heading that does not move.
+    myScroll = new QScrollArea(this);
+    myScroll->setFrameShape(QFrame::NoFrame);
+    myScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    myScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    myScroll->setWidgetResizable(true);
+    myRowsHost = new QWidget(myScroll);
+    myRowsColumn = new QVBoxLayout(myRowsHost);
+    myRowsColumn->setContentsMargins(0, 0, 0, 0);
+    myRowsColumn->setSpacing(4);
+    myRowsColumn->addStretch(1);
+    myScroll->setWidget(myRowsHost);
+    myColumn->addWidget(myScroll);
 
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
@@ -89,7 +109,7 @@ void ScenePiecesPanel::rebuild()
     myRows.clear();
 
     for (const Row& wanted : myWanted) {
-        auto* row = new QWidget(this);
+        auto* row = new QWidget(myRowsHost);
         auto* line = new QHBoxLayout(row);
         line->setContentsMargins(kRowInset, 2, kRowInset, 2);
         line->setSpacing(6);
@@ -113,7 +133,13 @@ void ScenePiecesPanel::rebuild()
                 [this, id](bool shown) { emit visibilityToggled(id, shown); });
         line->addWidget(eye);
 
-        myColumn->insertWidget(myColumn->count() - 1, row);
+        myRowsColumn->insertWidget(myRowsColumn->count() - 1, row);
+        // SHOWN EXPLICITLY. A widget inserted into the layout of a parent that
+        // is not itself visible yet stays hidden, and a hidden child
+        // contributes nothing to the layout's sizeHint - so the card measured
+        // its own height as if it had no rows at all, and adjustSize() had
+        // nothing to grow to.
+        row->show();
 
         BuiltRow built;
         built.data = wanted;
@@ -125,7 +151,23 @@ void ScenePiecesPanel::rebuild()
 
     if (myEmpty) myEmpty->setVisible(myWanted.isEmpty());
     applyTheme();
+
+    // ACTIVATED, then sized, and in that order. updateGeometry() alone only
+    // SCHEDULES an invalidation, so ViewportOverlay::relayout() - which runs
+    // synchronously right after this, and sizes every anchored card by
+    // adjustSize() - read a stale sizeHint and left the card at its old
+    // height. QVBoxLayout then squeezed the title and the rows into a space
+    // they did not fit, which Qt resolves by crushing them together: measured
+    // at 40 px against a sizeHint of 133, and seen as a row's name drawn
+    // across the title. invalidate() + activate() makes the layout answer now.
+    myRowsColumn->invalidate();
+    myRowsColumn->activate();
+    myRowsHost->adjustSize();
+    myScroll->setVisible(!myWanted.isEmpty());
+    myColumn->invalidate();
+    myColumn->activate();
     updateGeometry();
+    adjustSize();
 }
 
 int ScenePiecesPanel::rowIdAt(int index) const
@@ -208,6 +250,25 @@ void ScenePiecesPanel::mouseDoubleClickEvent(QMouseEvent* event)
         return;
     }
     QWidget::mouseDoubleClickEvent(event);
+}
+
+QSize ScenePiecesPanel::sizeHint() const
+{
+    // FROM THE PARTS. QScrollArea::sizeHint() does not answer for its widget -
+    // it returns a cached size bounded to roughly 24 text lines and ignores
+    // sizeAdjustPolicy entirely - so the rows' own host is asked instead and
+    // the result capped. sizeHint, never heightForWidth: the content sits in a
+    // widgetResizable scroll area, and asking its layout for a height AT A
+    // WIDTH re-enters the very layout pass doing the asking.
+    int height = kPad * 2;
+    if (myTitle) height += myTitle->sizeHint().height();
+    if (myWanted.isEmpty()) {
+        if (myEmpty) height += myColumn->spacing() + myEmpty->sizeHint().height();
+    } else if (myRowsHost) {
+        height += myColumn->spacing() + std::min(kRowsMaxHeight,
+                                                 myRowsHost->sizeHint().height());
+    }
+    return QSize(width(), height);
 }
 
 void ScenePiecesPanel::paintEvent(QPaintEvent* /*event*/)

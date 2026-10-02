@@ -95,7 +95,11 @@ public:
     // stay behind the double-click they already had. It is the DEFAULT this
     // member is constructed with, and Phase 2 removed the three actions, the
     // three rail chips and the three menu entries that used to reach the
-    // others - nothing in the shipped app calls setSelectionMode() at all.
+    // others - within the EDITOR nothing calls setSelectionMode() at all. The
+    // two callers anywhere are gui_smoke and SceneWindow, which picks whole
+    // bodies (Solid) because a scene has no gesture that wants a face or an
+    // edge, so arbitrating between candidates no tool can use is work for
+    // nothing. See CLAUDE.md's "The scene editor" section.
     //
     // Solid/Face/Edge survive as a DOCUMENTED TEST SEAM and nothing else:
     // one AIS selection mode activated on every body, with the hover
