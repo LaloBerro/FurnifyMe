@@ -9,6 +9,7 @@
 #include "ScenePiecesPanel.h"
 #include "Theme.h"
 #include "Toast.h"
+#include "UnsavedCloseCard.h"
 #include "ViewportOverlay.h"
 
 #include <QAction>
@@ -104,7 +105,10 @@ void SceneWindow::buildMenus()
 
     myCloseSceneAction = new QAction(tr("Close scene"), this);
     myCloseSceneAction->setToolTip(tr("Go back to the library"));
-    connect(myCloseSceneAction, &QAction::triggered, this, [this] { emit closeRequested(); });
+    connect(myCloseSceneAction, &QAction::triggered, this, [this] {
+        if (askBeforeClosing(CloseRoute::Library)) return;
+        emit closeRequested();
+    });
     myNewPieceAction = new QAction(tr("New piece"), this);
     myNewPieceAction->setToolTip(tr("Put a furniture from the library into this scene"));
     connect(myNewPieceAction, &QAction::triggered, this, [this] {
@@ -115,6 +119,13 @@ void SceneWindow::buildMenus()
         if (myOverlay) myOverlay->relayout();
     });
     file->addAction(myNewPieceAction);
+
+    mySaveAction = new QAction(tr("Save"), this);
+    mySaveAction->setShortcut(QKeySequence::Save);
+    mySaveAction->setToolTip(tr("Write this scene to the library"));
+    connect(mySaveAction, &QAction::triggered, this, [this] { save(); });
+    file->addAction(mySaveAction);
+
     file->addSeparator();
     file->addAction(myCloseSceneAction);
 
@@ -173,6 +184,36 @@ void SceneWindow::buildOverlay()
     connect(myAddPiece, &AddPieceCard::chosen, this,
             [this](const QString& id) { addPiece(id); });
 
+    // The EDITOR'S OWN question and the editor's own dot. Nothing about either
+    // is about furniture rather than scenes, and a second pair that looked
+    // like them is exactly the drift this project keeps paying to avoid.
+    myCloseCard = new UnsavedCloseCard(myView);
+    connect(myCloseCard, &UnsavedCloseCard::saveChosen, this, [this] {
+        const CloseRoute route = myCloseRoute;
+        myCloseCard->hide();
+        // Hidden BEFORE the save is attempted, so a Failure toast lands on a
+        // clear viewport - and a refused save ABORTS the exit rather than
+        // leaving by the back door.
+        if (!save()) return;
+        finishClose(route);
+    });
+    connect(myCloseCard, &UnsavedCloseCard::discardChosen, this, [this] {
+        const CloseRoute route = myCloseRoute;
+        myCloseCard->hide();
+        // Nothing is written on the way out: mySavedRevision is moved to the
+        // live one so no later save path can resurrect the discarded state.
+        mySavedRevision = myScene.revision();
+        finishClose(route);
+    });
+    connect(myCloseCard, &UnsavedCloseCard::keepChosen, this, [this] {
+        myCloseCard->hide();
+        myCloseRoute = CloseRoute::None;
+        refreshSurfaces();
+    });
+
+    myNameMark = new FurnitureNameMark(statusBar());
+    statusBar()->addPermanentWidget(myNameMark);
+
     connect(myPieces, &ScenePiecesPanel::renameCommitted, this,
             [this](int pieceId, const QString& name) { renamePiece(pieceId, name); });
 }
@@ -187,12 +228,30 @@ bool SceneWindow::openScene(const QString& id)
     SceneModel loaded;
     QString error;
     if (!myStore->loadScene(id, loaded, &error)) {
-        statusBar()->showMessage(error.isEmpty() ? tr("That scene could not be opened") : error);
+        // A FAILURE TOAST, not a status line. A refusal reports loudly or not
+        // at all, and the status bar was the weaker surface - the editor's own
+        // openFurniture() has always used a toast here.
+        if (myToasts) {
+            myToasts->show(tr("Couldn't open this scene — %1")
+                               .arg(error.isEmpty() ? tr("it could not be read") : error),
+                           Toast::Kind::Failure, false);
+        }
         return false;
     }
 
     myScene = loaded;
     mySceneId = id;
+    // Freshly loaded is freshly clean, and everything this window had shown
+    // belongs to the scene it is no longer showing.
+    myView->clearSolids();
+    myView->clearBodyWood();
+    myPieceBodies.clear();
+    myPieceShapes.clear();
+    myBodyPiece.clear();
+    myBrokenPieces.clear();
+    myGrainAcrossBodies.clear();
+    myNextBodyId = 1;
+    mySelectedPiece = 0;
     mySceneName.clear();
     for (const FurnitureStore::SceneInfo& info : myStore->listScenes()) {
         if (info.id == id) mySceneName = info.name;
@@ -201,6 +260,26 @@ bool SceneWindow::openScene(const QString& id)
     // is one the user cannot tell from the editor at a glance.
     setWindowTitle(mySceneName.isEmpty() ? tr("FurnifyMe — Scene")
                                          : tr("FurnifyMe — %1").arg(mySceneName));
+    // EVERY PIECE THE FILE NAMES, drawn where the file says - including the
+    // ones whose furniture has gone, which keep their row and their reason
+    // rather than being dropped. A scene that silently forgot a piece on open
+    // would delete the reference on the next save.
+    for (const SceneModel::Piece& piece : myScene.pieces()) {
+        QString loadError;
+        DocumentModel furniture;
+        if (myStore->loadFurniture(QString::fromStdString(piece.furnitureId), furniture,
+                                   &loadError)) {
+            displayPiece(piece.id, furniture, piece.placement);
+        } else {
+            myPieceBodies[piece.id] = {};
+            myPieceShapes[piece.id] = {};
+            myBrokenPieces[piece.id] = loadError.isEmpty()
+                                           ? tr("This furniture could not be read")
+                                           : loadError;
+        }
+    }
+    mySavedRevision = myScene.revision();
+
     refreshSurfaces();
     return true;
 }
@@ -513,6 +592,93 @@ void SceneWindow::setTool(Tool tool)
     refreshSurfaces();
 }
 
+bool SceneWindow::save()
+{
+    if (!myStore || mySceneId.isEmpty()) return false;
+    // NOT while render mode is on, the editor's own rule: a render-mode
+    // viewport is a studio shot, not a picture of the scene's arrangement, and
+    // a save must not silently replace the library card with it. saveScene()
+    // treats a null image as "leave the old one" rather than as a failure.
+    QImage thumb;
+    if (myView && !(myStudio && myStudio->isEnabled())) thumb = myView->captureThumbnail();
+    if (!myStore->saveScene(mySceneId, myScene, thumb)) {
+        if (myToasts) {
+            myToasts->show(tr("Couldn't save %1 — Check that its folder still exists and "
+                              "isn't read-only")
+                               .arg(mySceneName.isEmpty() ? tr("this scene") : mySceneName),
+                           Toast::Kind::Failure, false);
+        }
+        return false;
+    }
+    mySavedRevision = myScene.revision();
+    refreshSurfaces();
+    return true;
+}
+
+DocumentModel::Shot SceneWindow::currentShot(const QString& name) const
+{
+    return RenderStudio::shotFrom(myView, name);
+}
+
+void SceneWindow::applyShot(const DocumentModel::Shot& shot)
+{
+    RenderStudio::applyShotTo(myView, shot);
+    refreshSurfaces();
+}
+
+QString SceneWindow::nextShotName() const
+{
+    // The first free number rather than count + 1, MainWindow's own rule:
+    // deleting the middle shot and saving again would otherwise make a second
+    // row with the same name, and a name is how a shot is picked.
+    for (int n = 1; n < 1000; ++n) {
+        const QString candidate = tr("Shot %1").arg(n);
+        bool taken = false;
+        for (const DocumentModel::Shot& shot : myScene.shots()) {
+            if (QString::fromStdString(shot.name) == candidate) taken = true;
+        }
+        if (!taken) return candidate;
+    }
+    return tr("Shot");
+}
+
+void SceneWindow::addShotToScene(const DocumentModel::Shot& shot)
+{
+    myScene.addShot(shot);
+    refreshSurfaces();
+}
+
+bool SceneWindow::removeShotFromScene(std::size_t index)
+{
+    if (!myScene.removeShot(index)) return false;
+    refreshSurfaces();
+    return true;
+}
+
+bool SceneWindow::isAskingBeforeClose() const
+{
+    return myCloseCard && myCloseCard->isAsking();
+}
+
+bool SceneWindow::askBeforeClosing(CloseRoute route)
+{
+    if (!isSceneDirty() || !myCloseCard) return false;
+    // Render mode first: asking is leaving, and the question belongs over the
+    // viewport the user was arranging in.
+    if (myStudio && myStudio->isEnabled()) myStudio->setEnabled(false);
+    myCloseRoute = route;
+    myCloseCard->ask(mySceneName.isEmpty() ? tr("this scene") : mySceneName);
+    refreshSurfaces();
+    return true;
+}
+
+void SceneWindow::finishClose(CloseRoute route)
+{
+    myCloseRoute = CloseRoute::None;
+    if (route == CloseRoute::Library) emit closeRequested();
+    else if (route == CloseRoute::Quit) emit quitRequested();
+}
+
 void SceneWindow::refreshSurfaces()
 {
     // DERIVED on every state change, never set once at the control that moved
@@ -543,6 +709,9 @@ void SceneWindow::refreshSurfaces()
                          Theme::snapToDevicePixels(std::max(0, cardY), origin.y(), dpr));
         myAddPiece->raise();
     }
+    if (myNameMark) {
+        myNameMark->setState(mySceneName, isSceneDirty());
+    }
     if (myOverlay) myOverlay->relayout();
 }
 
@@ -551,6 +720,12 @@ void SceneWindow::closeEvent(QCloseEvent* event)
     // The X QUITS, the way closing the editor does since Milestone 5 - it is
     // not a second route back to the hub. File -> Close scene is that route,
     // and it says so in its own tooltip.
+    if (askBeforeClosing(CloseRoute::Quit)) {
+        // Asking is not leaving. The window stays put until the question is
+        // answered, exactly as the editor's X does.
+        event->ignore();
+        return;
+    }
     emit quitRequested();
     QMainWindow::closeEvent(event);
 }

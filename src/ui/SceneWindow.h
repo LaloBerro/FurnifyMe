@@ -38,8 +38,10 @@ class AppBar;
 class FurnitureStore;
 class OcctViewWidget;
 class RenderStudio;
+class FurnitureNameMark;
 class ScenePiecesPanel;
 class ToastHost;
+class UnsavedCloseCard;
 class ViewportOverlay;
 
 class SceneWindow : public QMainWindow {
@@ -79,6 +81,23 @@ public:
     // something is measured, which is on a commit, not on every drag step.
     std::vector<TopoDS_Shape> placedShapesForPiece(int pieceId) const;
 
+    // Writes the scene and a thumbnail of what is on screen. False on a
+    // refused write, REPORTED as a Failure rather than swallowed.
+    bool save();
+    // Unsaved changes, DERIVED from the scene's own revision against the one
+    // last written - never a flag something has to remember to set.
+    bool isSceneDirty() const { return myScene.revision() != mySavedRevision; }
+    bool isAskingBeforeClose() const;
+
+    // What a shot carries is RenderStudio's list, not a second copy of it.
+    DocumentModel::Shot currentShot(const QString& name) const;
+    void applyShot(const DocumentModel::Shot& shot);
+    QString nextShotName() const;
+    // Keeps a shot in the scene. The window's own route, so the dirty state
+    // and the surfaces follow a shot exactly as they follow a placement.
+    void addShotToScene(const DocumentModel::Shot& shot);
+    bool removeShotFromScene(std::size_t index);
+
     void setTool(Tool tool);
     Tool tool() const { return myTool; }
     // Which piece is selected, derived from the live selection rather than
@@ -105,6 +124,11 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    // Which exit an answered close question carries out - the editor's own
+    // CloseRoute split: the X quits, File -> Close scene goes to the library.
+    // Declared before the members that take it, which a parameter type must be.
+    enum class CloseRoute { None, Quit, Library };
+
     void buildMenus();
     void buildOverlay();
     // Displays one piece's bodies and pushes that furniture's own wood onto
@@ -132,6 +156,10 @@ private:
     // the surfaces. `dragged` false means the press never moved, which is a
     // pick rather than a placement.
     void commitDrag(bool dragged);
+    // Asks, or leaves straight away when there is nothing to lose. True when
+    // the exit was handled here and the caller should not continue.
+    bool askBeforeClosing(CloseRoute route);
+    void finishClose(CloseRoute route);
     // Pushes live state onto every surface that follows it. This window's own
     // appStateChanged, under a plainer name because there is far less of it.
     void refreshSurfaces();
@@ -150,6 +178,13 @@ private:
     QAction* myCloseSceneAction = nullptr;
     QAction* myNewPieceAction = nullptr;
     QAction* mySnapAction = nullptr;
+    QAction* mySaveAction = nullptr;
+    UnsavedCloseCard* myCloseCard = nullptr;
+    FurnitureNameMark* myNameMark = nullptr;
+    // The revision last written to disk. Compared against the live one, so
+    // "dirty" cannot drift out of step with what actually changed.
+    std::size_t mySavedRevision = 0;
+    CloseRoute myCloseRoute = CloseRoute::None;
     Tool myTool = Tool::Move;
     int mySelectedPiece = 0;
     // Guards the selection handler against the selection IT sets: picking one

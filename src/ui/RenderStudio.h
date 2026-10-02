@@ -25,6 +25,8 @@
 // before this class existed (5028). A changed count would have meant
 // something stopped running.
 #include <QObject>
+
+#include "DocumentModel.h"
 #include <QStringList>
 
 class AppBar;
@@ -53,6 +55,17 @@ public:
     // THE SINGLE AUTHORITY for whether render mode is on. Docks the panel,
     // slides the bar away, raises the Back chip and starts the polish ticker;
     // emits enabledChanged() so the host can re-derive its own surfaces.
+    // WHAT A SHOT CARRIES, written down once. The user's own list - "the shot
+    // must store: camera pose, aspect, perpsective and light" - and both
+    // windows that can take a picture read it from here rather than each
+    // keeping a copy that would drift the day a sixth field joined. Static,
+    // and taking the viewport, because a shot is entirely about the render
+    // layer and nothing about which window is hosting it.
+    static DocumentModel::Shot shotFrom(const OcctViewWidget* view, const QString& name);
+    // The caller refreshes its own surfaces afterwards; this touches only the
+    // viewport.
+    static void applyShotTo(OcctViewWidget* view, const DocumentModel::Shot& shot);
+
     void setEnabled(bool on);
     bool isEnabled() const { return myEnabled; }
 

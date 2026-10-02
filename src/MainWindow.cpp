@@ -4602,34 +4602,16 @@ void MainWindow::setRenderModeEnabled(bool on)
 
 DocumentModel::Shot MainWindow::currentShot(const QString& name) const
 {
-    DocumentModel::Shot shot;
-    shot.name = name.toStdString();
-    if (!myView) return shot;
-    shot.camera = myView->camera().state();
-    shot.orthographic =
-        myView->camera().baseProjection() == CameraController::Projection::Orthographic;
-    shot.fovDeg = myView->renderFov();
-    shot.aspect = static_cast<int>(myView->renderAspect());
-    shot.lightAngleDeg = myView->renderLightAngleDeg();
-    shot.lightStrength = myView->renderLightStrength();
-    return shot;
+    // The list of what a shot carries lives in RenderStudio, which the scene
+    // window reads too - one place, so a sixth field cannot reach one window
+    // and miss the other.
+    return RenderStudio::shotFrom(myView, name);
 }
 
 void MainWindow::applyShot(const DocumentModel::Shot& shot)
 {
     if (!myView) return;
-    // The projection BEFORE the pose: setBaseProjection() is the user-facing
-    // route that also hands back a temporary-ortho loan (see CameraController's
-    // own note), and applying it after the pose would drop a loan the pose
-    // never took while leaving the camera where it already was. Order settled
-    // by that rule rather than by taste.
-    myView->setBaseProjection(shot.orthographic ? CameraController::Projection::Orthographic
-                                                : CameraController::Projection::Perspective);
-    myView->setCameraStateNow(shot.camera);
-    myView->setRenderFov(shot.fovDeg);
-    myView->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(shot.aspect));
-    myView->setRenderLightAngleDeg(shot.lightAngleDeg);
-    myView->setRenderLightStrength(shot.lightStrength);
+    RenderStudio::applyShotTo(myView, shot);
     updateActions();
 }
 

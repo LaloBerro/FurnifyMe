@@ -85,6 +85,38 @@ RenderStudio::RenderStudio(OcctViewWidget* view, QMainWindow* host, ViewportOver
     connect(myTierTicker, &QTimer::timeout, this, [this] { emit tierTick(); });
 }
 
+DocumentModel::Shot RenderStudio::shotFrom(const OcctViewWidget* view, const QString& name)
+{
+    DocumentModel::Shot shot;
+    shot.name = name.toStdString();
+    if (!view) return shot;
+    shot.camera = view->camera().state();
+    shot.orthographic =
+        view->camera().baseProjection() == CameraController::Projection::Orthographic;
+    shot.fovDeg = view->renderFov();
+    shot.aspect = static_cast<int>(view->renderAspect());
+    shot.lightAngleDeg = view->renderLightAngleDeg();
+    shot.lightStrength = view->renderLightStrength();
+    return shot;
+}
+
+void RenderStudio::applyShotTo(OcctViewWidget* view, const DocumentModel::Shot& shot)
+{
+    if (!view) return;
+    // The projection BEFORE the pose: setBaseProjection() is the user-facing
+    // route that also hands back a temporary-ortho loan (see CameraController's
+    // own note), and applying it after the pose would drop a loan the pose
+    // never took while leaving the camera where it already was. Order settled
+    // by that rule rather than by taste.
+    view->setBaseProjection(shot.orthographic ? CameraController::Projection::Orthographic
+                                              : CameraController::Projection::Perspective);
+    view->setCameraStateNow(shot.camera);
+    view->setRenderFov(shot.fovDeg);
+    view->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(shot.aspect));
+    view->setRenderLightAngleDeg(shot.lightAngleDeg);
+    view->setRenderLightStrength(shot.lightStrength);
+}
+
 void RenderStudio::setEnabled(bool on)
 {
     if (myEnabled == on) return;

@@ -59,6 +59,7 @@
 #include "SceneModel.h"
 #include "ScenePiecesPanel.h"
 #include "AddPieceCard.h"
+#include "RenderStudio.h"
 #include "SceneWindow.h"
 #include "RenderFrameGuides.h"
 #include "RenderSettingsPanel.h"
@@ -29013,7 +29014,247 @@ int main(int argc, char* argv[])
                   .arg(scenePieceX(twinA), 0, 'f', 1)
                   .arg(scenePieceX(twinB), 0, 'f', 1));
 
+
+        // --- render mode in a scene is the EDITOR's render mode ---------------
+        // The same classes, because RenderStudio is one implementation with two
+        // callers rather than two that look alike.
+        scene.view()->setSelectedSolids({});
+        settle(150);
+        scene.studio()->setEnabled(true);
+        settle(400);
+        check(scene.studio()->isEnabled(), "render mode turns on in a scene");
+        check(scene.findChild<RenderSettingsPanel*>() != nullptr,
+              "...showing the editor's own RenderSettingsPanel class");
+        check(scene.findChild<RenderFrameGuides*>() != nullptr,
+              "...and its own RenderFrameGuides");
+        check(scene.piecesPanel() && !scene.piecesPanel()->isVisible(),
+              "...with the pieces list out of the picture, as every overlay is");
+        check(!scene.view()->hasMoveGizmo() && !scene.view()->hasRotateGizmo(),
+              "...and no gizmo standing in the shot");
+
+        // --- a shot stores the camera, the aspect, the projection and the light
+        // The user's own list, verbatim: "the shot must store: camera pose,
+        // aspect, perpsective and light".
+        scene.view()->setRenderAspect(OcctViewWidget::RenderAspect::Square);
+        scene.view()->setRenderLightAngleDeg(61.0);
+        scene.view()->setRenderLightStrength(3.25);
+        scene.view()->setBaseProjection(CameraController::Projection::Orthographic);
+        settle(250);
+        const DocumentModel::Shot shot = scene.currentShot(QStringLiteral("Shot 1"));
+        const CameraState posed = scene.view()->camera().state();
+        check(shot.aspect == static_cast<int>(OcctViewWidget::RenderAspect::Square) &&
+                  shot.orthographic &&
+                  std::fabs(shot.lightAngleDeg - 61.0) < 1.0e-6 &&
+                  std::fabs(shot.lightStrength - 3.25) < 1.0e-6,
+              QStringLiteral("a shot carries the aspect, the projection and the light "
+                             "(aspect %1, ortho %2, %3 deg, %4x)")
+                  .arg(shot.aspect)
+                  .arg(shot.orthographic ? 1 : 0)
+                  .arg(shot.lightAngleDeg, 0, 'f', 2)
+                  .arg(shot.lightStrength, 0, 'f', 2));
+
+        // Moved away on every axis the shot claims to carry, so restoring has
+        // something to restore rather than agreeing with where it already was.
+        scene.view()->setRenderAspect(OcctViewWidget::RenderAspect::SixteenNine);
+        scene.view()->setRenderLightAngleDeg(10.0);
+        scene.view()->setRenderLightStrength(1.0);
+        scene.view()->setBaseProjection(CameraController::Projection::Perspective);
+        CameraState elsewhere = posed;
+        elsewhere.azimuthDeg = posed.azimuthDeg + 37.0;
+        elsewhere.elevationDeg = posed.elevationDeg - 11.0;
+        elsewhere.distance = posed.distance * 1.4;
+        scene.view()->setCameraStateNow(elsewhere);
+        settle(250);
+        check(std::fabs(scene.view()->camera().state().azimuthDeg - posed.azimuthDeg) > 1.0,
+              "the camera is genuinely somewhere else before the shot is applied");
+
+        scene.applyShot(shot);
+        settle(300);
+        const CameraState restored = scene.view()->camera().state();
+        check(std::fabs(restored.azimuthDeg - posed.azimuthDeg) < 1.0e-6 &&
+                  std::fabs(restored.elevationDeg - posed.elevationDeg) < 1.0e-6 &&
+                  std::fabs(restored.distance - posed.distance) < 1.0e-6,
+              QStringLiteral("applying it restores the camera POSE (az %1, el %2, d %3)")
+                  .arg(restored.azimuthDeg, 0, 'f', 3)
+                  .arg(restored.elevationDeg, 0, 'f', 3)
+                  .arg(restored.distance, 0, 'f', 3));
+        check(scene.view()->renderAspect() == OcctViewWidget::RenderAspect::Square,
+              "...the aspect");
+        check(scene.view()->camera().baseProjection() ==
+                  CameraController::Projection::Orthographic,
+              "...the projection");
+        check(std::fabs(scene.view()->renderLightAngleDeg() - 61.0) < 1.0e-6 &&
+                  std::fabs(scene.view()->renderLightStrength() - 3.25) < 1.0e-6,
+              "...and the light");
+
+        scene.studio()->setEnabled(false);
+        settle(300);
+        check(!scene.studio()->isEnabled(), "render mode turns back off");
+
+        // --- save, close, reopen: identical to the micron ---------------------
+        scene.scene().pieces();   // (read for clarity below)
+        std::vector<std::pair<QString, gp_Trsf>> expected;
+        for (const SceneModel::Piece& piece : scene.scene().pieces())
+            expected.emplace_back(QString::fromStdString(piece.name), piece.placement);
+        const int expectedCount = static_cast<int>(expected.size());
+        check(expectedCount >= 4,
+              QStringLiteral("there is a scene worth saving (%1 pieces)").arg(expectedCount));
+        scene.addShotToScene(shot);
+        check(scene.scene().shots().size() == 1, "a shot is kept in the scene");
+        check(scene.save(), "the scene saves");
+        check(!scene.isSceneDirty(), "...and reads clean afterwards");
+
+        {
+            SceneWindow reopened(&winStore);
+            reopened.setAttribute(Qt::WA_ShowWithoutActivating);
+            reopened.resize(1000, 760);
+            reopened.show();
+            settle(300);
+            check(reopened.openScene(sceneId), "a second window reopens the saved scene");
+            settle(300);
+            check(static_cast<int>(reopened.scene().pieces().size()) == expectedCount,
+                  QStringLiteral("with every piece back (%1 of %2)")
+                      .arg(static_cast<int>(reopened.scene().pieces().size()))
+                      .arg(expectedCount));
+            bool identical = static_cast<int>(reopened.scene().pieces().size()) == expectedCount;
+            double worstMm = 0.0;
+            for (int i = 0; i < expectedCount && identical; ++i) {
+                const SceneModel::Piece& back = reopened.scene().pieces()[i];
+                if (QString::fromStdString(back.name) != expected[i].first) identical = false;
+                for (int r = 1; r <= 3 && identical; ++r) {
+                    for (int c = 1; c <= 4; ++c) {
+                        worstMm = std::max(worstMm, std::fabs(back.placement.Value(r, c) -
+                                                              expected[i].second.Value(r, c)));
+                    }
+                }
+            }
+            check(identical && worstMm < 1.0e-6,
+                  QStringLiteral("...its name and its placement identical to the micron "
+                                 "(worst element %1)").arg(worstMm, 0, 'e', 2));
+            check(reopened.piecesPanel() &&
+                      reopened.piecesPanel()->rowCount() == expectedCount,
+                  "...and the list is rebuilt from the file, not from memory");
+            // EXACTLY ONE piece should render nothing - the one deliberately
+            // given a furniture id that was never there. Any other empty piece
+            // is a furniture that should have loaded and did not.
+            int emptyOnReopen = 0;
+            QStringList emptyNames;
+            for (const SceneModel::Piece& piece : reopened.scene().pieces()) {
+                if (!reopened.bodyIdsForPiece(piece.id).empty()) continue;
+                ++emptyOnReopen;
+                emptyNames << QString::fromStdString(piece.name);
+            }
+            check(emptyOnReopen == 1,
+                  QStringLiteral("...and every piece whose furniture exists came back with "
+                                 "its geometry - only the deliberately broken one is empty "
+                                 "(%1 empty: %2)")
+                      .arg(emptyOnReopen)
+                      .arg(emptyNames.isEmpty() ? QStringLiteral("none")
+                                                : emptyNames.join(", ")));
+
+            // THE SHOT RODE ALONG in the scene's own file. This replaced a
+            // tautology (empty() || !empty()) that could not fail.
+            const bool haveShot = reopened.scene().shots().size() == 1;
+            const DocumentModel::Shot& back =
+                haveShot ? reopened.scene().shots().front() : shot;
+            check(haveShot,
+                  QStringLiteral("the shot saved into the scene comes back with it (%1)")
+                      .arg(static_cast<int>(reopened.scene().shots().size())));
+            check(haveShot && QString::fromStdString(back.name) == QStringLiteral("Shot 1") &&
+                      back.aspect == shot.aspect && back.orthographic == shot.orthographic &&
+                      std::fabs(back.lightAngleDeg - 61.0) < 1.0e-6 &&
+                      std::fabs(back.lightStrength - 3.25) < 1.0e-6 &&
+                      std::fabs(back.camera.azimuthDeg - shot.camera.azimuthDeg) < 1.0e-6 &&
+                      std::fabs(back.camera.distance - shot.camera.distance) < 1.0e-6,
+                  QStringLiteral("...carrying its camera, aspect, projection and light "
+                                 "through the file (\"%1\", aspect %2, %3 deg, %4x)")
+                      .arg(QString::fromStdString(back.name))
+                      .arg(back.aspect)
+                      .arg(back.lightAngleDeg, 0, 'f', 2)
+                      .arg(back.lightStrength, 0, 'f', 2));
+            reopened.close();
+        }
+
+        // --- Review Focus: a furniture DELETED while the scene was closed -----
+        // The reference must survive. A scene that silently forgot the piece
+        // would lose the arrangement, and the user would never be told.
+        check(winStore.deleteFurniture(chairId), "the chair furniture is deleted outright");
+        {
+            SceneWindow afterDelete(&winStore);
+            afterDelete.setAttribute(Qt::WA_ShowWithoutActivating);
+            afterDelete.resize(1000, 760);
+            afterDelete.show();
+            settle(300);
+            check(afterDelete.openScene(sceneId),
+                  "the scene still OPENS with one of its furniture gone");
+            settle(300);
+            check(static_cast<int>(afterDelete.scene().pieces().size()) == expectedCount,
+                  QStringLiteral("...keeping every piece, the dangling one included (%1 of "
+                                 "%2)")
+                      .arg(static_cast<int>(afterDelete.scene().pieces().size()))
+                      .arg(expectedCount));
+
+            int brokenRows = 0;
+            int brokenPiece = 0;
+            for (const SceneModel::Piece& piece : afterDelete.scene().pieces()) {
+                if (piece.furnitureId == chairId.toStdString()) brokenPiece = piece.id;
+            }
+            check(brokenPiece != 0, "...and the dangling piece is identifiable");
+            check(brokenPiece != 0 && afterDelete.bodyIdsForPiece(brokenPiece).empty(),
+                  "...rendering nothing at all, rather than something wrong");
+            for (int i = 0; i < afterDelete.piecesPanel()->rowCount(); ++i) {
+                if (afterDelete.piecesPanel()->rowIdAt(i) == brokenPiece) ++brokenRows;
+            }
+            check(brokenRows == 1, "...while keeping its row in the list");
+
+            // AND SAVING PRESERVES IT. This is the half that matters: a save
+            // that wrote only the pieces it could draw would delete the
+            // reference permanently, on the next autosave, silently.
+            check(afterDelete.save(), "the scene saves with a dangling reference in it");
+            SceneModel checkBack;
+            QString backErr;
+            // Loaded FIRST, into locals, and only then checked. Building the
+            // message in the same call as the load reads checkBack before the
+            // load has run - argument evaluation order is unspecified - and
+            // the check passed while printing "0 of 6", which is exactly the
+            // kind of output that would hide a real failure next time.
+            const bool backOk = winStore.loadScene(sceneId, checkBack, &backErr);
+            const int backCount = static_cast<int>(checkBack.pieces().size());
+            check(backOk && backCount == expectedCount,
+                  QStringLiteral("...and the reference is still in the file afterwards "
+                                 "(%1 of %2 pieces%3)")
+                      .arg(backCount)
+                      .arg(expectedCount)
+                      .arg(backErr.isEmpty() ? QString() : QStringLiteral(", ") + backErr));
+            afterDelete.close();
+        }
+
         scene.close();
+    }
+
+    // AN EMPTY SCENE still takes a picture. The studio floor is built from the
+    // lowest DISPLAYED body and there is none, so this is the one path where
+    // the floor is legitimately absent - it must be absent rather than wrong,
+    // and the export must still produce a file.
+    if (blockEnabled("a-scene-window-opens-a-scene")) {
+        RequiredTempDir emptyLib;
+        FurnitureStore emptyStore(emptyLib.path());
+        const QString emptyId = emptyStore.createScene(QStringLiteral("Nothing"));
+        SceneWindow empty(&emptyStore);
+        empty.setAttribute(Qt::WA_ShowWithoutActivating);
+        empty.resize(900, 700);
+        empty.show();
+        settle(300);
+        check(empty.openScene(emptyId), "an empty scene opens");
+        check(empty.scene().pieces().empty(), "and it really is empty");
+        empty.studio()->setEnabled(true);
+        settle(400);
+        check(empty.studio()->isEnabled(), "render mode turns on over nothing at all");
+        const QString emptyPath = outDir + QStringLiteral("/empty-scene.png");
+        check(empty.view()->saveSnapshot(emptyPath),
+              "and an export still writes a file rather than failing");
+        check(!QImage(emptyPath).isNull(), "which loads back as an image");
+        empty.close();
     }
 
     // --- Milestone 5, item 10: Autosave modes and the two timed-save laws ----
