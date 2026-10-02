@@ -9,6 +9,7 @@
 #include "AppBar.h"
 #include "AppearancePanel.h"
 #include "RenderFrameGuides.h"
+#include "RenderStudio.h"
 #include "RenderSettingsPanel.h"
 #include "AxisGizmo.h"
 #include "CardSlide.h"
@@ -1064,26 +1065,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // The pill goes with it, and the Back chip is its exact opposite -
         // both derived here on every state change rather than set once at
         // the toggle, the sibling-visibility law this whole block keeps.
-        if (myAppBarSlide) myAppBarSlide->setShown(!hiddenForRenderMode);
-        if (myRenderExitChip) myRenderExitChip->setVisible(hiddenForRenderMode);
-        if (myRenderFrame) {
-            myRenderFrame->setVisible(hiddenForRenderMode);
-            // Re-read on every state change, not only when the aspect moves:
-            // the viewport resizes when the panel docks and when the window
-            // does, and the frame is a fraction of the viewport either way.
-            if (hiddenForRenderMode) {
-                myRenderFrame->refresh();
-                // LOWERED among the viewport's siblings, not raised. The mask
-                // is meant to dim the SCENE, and every sibling over this
-                // viewport is a control - the Back chip, a toast - which has
-                // to stay crisp on top of it. Children of a QOpenGLWidget
-                // paint over its GL content whatever their sibling order, so
-                // lowering costs the mask nothing and keeps the controls
-                // legible over the part of the room that is outside the
-                // picture.
-                myRenderFrame->lower();
-            }
-        }
+        // The app bar's slide, the Back chip, the frame and the panel's own
+        // visibility are all RenderStudio's to derive now - one call, rather
+        // than four blocks this window would have to keep in step with a
+        // second caller's copy of them.
+        if (myStudio) myStudio->refresh();
         if (myAxisGizmo) myAxisGizmo->setVisible(!hiddenForRenderMode);
         // The render settings card and the shutter (Task 7.2) - the exact
         // opposite predicate: neither has a QAction of its own either, and
@@ -1153,15 +1139,6 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
                 myMaterialCard->material() != activeMaterialName()) {
                 myMaterialCard->close();
             }
-        }
-        if (myRenderTierTicker) {
-            // The polish bar is live data - the accumulation deepens frame
-            // by frame with no appStateChanged to ride - so a 500 ms ticker
-            // runs for exactly as long as render mode does.
-            if (hiddenForRenderMode && !myRenderTierTicker->isActive())
-                myRenderTierTicker->start(500);
-            else if (!hiddenForRenderMode)
-                myRenderTierTicker->stop();
         }
         if (myOverlay) myOverlay->relayout();
     });
@@ -2207,7 +2184,8 @@ void MainWindow::buildOverlay()
     // And the pill above it leaves upward, for the same reason and through
     // the same object: every show and hide of the app bar goes through this
     // from here on, and nothing else may call setVisible() on it.
-    myAppBarSlide = new CardSlide(myAppBar, CardSlide::From::Top, myView, myOverlay, this);
+    // The app bar's slide-away is RenderStudio's, built below with the rest
+    // of the render layer.
 
     // The Add-shape flyout (Milestone 5, pick A): built hidden beside the
     // rail; the chip's action toggles it, a pick places and closes, and the
@@ -2285,10 +2263,14 @@ void MainWindow::buildOverlay()
     // exception to. IconSet::Glyph::Back was added for it: a left chevron
     // reads as "back" without a word, and the words are in the tooltip,
     // which mirrors the action exactly as every other chip's does.
-    myRenderExitChip = new ToolChip(myRenderModeAction, IconSet::Glyph::Back,
-                                    ToolChip::ChipMode::IconOnly, myView);
-    myRenderExitChip->hide();
-    myOverlay->addWidget(myRenderExitChip, ViewportOverlay::Anchor::TopLeft);
+    // THE RENDER LAYER, built here because the Back chip it owns must be the
+    // LAST TopLeft overlay entry - it takes the corner only when every drawer
+    // above it is hidden, which is exactly and only render mode.
+    myStudio = new RenderStudio(myView, this, myOverlay, myAppBar, myRenderModeAction, this);
+    myRenderExitChip = myStudio->exitChip();
+    myRenderFrame = myStudio->frame();
+    myRenderSettingsPanel = myStudio->panel();
+    connect(myStudio, &RenderStudio::tierTick, this, &MainWindow::syncRenderTierStatus);
 
     // The picture's edges. Deliberately NOT a ViewportOverlay entry: the
     // overlay anchors cards to edges and this covers the viewport edge to
@@ -2297,10 +2279,7 @@ void MainWindow::buildOverlay()
     // Raised above the other siblings so the mask darkens what is outside the
     // picture rather than being painted under it; it takes no clicks, so
     // being on top costs nothing.
-    myRenderFrame = new RenderFrameGuides(myView);
-    connect(myView, &OcctViewWidget::renderFrameChanged, this, [this] {
-        if (myRenderFrame) myRenderFrame->refresh();
-    });
+    // The frame and guides are RenderStudio's too, built above.
 
     // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
     // the least used of the three, and absent from the design's bar and rail
@@ -2460,8 +2439,8 @@ void MainWindow::buildOverlay()
     // there at once. Hidden before it is added, on the Appearance
     // card's own terms: its visibility belongs to the render-mode-derived
     // lambda alone, never to addWidget()'s default show().
-    myRenderSettingsPanel = new RenderSettingsPanel(myView);
-    myRenderSettingsPanel->hide();
+    // The settings panel is RenderStudio's, built above - this window wires
+    // its rows below but does not own it.
     // The full-height studio panel (Milestone 5's render-UI rework, mockup
     // pick A): RightEdge, the anchor added for exactly this - it stretches
     // top to bottom and pushes the view-controls cluster left past itself,
@@ -2708,9 +2687,8 @@ void MainWindow::buildOverlay()
             });
 
     // The polish ticker - see the visibility lambda above for start/stop.
-    myRenderTierTicker = new QTimer(this);
-    connect(myRenderTierTicker, &QTimer::timeout, this,
-            &MainWindow::syncRenderTierStatus);
+    // The polish ticker is RenderStudio's; its tierTick() is connected to
+    // syncRenderTierStatus() where the studio is built.
 
     // Every outcome the app reports - success or failure - goes through this
     // one host rather than a modal dialog. It parents itself (and its Toast)
@@ -4577,13 +4555,14 @@ void MainWindow::setRenderModeEnabled(bool on)
         myRenderModeAction->setChecked(on);
     }
 
-    myView->setRenderMode(on);
+    // RenderStudio::setEnabled() below calls myView->setRenderMode(on) and
+    // docks the panel - the single authority for both.
     // The panel takes its own column beside the viewport rather than floating
     // over it - see setRenderDockOpen() and the member's own comment. Done
     // AFTER setRenderMode() so the viewport is already in its studio state
     // when it is resized into the narrower half, rather than rendering one
     // modeling frame at the new width first.
-    setRenderDockOpen(on);
+    if (myStudio) myStudio->setEnabled(on);
 
     // The one Note toast render mode raises on entry, naming the tier the
     // viewport just settled on - read AFTER setRenderMode(on) returns, since
@@ -4668,51 +4647,6 @@ QString MainWindow::nextShotName() const
         if (!taken) return candidate;
     }
     return tr("Shot");
-}
-
-void MainWindow::setRenderDockOpen(bool open)
-{
-    if (!myRenderSettingsPanel) return;
-    if (open == (myRenderDock != nullptr)) return;
-
-    if (open) {
-        // The size the viewport has RIGHT NOW is the size the container is
-        // about to be handed, and the compare pane's finding says to set it
-        // explicitly rather than trust a layout pass to happen: captured
-        // before anything below moves a widget.
-        const QSize centralSize = myView->size();
-
-        myRenderDock = new QWidget(this);
-        auto* row = new QHBoxLayout(myRenderDock);
-        row->setContentsMargins(0, 0, 0, 0);
-        row->setSpacing(0);
-        // The viewport takes every pixel the panel does not, and the panel
-        // takes its own fixed width at full height - which is the whole of
-        // what "a panel, not a card" means here.
-        row->addWidget(myView, 1);
-        row->addWidget(myRenderSettingsPanel, 0);
-        setCentralWidget(myRenderDock);
-        myRenderDock->resize(centralSize);
-    } else {
-        const QSize centralSize = myRenderDock ? myRenderDock->size() : myView->size();
-        // The panel is parented back to the WINDOW before the container goes,
-        // or deleting the container would delete the panel with it - every
-        // later appStateChanged reads it, and a dangling QPointer would read
-        // as "no panel" rather than as a crash, which is worse.
-        myRenderSettingsPanel->setParent(this);
-        myRenderSettingsPanel->hide();
-        setCentralWidget(myView);
-        // The compare pane's own lesson, applied at the second site that
-        // needs it: setCentralWidget() leaves myView at the width it had as
-        // ONE CHILD of the container until something forces
-        // QMainWindowLayout to run again, and neither invalidate() nor
-        // activate() is that something. It was found there by a composited
-        // capture rather than by any geometry check, because the view
-        // rendered and picked correctly inside its own wrong rect.
-        myView->resize(centralSize);
-        myRenderDock->deleteLater();
-        myRenderDock = nullptr;
-    }
 }
 
 bool MainWindow::canOpenSaveVersion() const

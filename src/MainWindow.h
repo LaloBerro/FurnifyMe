@@ -1262,7 +1262,7 @@ public:
     // Puts the render settings panel beside the viewport, or takes it back
     // out. The ONE place the central widget changes for render mode, so the
     // reparent and its explicit resize cannot drift apart.
-    void setRenderDockOpen(bool open);
+    // The dock moved to RenderStudio::setDockOpen().
 
     // THE ONE PLACE A SHOT IS READ OFF THE LIVE VIEWPORT, and the one place
     // one is put back. The panel lists names and reports a click; the
@@ -2158,7 +2158,12 @@ private:
     // buttons KEEP theirs, because they cannot go - a window with no close
     // button is a trap, and the Back chip below is a way out of the mode,
     // not out of the app.
-    class CardSlide* myAppBarSlide = nullptr;
+    // THE RENDER LAYER, which this window no longer owns the pieces of. It
+    // holds the settings panel, the frame and guides, the Back chip, the app
+    // bar's slide-away, the polish ticker and the mode's own dock - everything
+    // about TAKING A PICTURE rather than about furniture - so a scene window
+    // can drive the same one. See ui/RenderStudio.h.
+    class RenderStudio* myStudio = nullptr;
 
     // The way back out of render mode once the menu has slid away. A plain
     // ToolChip on myRenderModeAction, so it is a mirror and not a fourth
@@ -2167,6 +2172,8 @@ private:
     // the three drawers, so in modelling it is hidden and occupies no slot,
     // and in render mode - where every other TopLeft entry is hidden - it is
     // the first visible one and lands in the corner the app bar just left.
+    // NON-OWNING - RenderStudio builds and owns the Back chip; this is
+    // the pointer this window's own wiring reads it through.
     class ToolChip* myRenderExitChip = nullptr;
 
     // Render mode DOCKS its panel rather than floating it, which is a change
@@ -2183,8 +2190,7 @@ private:
     // back at its OLD geometry until something forces QMainWindowLayout to
     // run again, and neither invalidate() nor activate() is that something -
     // so the size is set explicitly from the widget being replaced. See
-    // setRenderDockOpen().
-    QWidget* myRenderDock = nullptr;
+    // The dock lives in RenderStudio now.
 
     // The picture's edges and its framing lines, over the viewport while
     // render mode is on. Visibility is DERIVED off myRenderModeOn on every
@@ -2192,6 +2198,8 @@ private:
     // refreshed off the viewport's own renderFrameChanged, because choosing
     // an aspect moves the frame without moving any application state this
     // window would otherwise notice.
+    // NON-OWNING - RenderStudio builds and owns the frame and guides; this is
+    // the pointer this window's own wiring reads it through.
     class RenderFrameGuides* myRenderFrame = nullptr;
 
     AppBar* myAppBar = nullptr;
@@ -2219,8 +2227,10 @@ private:
     // alone (neither has a QAction of its own to check; they exist exactly
     // when render mode does), kept here on myRail/myAxisGizmo's own terms so
     // the appStateChanged-driven visibility lambda can reach them.
+    // NON-OWNING - RenderStudio builds and owns the settings panel; this is
+    // the pointer this window's own wiring reads it through.
     RenderSettingsPanel* myRenderSettingsPanel = nullptr;
-    class QTimer* myRenderTierTicker = nullptr;
+    // The polish ticker lives in RenderStudio now; this window answers its tierTick().
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
     ExtrudePreview* myExtrudePreview = nullptr;
