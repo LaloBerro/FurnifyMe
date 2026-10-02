@@ -1,6 +1,7 @@
 #include "ScenePiecesPanel.h"
 
 #include "IconSet.h"
+#include "InlineRename.h"
 #include "Theme.h"
 
 #include <QLabel>
@@ -63,11 +64,7 @@ void ScenePiecesPanel::setRows(const QVector<Row>& rows)
                      QLatin1Char('\x1f') + row.reason + QLatin1Char('\x1e');
     }
     signature += QLatin1Char('|') + QString::number(mySelected);
-    if (!myRows.isEmpty() && signature == mySignature) return;
-    if (myRows.isEmpty() && rows.isEmpty() && !mySignature.isEmpty() &&
-        signature == mySignature) {
-        return;
-    }
+    if (myBuilt && signature == mySignature) return;
     mySignature = signature;
     myWanted = rows;
     rebuild();
@@ -85,6 +82,7 @@ void ScenePiecesPanel::setSelected(int pieceId)
 
 void ScenePiecesPanel::rebuild()
 {
+    myBuilt = true;
     for (const BuiltRow& row : myRows) {
         if (row.widget) row.widget->deleteLater();
     }
@@ -190,6 +188,26 @@ void ScenePiecesPanel::applyTheme()
         row.name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
                                     .arg((dim ? Theme::textMuted() : Theme::text()).name()));
     }
+}
+
+void ScenePiecesPanel::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    // Double-click a row to rename the PIECE. The selector's cards and the
+    // versions drawer's rows already rename in place through this one helper,
+    // so this list does too rather than growing an editor of its own.
+    for (const BuiltRow& row : myRows) {
+        if (!row.widget || !row.widget->geometry().contains(event->pos())) continue;
+        const int id = row.data.pieceId;
+        const QString current = row.data.name;
+        InlineRename::beginRename(this, row.widget->geometry(), current,
+                                  [this, id](QString chosen) {
+                                      if (!chosen.trimmed().isEmpty())
+                                          emit renameCommitted(id, chosen.trimmed());
+                                  });
+        event->accept();
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
 }
 
 void ScenePiecesPanel::paintEvent(QPaintEvent* /*event*/)

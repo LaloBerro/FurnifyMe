@@ -21,6 +21,7 @@
 #include <QWidget>
 
 class QLabel;
+class QMouseEvent;
 class QPushButton;
 class QVBoxLayout;
 
@@ -63,11 +64,15 @@ public:
 
 signals:
     void selectionRequested(int pieceId);
+    // A piece carries its own name, independent of the furniture it points
+    // at and independent of any other piece pointing at the same one.
+    void renameCommitted(int pieceId, const QString& name);
     void visibilityToggled(int pieceId, bool visible);
     void removeRequested(int pieceId);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:
     void rebuild();
@@ -83,6 +88,10 @@ private:
     QVector<Row> myWanted;
     QVector<BuiltRow> myRows;
     QString mySignature;
+    // Whether rebuild() has ever run. Without it the early-out needs two
+    // clauses to tell "no rows yet" from "no rows, and that is already what
+    // is on screen" - correct, but a reader has to work it out.
+    bool myBuilt = false;
     QVBoxLayout* myColumn = nullptr;
     QLabel* myTitle = nullptr;
     QLabel* myEmpty = nullptr;

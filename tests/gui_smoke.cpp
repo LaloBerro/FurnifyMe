@@ -58,6 +58,7 @@
 #include "MaterialCard.h"
 #include "SceneModel.h"
 #include "ScenePiecesPanel.h"
+#include "AddPieceCard.h"
 #include "SceneWindow.h"
 #include "RenderFrameGuides.h"
 #include "RenderSettingsPanel.h"
@@ -28560,6 +28561,181 @@ int main(int argc, char* argv[])
         check(banned.isEmpty(),
               QStringLiteral("every action this window paints avoids the banned words (%1)")
                   .arg(banned.isEmpty() ? QStringLiteral("all clean") : banned.join(", ")));
+
+
+        // --- pieces, each in the wood its own furniture was saved with -------
+        // The spec's fork: "The table renders in whatever it was saved with,
+        // the chairs in theirs." Two furniture, two genuinely different saved
+        // looks, and the proof is that each piece's bodies carry THAT
+        // furniture's numbers rather than one scene-wide material.
+        auto makeWoodenFurniture = [&winStore](const QString& name, double r, double g,
+                                               double b, double grain) {
+            const QString id = winStore.createFurniture(name);
+            if (id.isEmpty()) return QString();
+            DocumentModel doc;
+            doc.addSolid(BRepPrimAPI_MakeBox(200.0, 100.0, 18.0).Shape());
+            DocumentModel::MaterialLook look;
+            look.material = "Oak";
+            look.red = r; look.green = g; look.blue = b;
+            look.grainSize = grain;
+            doc.setMaterialLook(look);
+            return winStore.saveFurniture(id, doc, QImage()) ? id : QString();
+        };
+        const QString tableId = makeWoodenFurniture(QStringLiteral("Table"),
+                                                    0.52, 0.36, 0.18, 240.0);
+        const QString chairId = makeWoodenFurniture(QStringLiteral("Chair"),
+                                                    0.18, 0.11, 0.07, 90.0);
+        check(!tableId.isEmpty() && !chairId.isEmpty(),
+              "two furniture are saved, each with its own wood");
+
+        check(scene.addPiece(tableId), "the table goes into the scene");
+        check(scene.addPiece(chairId), "and the chair does too");
+        settle(200);
+        check(scene.scene().pieces().size() == 2,
+              QStringLiteral("the scene holds two pieces (%1)")
+                  .arg(static_cast<int>(scene.scene().pieces().size())));
+        check(scene.piecesPanel() && scene.piecesPanel()->rowCount() == 2,
+              QStringLiteral("and the list has two rows (%1)")
+                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowCount() : -1));
+        check(scene.piecesPanel() &&
+                  scene.piecesPanel()->rowTextAt(0) == QStringLiteral("Table") &&
+                  scene.piecesPanel()->rowTextAt(1) == QStringLiteral("Chair"),
+              QStringLiteral("each row is named after its furniture (\"%1\", \"%2\")")
+                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(0) : QString())
+                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(1) : QString()));
+
+        // Every body of every piece is on screen, and every one of them
+        // carries a wood of its own - the structural half of "its own wood".
+        const std::vector<int> tableBodies =
+            scene.bodyIdsForPiece(scene.scene().pieces()[0].id);
+        const std::vector<int> chairBodies =
+            scene.bodyIdsForPiece(scene.scene().pieces()[1].id);
+        check(!tableBodies.empty() && !chairBodies.empty(),
+              QStringLiteral("both pieces put bodies in the viewport (%1 and %2)")
+                  .arg(static_cast<int>(tableBodies.size()))
+                  .arg(static_cast<int>(chairBodies.size())));
+        bool everyBodyWooded = !tableBodies.empty() && !chairBodies.empty();
+        for (int id : tableBodies)
+            everyBodyWooded = everyBodyWooded && scene.view()->hasBodyWood(id);
+        for (int id : chairBodies)
+            everyBodyWooded = everyBodyWooded && scene.view()->hasBodyWood(id);
+        check(everyBodyWooded, "...and every one of them carries a wood of its own");
+
+        // THE VALUES, not merely their presence. Task 4's own block already
+        // pinned setBodyWood() -> PIXELS with a dump; what is in question here
+        // is whether the right furniture's numbers reach the right body.
+        OcctViewWidget::BodyWood tableWood;
+        OcctViewWidget::BodyWood chairWood;
+        const bool readBoth = !tableBodies.empty() && !chairBodies.empty() &&
+                              scene.view()->bodyWood(tableBodies.front(), tableWood) &&
+                              scene.view()->bodyWood(chairBodies.front(), chairWood);
+        check(readBoth, "both woods read back off the viewport");
+        check(readBoth && std::fabs(tableWood.red - 0.52) < 1.0e-6 &&
+                  std::fabs(tableWood.grainSize - 240.0) < 1.0e-6,
+              QStringLiteral("the table's body wears the TABLE's wood (red %1, grain %2)")
+                  .arg(tableWood.red, 0, 'f', 3)
+                  .arg(tableWood.grainSize, 0, 'f', 1));
+        check(readBoth && std::fabs(chairWood.red - 0.18) < 1.0e-6 &&
+                  std::fabs(chairWood.grainSize - 90.0) < 1.0e-6,
+              QStringLiteral("the chair's body wears the CHAIR's wood (red %1, grain %2)")
+                  .arg(chairWood.red, 0, 'f', 3)
+                  .arg(chairWood.grainSize, 0, 'f', 1));
+        check(readBoth && std::fabs(tableWood.red - chairWood.red) > 0.3,
+              "...so the two pieces are genuinely NOT sharing one scene-wide material");
+
+        // --- a new piece lands beside what is already there ------------------
+        // Not an automatic nudge of the kind improvements item 15 deleted: two
+        // whole furniture dropped at one origin interpenetrate, and a scene
+        // whose pieces start inside each other is unusable.
+        check(scene.scene().pieces()[1].placement.TranslationPart().X() >
+                  scene.scene().pieces()[0].placement.TranslationPart().X() + 1.0,
+              QStringLiteral("the chair landed clear of the table along X (%1 against %2)")
+                  .arg(scene.scene().pieces()[1].placement.TranslationPart().X(), 0, 'f', 1)
+                  .arg(scene.scene().pieces()[0].placement.TranslationPart().X(), 0, 'f', 1));
+
+        // --- Review Focus: two pieces naming ONE furniture -------------------
+        // Nothing may key off the furniture id as if it were unique.
+        check(scene.addPiece(tableId), "the same furniture goes in a second time");
+        settle(200);
+        check(scene.scene().pieces().size() == 3, "which is a third piece, not a refusal");
+        const int firstTable = scene.scene().pieces()[0].id;
+        const int secondTable = scene.scene().pieces()[2].id;
+        check(firstTable != secondTable, "...with an id of its own");
+        check(scene.bodyIdsForPiece(firstTable) != scene.bodyIdsForPiece(secondTable),
+              "...and bodies of its own in the viewport, not the first piece's");
+
+        scene.renamePiece(secondTable, QStringLiteral("Side table"));
+        settle(150);
+        check(scene.piecesPanel() && scene.piecesPanel()->rowCount() == 3 &&
+                  scene.piecesPanel()->rowTextAt(2) == QStringLiteral("Side table") &&
+                  scene.piecesPanel()->rowTextAt(0) == QStringLiteral("Table"),
+              QStringLiteral("renaming one of them leaves the other alone (\"%1\" / \"%2\")")
+                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(0) : QString())
+                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(2) : QString()));
+
+        // --- a furniture that cannot be read ---------------------------------
+        // The piece is still added, carrying its reason where its name goes -
+        // and the refusal is a FAILURE TOAST, because this app's taxonomy is
+        // that a refusal reports loudly or not at all.
+        ToastHost* sceneToasts = scene.findChild<ToastHost*>();
+        check(sceneToasts != nullptr, "the scene window has a toast host to refuse through");
+        check(scene.addPiece(QStringLiteral("no-such-furniture")) == false,
+              "a furniture that is not there refuses");
+        settle(150);
+        check(scene.scene().pieces().size() == 4,
+              "...but the piece is still added, so the reference is not silently dropped");
+        check(scene.piecesPanel() && scene.piecesPanel()->rowCount() == 4 &&
+                  !scene.piecesPanel()->rowTextAt(3).isEmpty() &&
+                  scene.piecesPanel()->rowTextAt(3) != QStringLiteral("Table"),
+              QStringLiteral("...and its row prints a reason where the name goes (\"%1\")")
+                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(3) : QString()));
+        // A Failure, told from a Note the way this suite always tells them
+        // apart - by the ARMED TIMER, 8000 ms against a Note's 4000.
+        check(sceneToasts && sceneToasts->isShowing() && sceneToasts->remainingMs() > 5000,
+              QStringLiteral("...and it is reported as a Failure, never a status line "
+                             "nobody reads (%1 ms armed, \"%2\")")
+                  .arg(sceneToasts ? sceneToasts->remainingMs() : -1)
+                  .arg(sceneToasts ? sceneToasts->currentText() : QString()));
+
+        // --- the card that offers the library --------------------------------
+        QAction* newPiece = nullptr;
+        for (QAction* candidate : scene.findChildren<QAction*>()) {
+            if (candidate->text().remove(QLatin1Char('&')) == QStringLiteral("New piece"))
+                newPiece = candidate;
+        }
+        check(newPiece != nullptr,
+              "File offers New piece now that there is something behind it");
+        if (newPiece) newPiece->trigger();
+        settle(200);
+        AddPieceCard* pieceCard = scene.findChild<AddPieceCard*>();
+        check(pieceCard != nullptr && pieceCard->isVisible(),
+              "...which opens the add-a-piece card over the viewport");
+        check(scene.findChildren<QDialog*>().isEmpty(),
+              "...and it is not a dialog - this app has none");
+        check(pieceCard && pieceCard->entryCount() == 2,
+              QStringLiteral("...listing the library's two furniture (%1)")
+                  .arg(pieceCard ? pieceCard->entryCount() : -1));
+        if (pieceCard) {
+            sendKeyTo(pieceCard, Qt::Key_Escape);
+            settle(150);
+            check(!pieceCard->isVisible(), "...and Escape closes it, adding nothing");
+        }
+        check(scene.scene().pieces().size() == 4, "...the scene is unchanged by opening it");
+
+        // --- the vocabulary sweep over the new copy --------------------------
+        QStringList pieceBanned;
+        QStringList pieceTexts =
+            scene.piecesPanel() ? scene.piecesPanel()->paintedTexts() : QStringList();
+        if (pieceCard) pieceTexts += pieceCard->paintedTexts();
+        for (const QString& text : pieceTexts) {
+            for (const QString& word : bannedWords()) {
+                if (usesBannedWord(text, word)) pieceBanned << text;
+            }
+        }
+        check(pieceBanned.isEmpty(),
+              QStringLiteral("the pieces list and the add card avoid the banned words (%1)")
+                  .arg(pieceBanned.isEmpty() ? QStringLiteral("all clean")
+                                             : pieceBanned.join(", ")));
 
         scene.close();
     }

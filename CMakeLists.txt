@@ -183,6 +183,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/RenderStudio.cpp
       src/ui/SceneWindow.cpp
       src/ui/ScenePiecesPanel.cpp
+      src/ui/AddPieceCard.cpp
       src/ui/UnsavedCloseCard.cpp
       src/FurnitureStore.cpp
     )

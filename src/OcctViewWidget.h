@@ -1624,6 +1624,12 @@ public:
     void setBodyWood(int bodyId, const BodyWood& wood);
     void clearBodyWood();
     bool hasBodyWood(int bodyId) const;
+    // Reads one back. False when this body has no entry of its own, in which
+    // case it renders in the single live material - the fallback the per-body
+    // lookup is built on. For a caller that needs to know WHICH wood reached
+    // WHICH body; that the wood reaches pixels at all is pinned separately,
+    // with a dump, because a setter read back on its own is a self-oracle.
+    bool bodyWood(int bodyId, BodyWood& out) const;
 
     void setRenderWoodAngleDeg(double degrees);
     double renderWoodAngleDeg() const { return myWoodAngleDeg; }

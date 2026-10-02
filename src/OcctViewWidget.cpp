@@ -5854,6 +5854,14 @@ bool OcctViewWidget::hasBodyWood(int bodyId) const
     return myBodyWood.find(bodyId) != myBodyWood.end();
 }
 
+bool OcctViewWidget::bodyWood(int bodyId, BodyWood& out) const
+{
+    const auto at = myBodyWood.find(bodyId);
+    if (at == myBodyWood.end()) return false;
+    out = at->second;
+    return true;
+}
+
 void OcctViewWidget::applyWoodTexture(bool on)
 {
     // Kept as the one switchboard the material appliers call; the actual
