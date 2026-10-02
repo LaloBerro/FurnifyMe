@@ -543,6 +543,35 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     connect(myNewButton, &QPushButton::clicked, this,
             [this] { myNameCard->ask(myStore.nextFurnitureName()); });
 
+    // --- the scenes section ------------------------------------------------
+    // A heading between the two blocks, so a card's kind is obvious BEFORE a
+    // click rather than after one.
+    myScenesHeading = new QLabel(tr("Scenes"), myGrid);
+    myScenesHeading->hide();   // shown by relayoutCards(), which places it
+
+    myNewSceneButton = new NewFurnitureCard(myGrid);
+    myNewSceneButton->setText(tr("+ New scene"));
+    // A scene is created with a NUMBERED NAME rather than asking first, which
+    // is where it parts company with a furniture deliberately. The name
+    // question exists because a furniture is a thing you commit to - it holds
+    // the work - and an unnamed one is a drawer full of "Furniture 03". A
+    // scene holds no work of its own: it is an arrangement of furniture that
+    // already have names, it is renamed in place on its own card, and the
+    // quickest path from "I want to photograph these together" to a viewport
+    // is the whole point of it. Creating and opening stay ONE gesture, as the
+    // furniture + card's own tail does.
+    connect(myNewSceneButton, &QPushButton::clicked, this, [this] {
+        emit createSceneRequested();
+        const QString id = myStore.createScene(myStore.nextSceneName());
+        if (id.isEmpty()) {
+            showFailure(tr("Couldn't make a new scene — Check that the library folder "
+                          "still exists and isn't read-only"));
+            return;
+        }
+        refresh();
+        emit sceneChosen(id);
+    });
+
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &SelectorWindow::applyTheme);
 
@@ -634,6 +663,7 @@ QWidget* SelectorWindow::buildCard(const QString& id, const QString& name,
 void SelectorWindow::refresh()
 {
     rebuildCards();
+    rebuildSceneCards();
     relayoutCards();
 }
 
@@ -653,6 +683,58 @@ void SelectorWindow::rebuildCards()
         c.lastEdited = info.lastEdited;
         myCards.push_back(c);
     }
+}
+
+void SelectorWindow::rebuildSceneCards()
+{
+    for (const Card& c : mySceneCards) {
+        if (c.widget) c.widget->deleteLater();
+    }
+    mySceneCards.clear();
+
+    for (const FurnitureStore::SceneInfo& info : myStore.listScenes()) {
+        QWidget* widget = buildSceneCard(info.id, info.name, info.thumbPath, info.lastEdited);
+        Card c;
+        c.id = info.id;
+        c.widget = widget;
+        c.name = info.name;
+        c.lastEdited = info.lastEdited;
+        mySceneCards.push_back(c);
+    }
+}
+
+QWidget* SelectorWindow::buildSceneCard(const QString& id, const QString& name,
+                                        const QString& thumbPath, const QDateTime& lastEdited)
+{
+    // The SAME card widget a furniture uses. A scene card that looked
+    // different would be saying the two are different kinds of thing to look
+    // at, when the only difference is what a click opens - which the section
+    // heading above it already says.
+    auto* card = new SelectorCardWidget(myGrid);
+    card->setFurniture(name, thumbPath, lastEdited);
+    card->onActivated = [this, id] { emit sceneChosen(id); };
+    card->onRenameRequested = [this, id, card] {
+        InlineRename::beginRename(card, card->nameLabelGeometry(), card->nameText(),
+                                  [this, id](QString newName) {
+                                      if (!myStore.renameScene(id, newName)) {
+                                          showFailure(tr("Couldn't rename this scene to "
+                                                        "%1 — Check that its folder still "
+                                                        "exists and isn't read-only")
+                                                          .arg(newName));
+                                          return;
+                                      }
+                                      refresh();
+                                  });
+    };
+    card->onDeleteRequested = [this, id] {
+        if (!myStore.deleteScene(id)) {
+            showFailure(tr("Couldn't delete this scene — Check that its folder still "
+                          "exists and isn't read-only"));
+            return;
+        }
+        refresh();
+    };
+    return card;
 }
 
 void SelectorWindow::relayoutCards()
@@ -713,6 +795,53 @@ void SelectorWindow::relayoutCards()
         }
         place(c->widget);
     }
+    // --- the scenes section, below the furniture -------------------------
+    // Its own heading and its own + card, in the SAME grid: one grid keeps
+    // the device-pixel snapping and the stretch parking below in one place,
+    // and the heading is what makes a card's kind obvious BEFORE a click
+    // rather than after one.
+    if (col > 0) { col = 0; ++row; }
+    if (myScenesHeading) {
+        grid->addWidget(myScenesHeading, row, 0, 1, kGridColumns,
+                        Qt::AlignLeft | Qt::AlignVCenter);
+        myScenesHeading->show();
+        ++row;
+    }
+    if (myNewSceneButton) place(myNewSceneButton);
+    {
+        std::vector<const Card*> sceneOrdered;
+        sceneOrdered.reserve(mySceneCards.size());
+        for (const Card& c : mySceneCards) {
+            if (c.widget) sceneOrdered.push_back(&c);
+        }
+        // The same ordering the furniture block uses, for the same reason: a
+        // second rule would make one section answer "recent" differently from
+        // the other with one set of chips driving both.
+        if (sortedByName()) {
+            std::sort(sceneOrdered.begin(), sceneOrdered.end(),
+                      [](const Card* a, const Card* b) {
+                          const int byName =
+                              QString::compare(a->name, b->name, Qt::CaseInsensitive);
+                          return byName != 0 ? byName < 0 : a->id < b->id;
+                      });
+        } else {
+            std::sort(sceneOrdered.begin(), sceneOrdered.end(),
+                      [](const Card* a, const Card* b) {
+                          if (a->lastEdited.isValid() != b->lastEdited.isValid())
+                              return a->lastEdited.isValid();
+                          if (a->lastEdited != b->lastEdited) return a->lastEdited > b->lastEdited;
+                          return a->id < b->id;
+                      });
+        }
+        for (const Card* c : sceneOrdered) {
+            if (!needle.isEmpty() && !c->name.contains(needle, Qt::CaseInsensitive)) {
+                c->widget->hide();
+                continue;
+            }
+            place(c->widget);
+        }
+    }
+
     // Park the slack: an empty stretch column past the third and an empty
     // stretch row past the last keep a wider or taller viewport from
     // spreading the fixed-size cells apart instead of leaving the grid

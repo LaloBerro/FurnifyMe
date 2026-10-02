@@ -909,6 +909,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-saved-shot-puts-the-picture-back", false, true },
     { "the-store-keeps-scenes-beside-the-furniture", false, true },
     { "two-bodies-can-wear-two-different-woods", false, true },
+    { "the-hub-lists-scenes-in-their-own-section", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
@@ -28269,6 +28270,108 @@ int main(int argc, char* argv[])
                   .arg(plainLeft).arg(plainRight));
 
         probe.close();
+    }
+
+
+    // --- the hub lists scenes in their own section ---------------------------
+    //
+    // Below the furniture, with its own + card. One grid holding both was
+    // rejected: a card's click would mean two different things, and the user
+    // would have to know which kind they were looking at before they knew what
+    // a click would do.
+    //
+    // Checked in BOTH directions - "a scene is not in the furniture list" and
+    // "a furniture is not in the scene list" are two different mistakes, and a
+    // section that quietly listed everything would pass only one of them.
+    if (blockEnabled("the-hub-lists-scenes-in-their-own-section")) {
+        RequiredTempDir hubLib;
+        FurnitureStore hubStore(hubLib.path());
+        SelectorWindow hub(hubStore);
+        hub.setAttribute(Qt::WA_ShowWithoutActivating);
+        hub.resize(1000, 760);
+        hub.show();
+        settle(300);
+
+        check(hub.furnitureCount() == 0 && hub.sceneCount() == 0,
+              "a fresh library shows neither kind");
+        check(hub.newSceneControl() != nullptr && hub.newSceneControl()->isVisible(),
+              "there is a + card for scenes");
+
+        // --- the + makes one, and this window owns the store call ------------
+        QString chosenId;
+        QObject::connect(&hub, &SelectorWindow::sceneChosen, &hub,
+                         [&chosenId](const QString& id) { chosenId = id; });
+        QPushButton* newScene = hub.newSceneControl();
+        clickAt(newScene, QPointF(newScene->width() / 2.0, newScene->height() / 2.0));
+        settle(300);
+        check(hubStore.listScenes().size() == 1,
+              QStringLiteral("clicking it creates a scene in the store (%1)")
+                  .arg(hubStore.listScenes().size()));
+        check(hub.sceneCount() == 1, "and the section grew a card");
+        check(!chosenId.isEmpty() &&
+                  (hubStore.listScenes().isEmpty() ||
+                   chosenId == hubStore.listScenes().front().id),
+              "and it reports THAT scene chosen, so making one and opening one are "
+              "a single gesture - the furniture + card's own arrangement");
+
+        // --- the two kinds stay apart ----------------------------------------
+        const QString madeFurniture = hubStore.createFurniture(QStringLiteral("Oak chair"));
+        check(!madeFurniture.isEmpty(), "a furniture is created beside it");
+        hub.refresh();
+        settle(200);
+        check(hub.furnitureCount() == 1,
+              QStringLiteral("the furniture section shows it (%1)").arg(hub.furnitureCount()));
+        check(hub.sceneCount() == 1,
+              QStringLiteral("and the scene section is UNCHANGED by it (%1)")
+                  .arg(hub.sceneCount()));
+
+        const QString madeScene = hubStore.createScene(QStringLiteral("Dining set"));
+        check(!madeScene.isEmpty(), "a second scene is created");
+        hub.refresh();
+        settle(200);
+        check(hub.sceneCount() == 2,
+              QStringLiteral("the scene section shows both (%1)").arg(hub.sceneCount()));
+        check(hub.furnitureCount() == 1,
+              QStringLiteral("and the furniture section is UNCHANGED by it (%1)")
+                  .arg(hub.furnitureCount()));
+
+        // --- a scene card opens that scene -----------------------------------
+        chosenId.clear();
+        QWidget* card = hub.sceneCardAt(0);
+        check(card != nullptr && card->isVisible(), "a scene card is on screen");
+        if (card) {
+            // THE WIDGET A CLICK ACTUALLY REACHES, not the cell. A card nests
+            // a real interactive thumbnail above a real under-row, and it is
+            // the thumbnail that carries the open gesture - so a click sent at
+            // the cell itself reaches nothing, which is what this probe did
+            // first. childAt() answers which widget is really under that
+            // point, and clicking THAT is the user's own gesture; it also
+            // proves the card is reachable at all rather than asserting a
+            // callback pointer, which would pass against a card nobody can
+            // hit.
+            const QPoint centre =
+                card->mapTo(&hub, QPoint(card->width() / 2, card->height() / 2));
+            QWidget* hit = hub.childAt(centre);
+            check(hit != nullptr && (hit == card || card->isAncestorOf(hit)),
+                  "a real click at the card's centre lands on the card or something "
+                  "inside it");
+            if (hit) {
+                clickAt(hit, QPointF(hit->width() / 2.0, hit->height() / 2.0));
+                settle(250);
+            }
+        }
+        check(!chosenId.isEmpty(), "clicking it reports a scene chosen");
+        {
+            bool namesAScene = false;
+            for (const FurnitureStore::SceneInfo& info : hubStore.listScenes()) {
+                if (info.id == chosenId) namesAScene = true;
+            }
+            check(namesAScene,
+                  "and the id it reports is a SCENE's, never a furniture's - the two "
+                  "sections carry different kinds and say so");
+        }
+
+        hub.close();
     }
 
     // --- Milestone 5, item 10: Autosave modes and the two timed-save laws ----

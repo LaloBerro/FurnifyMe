@@ -67,6 +67,18 @@ public:
     void refresh();
 
     int furnitureCount() const { return static_cast<int>(myCards.size()); }
+    // The scenes section, below the furniture. Separate accessors rather than
+    // one list with a kind on each row: a caller that could hold either would
+    // have to ask which it had before it could do anything with it, which is
+    // the same reason the two have separate signals.
+    int sceneCount() const { return static_cast<int>(mySceneCards.size()); }
+    QWidget* sceneCardAt(int index) const
+    {
+        return index >= 0 && index < static_cast<int>(mySceneCards.size())
+                   ? mySceneCards[static_cast<std::size_t>(index)].widget
+                   : nullptr;
+    }
+    QPushButton* newSceneControl() const { return myNewSceneButton; }
     // The whole grid cell - the thumbnail card plus the under-row beneath it
     // - for gui_smoke's real childAt()/hover probes, the same discipline
     // InitScreen's own cardAt() already established.
@@ -152,6 +164,18 @@ signals:
     // observable "the user asked for one", and carries no id of its own.
     void createRequested();
 
+    // A scene card was opened by a plain click. A SEPARATE signal from
+    // furnitureChosen(), not a flag on it: the two open different windows, and
+    // a listener that had to branch on a kind would be one `if` away from
+    // opening the wrong one.
+    void sceneChosen(const QString& id);
+    // The scenes "+" was clicked. This window creates the scene itself - it
+    // owns every FurnitureStore call, as the class comment requires - and then
+    // emits sceneChosen() for the id it just made, because opening a fresh
+    // scene is not a different gesture from opening an existing one. This
+    // fires first, purely as an observable "the user asked for one".
+    void createSceneRequested();
+
     // This window is closing - the native X, or a real close() call. This
     // class knows nothing about quitting the application; it only reports
     // the gesture, exactly as it reports everything else through a signal
@@ -181,6 +205,9 @@ private:
     };
 
     void rebuildCards();
+    void rebuildSceneCards();
+    QWidget* buildSceneCard(const QString& id, const QString& name,
+                            const QString& thumbPath, const QDateTime& lastEdited);
     void relayoutCards();
     QWidget* buildCard(const QString& id, const QString& name, const QString& thumbPath,
                        const QDateTime& lastEdited);
@@ -224,4 +251,15 @@ private:
     QScrollArea* myScroll = nullptr;
     QWidget* myGrid = nullptr;
     std::vector<Card> myCards;
+    // The scenes section. Its own heading, its own + card and its own cards,
+    // laid out in the SAME grid below the furniture - one grid keeps the
+    // whole-device-pixel snapping and the stretch parking in one place, while
+    // the heading between the two blocks is what makes the kinds obvious
+    // before a click rather than after one.
+    QLabel* myScenesHeading = nullptr;
+    // A QPushButton here, not NewFurnitureCard: that class is defined in the
+    // .cpp, exactly as myNewButton above is held. The accessor and the two
+    // calls this window makes on it (setText, clicked) are QPushButton's.
+    QPushButton* myNewSceneButton = nullptr;
+    std::vector<Card> mySceneCards;
 };
