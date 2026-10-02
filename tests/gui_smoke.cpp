@@ -57,6 +57,8 @@
 #include "PullArrow.h"
 #include "MaterialCard.h"
 #include "SceneModel.h"
+#include "ScenePiecesPanel.h"
+#include "SceneWindow.h"
 #include "RenderFrameGuides.h"
 #include "RenderSettingsPanel.h"
 #include "SelectorWindow.h"
@@ -910,6 +912,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-store-keeps-scenes-beside-the-furniture", false, true },
     { "two-bodies-can-wear-two-different-woods", false, true },
     { "the-hub-lists-scenes-in-their-own-section", false, true },
+    { "a-scene-window-opens-a-scene", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
@@ -28372,6 +28375,97 @@ int main(int argc, char* argv[])
         }
 
         hub.close();
+    }
+
+
+    // --- a scene window opens a scene ----------------------------------------
+    //
+    // The third top-level window: its own viewport, its own pieces list, its
+    // own RenderStudio. What it does NOT have is as much the point as what it
+    // does - a scene arranges furniture, it does not make it, so no sketch, no
+    // extrude, no boolean, no joint, no mirror, no version and no compare.
+    if (blockEnabled("a-scene-window-opens-a-scene")) {
+        RequiredTempDir sceneWinLib;
+        FurnitureStore winStore(sceneWinLib.path());
+        const QString sceneId = winStore.createScene(QStringLiteral("Dining set"));
+        check(!sceneId.isEmpty(), "a scene exists to open");
+
+        SceneWindow scene(&winStore);
+        scene.setAttribute(Qt::WA_ShowWithoutActivating);
+        scene.resize(1100, 800);
+        scene.show();
+        settle(300);
+        check(scene.isVisible(), "the scene window shows");
+
+        check(scene.openScene(sceneId), "it opens the scene");
+        settle(250);
+        check(scene.view() != nullptr, "it has a viewport of its own");
+        check(scene.studio() != nullptr, "and a RenderStudio of its own");
+        check(scene.piecesPanel() != nullptr, "and a pieces list");
+        check(scene.piecesPanel() != nullptr && scene.piecesPanel()->rowCount() == 0,
+              QStringLiteral("which is empty, because the scene is (%1)")
+                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowCount() : -1));
+        check(scene.scene().pieces().empty(), "and the document agrees");
+
+        // The window NAMES the scene it is showing - a second window with no
+        // name on it is a window the user cannot tell from the editor.
+        check(scene.windowTitle().contains(QStringLiteral("Dining set")),
+              QStringLiteral("the window names the scene (\"%1\")").arg(scene.windowTitle()));
+
+        // NO MODAL DIALOGS, the app's own law, asserted here because this is a
+        // brand new window and the law is kept per-window.
+        check(scene.findChildren<QDialog*>().isEmpty(),
+              "it raised no modal dialog - this app has none");
+
+        // --- what a scene deliberately CANNOT do -----------------------------
+        // Asserted by name rather than by counting actions: a scene arranges
+        // furniture, it does not make it, and an action that exists but
+        // refuses is a control that reads as broken.
+        const QStringList forbidden{QStringLiteral("Start Sketch"), QStringLiteral("Extrude"),
+                                    QStringLiteral("Union"),        QStringLiteral("Subtract"),
+                                    QStringLiteral("Intersect"),    QStringLiteral("Mirror"),
+                                    QStringLiteral("Save version")};
+        QStringList present;
+        for (QAction* candidate : scene.findChildren<QAction*>()) {
+            const QString text = candidate->text().remove(QLatin1Char('&'));
+            if (forbidden.contains(text)) present << text;
+        }
+        check(present.isEmpty(),
+              QStringLiteral("a scene window offers no geometry-making action at all (%1)")
+                  .arg(present.isEmpty() ? QStringLiteral("none") : present.join(", ")));
+
+        // --- the way back to the hub -----------------------------------------
+        bool asked = false;
+        QObject::connect(&scene, &SceneWindow::closeRequested, &scene, [&asked] { asked = true; });
+        // Found and triggered directly: the shared trigger() helper takes a
+        // MainWindow, and this is a different window with a far smaller menu.
+        QAction* closeScene = nullptr;
+        for (QAction* candidate : scene.findChildren<QAction*>()) {
+            if (candidate->text().remove(QLatin1Char('&')) == QStringLiteral("Close scene"))
+                closeScene = candidate;
+        }
+        check(closeScene != nullptr, "there is a Close scene action");
+        if (closeScene) closeScene->trigger();
+        settle(150);
+        check(asked,
+              "which reports the gesture rather than acting on another window - the same "
+              "arrangement every other window in this app keeps");
+
+        // --- the vocabulary sweep -------------------------------------------
+        // A new window is new painted copy, and the sweep only covers what it
+        // is pointed at.
+        QStringList banned;
+        for (QAction* candidate : scene.findChildren<QAction*>()) {
+            for (const QString& word : bannedWords()) {
+                if (usesBannedWord(candidate->text(), word)) banned << candidate->text();
+                if (usesBannedWord(candidate->toolTip(), word)) banned << candidate->toolTip();
+            }
+        }
+        check(banned.isEmpty(),
+              QStringLiteral("every action this window paints avoids the banned words (%1)")
+                  .arg(banned.isEmpty() ? QStringLiteral("all clean") : banned.join(", ")));
+
+        scene.close();
     }
 
     // --- Milestone 5, item 10: Autosave modes and the two timed-save laws ----
