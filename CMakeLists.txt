@@ -30,6 +30,7 @@ add_library(furnify_geometry STATIC
   src/UserProgress.cpp
   src/FurnifySerial.cpp
   src/Joinery.cpp
+  src/SceneModel.cpp
 )
 target_include_directories(furnify_geometry PUBLIC
   src ${OpenCASCADE_INCLUDE_DIR})
@@ -86,6 +87,10 @@ add_test(NAME headless_mitre COMMAND headless_mitre)
 add_executable(headless_measured_box tests/measured_box.cpp)
 target_link_libraries(headless_measured_box PRIVATE furnify_geometry)
 add_test(NAME headless_measured_box COMMAND headless_measured_box)
+
+add_executable(headless_scene_model tests/scene_model.cpp)
+target_link_libraries(headless_scene_model PRIVATE furnify_geometry)
+add_test(NAME headless_scene_model COMMAND headless_scene_model)
 
 add_executable(headless_resize_axis tests/resize_axis.cpp)
 target_link_libraries(headless_resize_axis PRIVATE furnify_geometry)
