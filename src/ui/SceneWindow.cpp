@@ -175,6 +175,16 @@ void SceneWindow::buildMenus()
     // action group makes the pair exclusive, and each mirrors myTool rather
     // than holding state of its own, which is this app's law for every
     // control.
+    // FIT ALL. The one control whose job is finding things, and this window
+    // had none: pieces land clear of each other along X, so a few of them walk
+    // straight out of frame and nothing brings them back.
+    myFitAllAction = new QAction(tr("Fit All"), this);
+    myFitAllAction->setShortcut(QKeySequence(Qt::Key_F));
+    myFitAllAction->setToolTip(tr("Frame everything in this scene"));
+    connect(myFitAllAction, &QAction::triggered, this, [this] {
+        if (myView) myView->fitAll();
+    });
+
     auto* arrange = menuBar()->addMenu(tr("&Arrange"));
     auto* tools = new QActionGroup(this);
     tools->setExclusive(true);
@@ -204,6 +214,8 @@ void SceneWindow::buildMenus()
         if (myStudio) myStudio->setEnabled(on);
         refreshSurfaces();
     });
+    view->addAction(myFitAllAction);
+    view->addSeparator();
     view->addAction(myRenderModeAction);
 
     // Snapping is the user's fork too ("full move and rotate, and snapping"),
@@ -321,6 +333,16 @@ void SceneWindow::buildOverlay()
     myNameMark = new FurnitureNameMark(statusBar());
     statusBar()->addPermanentWidget(myNameMark);
 
+    connect(myPieces, &ScenePiecesPanel::removeRequested, this,
+            [this](int pieceId) { removePiece(pieceId); });
+    // The eye was inert too: every row had one, and toggling it changed
+    // nothing on screen.
+    connect(myPieces, &ScenePiecesPanel::visibilityToggled, this,
+            [this](int pieceId, bool shown) {
+                for (int bodyId : bodyIdsForPiece(pieceId))
+                    myView->setSolidVisible(bodyId, shown);
+                refreshSurfaces();
+            });
     connect(myPieces, &ScenePiecesPanel::renameCommitted, this,
             [this](int pieceId, const QString& name) { renamePiece(pieceId, name); });
 }
@@ -567,6 +589,7 @@ bool SceneWindow::addPiece(const QString& furnitureId)
         if (info.id == furnitureId) name = info.name;
     }
 
+    const bool wasEmpty = myScene.pieces().empty();
     QString error;
     DocumentModel furniture;
     const bool loaded = myStore->loadFurniture(furnitureId, furniture, &error);
@@ -601,6 +624,28 @@ bool SceneWindow::addPiece(const QString& furnitureId)
     // to drag it and let go.
     placement = settledOnFloor(pieceId, placement);
     applyPlacement(pieceId, placement);
+    // The FIRST piece frames itself - MainWindow's own "if (wasEmpty) fitAll()"
+    // rule. Later ones do not, because by then the user has framed a shot and
+    // re-framing under them would be the window overriding a choice.
+    if (wasEmpty && myView) myView->fitAll();
+    refreshSurfaces();
+    return true;
+}
+
+bool SceneWindow::removePiece(int pieceId)
+{
+    // The viewport first, the model second: the bodies are this window's own
+    // ids and nothing else knows them, so they have to go here or they stay on
+    // screen belonging to a piece that no longer exists.
+    for (int bodyId : bodyIdsForPiece(pieceId)) myView->removeSolid(bodyId);
+    myPieceBodies.erase(pieceId);
+    myPieceShapes.erase(pieceId);
+    myBrokenPieces.erase(pieceId);
+    for (auto it = myBodyPiece.begin(); it != myBodyPiece.end();)
+        it = (it->second == pieceId) ? myBodyPiece.erase(it) : std::next(it);
+    if (mySelectedPiece == pieceId) mySelectedPiece = 0;
+    if (!myScene.removePiece(pieceId)) return false;
+    showToolGizmo();
     refreshSurfaces();
     return true;
 }

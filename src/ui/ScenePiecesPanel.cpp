@@ -83,7 +83,8 @@ void ScenePiecesPanel::setRows(const QVector<Row>& rows)
                      QLatin1Char('\x1f') + (row.visible ? QLatin1Char('1') : QLatin1Char('0')) +
                      QLatin1Char('\x1f') + row.reason + QLatin1Char('\x1e');
     }
-    signature += QLatin1Char('|') + QString::number(mySelected);
+    signature += QLatin1Char('|') + QString::number(mySelected) + QLatin1Char('|') +
+                 QString::number(myArmedRemove);
     if (myBuilt && signature == mySignature) return;
     mySignature = signature;
     myWanted = rows;
@@ -133,6 +134,29 @@ void ScenePiecesPanel::rebuild()
                 [this, id](bool shown) { emit visibilityToggled(id, shown); });
         line->addWidget(eye);
 
+        auto* remove = new QPushButton(row);
+        remove->setFixedSize(kRowButtonPx, kRowButtonPx);
+        remove->setToolTip(tr("Take this piece out of the scene"));
+        remove->setCursor(Qt::PointingHandCursor);
+        connect(remove, &QPushButton::clicked, this, [this, id] {
+            if (myArmedRemove != id) {
+                // ASKS FIRST. Nothing is written until the second click, and
+                // arming one row disarms any other.
+                //
+                // RESTYLED IN PLACE, never rebuilt: a rebuild deletes the very
+                // button the second click is about to land on. A human would
+                // hit its replacement at the same pixel and never notice, which
+                // is exactly how this would have shipped unnoticed - the test
+                // held the pointer and found it dead.
+                myArmedRemove = id;
+                applyTheme();
+                return;
+            }
+            myArmedRemove = 0;
+            emit removeRequested(id);
+        });
+        line->addWidget(remove);
+
         myRowsColumn->insertWidget(myRowsColumn->count() - 1, row);
         // SHOWN EXPLICITLY. A widget inserted into the layout of a parent that
         // is not itself visible yet stays hidden, and a hidden child
@@ -146,6 +170,7 @@ void ScenePiecesPanel::rebuild()
         built.widget = row;
         built.name = name;
         built.eye = eye;
+        built.remove = remove;
         myRows.push_back(built);
     }
 
@@ -192,6 +217,11 @@ QPushButton* ScenePiecesPanel::rowEyeAt(int index) const
     return index >= 0 && index < myRows.size() ? myRows[index].eye : nullptr;
 }
 
+QPushButton* ScenePiecesPanel::rowRemoveAt(int index) const
+{
+    return index >= 0 && index < myRows.size() ? myRows[index].remove : nullptr;
+}
+
 QStringList ScenePiecesPanel::paintedTexts() const
 {
     // THIS APP'S OWN COPY ONLY. A piece's name is the user's word choice, and
@@ -199,7 +229,9 @@ QStringList ScenePiecesPanel::paintedTexts() const
     // Table" - the exemption every surface that paints user text already
     // keeps, applied at the surface that knows which string is whose.
     QStringList texts{tr("Pieces"), tr("Add a furniture to put it in this scene"),
-                      tr("Show or hide this piece")};
+                      tr("Show or hide this piece"),
+                      tr("Take this piece out of the scene"),
+                      tr("Click again to take it out")};
     for (const BuiltRow& row : myRows) {
         // A refusal sentence is this app's copy, so it IS swept.
         if (!row.data.reason.isEmpty()) texts << row.data.reason;
@@ -222,6 +254,16 @@ void ScenePiecesPanel::applyTheme()
                                    .arg(Theme::textMuted().name()));
     }
     for (const BuiltRow& row : myRows) {
+        if (row.remove) {
+            const bool armed = row.data.pieceId == myArmedRemove;
+            row.remove->setText(armed ? QStringLiteral("!") : QStringLiteral("x"));
+            row.remove->setToolTip(armed ? tr("Click again to take it out")
+                                         : tr("Take this piece out of the scene"));
+            row.remove->setStyleSheet(
+                QStringLiteral("QPushButton { background: transparent; border: none;"
+                               " color: %1; }")
+                    .arg((armed ? Theme::caution() : Theme::textMuted()).name()));
+        }
         if (!row.name) continue;
         row.name->setFont(Theme::bodyFont());
         // A broken piece and a hidden one both read MUTED, for the same

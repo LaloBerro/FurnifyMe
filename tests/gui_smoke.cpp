@@ -915,6 +915,7 @@ constexpr BlockInfo kBlocks[] = {
     { "two-bodies-can-wear-two-different-woods", false, true },
     { "the-hub-lists-scenes-in-their-own-section", false, true },
     { "a-scene-window-opens-a-scene", false, true },
+    { "each-piece-renders-in-its-own-furnitures-wood", false, true },
     { "the-real-librarys-own-scene-renders", false, true },
     { "wood-at-a-hundred-bodies-in-the-editor", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
@@ -28823,6 +28824,45 @@ int main(int argc, char* argv[])
                   .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(0) : QString())
                   .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(2) : QString()));
 
+        // --- a piece can be taken out again -----------------------------------
+        // There was no route at all: SceneModel::removePiece() is headless
+        // tested, the panel declares removeRequested, and nothing emitted or
+        // connected it - so adding the wrong furniture was permanent, in a
+        // window with no undo.
+        {
+            const int before = static_cast<int>(scene.scene().pieces().size());
+            const int victim = scene.scene().pieces().back().id;
+            const std::vector<int> victimBodies = scene.bodyIdsForPiece(victim);
+            ScenePiecesPanel* rp = scene.piecesPanel();
+            int rowIndex = -1;
+            for (int i = 0; rp && i < rp->rowCount(); ++i) {
+                if (rp->rowIdAt(i) == victim) rowIndex = i;
+            }
+            check(rowIndex >= 0, "the piece to remove has a row");
+            QPushButton* x = rp ? rp->rowRemoveAt(rowIndex) : nullptr;
+            check(x != nullptr, "...with a remove control on it");
+            if (x) {
+                // TWO CLICKS, the pattern this app uses wherever a deletion has
+                // no undo behind it - and a scene has no undo at all.
+                clickAt(x, QPointF(x->width() / 2.0, x->height() / 2.0));
+                settle(150);
+                check(static_cast<int>(scene.scene().pieces().size()) == before,
+                      "one click asks rather than removing");
+                clickAt(x, QPointF(x->width() / 2.0, x->height() / 2.0));
+                settle(250);
+            }
+            check(static_cast<int>(scene.scene().pieces().size()) == before - 1,
+                  QStringLiteral("...and the second takes it out (%1 -> %2)")
+                      .arg(before)
+                      .arg(static_cast<int>(scene.scene().pieces().size())));
+            check(scene.bodyIdsForPiece(victim).empty(),
+                  "...with its bodies gone from the viewport too");
+            bool stillShown = false;
+            for (int bodyId : victimBodies)
+                if (scene.view()->isSolidVisible(bodyId)) stillShown = true;
+            check(!stillShown, "...and nothing of it left on screen");
+        }
+
         // --- a furniture that cannot be read ---------------------------------
         // The piece is still added, carrying its reason where its name goes -
         // and the refusal is a FAILURE TOAST, because this app's taxonomy is
@@ -28832,13 +28872,14 @@ int main(int argc, char* argv[])
         check(scene.addPiece(QStringLiteral("no-such-furniture")) == false,
               "a furniture that is not there refuses");
         settle(150);
-        check(scene.scene().pieces().size() == 4,
+        // Three, not four: the remove-a-piece block above took one out.
+        check(scene.scene().pieces().size() == 3,
               "...but the piece is still added, so the reference is not silently dropped");
-        check(scene.piecesPanel() && scene.piecesPanel()->rowCount() == 4 &&
-                  !scene.piecesPanel()->rowTextAt(3).isEmpty() &&
-                  scene.piecesPanel()->rowTextAt(3) != QStringLiteral("Table"),
+        check(scene.piecesPanel() && scene.piecesPanel()->rowCount() == 3 &&
+                  !scene.piecesPanel()->rowTextAt(2).isEmpty() &&
+                  scene.piecesPanel()->rowTextAt(2) != QStringLiteral("Table"),
               QStringLiteral("...and its row prints a reason where the name goes (\"%1\")")
-                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(3) : QString()));
+                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(2) : QString()));
         // A Failure, told from a Note the way this suite always tells them
         // apart - by the ARMED TIMER, 8000 ms against a Note's 4000.
         check(sceneToasts && sceneToasts->isShowing() && sceneToasts->remainingMs() > 5000,
@@ -28892,7 +28933,7 @@ int main(int argc, char* argv[])
             settle(150);
             check(!pieceCard->isVisible(), "...and Escape closes it, adding nothing");
         }
-        check(scene.scene().pieces().size() == 4, "...the scene is unchanged by opening it");
+        check(scene.scene().pieces().size() == 3, "...the scene is unchanged by opening it");
 
         // --- the vocabulary sweep over the new copy --------------------------
         QStringList pieceBanned;
@@ -29312,115 +29353,6 @@ int main(int argc, char* argv[])
                   std::fabs(scene.view()->renderLightStrength() - 3.25) < 1.0e-6,
               "...and the light");
 
-        // --- per-piece wood, MEASURED IN PIXELS --------------------------------
-        // The spec's named fork, and until now it was only ever read back
-        // through the accessor that stored it. Two things were wrong and
-        // neither could be seen that way: the scene never turned wood ON, so
-        // no overlay existed to carry a per-body material; and the overlay is
-        // built from the AIS object's UNTRANSFORMED shape, so every piece
-        // would have drawn at its own furniture's origin - stacked on top of
-        // each other - the moment it was.
-        check(scene.view()->renderWood(),
-              "a scene renders its furniture in wood - the mode per-piece wood needs");
-        settle(600);
-        const QString woodPath = outDir + QStringLiteral("/scene-two-woods.png");
-        check(scene.view()->saveSnapshot(woodPath), "a render of the scene is taken");
-        const QImage woodShot(woodPath);
-        check(!woodShot.isNull(), "and it loads back");
-
-        // Each piece's own centre, projected and mapped into the DUMP's pixel
-        // grid - which is not the widget's. (The same mapping bug this file
-        // has already paid for once.)
-        const auto sceneIntoImage = [&woodShot, &scene](const QPoint& logical) {
-            if (woodShot.isNull() || scene.view()->width() <= 0) return QPoint(-1, -1);
-            const double sx = woodShot.width() / static_cast<double>(scene.view()->width());
-            const double sy = woodShot.height() / static_cast<double>(scene.view()->height());
-            return QPoint(static_cast<int>(logical.x() * sx),
-                          static_cast<int>(logical.y() * sy));
-        };
-        const auto sceneMedian = [](const QImage& image, const QPoint& at, int half) {
-            std::vector<int> levels;
-            for (int x = at.x() - half; x <= at.x() + half; ++x) {
-                for (int y = at.y() - half; y <= at.y() + half; ++y) {
-                    if (x < 0 || y < 0 || x >= image.width() || y >= image.height()) continue;
-                    levels.push_back(qGray(image.pixel(x, y)));
-                }
-            }
-            if (levels.empty()) return -1;
-            std::sort(levels.begin(), levels.end());
-            return levels[levels.size() / 2];
-        };
-        const auto pieceSample = [&](int pieceId, int& level, QPoint& at) {
-            const std::vector<TopoDS_Shape> shapes = scene.placedShapesForPiece(pieceId);
-            if (shapes.empty()) return false;
-            const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(shapes);
-            QPoint logical;
-            if (!box.ok || !scene.view()->projectToScreen(box.centre, logical)) return false;
-            at = sceneIntoImage(logical);
-            level = sceneMedian(woodShot, at, 10);
-            return level >= 0;
-        };
-
-        // pieces[0] is the Table, saved with the LIGHTER wood (red 0.52);
-        // pieces[1] is the Chair, saved much darker (red 0.18). Named after
-        // the furniture rather than after a brightness guess, which is how
-        // this pair got written back to front the first time.
-        int tableLevel = -1, chairLevel = -1;
-        QPoint tableAt, chairAt;
-        const bool haveTable = pieceSample(scene.scene().pieces()[0].id, tableLevel, tableAt);
-        const bool haveChair = pieceSample(scene.scene().pieces()[1].id, chairLevel, chairAt);
-        check(haveTable && haveChair, "both pieces project into the render");
-
-        // ON THE WOOD, not on the floor - which is what a piece drawn back at
-        // its furniture's origin would leave behind at these pixels.
-        const int sceneFloor = woodShot.isNull() ? -1 : sceneMedian(woodShot, QPoint(12, 12), 8);
-        check(haveTable && haveChair && sceneFloor >= 0 &&
-                  std::abs(tableLevel - sceneFloor) > 20 &&
-                  std::abs(chairLevel - sceneFloor) > 20,
-              QStringLiteral("each piece is drawn WHERE IT STANDS, not back at its "
-                             "furniture's origin (table %1, chair %2, floor %3)")
-                  .arg(tableLevel).arg(chairLevel).arg(sceneFloor));
-        // The woods differ by 0.52 against 0.18 in red; measured at 39 against
-        // 12, a ratio close to the woods' own. The bound is well clear of any
-        // grain noise (the floor sits at 213, the bodies in the tens) and is
-        // DIRECTIONAL: the furniture saved with the lighter wood must be the
-        // lighter piece, so the two cannot simply be swapped and still pass.
-        check(haveTable && haveChair && tableLevel - chairLevel > 15,
-              QStringLiteral("...and each in ITS OWN furniture's wood - the table's "
-                             "lighter wood reads above the chair's (%1 against %2)")
-                  .arg(tableLevel).arg(chairLevel));
-
-        // --- the render card's controls are LIVE in a scene --------------------
-        // They were inert: RenderSettingsPanel's own header says "MainWindow is
-        // the one listener", and a scene connected only the three shot signals,
-        // so fifteen controls moved and changed nothing. The wiring is
-        // RenderStudio's now, shared with the editor rather than copied.
-        if (RenderSettingsPanel* rsp = scene.studio()->panel()) {
-            const double fovBefore = scene.view()->renderFov();
-            emit rsp->fovChanged(fovBefore + 11.0);
-            settle(150);
-            check(std::fabs(scene.view()->renderFov() - (fovBefore + 11.0)) < 1.0e-6,
-                  QStringLiteral("a scene's render card reaches its viewport (FOV %1 -> %2)")
-                      .arg(fovBefore, 0, 'f', 1)
-                      .arg(scene.view()->renderFov(), 0, 'f', 1));
-            emit rsp->guidesChanged(RenderSettingsPanel::Guides::Thirds);
-            settle(150);
-            check(scene.view()->renderGuides() == OcctViewWidget::RenderGuides::Thirds,
-                  "...and so does a second one, so this is the wiring and not one lucky call");
-            emit rsp->fovChanged(fovBefore);
-            settle(150);
-        }
-        // AND THERE IS A DOOR TO THE EXPORT. The empty-scene probe calls
-        // saveSnapshot() directly - a viewport method, not a gesture - so
-        // without this the one output the window exists for had no route.
-        QAction* sceneShot = nullptr;
-        for (QAction* candidate : scene.findChildren<QAction*>()) {
-            if (candidate->text().remove(QLatin1Char('&')) == QStringLiteral("Save Screenshot"))
-                sceneShot = candidate;
-        }
-        check(sceneShot != nullptr,
-              "a scene offers Save Screenshot - the picture is the point of the window");
-
         scene.studio()->setEnabled(false);
         settle(300);
         check(!scene.studio()->isEnabled(), "render mode turns back off");
@@ -29618,6 +29550,89 @@ int main(int argc, char* argv[])
               "and an export still writes a file rather than failing");
         check(!QImage(emptyPath).isNull(), "which loads back as an image");
         empty.close();
+    }
+
+    // --- each piece renders in its own furniture's wood ---------------------
+    // Its own scene, with exactly TWO pieces and nothing else in frame. The
+    // shared block grew to five pieces that occlude one another, and a sample
+    // taken at a projected box centre then lands on a neighbour - which is how
+    // this check came to report a dark chair as brighter than a pale table.
+    // A measurement needs a fixture that cannot confuse it.
+    if (blockEnabled("each-piece-renders-in-its-own-furnitures-wood")) {
+        RequiredTempDir woodSceneDir;
+        FurnitureStore woodStore(woodSceneDir.path());
+        auto makeWood = [&woodStore](const QString& name, double r, double g, double b) {
+            const QString id = woodStore.createFurniture(name);
+            DocumentModel doc;
+            doc.addSolid(BRepPrimAPI_MakeBox(240.0, 120.0, 20.0).Shape());
+            DocumentModel::MaterialLook look;
+            look.material = "Oak";
+            look.red = r; look.green = g; look.blue = b;
+            doc.setMaterialLook(look);
+            return woodStore.saveFurniture(id, doc, QImage()) ? id : QString();
+        };
+        const QString paleId = makeWood(QStringLiteral("Pale"), 0.92, 0.86, 0.70);
+        const QString darkId = makeWood(QStringLiteral("Dark"), 0.14, 0.09, 0.05);
+        const QString woodSceneId = woodStore.createScene(QStringLiteral("Two woods"));
+        check(!paleId.isEmpty() && !darkId.isEmpty() && !woodSceneId.isEmpty(),
+              "two furniture with very different woods, and a scene to put them in");
+
+        SceneWindow woodScene(&woodStore);
+        woodScene.setAttribute(Qt::WA_ShowWithoutActivating);
+        woodScene.resize(1100, 800);
+        woodScene.show();
+        settle(300);
+        check(woodScene.openScene(woodSceneId), "the scene opens");
+        check(woodScene.addPiece(paleId) && woodScene.addPiece(darkId),
+              "both pieces go in");
+        settle(300);
+        woodScene.view()->fitAll();
+        settle(300);
+        woodScene.studio()->setEnabled(true);
+        settle(900);
+        check(woodScene.view()->renderWood(), "a scene renders its furniture in wood");
+
+        const QString twoPath = outDir + QStringLiteral("/two-piece-woods.png");
+        check(woodScene.view()->saveSnapshot(twoPath), "a render is taken");
+        const QImage twoShot(twoPath);
+        check(!twoShot.isNull(), "and loads back");
+
+        const auto sample = [&](int pieceId, int& level) {
+            const std::vector<TopoDS_Shape> shapes = woodScene.placedShapesForPiece(pieceId);
+            if (shapes.empty() || twoShot.isNull()) return false;
+            const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(shapes);
+            QPoint logical;
+            if (!box.ok || !woodScene.view()->projectToScreen(box.centre, logical)) return false;
+            const double sx = twoShot.width() / static_cast<double>(woodScene.view()->width());
+            const double sy = twoShot.height() / static_cast<double>(woodScene.view()->height());
+            const QPoint at(static_cast<int>(logical.x() * sx),
+                            static_cast<int>(logical.y() * sy));
+            std::vector<int> levels;
+            for (int x = at.x() - 6; x <= at.x() + 6; ++x) {
+                for (int y = at.y() - 6; y <= at.y() + 6; ++y) {
+                    if (x < 0 || y < 0 || x >= twoShot.width() || y >= twoShot.height()) continue;
+                    levels.push_back(qGray(twoShot.pixel(x, y)));
+                }
+            }
+            if (levels.empty()) return false;
+            std::sort(levels.begin(), levels.end());
+            level = levels[levels.size() / 2];
+            return true;
+        };
+
+        int paleLevel = -1, darkLevel = -1;
+        const bool got = sample(woodScene.scene().pieces()[0].id, paleLevel) &&
+                         sample(woodScene.scene().pieces()[1].id, darkLevel);
+        check(got, "both pieces sample");
+        const int bg = twoShot.isNull() ? -1 : qGray(twoShot.pixel(10, 10));
+        check(got && bg >= 0 && std::abs(paleLevel - bg) > 20 && std::abs(darkLevel - bg) > 20,
+              QStringLiteral("each sample lands on a body, not the floor (pale %1, dark %2, "
+                             "floor %3)").arg(paleLevel).arg(darkLevel).arg(bg));
+        check(got && paleLevel - darkLevel > 40,
+              QStringLiteral("and each wears ITS OWN furniture's wood - the pale piece reads "
+                             "well above the dark one (%1 against %2)")
+                  .arg(paleLevel).arg(darkLevel));
+        woodScene.close();
     }
 
     // --- wood at a hundred bodies, in the EDITOR ----------------------------

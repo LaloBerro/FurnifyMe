@@ -74,6 +74,9 @@ public:
     // A piece's name is its own, never the furniture's - two pieces may point
     // at one furniture and must rename apart.
     bool renamePiece(int pieceId, const QString& name);
+    // Takes a piece out of the scene, bodies and all. A scene has no undo, so
+    // the gesture that reaches this asks twice.
+    bool removePiece(int pieceId);
     // The scene-local body ids this piece put in the viewport, in order.
     std::vector<int> bodyIdsForPiece(int pieceId) const;
     // This piece's shapes WHERE THEY STAND - its saved geometry with its
@@ -186,6 +189,7 @@ private:
     QAction* myMoveAction = nullptr;
     QAction* myRotateAction = nullptr;
     QAction* myScreenshotAction = nullptr;
+    QAction* myFitAllAction = nullptr;
     QAction* mySaveAction = nullptr;
     UnsavedCloseCard* myCloseCard = nullptr;
     FurnitureNameMark* myNameMark = nullptr;

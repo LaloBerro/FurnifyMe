@@ -57,6 +57,7 @@ public:
     QWidget* rowWidgetAt(int index) const;
     QString rowTextAt(int index) const;
     QPushButton* rowEyeAt(int index) const;
+    QPushButton* rowRemoveAt(int index) const;
 
     // Everything this panel paints, for the banned-word sweep. The piece NAMES
     // are the user's own words and are swept as user data; this list carries
@@ -90,6 +91,7 @@ private:
         QWidget* widget = nullptr;
         QLabel* name = nullptr;
         QPushButton* eye = nullptr;
+        QPushButton* remove = nullptr;
     };
 
     QVector<Row> myWanted;
@@ -106,4 +108,8 @@ private:
     QLabel* myTitle = nullptr;
     QLabel* myEmpty = nullptr;
     int mySelected = 0;
+    // Which row's remove control is ARMED. A scene has no undo at all, so a
+    // deletion asks once first - VersionsPanel's own two-click confirm, which
+    // is this app's answer wherever a change cannot be taken back.
+    int myArmedRemove = 0;
 };
