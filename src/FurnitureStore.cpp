@@ -255,6 +255,13 @@ QJsonObject materialsToJson(const DocumentModel::DocumentMeta& meta)
     }
     QJsonObject obj;
     obj[QStringLiteral("materials")] = arr;
+    // WHICH of them this furniture wears, and the image it is made of. Written
+    // only when set, so a furniture that has never chosen one keeps a manifest
+    // with no such key - and reads back as it always did.
+    if (!meta.activeMaterial.empty())
+        obj[QStringLiteral("activeMaterial")] = QString::fromStdString(meta.activeMaterial);
+    if (!meta.woodTextureFile.empty())
+        obj[QStringLiteral("woodTexture")] = QString::fromStdString(meta.woodTextureFile);
     // WHICH BODIES RUN ACROSS THE GRAIN, by index into this document's own
     // body list rather than by id - the same positional matching every other
     // block in this manifest uses, because an id is a live document's
@@ -325,6 +332,12 @@ void jsonToMaterials(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
         look.grainAngle = angle;
         meta.materialLooks.push_back(look);
     }
+    // Absent means "no wood of its own", which is what every furniture saved
+    // before this existed genuinely is - the app-wide choice then applies, as
+    // it always did.
+    meta.activeMaterial =
+        obj.value(QStringLiteral("activeMaterial")).toString().toStdString();
+    meta.woodTextureFile = obj.value(QStringLiteral("woodTexture")).toString().toStdString();
     // Absent decodes to "none across", which is what every furniture saved
     // before this existed genuinely was.
     for (const QJsonValue& value : obj.value(QStringLiteral("grainAcross")).toArray()) {

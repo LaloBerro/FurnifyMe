@@ -1618,6 +1618,18 @@ public:
     // angleDeg, so this costs nothing but the lookup: see
     // refreshWoodOverlays().
     void setBodyGrainAcross(const std::vector<int>& bodyIds);
+    // Drops every per-path texture this widget has built. Called when the
+    // bodies they belong to go away, so a long session of opening scenes does
+    // not accumulate images nothing references.
+    void clearBodyWoodTextures();
+
+private:
+    // ONE builder, asked for a particular image. An empty path answers with
+    // the single live texture, which is what the furniture editor always
+    // wants; a path is built once and cached.
+    Handle(Graphic3d_TextureMap) woodTextureFor(const QString& path);
+
+public:
     bool bodyGrainAcross(int bodyId) const;
 
     // ONE BODY'S OWN WOOD. refreshWoodOverlays() already builds an overlay per
@@ -1636,6 +1648,12 @@ public:
         double metal = 0.0;
         double grainSize = 300.0;  // mm of real wood across one image tile
         double grainAngle = 0.0;   // degrees
+        // THE IMAGE this body's wood is made of. Empty means the one live
+        // texture, which is what the furniture editor always uses - it has one
+        // document and therefore one wood. A SCENE holds several furniture,
+        // each with its own, so the texture has to be per body or every piece
+        // wears whichever image happened to be loaded last.
+        QString texturePath;
     };
     void setBodyWood(int bodyId, const BodyWood& wood);
     void clearBodyWood();
@@ -3158,6 +3176,9 @@ private:
     std::vector<int> myGrainAcross;
     std::map<int, BodyWood> myBodyWood;
     QString myWoodTextureFile;
+    // Built once per distinct image and shared by every body that names it -
+    // six chairs of one wood upload one texture, not six.
+    std::map<QString, Handle(Graphic3d_TextureMap)> myBodyWoodTextures;
     Handle(Graphic3d_TextureMap) myWoodTexture;
     void ensureWoodTexture();
     // The wood overlays (user feedback round): AIS_Shape stretches a texture

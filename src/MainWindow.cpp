@@ -4217,6 +4217,16 @@ bool MainWindow::performSave(bool announce, bool reportFailure)
     // deleted (see its own comment) - while the save itself still writes
     // shapes and manifest either way: data safety does not depend on which
     // picture is showing.
+    // THE FURNITURE'S OWN WOOD, recorded at the moment it is written. Until
+    // now the choice lived only in QSettings, application-wide, so every
+    // furniture in the library wore whatever was picked last and a scene could
+    // not tell them apart - the user's "why is just one material, it should be
+    // 3". Taken from the panel, which is where the user made the choice.
+    if (myRenderSettingsPanel) {
+        myDocument.setActiveMaterial(myRenderSettingsPanel->woodSelection().toStdString());
+        myDocument.setWoodTextureFile(myView->renderTextureFile().toStdString());
+    }
+
     const QImage thumb = myRenderModeOn ? QImage() : myView->captureThumbnail();
     if (!myStore.saveFurniture(myFurnitureId, myDocument, thumb)) {
         // A refusal reports here whether or not the caller wanted an

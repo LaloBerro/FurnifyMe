@@ -5738,6 +5738,37 @@ void OcctViewWidget::setRenderWoodAngleDeg(double degrees)
     }
 }
 
+Handle(Graphic3d_TextureMap) OcctViewWidget::woodTextureFor(const QString& path)
+{
+    if (path.isEmpty()) {
+        ensureWoodTexture();
+        return myWoodTexture;
+    }
+    const auto cached = myBodyWoodTextures.find(path);
+    if (cached != myBodyWoodTextures.end()) return cached->second;
+
+    // Built through ensureWoodTexture() rather than beside it: that function
+    // owns the 2048 cap, the row-copy and the procedural fallback, and a
+    // second copy of all three would be a second thing to keep in step. The
+    // swap is local and restored unconditionally.
+    const QString keepFile = myWoodTextureFile;
+    const Handle(Graphic3d_TextureMap) keepTexture = myWoodTexture;
+    myWoodTextureFile = path;
+    myWoodTexture.Nullify();
+    ensureWoodTexture();
+    const Handle(Graphic3d_TextureMap) built = myWoodTexture;
+    myWoodTextureFile = keepFile;
+    myWoodTexture = keepTexture;
+
+    myBodyWoodTextures[path] = built;
+    return built;
+}
+
+void OcctViewWidget::clearBodyWoodTextures()
+{
+    myBodyWoodTextures.clear();
+}
+
 void OcctViewWidget::ensureWoodTexture()
 {
     if (!myWoodTexture.IsNull()) return;
@@ -5937,7 +5968,16 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
 
         Handle(WoodBodyObject) overlay = new WoodBodyObject();
         overlay->shape = entry.second->Shape();
-        overlay->texture = myWoodTexture;
+        // THIS BODY'S OWN IMAGE when it names one. A scene holds several
+        // furniture, each with its own wood; the editor names none and gets
+        // the single live texture exactly as before.
+        {
+            const auto entryWood = myBodyWood.find(entry.first);
+            const QString wantedTexture =
+                entryWood == myBodyWood.end() ? QString() : entryWood->second.texturePath;
+            const Handle(Graphic3d_TextureMap) chosen = woodTextureFor(wantedTexture);
+            overlay->texture = chosen.IsNull() ? myWoodTexture : chosen;
+        }
         // THIS BODY'S OWN WOOD when it has one, the single live material when
         // it does not. The fallback is what keeps the furniture editor
         // identical: it sets no entries at all, so every body takes the

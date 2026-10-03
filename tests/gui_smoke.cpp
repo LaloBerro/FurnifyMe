@@ -29571,6 +29571,79 @@ int main(int argc, char* argv[])
             doc.setMaterialLook(look);
             return woodStore.saveFurniture(id, doc, QImage()) ? id : QString();
         };
+        // --- A FURNITURE REMEMBERS ITS OWN WOOD -------------------------------
+        // The user's report: "why is just one material, it should be 3". Their
+        // furniture record NOTHING - materialLooks is empty in every manifest -
+        // because the wood choice has only ever gone to QSettings, app-wide. So
+        // every piece fell back to one default and the spec's own fork could
+        // not work on real furniture. A furniture has to carry its wood.
+        {
+            const QString id = woodStore.createFurniture(QStringLiteral("Walnut thing"));
+            DocumentModel doc;
+            doc.addSolid(BRepPrimAPI_MakeBox(100.0, 100.0, 20.0).Shape());
+            doc.setActiveMaterial("Walnut");
+            doc.setWoodTextureFile("C:/woods/walnut.png");
+            DocumentModel::MaterialLook look;
+            look.material = "Walnut";
+            look.red = 0.33; look.green = 0.20; look.blue = 0.11;
+            doc.setMaterialLook(look);
+            check(!id.isEmpty() && woodStore.saveFurniture(id, doc, QImage()),
+                  "a furniture is saved with a wood of its own");
+
+            DocumentModel back;
+            QString err;
+            check(woodStore.loadFurniture(id, back, &err),
+                  QStringLiteral("...and loads again (%1)")
+                      .arg(err.isEmpty() ? QStringLiteral("ok") : err));
+            check(back.activeMaterial() == "Walnut",
+                  QStringLiteral("...remembering WHICH wood it wears (\"%1\")")
+                      .arg(QString::fromStdString(back.activeMaterial())));
+            check(back.woodTextureFile() == "C:/woods/walnut.png",
+                  QStringLiteral("...and the image that wood is made of (\"%1\")")
+                      .arg(QString::fromStdString(back.woodTextureFile())));
+            DocumentModel::MaterialLook backLook;
+            check(back.materialLook("Walnut", backLook) &&
+                      std::fabs(backLook.red - 0.33) < 1.0e-6,
+                  "...with that wood's own look beside it");
+        }
+
+        // IT USES THE WOOD THE FURNITURE NAMED, not the first look it happens
+        // to have saved. A furniture that tried a dark wood first and settled
+        // on a pale one must render pale - which is precisely the case the old
+        // "take looks.front()" rule got wrong, and the limit that was ledgered
+        // as unfixable until a furniture could record its choice.
+        {
+            const QString id = woodStore.createFurniture(QStringLiteral("Two tried"));
+            DocumentModel doc;
+            doc.addSolid(BRepPrimAPI_MakeBox(100.0, 100.0, 20.0).Shape());
+            DocumentModel::MaterialLook first;
+            first.material = "Ebony"; first.red = 0.05; first.green = 0.04; first.blue = 0.03;
+            doc.setMaterialLook(first);
+            DocumentModel::MaterialLook second;
+            second.material = "Birch"; second.red = 0.95; second.green = 0.90; second.blue = 0.76;
+            doc.setMaterialLook(second);
+            doc.setActiveMaterial("Birch");
+            check(woodStore.saveFurniture(id, doc, QImage()),
+                  "a furniture that tried two woods and settled on the second");
+
+            SceneWindow pick(&woodStore);
+            pick.setAttribute(Qt::WA_ShowWithoutActivating);
+            pick.resize(900, 700);
+            pick.show();
+            settle(250);
+            const QString pickScene = woodStore.createScene(QStringLiteral("Picked"));
+            check(pick.openScene(pickScene) && pick.addPiece(id), "it goes into a scene");
+            settle(250);
+            const std::vector<int> bodies = pick.bodyIdsForPiece(pick.scene().pieces()[0].id);
+            OcctViewWidget::BodyWood worn;
+            const bool read = !bodies.empty() && pick.view()->bodyWood(bodies.front(), worn);
+            check(read && std::fabs(worn.red - 0.95) < 1.0e-6,
+                  QStringLiteral("...and the piece wears the wood it NAMED, not the first it "
+                                 "saved (red %1, Birch is 0.95, Ebony 0.05)")
+                      .arg(worn.red, 0, 'f', 3));
+            pick.close();
+        }
+
         const QString paleId = makeWood(QStringLiteral("Pale"), 0.92, 0.86, 0.70);
         const QString darkId = makeWood(QStringLiteral("Dark"), 0.14, 0.09, 0.05);
         const QString woodSceneId = woodStore.createScene(QStringLiteral("Two woods"));

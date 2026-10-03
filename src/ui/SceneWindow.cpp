@@ -374,6 +374,7 @@ bool SceneWindow::openScene(const QString& id)
     // belongs to the scene it is no longer showing.
     myView->clearSolids();
     myView->clearBodyWood();
+    myView->clearBodyWoodTextures();
     myPieceBodies.clear();
     myPieceShapes.clear();
     myBodyPiece.clear();
@@ -531,9 +532,21 @@ void SceneWindow::displayPiece(int pieceId, const DocumentModel& furniture,
     // WHICH WOOD: the furniture's own saved look. A furniture records a look
     // per MATERIAL NAME and does not record which of them was last on screen,
     // so with several the first recorded one is taken - see the header note.
+    // WHICH WOOD: the one this furniture RECORDED, now that a furniture
+    // carries one. Before that existed the only answer was "the first look it
+    // happened to save", which for real furniture was none at all - every
+    // piece fell back to one default and the scene showed a single material
+    // whatever its furniture were made of.
     DocumentModel::MaterialLook look;
-    const auto& looks = furniture.materialLooks();
-    if (!looks.empty()) look = looks.front();
+    const std::string& named = furniture.activeMaterial();
+    if (!named.empty() && furniture.materialLook(named, look)) {
+        // its own, by name
+    } else if (!furniture.materialLooks().empty()) {
+        // A furniture that edited a look but never recorded which wood it
+        // wears - the first it saved is the only honest guess.
+        look = furniture.materialLooks().front();
+    }
+    const QString texture = QString::fromStdString(furniture.woodTextureFile());
 
     for (const DocumentModel::Solid& solid : furniture.solids()) {
         if (solid.shape.IsNull()) continue;
@@ -554,6 +567,7 @@ void SceneWindow::displayPiece(int pieceId, const DocumentModel& furniture,
         wood.metal = look.metal;
         wood.grainSize = look.grainSize;
         wood.grainAngle = look.grainAngle;
+        wood.texturePath = texture;
         myView->setBodyWood(bodyId, wood);
 
         // The one exception a real piece of furniture needs, carried across

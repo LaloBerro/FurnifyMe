@@ -1041,6 +1041,20 @@ bool DocumentModel::materialLook(const std::string& material, MaterialLook& out)
     return false;
 }
 
+void DocumentModel::setActiveMaterial(const std::string& material)
+{
+    if (myActiveMaterial == material) return;
+    myActiveMaterial = material;
+    ++myRevision;
+}
+
+void DocumentModel::setWoodTextureFile(const std::string& path)
+{
+    if (myWoodTextureFile == path) return;
+    myWoodTextureFile = path;
+    ++myRevision;
+}
+
 void DocumentModel::setMaterialLook(const MaterialLook& look)
 {
     if (look.material.empty()) return;
@@ -1197,6 +1211,8 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
 
     // How each material looks on this furniture - straight across, by name.
     meta.materialLooks = myMaterialLooks;
+    meta.activeMaterial = myActiveMaterial;
+    meta.woodTextureFile = myWoodTextureFile;
     meta.shots = myShots;
     // BY INDEX, never by id. An id is a live document's bookkeeping and
     // restarts at 1 in every document, so a file carrying ids would put the
@@ -1370,6 +1386,8 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     // A second load onto the same instance must not keep the OLD furniture's
     // materials - the same reasoning every block above it carries.
     myMaterialLooks = meta.materialLooks;
+    myActiveMaterial = meta.activeMaterial;
+    myWoodTextureFile = meta.woodTextureFile;
     myShots = meta.shots;
     // Cleared here and filled from the indices AFTER the bodies have been
     // added below and have ids - the same two-step symmetryPairs, linkGroups

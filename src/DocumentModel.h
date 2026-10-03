@@ -579,6 +579,23 @@ public:
     void setBodyGrainAcross(int bodyId, bool across);
     const std::vector<int>& grainAcrossBodies() const { return myGrainAcross; }
 
+    // WHICH WOOD THIS FURNITURE WEARS, and the image that wood is made of.
+    //
+    // materialLooks() has always recorded how each material LOOKS on this
+    // furniture; what was missing is which of them is actually on it. That
+    // lived in QSettings, application-wide, so every furniture in the library
+    // wore whatever the user last picked - and a scene, which is several
+    // furniture at once, could not render them differently however much the
+    // spec said each keeps its own.
+    //
+    // PRESENTATION, like visibility and the looks themselves: persisted with
+    // the furniture, bumps revision() so autosave notices, takes NO checkpoint,
+    // because choosing a wood is not an edit to the wood.
+    const std::string& activeMaterial() const { return myActiveMaterial; }
+    void setActiveMaterial(const std::string& material);
+    const std::string& woodTextureFile() const { return myWoodTextureFile; }
+    void setWoodTextureFile(const std::string& path);
+
     const std::vector<MaterialLook>& materialLooks() const { return myMaterialLooks; }
     // False (and `out` left at its defaults) when this furniture has never
     // been told what that material should look like.
@@ -677,6 +694,10 @@ public:
         // a material is not an item in a list this document owns, it is a
         // thing the app offers, and the name is what both ends already use.
         std::vector<MaterialLook> materialLooks;
+        // Absent in a file written before furniture carried a wood, which
+        // reads back as empty and behaves exactly as that file always did.
+        std::string activeMaterial;
+        std::string woodTextureFile;
         std::vector<Shot> shots;
         std::vector<int> grainAcrossBodies;
     };
@@ -829,6 +850,8 @@ private:
     // See MaterialLook. Keyed by the material's own name, and deliberately
     // not in State - presentation, persisted, never undone.
     std::vector<MaterialLook> myMaterialLooks;
+    std::string myActiveMaterial;
+    std::string myWoodTextureFile;
     std::vector<Shot> myShots;
     // Sorted, and holding only the bodies that are ACROSS - with the grain is
     // the default and needs no record, so an untouched furniture stores an
