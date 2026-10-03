@@ -486,19 +486,21 @@ gp_Trsf SceneWindow::placementForNewPiece(const DocumentModel& furniture) const
     // overlap depending on where its author happened to draw it.
     double occupiedRight = 0.0;
     bool anything = false;
+    // THROUGH placedShapesForPiece(), which applies the placement properly.
+    // Adding the placement's X TRANSLATION to an untransformed box is only the
+    // right answer while nothing has been turned: a rotation about a pivot
+    // rewrites that translation into a number that no longer means "how far
+    // right it stands", so a new piece landed inside a turned neighbour or far
+    // out in empty space.
     for (const auto& entry : myPieceShapes) {
-        for (const TopoDS_Shape& shape : entry.second) {
+        for (const TopoDS_Shape& shape : placedShapesForPiece(entry.first)) {
             if (shape.IsNull()) continue;
             Bnd_Box box;
             BRepBndLib::Add(shape, box);
             if (box.IsVoid()) continue;
             double xMin, yMin, zMin, xMax, yMax, zMax;
             box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
-            // Measured where the piece actually STANDS, so its own placement
-            // counts - the shapes kept here are the untransformed ones.
-            const SceneModel::Piece* piece = myScene.piece(entry.first);
-            const double shift = piece ? piece->placement.TranslationPart().X() : 0.0;
-            occupiedRight = anything ? std::max(occupiedRight, xMax + shift) : xMax + shift;
+            occupiedRight = anything ? std::max(occupiedRight, xMax) : xMax;
             anything = true;
         }
     }
@@ -659,6 +661,16 @@ bool SceneWindow::removePiece(int pieceId)
         it = (it->second == pieceId) ? myBodyPiece.erase(it) : std::next(it);
     if (mySelectedPiece == pieceId) mySelectedPiece = 0;
     if (!myScene.removePiece(pieceId)) return false;
+    showToolGizmo();
+    refreshSurfaces();
+    return true;
+}
+
+bool SceneWindow::setPiecePlacement(int pieceId, const gp_Trsf& placement)
+{
+    if (SceneModel::checkPlacement(placement) != SceneCheck::Ok) return false;
+    if (!myScene.piece(pieceId)) return false;
+    applyPlacement(pieceId, placement);
     showToolGizmo();
     refreshSurfaces();
     return true;

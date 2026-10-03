@@ -28768,13 +28768,91 @@ int main(int argc, char* argv[])
                   .arg(scene.scene().pieces()[1].placement.TranslationPart().X(), 0, 'f', 1)
                   .arg(scene.scene().pieces()[0].placement.TranslationPart().X(), 0, 'f', 1));
 
+        // --- a TURNED piece is measured where it stands -----------------------
+        // Everything that measures a body - what to frame, what to snap to,
+        // where the studio floor goes, where a new piece lands - used to read
+        // the shape at its FURNITURE'S ORIGIN, because in the editor a
+        // presentation transform is always the identity. A scene puts the
+        // placement there. For a piece that has only been slid, adding the
+        // placement's X translation happened to agree; for a TURNED one it
+        // does not, because a rotation about a pivot rewrites that translation
+        // into a number that no longer means "how far right it stands".
+        {
+            const int turnMe = scene.scene().pieces()[1].id;
+            // ABOUT ITS OWN CENTRE, so the piece STAYS WHERE IT IS and only
+            // its extent changes. Turning about the world origin flings it off
+            // to negative X, where "the next piece lands clear of it" is true
+            // for a reason that has nothing to do with the fix - which is
+            // exactly how this check first passed.
+            const ModelingOps::MeasuredBox turnBox =
+                ModelingOps::measuredBox(scene.placedShapesForPiece(turnMe));
+            check(turnBox.ok, "the piece to turn can be measured");
+            gp_Trsf turn;
+            turn.SetRotation(gp_Ax1(turnBox.centre, gp_Dir(0.0, 0.0, 1.0)),
+                             90.0 * M_PI / 180.0);
+            gp_Trsf placed = turn.Multiplied(scene.scene().piece(turnMe)->placement);
+            check(scene.setPiecePlacement(turnMe, placed), "a piece is turned 90 degrees");
+            settle(200);
+
+            // Where it REALLY reaches now, from its placed shape.
+            double realRight = -1.0e9;
+            for (const TopoDS_Shape& shape : scene.placedShapesForPiece(turnMe)) {
+                Bnd_Box box;
+                BRepBndLib::Add(shape, box);
+                if (box.IsVoid()) continue;
+                double x0, y0, z0, x1, y1, z1;
+                box.Get(x0, y0, z0, x1, y1, z1);
+                realRight = std::max(realRight, x1);
+            }
+            check(realRight > -1.0e8, "...and its placed extent is measurable");
+            const ModelingOps::MeasuredBox afterBox =
+                ModelingOps::measuredBox(scene.placedShapesForPiece(turnMe));
+            check(afterBox.ok &&
+                      std::hypot(afterBox.centre.X() - turnBox.centre.X(),
+                                 afterBox.centre.Y() - turnBox.centre.Y()) < 1.0e-6,
+                  "...and it stayed where it stood, so only its EXTENT changed");
+            check(realRight > turnBox.centre.X(),
+                  QStringLiteral("...reaching past its own centre, which the next piece has "
+                                 "to clear (%1 against centre %2)")
+                      .arg(realRight, 0, 'f', 1)
+                      .arg(turnBox.centre.X(), 0, 'f', 1));
+
+            // A NEW PIECE MUST LAND CLEAR OF IT. Measured against where the
+            // turned piece actually reaches, not against its furniture's box
+            // plus a translation that no longer describes it.
+            check(scene.addPiece(tableId), "a new piece goes in beside it");
+            settle(200);
+            double freshLeft = 1.0e9;
+            for (const TopoDS_Shape& shape :
+                 scene.placedShapesForPiece(scene.scene().pieces().back().id)) {
+                Bnd_Box box;
+                BRepBndLib::Add(shape, box);
+                if (box.IsVoid()) continue;
+                double x0, y0, z0, x1, y1, z1;
+                box.Get(x0, y0, z0, x1, y1, z1);
+                freshLeft = std::min(freshLeft, x0);
+            }
+            // BOTH DIRECTIONS. "Clear of it" alone cannot fail when the old
+            // arithmetic OVER-estimates, which is one of the two ways reading
+            // a translation off a turned placement goes wrong - and a mutation
+            // restoring that arithmetic reddened nothing until this bound
+            // existed. The gap is the window's own kNewPieceGapMm (120).
+            const double wantLeft = realRight + 120.0;
+            check(std::fabs(freshLeft - wantLeft) < 1.0,
+                  QStringLiteral("...and the new piece lands exactly one gap past where the "
+                                 "turned one really reaches (starts %1, wanted %2)")
+                      .arg(freshLeft, 0, 'f', 1)
+                      .arg(wantLeft, 0, 'f', 1));
+        }
+
         // --- Review Focus: two pieces naming ONE furniture -------------------
         // Nothing may key off the furniture id as if it were unique.
         check(scene.addPiece(tableId), "the same furniture goes in a second time");
         settle(200);
-        check(scene.scene().pieces().size() == 3, "which is a third piece, not a refusal");
+        check(scene.scene().pieces().size() == 4,
+              "which is another piece, not a refusal");
         const int firstTable = scene.scene().pieces()[0].id;
-        const int secondTable = scene.scene().pieces()[2].id;
+        const int secondTable = scene.scene().pieces().back().id;
         check(firstTable != secondTable, "...with an id of its own");
         check(scene.bodyIdsForPiece(firstTable) != scene.bodyIdsForPiece(secondTable),
               "...and bodies of its own in the viewport, not the first piece's");
@@ -28817,12 +28895,21 @@ int main(int argc, char* argv[])
                 }
             }
         }
-        check(scene.piecesPanel() && scene.piecesPanel()->rowCount() == 3 &&
-                  scene.piecesPanel()->rowTextAt(2) == QStringLiteral("Side table") &&
-                  scene.piecesPanel()->rowTextAt(0) == QStringLiteral("Table"),
-              QStringLiteral("renaming one of them leaves the other alone (\"%1\" / \"%2\")")
-                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(0) : QString())
-                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(2) : QString()));
+        // BY ID, not by a fixed row index - the fixture grows as this block
+        // grows, and an index pinned to today's piece count is a check that
+        // breaks for reasons unrelated to what it asserts.
+        {
+            ScenePiecesPanel* rp = scene.piecesPanel();
+            QString renamedText, firstText;
+            for (int i = 0; rp && i < rp->rowCount(); ++i) {
+                if (rp->rowIdAt(i) == secondTable) renamedText = rp->rowTextAt(i);
+                if (rp->rowIdAt(i) == firstTable) firstText = rp->rowTextAt(i);
+            }
+            check(renamedText == QStringLiteral("Side table") &&
+                      firstText == QStringLiteral("Table"),
+                  QStringLiteral("renaming one of them leaves the other alone (\"%1\" / "
+                                 "\"%2\")").arg(firstText, renamedText));
+        }
 
         // --- a piece can be taken out again -----------------------------------
         // There was no route at all: SceneModel::removePiece() is headless
@@ -28867,19 +28954,22 @@ int main(int argc, char* argv[])
         // The piece is still added, carrying its reason where its name goes -
         // and the refusal is a FAILURE TOAST, because this app's taxonomy is
         // that a refusal reports loudly or not at all.
+        const int piecesBeforeBroken = static_cast<int>(scene.scene().pieces().size());
         ToastHost* sceneToasts = scene.findChild<ToastHost*>();
         check(sceneToasts != nullptr, "the scene window has a toast host to refuse through");
         check(scene.addPiece(QStringLiteral("no-such-furniture")) == false,
               "a furniture that is not there refuses");
         settle(150);
-        // Three, not four: the remove-a-piece block above took one out.
-        check(scene.scene().pieces().size() == 3,
-              "...but the piece is still added, so the reference is not silently dropped");
-        check(scene.piecesPanel() && scene.piecesPanel()->rowCount() == 3 &&
-                  !scene.piecesPanel()->rowTextAt(2).isEmpty() &&
-                  scene.piecesPanel()->rowTextAt(2) != QStringLiteral("Table"),
+        check(static_cast<int>(scene.scene().pieces().size()) == piecesBeforeBroken + 1,
+              QStringLiteral("...but the piece is still added, so the reference is not "
+                             "silently dropped (%1 -> %2)")
+                  .arg(piecesBeforeBroken)
+                  .arg(static_cast<int>(scene.scene().pieces().size())));
+        const int lastRow = scene.piecesPanel() ? scene.piecesPanel()->rowCount() - 1 : -1;
+        check(lastRow >= 0 && !scene.piecesPanel()->rowTextAt(lastRow).isEmpty() &&
+                  scene.piecesPanel()->rowTextAt(lastRow) != QStringLiteral("Table"),
               QStringLiteral("...and its row prints a reason where the name goes (\"%1\")")
-                  .arg(scene.piecesPanel() ? scene.piecesPanel()->rowTextAt(2) : QString()));
+                  .arg(lastRow >= 0 ? scene.piecesPanel()->rowTextAt(lastRow) : QString()));
         // A Failure, told from a Note the way this suite always tells them
         // apart - by the ARMED TIMER, 8000 ms against a Note's 4000.
         check(sceneToasts && sceneToasts->isShowing() && sceneToasts->remainingMs() > 5000,
@@ -28933,7 +29023,8 @@ int main(int argc, char* argv[])
             settle(150);
             check(!pieceCard->isVisible(), "...and Escape closes it, adding nothing");
         }
-        check(scene.scene().pieces().size() == 3, "...the scene is unchanged by opening it");
+        check(static_cast<int>(scene.scene().pieces().size()) == piecesBeforeBroken + 1,
+              "...the scene is unchanged by opening it");
 
         // --- the vocabulary sweep over the new copy --------------------------
         QStringList pieceBanned;

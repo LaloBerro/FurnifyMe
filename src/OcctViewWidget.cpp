@@ -625,6 +625,27 @@ Aspect_Drawable currentGlNativeWindow()
     return 0;
 #endif
 }
+
+// A PRESENTATION'S SHAPE WHERE IT IS DRAWN. An AIS_Shape carries the geometry
+// it was built with, at its own origin; in the furniture editor that is also
+// where it appears, because every presentation transform there is the
+// identity. A SCENE puts a piece's placement on exactly that transform, so
+// anything that MEASURES a body - what to frame, what to snap to, where the
+// studio floor goes - must ask for the PLACED shape or it measures the
+// furniture's origin instead of the arrangement.
+//
+// This is the audit the presentation-transform ruling owed and had not paid:
+// the claim was that every measurement goes through the scene's own accessor,
+// and inside this file several did not.
+TopoDS_Shape placedShapeOf(const Handle(AIS_Shape)& object)
+{
+    if (object.IsNull()) return TopoDS_Shape();
+    TopoDS_Shape shape = object->Shape();
+    if (shape.IsNull() || !object->HasTransformation()) return shape;
+    shape.Move(TopLoc_Location(object->LocalTransformation()));
+    return shape;
+}
+
 }  // namespace
 
 QSurfaceFormat OcctViewWidget::surfaceFormat()
@@ -2535,7 +2556,7 @@ void OcctViewWidget::collectMagnetCandidates(int axis)
     const auto movingIt = mySolids.find(movingId);
     Box moving;
     if (movingIt == mySolids.end() || movingIt->second.IsNull() ||
-        !boxOf(movingIt->second->Shape(), moving))
+        !boxOf(placedShapeOf(movingIt->second), moving))
         return;
     const double movingFeatures[3] = {moving.lo[axis], 0.5 * (moving.lo[axis] + moving.hi[axis]),
                                       moving.hi[axis]};
@@ -2546,7 +2567,7 @@ void OcctViewWidget::collectMagnetCandidates(int axis)
         // drag would be sticking to.
         if (!myContext->IsDisplayed(entry.second)) continue;
         Box other;
-        if (!boxOf(entry.second->Shape(), other)) continue;
+        if (!boxOf(placedShapeOf(entry.second), other)) continue;
         const double targets[3] = {other.lo[axis], 0.5 * (other.lo[axis] + other.hi[axis]),
                                    other.hi[axis]};
         for (double target : targets) {
@@ -5021,11 +5042,8 @@ void OcctViewWidget::fitAll()
     // framed the furniture's origins instead of the arrangement - and a scene
     // whose pieces stand metres out opened on an empty picture.
     const auto boundsOf = [](const Handle(AIS_Shape)& object, Bnd_Box& out) {
-        if (object.IsNull()) return;
-        TopoDS_Shape shape = object->Shape();
-        if (shape.IsNull()) return;
-        if (object->HasTransformation()) shape.Move(TopLoc_Location(object->LocalTransformation()));
-        BRepBndLib::Add(shape, out);
+        const TopoDS_Shape placed = placedShapeOf(object);
+        if (!placed.IsNull()) BRepBndLib::Add(placed, out);
     };
     Bnd_Box box;
     for (const auto& entry : mySolids) {
@@ -5381,7 +5399,7 @@ void OcctViewWidget::showRenderFloor()
             myWoodHiddenIds.end();
         if (!myContext->IsDisplayed(entry.second) && !woodStandsIn) continue;
         Bnd_Box b;
-        BRepBndLib::Add(entry.second->Shape(), b);
+        BRepBndLib::Add(placedShapeOf(entry.second), b);
         box.Add(b);
     }
     if (box.IsVoid()) return;
@@ -8329,7 +8347,7 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     for (const auto& entry : mySolids) {
         if (entry.second.get() != hit.get()) continue;
         Bnd_Box box;
-        BRepBndLib::Add(entry.second->Shape(), box);
+        BRepBndLib::Add(placedShapeOf(entry.second), box);
         CameraController scratch = myCamera;
         scratch.frame(box, kFovyDeg);
         animateTo(scratch.state());

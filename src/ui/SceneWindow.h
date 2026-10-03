@@ -77,6 +77,10 @@ public:
     // Takes a piece out of the scene, bodies and all. A scene has no undo, so
     // the gesture that reaches this asks twice.
     bool removePiece(int pieceId);
+    // Places a piece outright. Refuses a placement SceneModel would not store
+    // - rigid only - so the screen and the document cannot disagree, which is
+    // the whole basis for keeping the placement on the presentation.
+    bool setPiecePlacement(int pieceId, const gp_Trsf& placement);
     // The scene-local body ids this piece put in the viewport, in order.
     std::vector<int> bodyIdsForPiece(int pieceId) const;
     // This piece's shapes WHERE THEY STAND - its saved geometry with its
