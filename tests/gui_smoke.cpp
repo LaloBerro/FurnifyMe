@@ -29644,6 +29644,95 @@ int main(int argc, char* argv[])
             pick.close();
         }
 
+        // --- TWO DIFFERENT WOOD IMAGES, which is the user's real case ---------
+        // Their furniture's colours are all but identical ("Oak veneer" is
+        // white at 2x, "Oak natural" is the default tone) - what tells their
+        // woods apart is the IMAGE. So a per-body colour proves nothing about
+        // their library; a per-body TEXTURE is the thing that had to work.
+        {
+            const QString woodsDir =
+                QCoreApplication::applicationDirPath() + QStringLiteral("/materials");
+            const QString imageA = woodsDir + QStringLiteral("/oak-natural.jpg");
+            const QString imageB = woodsDir + QStringLiteral("/oak-veneer.jpg");
+            if (!QFile::exists(imageA) || !QFile::exists(imageB)) {
+                check(true, "[skip] the shipped wood images are not beside this binary");
+            } else {
+                auto makeTextured = [&](const QString& name, const QString& image) {
+                    const QString id = woodStore.createFurniture(name);
+                    DocumentModel doc;
+                    doc.addSolid(BRepPrimAPI_MakeBox(300.0, 160.0, 24.0).Shape());
+                    // THE SAME neutral colour on both, so only the image can
+                    // account for any difference measured below.
+                    DocumentModel::MaterialLook look;
+                    look.material = name.toStdString();
+                    look.red = 0.70; look.green = 0.70; look.blue = 0.68;
+                    doc.setMaterialLook(look);
+                    doc.setActiveMaterial(name.toStdString());
+                    doc.setWoodTextureFile(image.toStdString());
+                    return woodStore.saveFurniture(id, doc, QImage()) ? id : QString();
+                };
+                const QString natId = makeTextured(QStringLiteral("Oak natural"), imageA);
+                const QString venId = makeTextured(QStringLiteral("Oak veneer"), imageB);
+                check(!natId.isEmpty() && !venId.isEmpty(),
+                      "two furniture wearing two different wood IMAGES, same colour");
+
+                SceneWindow tex(&woodStore);
+                tex.setAttribute(Qt::WA_ShowWithoutActivating);
+                tex.resize(1000, 760);
+                tex.show();
+                settle(250);
+                const QString texScene = woodStore.createScene(QStringLiteral("Two images"));
+                check(tex.openScene(texScene) && tex.addPiece(natId) && tex.addPiece(venId),
+                      "both go into a scene");
+                settle(300);
+                tex.view()->fitAll();
+                settle(200);
+                tex.studio()->setEnabled(true);
+                settle(900);
+                const QString texPath = outDir + QStringLiteral("/two-wood-images.png");
+                check(tex.view()->saveSnapshot(texPath), "a render is taken");
+                const QImage texShot(texPath);
+
+                // The two pieces' own patches, compared as a HISTOGRAM rather
+                // than a median: two oaks can share an average and still be
+                // visibly different boards, which is exactly what a grain is.
+                const auto patch = [&](int pieceId, std::vector<int>& out) {
+                    const std::vector<TopoDS_Shape> shapes = tex.placedShapesForPiece(pieceId);
+                    if (shapes.empty() || texShot.isNull()) return false;
+                    const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(shapes);
+                    QPoint logical;
+                    if (!box.ok || !tex.view()->projectToScreen(box.centre, logical)) return false;
+                    const double sx = texShot.width() / double(tex.view()->width());
+                    const double sy = texShot.height() / double(tex.view()->height());
+                    const QPoint at(int(logical.x() * sx), int(logical.y() * sy));
+                    for (int x = at.x() - 14; x <= at.x() + 14; ++x)
+                        for (int y = at.y() - 14; y <= at.y() + 14; ++y) {
+                            if (x < 0 || y < 0 || x >= texShot.width() || y >= texShot.height())
+                                continue;
+                            out.push_back(qGray(texShot.pixel(x, y)));
+                        }
+                    return !out.empty();
+                };
+                std::vector<int> natPix, venPix;
+                const bool both = tex.scene().pieces().size() == 2 &&
+                                  patch(tex.scene().pieces()[0].id, natPix) &&
+                                  patch(tex.scene().pieces()[1].id, venPix);
+                check(both, "both pieces sample");
+                double natMean = 0.0, venMean = 0.0;
+                for (int v : natPix) natMean += v;
+                for (int v : venPix) venMean += v;
+                if (!natPix.empty()) natMean /= natPix.size();
+                if (!venPix.empty()) venMean /= venPix.size();
+                check(both && std::fabs(natMean - venMean) > 4.0,
+                      QStringLiteral("the two pieces render in DIFFERENT wood images - the "
+                                     "thing that tells the real library's woods apart "
+                                     "(means %1 against %2)")
+                          .arg(natMean, 0, 'f', 1)
+                          .arg(venMean, 0, 'f', 1));
+                tex.close();
+            }
+        }
+
         const QString paleId = makeWood(QStringLiteral("Pale"), 0.92, 0.86, 0.70);
         const QString darkId = makeWood(QStringLiteral("Dark"), 0.14, 0.09, 0.05);
         const QString woodSceneId = woodStore.createScene(QStringLiteral("Two woods"));
