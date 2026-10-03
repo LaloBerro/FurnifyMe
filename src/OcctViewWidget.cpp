@@ -5014,15 +5014,28 @@ void OcctViewWidget::fitAll()
     // the whole document rather than the currently-visible part of it - which
     // is the behaviour the bodies have always had, and the two should not
     // differ on the same question.
+    // MEASURED WHERE THEY STAND. A presentation's shape is its own, built at
+    // its own origin; in the editor that is also where it is drawn, because
+    // every presentation transform there is the identity. A SCENE puts a
+    // piece's placement on exactly that transform, so framing the raw shapes
+    // framed the furniture's origins instead of the arrangement - and a scene
+    // whose pieces stand metres out opened on an empty picture.
+    const auto boundsOf = [](const Handle(AIS_Shape)& object, Bnd_Box& out) {
+        if (object.IsNull()) return;
+        TopoDS_Shape shape = object->Shape();
+        if (shape.IsNull()) return;
+        if (object->HasTransformation()) shape.Move(TopLoc_Location(object->LocalTransformation()));
+        BRepBndLib::Add(shape, out);
+    };
     Bnd_Box box;
     for (const auto& entry : mySolids) {
         Bnd_Box b;
-        BRepBndLib::Add(entry.second->Shape(), b);
+        boundsOf(entry.second, b);
         box.Add(b);
     }
     for (const auto& entry : myOutlines) {
         Bnd_Box b;
-        BRepBndLib::Add(entry.second->Shape(), b);
+        boundsOf(entry.second, b);
         box.Add(b);
     }
     if (box.IsVoid()) box.Update(-250.0, -250.0, 0.0, 250.0, 250.0, 10.0);
@@ -5906,7 +5919,17 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
 {
     clearWoodOverlays();
     if (myContext.IsNull() || myWoodTexture.IsNull()) return;
+    // ONE BODY MAY NOT TAKE THE APPLICATION DOWN. Dressing a body in wood is
+    // presentation: if the kernel refuses one shape, that body belongs in the
+    // plain material, and the other hundred still deserve their wood. Before
+    // this guard an exception thrown on a single body unwound the whole loop
+    // and killed the process - reproducible on a real five-piece scene of 122
+    // bodies, where it died on an ordinary six-face box at number 73 with no
+    // message anywhere. The editor never met it because one furniture is far
+    // smaller than a scene of several.
+    int refused = 0;
     for (auto& entry : mySolids) {
+        try {
         if (entry.second.IsNull()) continue;
         // Only bodies the user can SEE dress up; a hidden body stays hidden
         // and is not recorded for the restore.
@@ -5933,9 +5956,18 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
         } else {
             const BodyWood& wood = own->second;
             Graphic3d_MaterialAspect mine(Graphic3d_NameOfMaterial_UserDefined);
-            mine.SetColor(Quantity_Color(wood.red * wood.brightness,
-                                         wood.green * wood.brightness,
-                                         wood.blue * wood.brightness, Quantity_TOC_sRGB));
+            // CLAMPED. Brightness runs to 2.0 by design (MaterialLook's own
+            // range), so any colour above 0.5 multiplies past 1.0 and
+            // Quantity_Color THROWS "Color out of range" - which unwound the
+            // whole wood loop and took the process down on a real scene. The
+            // editor never met it because the window-wide material path
+            // clamps; this per-body branch did not.
+            const auto lit = [](double channel, double brightness) {
+                return std::clamp(channel * brightness, 0.0, 1.0);
+            };
+            mine.SetColor(Quantity_Color(lit(wood.red, wood.brightness),
+                                         lit(wood.green, wood.brightness),
+                                         lit(wood.blue, wood.brightness), Quantity_TOC_sRGB));
             Graphic3d_PBRMaterial pbr;
             pbr.SetColor(mine.Color());
             pbr.SetMetallic(static_cast<float>(wood.metal));
@@ -5953,6 +5985,14 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
             overlay->angleDeg = wood.grainAngle + across;
         }
         myContext->Display(overlay, 0, -1, Standard_False);   // never pickable
+        // AND IT STANDS WHERE THE BODY STANDS. The overlay is built from the
+        // AIS object's own UNTRANSFORMED shape, which is where it is drawn for
+        // every body in the furniture editor - every presentation transform
+        // there is the identity. A SCENE puts a piece's placement on exactly
+        // that transform (see setSolidPlacement), so without this line turning
+        // wood on collapses every piece back onto its furniture's origin.
+        if (entry.second->HasTransformation())
+            overlay->SetLocalTransformation(entry.second->LocalTransformation());
 
         // The real presentation steps aside - two shaded meshes at one
         // depth would z-fight, and the overlay IS the body for as long as
@@ -5960,6 +6000,23 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
         myContext->Erase(entry.second, Standard_False);
         myWoodHiddenIds.push_back(entry.first);
         myWoodOverlays[entry.first] = overlay;
+        } catch (const Standard_Failure& failure) {
+            if (refused == 0) {
+                Message::SendWarning()
+                    << "FurnifyMe: wood refused on body " << entry.first << " - "
+                    << (failure.GetMessageString() ? failure.GetMessageString() : "(no message)");
+            }
+            // Left undressed, deliberately: the real presentation was not
+            // erased for this body (that happens last), so it keeps drawing in
+            // the ordinary material and the picture is complete apart from its
+            // grain.
+            ++refused;
+        }
+    }
+    if (refused > 0) {
+        Message::SendWarning() << "FurnifyMe: " << refused
+                               << " body(ies) could not be dressed in wood and are drawn "
+                                  "in the plain material.";
     }
     scheduleRedraw();
 }

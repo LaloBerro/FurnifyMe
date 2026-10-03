@@ -14,7 +14,11 @@
 #include "ViewportOverlay.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QCloseEvent>
+#include <QDir>
+#include <QFileDialog>
+#include <QStandardPaths>
 #include <QMenu>
 #include <QMenuBar>
 #include <QStatusBar>
@@ -51,6 +55,12 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
     // would arbitrate between candidates no tool here can use.
     myView->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
     myView->setSnap(true, kSnapStepMm);
+    // WOOD ON. Per-piece wood is the spec's own fork, and the per-body
+    // material is read in exactly one place - the wood overlays - which exist
+    // only while this is true. Without it every piece's saved look was stored
+    // and never drawn, and a scene of an oak table and a walnut chair rendered
+    // both in the plain body material.
+    myView->setRenderWood(true);
 
     connect(myView, &OcctViewWidget::selectionChanged, this, [this] { refreshSelection(); });
 
@@ -126,6 +136,30 @@ void SceneWindow::buildMenus()
     });
     file->addAction(myNewPieceAction);
 
+    // AN EXPORT ROUTE. A scene could be rendered and not saved as a picture by
+    // any gesture at all - the suite reached saveSnapshot() directly, which is
+    // a viewport method and not a door the user has. Taking the picture is the
+    // whole point of the window.
+    myScreenshotAction = new QAction(tr("Save Screenshot"), this);
+    myScreenshotAction->setToolTip(tr("Write the picture to a file"));
+    connect(myScreenshotAction, &QAction::triggered, this, [this] {
+        const QString suggested =
+            (mySceneName.isEmpty() ? tr("Screenshot") : mySceneName) + QStringLiteral(".png");
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("Save Screenshot"),
+            QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
+                .filePath(suggested),
+            tr("PNG image (*.png)"));
+        if (path.isEmpty()) return;
+        if (!myView->saveSnapshot(path) && myToasts) {
+            myToasts->show(tr("Screenshot failed — Couldn't save the image to %1 — "
+                              "Check that the folder exists and isn't read-only")
+                               .arg(path),
+                           Toast::Kind::Failure, false);
+        }
+    });
+    file->addAction(myScreenshotAction);
+
     mySaveAction = new QAction(tr("Save"), this);
     mySaveAction->setShortcut(QKeySequence::Save);
     mySaveAction->setToolTip(tr("Write this scene to the library"));
@@ -134,6 +168,33 @@ void SceneWindow::buildMenus()
 
     file->addSeparator();
     file->addAction(myCloseSceneAction);
+
+    // THE TWO TOOLS, as real actions. setTool() existed with no caller
+    // anywhere in the app - only the suite reached it - so Rotate was
+    // unreachable and fifteen checks passed through a door no user has. An
+    // action group makes the pair exclusive, and each mirrors myTool rather
+    // than holding state of its own, which is this app's law for every
+    // control.
+    auto* arrange = menuBar()->addMenu(tr("&Arrange"));
+    auto* tools = new QActionGroup(this);
+    tools->setExclusive(true);
+
+    myMoveAction = new QAction(tr("Move"), this);
+    myMoveAction->setCheckable(true);
+    myMoveAction->setChecked(true);
+    myMoveAction->setShortcut(QKeySequence(Qt::Key_G));
+    myMoveAction->setToolTip(tr("Slide a piece along the floor"));
+    connect(myMoveAction, &QAction::triggered, this, [this] { setTool(Tool::Move); });
+    tools->addAction(myMoveAction);
+    arrange->addAction(myMoveAction);
+
+    myRotateAction = new QAction(tr("Rotate"), this);
+    myRotateAction->setCheckable(true);
+    myRotateAction->setShortcut(QKeySequence(Qt::Key_R));
+    myRotateAction->setToolTip(tr("Turn a piece where it stands"));
+    connect(myRotateAction, &QAction::triggered, this, [this] { setTool(Tool::Rotate); });
+    tools->addAction(myRotateAction);
+    arrange->addAction(myRotateAction);
 
     auto* view = menuBar()->addMenu(tr("&View"));
     myRenderModeAction = new QAction(tr("Render mode"), this);
@@ -185,6 +246,11 @@ void SceneWindow::buildOverlay()
     // exactly and only render mode.
     myStudio = new RenderStudio(myView, this, myOverlay, myAppBar, myRenderModeAction, this);
     connect(myStudio, &RenderStudio::enabledChanged, this, [this](bool) { refreshSurfaces(); });
+    // Every viewport control on the render card raises this one signal; the
+    // wiring itself is RenderStudio's, shared with the editor.
+    connect(myStudio, &RenderStudio::settingsChanged, this, [this] { refreshSurfaces(); });
+    if (myStudio->panel() && myScreenshotAction)
+        myStudio->panel()->setShutterAction(myScreenshotAction);
 
     // THE SHOT ROWS ARE LIVE HERE TOO. RenderStudio re-emits the panel's three
     // shot signals, so leaving them unconnected would put a Save-shot control
@@ -321,8 +387,69 @@ bool SceneWindow::openScene(const QString& id)
     }
     mySavedRevision = myScene.revision();
 
+    // THE SCENE'S OWN SETTINGS AND CAMERA. They round-tripped to disk from the
+    // first commit and were then thrown away on every reload: frame a picture,
+    // set 16:9, a light angle and a quality, save, reopen - and every one of
+    // them was back at its default with the camera at the origin. The file
+    // carried them the whole time; nothing read them.
+    applySceneSettings();
+
+    // AND IT IS FRAMED. A scene whose pieces stand metres from the origin - a
+    // table at x = 3430 in the user's own scene - opened on a camera looking at
+    // the origin from 700 mm, so render mode produced an empty backdrop and
+    // this window has no Fit All to recover with. Framed only when the saved
+    // camera is the untouched default, so a framing the user DID set is never
+    // overridden by one this window invented.
+    const CameraState fresh;
+    const bool cameraUntouched =
+        myScene.camera.target.Distance(fresh.target) < 1.0e-6 &&
+        std::fabs(myScene.camera.distance - fresh.distance) < 1.0e-6 &&
+        std::fabs(myScene.camera.azimuthDeg - fresh.azimuthDeg) < 1.0e-6 &&
+        std::fabs(myScene.camera.elevationDeg - fresh.elevationDeg) < 1.0e-6;
+    if (cameraUntouched && !myScene.pieces().empty()) myView->fitAll();
+
     refreshSurfaces();
     return true;
+}
+
+void SceneWindow::applySceneSettings()
+{
+    if (!myView) return;
+    myView->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(myScene.aspect));
+    myView->setRenderGuides(static_cast<OcctViewWidget::RenderGuides>(myScene.guides));
+    myView->setRenderLightAngleDeg(myScene.lightAngleDeg);
+    myView->setRenderLightStrength(myScene.lightStrength);
+    myView->setRenderFov(myScene.fovDeg);
+    myView->setRenderExportSize(static_cast<OcctViewWidget::ExportSize>(myScene.exportSize));
+    myView->setRenderQuality(myScene.quality == 0 ? OcctViewWidget::RenderQuality::Simple
+                                                  : (myScene.quality == 1
+                                                         ? OcctViewWidget::RenderQuality::Balanced
+                                                         : OcctViewWidget::RenderQuality::Deep));
+    myView->setRenderCutout(myScene.cutout);
+    myView->setBaseProjection(myScene.orthographic ? CameraController::Projection::Orthographic
+                                                   : CameraController::Projection::Perspective);
+    myView->setCameraStateNow(myScene.camera);
+    // NOTE: the card's own controls are not pushed back to these values yet -
+    // the panel has no single sync entry point, and MainWindow sets its rows
+    // one setter at a time. So a reopened scene RENDERS with its saved
+    // settings while the card's sliders read their defaults until touched.
+    // Recorded rather than papered over.
+}
+
+void SceneWindow::captureSceneSettings()
+{
+    if (!myView) return;
+    myScene.aspect = static_cast<int>(myView->renderAspect());
+    myScene.guides = static_cast<int>(myView->renderGuides());
+    myScene.lightAngleDeg = myView->renderLightAngleDeg();
+    myScene.lightStrength = myView->renderLightStrength();
+    myScene.fovDeg = myView->renderFov();
+    myScene.exportSize = static_cast<int>(myView->renderExportSize());
+    myScene.quality = static_cast<int>(myView->renderQuality());
+    myScene.cutout = myView->renderCutout();
+    myScene.orthographic =
+        myView->camera().baseProjection() == CameraController::Projection::Orthographic;
+    myScene.camera = myView->camera().state();
 }
 
 gp_Trsf SceneWindow::placementForNewPiece(const DocumentModel& furniture) const
@@ -636,6 +763,9 @@ void SceneWindow::setTool(Tool tool)
 bool SceneWindow::save()
 {
     if (!myStore || mySceneId.isEmpty()) return false;
+    // Read out of the viewport at the moment of writing, so what comes back on
+    // the next open is the picture that was actually framed.
+    captureSceneSettings();
     // NOT while render mode is on, the editor's own rule: a render-mode
     // viewport is a studio shot, not a picture of the scene's arrangement, and
     // a save must not silently replace the library card with it. saveScene()
@@ -749,6 +879,8 @@ void SceneWindow::refreshSurfaces()
         myAddPiece->move(Theme::snapToDevicePixels(std::max(0, cardX), origin.x(), dpr),
                          Theme::snapToDevicePixels(std::max(0, cardY), origin.y(), dpr));
     }
+    if (myMoveAction) myMoveAction->setChecked(myTool == Tool::Move);
+    if (myRotateAction) myRotateAction->setChecked(myTool == Tool::Rotate);
     if (myNameMark) {
         myNameMark->setState(mySceneName, isSceneDirty());
     }

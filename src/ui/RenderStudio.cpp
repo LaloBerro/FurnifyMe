@@ -72,6 +72,8 @@ RenderStudio::RenderStudio(OcctViewWidget* view, QMainWindow* host, ViewportOver
     if (myView) {
         myPanel = new RenderSettingsPanel(myView);
         myPanel->hide();
+    wireViewportControls();
+
         connect(myPanel, &RenderSettingsPanel::shotSaveRequested, this,
                 [this] { emit shotSaveRequested(); });
         connect(myPanel, &RenderSettingsPanel::shotApplied, this,
@@ -83,6 +85,96 @@ RenderStudio::RenderStudio(OcctViewWidget* view, QMainWindow* host, ViewportOver
     // The polish ticker - see refresh() for start and stop.
     myTierTicker = new QTimer(this);
     connect(myTierTicker, &QTimer::timeout, this, [this] { emit tierTick(); });
+}
+
+void RenderStudio::wireViewportControls()
+{
+    if (!myPanel || !myView) return;
+    OcctViewWidget* view = myView;
+
+    connect(myPanel, &RenderSettingsPanel::surfaceGlossinessChanged, this,
+            [this, view](double glossiness01) {
+                view->setRenderSurfaceRoughness(1.0 - glossiness01);
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::metalChanged, this, [this, view](double metallic01) {
+        view->setRenderMetal(metallic01);
+        emit settingsChanged();
+    });
+    connect(myPanel, &RenderSettingsPanel::lightAngleChanged, this,
+            [this, view](double azimuthDeg) {
+                view->setRenderLightAngleDeg(azimuthDeg);
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::lightStrengthChanged, this,
+            [this, view](double multiplier) {
+                view->setRenderLightStrength(multiplier);
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::backgroundChanged, this,
+            [this, view](const QColor& colour) {
+                view->setRenderBackgroundOverride(colour);
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::aspectChanged, this,
+            [this, view](RenderSettingsPanel::Aspect aspect) {
+                view->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(aspect));
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::guidesChanged, this,
+            [this, view](RenderSettingsPanel::Guides guides) {
+                view->setRenderGuides(static_cast<OcctViewWidget::RenderGuides>(guides));
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::fovChanged, this, [this, view](double fovyDeg) {
+        view->setRenderFov(fovyDeg);
+        emit settingsChanged();
+    });
+    connect(myPanel, &RenderSettingsPanel::woodChanged, this, [this, view](bool wood) {
+        view->setRenderWood(wood);
+        emit settingsChanged();
+    });
+    connect(myPanel, &RenderSettingsPanel::woodTextureChosen, this,
+            [this, view](const QString& name, const QString& path) {
+                Q_UNUSED(name);
+                view->setRenderTextureFile(path);
+                view->setRenderWood(true);
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::woodTileChanged, this, [this, view](double mm) {
+        view->setRenderWoodTileMm(mm);
+        emit settingsChanged();
+    });
+    connect(myPanel, &RenderSettingsPanel::woodAngleChanged, this,
+            [this, view](double degrees) {
+                view->setRenderWoodAngleDeg(degrees);
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::exportSizeChanged, this,
+            [this, view](RenderSettingsPanel::ExportSize size) {
+                view->setRenderExportSize(static_cast<OcctViewWidget::ExportSize>(size));
+                emit settingsChanged();
+            });
+    connect(myPanel, &RenderSettingsPanel::cutoutChanged, this, [this, view](bool cutout) {
+        view->setRenderCutout(cutout);
+        emit settingsChanged();
+    });
+    connect(myPanel, &RenderSettingsPanel::qualityChanged, this,
+            [this, view](RenderSettingsPanel::Quality quality) {
+                view->setRenderQuality(
+                    quality == RenderSettingsPanel::Quality::Simple
+                        ? OcctViewWidget::RenderQuality::Simple
+                        : (quality == RenderSettingsPanel::Quality::Balanced
+                               ? OcctViewWidget::RenderQuality::Balanced
+                               : OcctViewWidget::RenderQuality::Deep));
+                // A live material/quality change does not reach a ray-traced
+                // frame on this build; the round trip is what applies it.
+                if (myEnabled) {
+                    setEnabled(false);
+                    setEnabled(true);
+                }
+                emit settingsChanged();
+            });
 }
 
 DocumentModel::Shot RenderStudio::shotFrom(const OcctViewWidget* view, const QString& name)

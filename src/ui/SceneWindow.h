@@ -156,6 +156,11 @@ private:
     // the surfaces. `dragged` false means the press never moved, which is a
     // pick rather than a placement.
     void commitDrag(bool dragged);
+    // The scene's own render settings and camera, pushed onto the viewport on
+    // open and read back out on save. Without the pair they round-tripped to
+    // disk and were discarded on every reload.
+    void applySceneSettings();
+    void captureSceneSettings();
     // Asks, or leaves straight away when there is nothing to lose. True when
     // the exit was handled here and the caller should not continue.
     bool askBeforeClosing(CloseRoute route);
@@ -178,6 +183,9 @@ private:
     QAction* myCloseSceneAction = nullptr;
     QAction* myNewPieceAction = nullptr;
     QAction* mySnapAction = nullptr;
+    QAction* myMoveAction = nullptr;
+    QAction* myRotateAction = nullptr;
+    QAction* myScreenshotAction = nullptr;
     QAction* mySaveAction = nullptr;
     UnsavedCloseCard* myCloseCard = nullptr;
     FurnitureNameMark* myNameMark = nullptr;

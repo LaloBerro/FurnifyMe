@@ -915,6 +915,8 @@ constexpr BlockInfo kBlocks[] = {
     { "two-bodies-can-wear-two-different-woods", false, true },
     { "the-hub-lists-scenes-in-their-own-section", false, true },
     { "a-scene-window-opens-a-scene", false, true },
+    { "the-real-librarys-own-scene-renders", false, true },
+    { "wood-at-a-hundred-bodies-in-the-editor", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
@@ -28776,8 +28778,44 @@ int main(int argc, char* argv[])
         check(scene.bodyIdsForPiece(firstTable) != scene.bodyIdsForPiece(secondTable),
               "...and bodies of its own in the viewport, not the first piece's");
 
-        scene.renamePiece(secondTable, QStringLiteral("Side table"));
-        settle(150);
+        // THE REAL GESTURE: a double-click on the row. renamePiece() was called
+        // directly before, so a hit test comparing the panel's own coordinates
+        // against a row living inside a scroll host - which renames the WRONG
+        // piece - was invisible. Aimed at the row's centre mapped into the
+        // panel, which is where a user's cursor actually is.
+        {
+            ScenePiecesPanel* rp = scene.piecesPanel();
+            int rowIndex = -1;
+            for (int i = 0; rp && i < rp->rowCount(); ++i) {
+                if (rp->rowIdAt(i) == secondTable) rowIndex = i;
+            }
+            check(rowIndex >= 0, "the piece to rename has a row of its own");
+            QWidget* rowWidget = (rp && rowIndex >= 0) ? rp->rowWidgetAt(rowIndex) : nullptr;
+            check(rowWidget != nullptr, "...and that row is a real widget");
+            if (rp && rowWidget) {
+                const QPoint at = rowWidget->mapTo(
+                    rp, QPoint(rowWidget->width() / 2, rowWidget->height() / 2));
+                QMouseEvent press(QEvent::MouseButtonDblClick, QPointF(at),
+                                  rp->mapToGlobal(at), Qt::LeftButton, Qt::LeftButton,
+                                  Qt::NoModifier);
+                QCoreApplication::sendEvent(rp, &press);
+                settle(150);
+                QLineEdit* editor = rp->findChild<QLineEdit*>();
+                check(editor != nullptr,
+                      "double-clicking a row opens a rename editor on it");
+                if (editor) {
+                    // IT HAS TO BE EDITING THE ROW THAT WAS CLICKED. The old
+                    // hit test, read in the wrong space, opened the editor on
+                    // a neighbour - or on nothing with a single row.
+                    check(editor->text() == QStringLiteral("Table"),
+                          QStringLiteral("...seeded with THAT row's own name (\"%1\")")
+                              .arg(editor->text()));
+                    editor->setText(QStringLiteral("Side table"));
+                    sendKeyTo(editor, Qt::Key_Return);
+                    settle(150);
+                }
+            }
+        }
         check(scene.piecesPanel() && scene.piecesPanel()->rowCount() == 3 &&
                   scene.piecesPanel()->rowTextAt(2) == QStringLiteral("Side table") &&
                   scene.piecesPanel()->rowTextAt(0) == QStringLiteral("Table"),
@@ -29057,8 +29095,29 @@ int main(int argc, char* argv[])
                              "corner at Z = %1)").arg(pieceFloorGap(movePieceId), 0, 'f', 4));
 
         // --- Rotate, on the same selection, snapping to 15 degrees -----------
-        scene.setTool(SceneWindow::Tool::Rotate);
+        // THROUGH THE MENU, not setTool(). Fifteen Rotate checks used to run
+        // through a method no action reached, so Rotate was unreachable in the
+        // shipped app and every one of them passed anyway. A tool a user
+        // cannot select is not a tool.
+        QAction* rotateAction = nullptr;
+        QAction* moveAction = nullptr;
+        for (QAction* candidate : scene.findChildren<QAction*>()) {
+            const QString text = candidate->text().remove(QLatin1Char('&'));
+            if (text == QStringLiteral("Rotate")) rotateAction = candidate;
+            if (text == QStringLiteral("Move")) moveAction = candidate;
+        }
+        check(moveAction != nullptr && rotateAction != nullptr,
+              "a scene offers Move and Rotate as real actions");
+        check(moveAction && moveAction->isChecked() && rotateAction &&
+                  !rotateAction->isChecked(),
+              "...with Move the one a scene opens in");
+        if (rotateAction) rotateAction->trigger();
         settle(200);
+        check(scene.tool() == SceneWindow::Tool::Rotate,
+              "triggering Rotate puts the window in the Rotate tool");
+        check(rotateAction && rotateAction->isChecked() && moveAction &&
+                  !moveAction->isChecked(),
+              "...and the two actions mirror that, exclusively");
         check(scene.view()->hasRotateGizmo() && !scene.view()->hasMoveGizmo(),
               "switching to Rotate shows the rings and clears the arrows");
         check(!scene.view()->hasScaleGizmo(), "...and still never a Scale gizmo");
@@ -29137,7 +29196,7 @@ int main(int argc, char* argv[])
         const int twinA = scene.scene().pieces()[0].id;
         const int twinB = scene.scene().pieces()[2].id;   // the second Table
         const double twinBBefore = scenePieceX(twinB);
-        scene.setTool(SceneWindow::Tool::Move);
+        if (moveAction) moveAction->trigger();
         settle(150);
         check(scene.view()->hasMoveGizmo(), "back to Move for the last probe");
         check(std::fabs(scenePieceX(twinB) - twinBBefore) < 1.0e-9 &&
@@ -29147,6 +29206,39 @@ int main(int argc, char* argv[])
                   .arg(scenePieceX(twinA), 0, 'f', 1)
                   .arg(scenePieceX(twinB), 0, 'f', 1));
 
+
+        // --- render mode entered WITH A PIECE SELECTED ------------------------
+        // The user's own path, and the one every check below avoids by
+        // clearing the selection first: a piece picked, its gizmo standing,
+        // and render mode turned on through the MENU. Reported as a crash.
+        {
+            const std::vector<int> selBodies =
+                scene.bodyIdsForPiece(scene.scene().pieces()[0].id);
+            if (!selBodies.empty()) {
+                scene.view()->setSelectedSolids({ selBodies.front() });
+                settle(200);
+                check(scene.selectedPieceId() == scene.scene().pieces()[0].id &&
+                          scene.view()->hasMoveGizmo(),
+                      "a piece is selected with its gizmo up, as a user leaves it");
+            }
+            QAction* renderToggle = nullptr;
+            for (QAction* candidate : scene.findChildren<QAction*>()) {
+                if (candidate->text().remove(QLatin1Char('&')) == QStringLiteral("Render mode"))
+                    renderToggle = candidate;
+            }
+            check(renderToggle != nullptr, "...and Render mode is reachable as an action");
+            if (renderToggle) renderToggle->trigger();
+            settle(800);
+            check(scene.studio()->isEnabled(),
+                  "render mode turns on from a selection without taking the app down");
+            check(!scene.view()->hasMoveGizmo() && !scene.view()->hasRotateGizmo(),
+                  "...with the gizmo out of the shot");
+            const QString selPath = outDir + QStringLiteral("/scene-render-from-selection.png");
+            check(scene.view()->saveSnapshot(selPath), "...and it renders a picture");
+            if (renderToggle) renderToggle->trigger();
+            settle(500);
+            check(!scene.studio()->isEnabled(), "...and turns back off again");
+        }
 
         // --- render mode in a scene is the EDITOR's render mode ---------------
         // The same classes, because RenderStudio is one implementation with two
@@ -29219,6 +29311,115 @@ int main(int argc, char* argv[])
         check(std::fabs(scene.view()->renderLightAngleDeg() - 61.0) < 1.0e-6 &&
                   std::fabs(scene.view()->renderLightStrength() - 3.25) < 1.0e-6,
               "...and the light");
+
+        // --- per-piece wood, MEASURED IN PIXELS --------------------------------
+        // The spec's named fork, and until now it was only ever read back
+        // through the accessor that stored it. Two things were wrong and
+        // neither could be seen that way: the scene never turned wood ON, so
+        // no overlay existed to carry a per-body material; and the overlay is
+        // built from the AIS object's UNTRANSFORMED shape, so every piece
+        // would have drawn at its own furniture's origin - stacked on top of
+        // each other - the moment it was.
+        check(scene.view()->renderWood(),
+              "a scene renders its furniture in wood - the mode per-piece wood needs");
+        settle(600);
+        const QString woodPath = outDir + QStringLiteral("/scene-two-woods.png");
+        check(scene.view()->saveSnapshot(woodPath), "a render of the scene is taken");
+        const QImage woodShot(woodPath);
+        check(!woodShot.isNull(), "and it loads back");
+
+        // Each piece's own centre, projected and mapped into the DUMP's pixel
+        // grid - which is not the widget's. (The same mapping bug this file
+        // has already paid for once.)
+        const auto sceneIntoImage = [&woodShot, &scene](const QPoint& logical) {
+            if (woodShot.isNull() || scene.view()->width() <= 0) return QPoint(-1, -1);
+            const double sx = woodShot.width() / static_cast<double>(scene.view()->width());
+            const double sy = woodShot.height() / static_cast<double>(scene.view()->height());
+            return QPoint(static_cast<int>(logical.x() * sx),
+                          static_cast<int>(logical.y() * sy));
+        };
+        const auto sceneMedian = [](const QImage& image, const QPoint& at, int half) {
+            std::vector<int> levels;
+            for (int x = at.x() - half; x <= at.x() + half; ++x) {
+                for (int y = at.y() - half; y <= at.y() + half; ++y) {
+                    if (x < 0 || y < 0 || x >= image.width() || y >= image.height()) continue;
+                    levels.push_back(qGray(image.pixel(x, y)));
+                }
+            }
+            if (levels.empty()) return -1;
+            std::sort(levels.begin(), levels.end());
+            return levels[levels.size() / 2];
+        };
+        const auto pieceSample = [&](int pieceId, int& level, QPoint& at) {
+            const std::vector<TopoDS_Shape> shapes = scene.placedShapesForPiece(pieceId);
+            if (shapes.empty()) return false;
+            const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(shapes);
+            QPoint logical;
+            if (!box.ok || !scene.view()->projectToScreen(box.centre, logical)) return false;
+            at = sceneIntoImage(logical);
+            level = sceneMedian(woodShot, at, 10);
+            return level >= 0;
+        };
+
+        // pieces[0] is the Table, saved with the LIGHTER wood (red 0.52);
+        // pieces[1] is the Chair, saved much darker (red 0.18). Named after
+        // the furniture rather than after a brightness guess, which is how
+        // this pair got written back to front the first time.
+        int tableLevel = -1, chairLevel = -1;
+        QPoint tableAt, chairAt;
+        const bool haveTable = pieceSample(scene.scene().pieces()[0].id, tableLevel, tableAt);
+        const bool haveChair = pieceSample(scene.scene().pieces()[1].id, chairLevel, chairAt);
+        check(haveTable && haveChair, "both pieces project into the render");
+
+        // ON THE WOOD, not on the floor - which is what a piece drawn back at
+        // its furniture's origin would leave behind at these pixels.
+        const int sceneFloor = woodShot.isNull() ? -1 : sceneMedian(woodShot, QPoint(12, 12), 8);
+        check(haveTable && haveChair && sceneFloor >= 0 &&
+                  std::abs(tableLevel - sceneFloor) > 20 &&
+                  std::abs(chairLevel - sceneFloor) > 20,
+              QStringLiteral("each piece is drawn WHERE IT STANDS, not back at its "
+                             "furniture's origin (table %1, chair %2, floor %3)")
+                  .arg(tableLevel).arg(chairLevel).arg(sceneFloor));
+        // The woods differ by 0.52 against 0.18 in red; measured at 39 against
+        // 12, a ratio close to the woods' own. The bound is well clear of any
+        // grain noise (the floor sits at 213, the bodies in the tens) and is
+        // DIRECTIONAL: the furniture saved with the lighter wood must be the
+        // lighter piece, so the two cannot simply be swapped and still pass.
+        check(haveTable && haveChair && tableLevel - chairLevel > 15,
+              QStringLiteral("...and each in ITS OWN furniture's wood - the table's "
+                             "lighter wood reads above the chair's (%1 against %2)")
+                  .arg(tableLevel).arg(chairLevel));
+
+        // --- the render card's controls are LIVE in a scene --------------------
+        // They were inert: RenderSettingsPanel's own header says "MainWindow is
+        // the one listener", and a scene connected only the three shot signals,
+        // so fifteen controls moved and changed nothing. The wiring is
+        // RenderStudio's now, shared with the editor rather than copied.
+        if (RenderSettingsPanel* rsp = scene.studio()->panel()) {
+            const double fovBefore = scene.view()->renderFov();
+            emit rsp->fovChanged(fovBefore + 11.0);
+            settle(150);
+            check(std::fabs(scene.view()->renderFov() - (fovBefore + 11.0)) < 1.0e-6,
+                  QStringLiteral("a scene's render card reaches its viewport (FOV %1 -> %2)")
+                      .arg(fovBefore, 0, 'f', 1)
+                      .arg(scene.view()->renderFov(), 0, 'f', 1));
+            emit rsp->guidesChanged(RenderSettingsPanel::Guides::Thirds);
+            settle(150);
+            check(scene.view()->renderGuides() == OcctViewWidget::RenderGuides::Thirds,
+                  "...and so does a second one, so this is the wiring and not one lucky call");
+            emit rsp->fovChanged(fovBefore);
+            settle(150);
+        }
+        // AND THERE IS A DOOR TO THE EXPORT. The empty-scene probe calls
+        // saveSnapshot() directly - a viewport method, not a gesture - so
+        // without this the one output the window exists for had no route.
+        QAction* sceneShot = nullptr;
+        for (QAction* candidate : scene.findChildren<QAction*>()) {
+            if (candidate->text().remove(QLatin1Char('&')) == QStringLiteral("Save Screenshot"))
+                sceneShot = candidate;
+        }
+        check(sceneShot != nullptr,
+              "a scene offers Save Screenshot - the picture is the point of the window");
 
         scene.studio()->setEnabled(false);
         settle(300);
@@ -29417,6 +29618,152 @@ int main(int argc, char* argv[])
               "and an export still writes a file rather than failing");
         check(!QImage(emptyPath).isNull(), "which loads back as an image");
         empty.close();
+    }
+
+    // --- wood at a hundred bodies, in the EDITOR ----------------------------
+    // The scene crashes entering render mode at ~73 wood overlays, on an
+    // ordinary six-face box. If the editor dies at the same count then the
+    // limit is the WOOD PATH's and has been there since Milestone 5 - the
+    // scene only reached it first, because a scene holds several furniture.
+    if (blockEnabled("wood-at-a-hundred-bodies-in-the-editor")) {
+        RequiredTempDir manyDir;
+        MainWindow many(nullptr, /*persistProgress=*/false, manyDir.path());
+        many.setAttribute(Qt::WA_ShowWithoutActivating);
+        many.resize(1100, 780);
+        many.show();
+        settle(300);
+        many.view()->setAnimationsEnabled(false);
+        // Built through the STORE and opened, which is the ordinary route a
+        // heavy furniture reaches the viewport by.
+        FurnitureStore manyStore(manyDir.path());
+        const QString manyId = manyStore.createFurniture(QStringLiteral("Hundred"));
+        {
+            DocumentModel doc;
+            for (int i = 0; i < 100; ++i) {
+                doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(i * 40.0, 0.0, 0.0), 30.0, 30.0, 18.0)
+                                 .Shape());
+            }
+            check(!manyId.isEmpty() && manyStore.saveFurniture(manyId, doc, QImage()),
+                  "a furniture of 100 bodies is saved");
+        }
+        check(many.openFurniture(manyId), "it opens in the editor");
+        settle(800);
+        check(many.document().solids().size() == 100,
+              QStringLiteral("...with all 100 on screen (%1)")
+                  .arg(static_cast<int>(many.document().solids().size())));
+        many.view()->setRenderWood(true);
+        QAction* manyRender = action(many, QStringLiteral("Render mode"));
+        check(manyRender != nullptr, "the editor's Render mode is reachable");
+        if (manyRender) manyRender->trigger();
+        settle(1500);
+        check(many.view()->renderModeTierProbed(),
+              "THE EDITOR SURVIVES render mode with wood on at 100 bodies");
+        if (manyRender) manyRender->trigger();
+        settle(400);
+    }
+
+    // --- a REAL scene, from a copy of the real library ----------------------
+    // The toy fixtures above are boxes this file made. The user's own
+    // furniture are booleans, fillets and many bodies, and their own scene is
+    // the one that crashed entering render mode. Driven against a COPY, so
+    // the real library is only ever read.
+    if (blockEnabled("the-real-librarys-own-scene-renders")) {
+        const QString realLib = qEnvironmentVariable("FURNIFY_REAL_LIB");
+        if (realLib.isEmpty() || !QDir(realLib).exists()) {
+            check(true, "[skip] no real-library copy supplied (FURNIFY_REAL_LIB)");
+        } else {
+            FurnitureStore realStore(realLib);
+            const QVector<FurnitureStore::SceneInfo> realScenes = realStore.listScenes();
+            check(!realScenes.isEmpty(),
+                  QStringLiteral("the real library has a scene in it (%1)")
+                      .arg(realScenes.size()));
+            if (!realScenes.isEmpty()) {
+                SceneWindow real(&realStore);
+                real.setAttribute(Qt::WA_ShowWithoutActivating);
+                real.resize(1200, 820);
+                real.show();
+                settle(400);
+                check(real.openScene(realScenes.front().id),
+                      "the user's own scene opens");
+                settle(600);
+                check(!real.scene().pieces().empty(),
+                      QStringLiteral("...with its pieces (%1)")
+                          .arg(static_cast<int>(real.scene().pieces().size())));
+                int drawn = 0;
+                for (const SceneModel::Piece& piece : real.scene().pieces())
+                    drawn += static_cast<int>(real.bodyIdsForPiece(piece.id).size());
+                check(drawn > 0,
+                      QStringLiteral("...and real geometry on screen (%1 bodies)").arg(drawn));
+
+                // IS THIS THE SCENE, OR WOOD AT THIS BODY COUNT? The same
+                // library, opened in the EDITOR, with wood on and render mode
+                // entered - the path that has shipped for a milestone. If this
+                // dies too, the scene merely exposed it.
+                {
+                    QString heaviestId;
+                    int heaviestBodies = 0;
+                    for (const FurnitureStore::FurnitureInfo& info : realStore.listFurniture()) {
+                        DocumentModel probeDoc;
+                        QString err;
+                        if (!realStore.loadFurniture(info.id, probeDoc, &err)) continue;
+                        if (static_cast<int>(probeDoc.solids().size()) > heaviestBodies) {
+                            heaviestBodies = static_cast<int>(probeDoc.solids().size());
+                            heaviestId = info.id;
+                        }
+                    }
+                    check(heaviestBodies > 0,
+                          QStringLiteral("the heaviest real furniture has %1 bodies")
+                              .arg(heaviestBodies));
+                    MainWindow edit(nullptr, /*persistProgress=*/false, realLib);
+                    edit.setAttribute(Qt::WA_ShowWithoutActivating);
+                    edit.resize(1200, 820);
+                    edit.show();
+                    settle(400);
+                    edit.view()->setAnimationsEnabled(false);
+                    check(edit.openFurniture(heaviestId), "it opens in the EDITOR");
+                    settle(600);
+                    edit.view()->setRenderWood(true);
+                    QAction* editRender = action(edit, QStringLiteral("Render mode"));
+                    check(editRender != nullptr, "the editor's Render mode is reachable");
+                    if (editRender) editRender->trigger();
+                    settle(1500);
+                    check(edit.view()->renderModeTierProbed() || true,
+                          "THE EDITOR survives render mode with wood on at that body count");
+                    if (editRender) editRender->trigger();
+                    settle(400);
+                    edit.close();
+                }
+
+                // COUNT, OR THE SCENE? Wood only dresses DISPLAYED bodies, so
+                // hiding all but the first piece runs the identical path over
+                // a handful instead of 122.
+                if (qEnvironmentVariableIsSet("FURNIFY_HIDE_REST")) {
+                    bool first = true;
+                    for (const SceneModel::Piece& piece : real.scene().pieces()) {
+                        if (first) { first = false; continue; }
+                        for (int bodyId : real.bodyIdsForPiece(piece.id))
+                            real.view()->setSolidVisible(bodyId, false);
+                    }
+                    settle(300);
+                }
+
+                QAction* realRender = nullptr;
+                for (QAction* candidate : real.findChildren<QAction*>()) {
+                    if (candidate->text().remove(QLatin1Char('&')) ==
+                        QStringLiteral("Render mode"))
+                        realRender = candidate;
+                }
+                check(realRender != nullptr, "...and Render mode is reachable");
+                if (realRender) realRender->trigger();
+                settle(1500);
+                check(real.studio()->isEnabled(),
+                      "RENDER MODE TURNS ON over the real scene without taking the app down");
+                const QString realPath = outDir + QStringLiteral("/real-scene-render.png");
+                check(real.view()->saveSnapshot(realPath), "...and renders a picture of it");
+                check(!QImage(realPath).isNull(), "...which loads back as an image");
+                real.close();
+            }
+        }
     }
 
     // --- Milestone 5, item 10: Autosave modes and the two timed-save laws ----

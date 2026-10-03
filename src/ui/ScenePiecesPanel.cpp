@@ -238,10 +238,18 @@ void ScenePiecesPanel::mouseDoubleClickEvent(QMouseEvent* event)
     // versions drawer's rows already rename in place through this one helper,
     // so this list does too rather than growing an editor of its own.
     for (const BuiltRow& row : myRows) {
-        if (!row.widget || !row.widget->geometry().contains(event->pos())) continue;
+        if (!row.widget) continue;
+        // MAPPED INTO THIS PANEL'S OWN SPACE. A row's geometry() is relative
+        // to its immediate parent, which since the list gained a scroll area
+        // is the rows' host and not the card - so testing it against the
+        // panel's event->pos() matched a NEIGHBOURING row, and renamed the
+        // wrong piece. The editor's rect needs the same mapping, or it would
+        // open in the wrong place even once the right row is found.
+        const QRect inPanel(row.widget->mapTo(this, QPoint(0, 0)), row.widget->size());
+        if (!inPanel.contains(event->pos())) continue;
         const int id = row.data.pieceId;
         const QString current = row.data.name;
-        InlineRename::beginRename(this, row.widget->geometry(), current,
+        InlineRename::beginRename(this, inPanel, current,
                                   [this, id](QString chosen) {
                                       if (!chosen.trimmed().isEmpty())
                                           emit renameCommitted(id, chosen.trimmed());

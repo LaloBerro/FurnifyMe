@@ -79,6 +79,17 @@ public:
     RenderFrameGuides* frame() const { return myFrame; }
     ToolChip* exitChip() const { return myExitChip; }
 
+private:
+    // THE PANEL'S CONTROLS, wired to the viewport once. Every one of these is
+    // a pure viewport concern - no document, no checkpoint - which is exactly
+    // why they belong to the render layer rather than to whichever window is
+    // hosting it. They were MainWindow's, and a scene window that did not
+    // repeat them had fifteen controls on screen that moved and changed
+    // nothing. Each one emits settingsChanged() so a host can persist or
+    // refresh in its own way.
+    void wireViewportControls();
+
+public:
 signals:
     // Something the host persists or re-derives has changed.
     void settingsChanged();

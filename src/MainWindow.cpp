@@ -2469,44 +2469,22 @@ void MainWindow::buildOverlay()
         1.0 - myView->renderSurfaceRoughness(), myView->renderMetal(),
         myView->renderLightAngleDeg(), myView->renderLightStrength(),
         myView->renderBackdropColour(), myView->renderFov());
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::surfaceGlossinessChanged, this,
-            [this](double glossiness01) {
-                myView->setRenderSurfaceRoughness(1.0 - glossiness01);
-                persistRenderSettings();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::metalChanged, this,
-            [this](double metallic01) {
-                myView->setRenderMetal(metallic01);
-                persistRenderSettings();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::lightAngleChanged, this,
-            [this](double azimuthDeg) {
-                myView->setRenderLightAngleDeg(azimuthDeg);
-                persistRenderSettings();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::lightStrengthChanged, this,
-            [this](double multiplier) {
-                myView->setRenderLightStrength(multiplier);
-                persistRenderSettings();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::backgroundChanged, this,
-            [this](const QColor& colour) {
-                myView->setRenderBackgroundOverride(colour);
-                persistRenderSettings();
-            });
     // The picture's shape and its guides. Both are pure presentation - no
     // checkpoint, no document revision - so they go straight to the viewport,
     // which owns them and derives the frame rect from them. The panel's own
     // enums are mapped onto the viewport's here, at the one wiring site, the
     // arrangement every other row on this card already uses.
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::aspectChanged, this,
-            [this](RenderSettingsPanel::Aspect aspect) {
-                myView->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(aspect));
-                updateActions();
-            });
     // The shots. Saving READS the viewport, applying WRITES it, and both go
     // through currentShot()/applyShot() so the list of what a shot holds is
     // written down exactly once.
+    // The panel's fifteen viewport controls are RenderStudio's now - the same
+    // wiring serves the scene window, which otherwise had fifteen controls on
+    // screen that moved and changed nothing. This window reacts to the one
+    // signal they all raise.
+    connect(myStudio, &RenderStudio::settingsChanged, this, [this] {
+        persistRenderSettings();
+        updateActions();
+    });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::shotSaveRequested, this, [this] {
         if (myShowingInitScreen) return;
         const QString name = nextShotName();
@@ -2536,16 +2514,6 @@ void MainWindow::buildOverlay()
             statusBar()->showMessage(tr("%1 forgotten").arg(name));
         updateActions();
     });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::guidesChanged, this,
-            [this](RenderSettingsPanel::Guides guides) {
-                myView->setRenderGuides(static_cast<OcctViewWidget::RenderGuides>(guides));
-                updateActions();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::fovChanged, this,
-            [this](double fovyDeg) {
-                myView->setRenderFov(fovyDeg);
-                persistRenderSettings();
-            });
 
     // The camera shutter - WIDE now, and living inside the studio panel's
     // own footer rather than floating at the corner (Milestone 5's rework).
@@ -2622,32 +2590,10 @@ void MainWindow::buildOverlay()
     myView->setRenderWood(myStartRenderWood);
     myRenderSettingsPanel->setWoodSelection(myStartRenderWoodName);
     myRenderSettingsPanel->setWood(myStartRenderWood);
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::woodChanged, this,
-            [this](bool wood) {
-                myView->setRenderWood(wood);
-                persistRenderSettings();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::woodTextureChosen, this,
-            [this](const QString& name, const QString& path) {
-                Q_UNUSED(name);
-                myView->setRenderTextureFile(path);
-                myView->setRenderWood(true);
-                persistRenderSettings();
-            });
     myView->setRenderWoodTileMm(myStartRenderWoodTile);
     myView->setRenderWoodAngleDeg(myStartRenderWoodAngle);
     myRenderSettingsPanel->setWoodTileMm(myStartRenderWoodTile);
     myRenderSettingsPanel->setWoodAngle(myStartRenderWoodAngle);
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::woodTileChanged, this,
-            [this](double mm) {
-                myView->setRenderWoodTileMm(mm);
-                persistRenderSettings();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::woodAngleChanged, this,
-            [this](double degrees) {
-                myView->setRenderWoodAngleDeg(degrees);
-                persistRenderSettings();
-            });
     // The Quality chips (improvements item 16). ONE handler for all three:
     // the panel says which of its own three was picked, this maps it to the
     // viewport's own enum, and render mode is re-entered so the new tier is
@@ -2658,33 +2604,6 @@ void MainWindow::buildOverlay()
     // on screen, so like the cut-out switch this re-enters no render mode.
     connect(myRenderSettingsPanel, &RenderSettingsPanel::materialEditRequested, this,
             &MainWindow::onMaterialEditRequested);
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::exportSizeChanged, this,
-            [this](RenderSettingsPanel::ExportSize size) {
-                myView->setRenderExportSize(static_cast<OcctViewWidget::ExportSize>(size));
-                persistRenderSettings();
-                updateActions();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::cutoutChanged, this,
-            [this](bool cutout) {
-                myView->setRenderCutout(cutout);
-                persistRenderSettings();
-                updateActions();
-            });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::qualityChanged, this,
-            [this](RenderSettingsPanel::Quality quality) {
-                myView->setRenderQuality(
-                    quality == RenderSettingsPanel::Quality::Simple
-                        ? OcctViewWidget::RenderQuality::Simple
-                        : (quality == RenderSettingsPanel::Quality::Balanced
-                               ? OcctViewWidget::RenderQuality::Balanced
-                               : OcctViewWidget::RenderQuality::Deep));
-                if (myRenderModeOn) {
-                    setRenderModeEnabled(false);
-                    setRenderModeEnabled(true);
-                }
-                persistRenderSettings();
-                updateActions();
-            });
 
     // The polish ticker - see the visibility lambda above for start/stop.
     // The polish ticker is RenderStudio's; its tierTick() is connected to
