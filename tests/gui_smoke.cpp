@@ -95,6 +95,7 @@
 #include <QSpinBox>
 #include <QDockWidget>
 #include <QElapsedTimer>
+#include <QThread>
 #include <QEnterEvent>
 #include <QFile>
 #include <QFileInfo>
@@ -964,8 +965,73 @@ void printBlockList()
 // `if (blockEnabled("name")) { ... }`, name matching a kBlocks entry exactly -
 // see the table's own comment for what alwaysRun/selfContained mean and why a
 // few registered blocks have no call site at all.
+// WHERE THE TEN MINUTES GO. Every block announces itself through
+// blockEnabled(), so timing one block is simply "the wall clock since the
+// previous announcement" - no wrapper around thirty thousand lines of blocks,
+// and no block has to remember to do anything.
+//
+// It changes no check and prints nothing until the end, so a run's accounting
+// is identical with it and without it. That matters: the suite is about to be
+// made faster, and the count is the guard that nothing stopped running while
+// it got quicker.
+struct BlockTiming {
+    std::string name;
+    double seconds = 0.0;
+    int checks = 0;
+};
+std::vector<BlockTiming> g_blockTimings;
+QElapsedTimer g_blockClock;
+std::string g_currentBlock;
+int g_blockStartChecks = 0;
+
+void closeCurrentBlockTiming()
+{
+    if (g_currentBlock.empty()) return;
+    BlockTiming entry;
+    entry.name = g_currentBlock;
+    entry.seconds = g_blockClock.elapsed() / 1000.0;
+    entry.checks = g_checks - g_blockStartChecks;
+    g_blockTimings.push_back(entry);
+    g_currentBlock.clear();
+}
+
+void beginBlockTiming(const char* name)
+{
+    closeCurrentBlockTiming();
+    g_currentBlock = name;
+    g_blockStartChecks = g_checks;
+    g_blockClock.restart();
+}
+
+void printBlockTimings()
+{
+    closeCurrentBlockTiming();
+    if (g_blockTimings.empty()) return;
+    std::vector<BlockTiming> sorted = g_blockTimings;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const BlockTiming& a, const BlockTiming& b) { return a.seconds > b.seconds; });
+    double total = 0.0;
+    for (const BlockTiming& entry : sorted) total += entry.seconds;
+    std::printf("\n--- where the time goes (%.1f s across %d blocks) ---\n", total,
+                static_cast<int>(sorted.size()));
+    double running = 0.0;
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+        running += sorted[i].seconds;
+        std::printf("%6.1fs  %5.1f%%  cum %5.1f%%  %4d checks  %s\n", sorted[i].seconds,
+                    total > 0.0 ? 100.0 * sorted[i].seconds / total : 0.0,
+                    total > 0.0 ? 100.0 * running / total : 0.0, sorted[i].checks,
+                    sorted[i].name.c_str());
+        if (i == 19 && sorted.size() > 20) {
+            std::printf("        ... %d more blocks, %.1fs between them\n",
+                        static_cast<int>(sorted.size() - 20), total - running);
+            break;
+        }
+    }
+}
+
 bool blockEnabled(const char* name)
 {
+    beginBlockTiming(name);
     const BlockInfo* info = findBlockInfo(name);
     if (!info) {
         // A call site with no table entry is a bug in the table above, not a
@@ -1200,7 +1266,59 @@ private:
 };
 
 // Lets the event loop breathe so Qt delivers exposure/resize and OCCT redraws.
+// WAITS UNTIL QT IS IDLE, up to `ms` - it used to spin for the whole duration
+// however little there was to do. Measured: 1,554 call sites totalling 304
+// seconds of a 774-second run, so up to 39% of this suite was sleeping.
+//
+// `ms` is still the CAP and still means what it meant, which is what makes the
+// change safe to judge: a wait that is genuinely waiting on a TIMER - the
+// 400 ms autosave debounce, a camera animation, the path-tracing tick - sees
+// no events, so `quiet` climbs and it would exit early and test nothing. Those
+// sites call waitFully() instead, and the way they were found is the only
+// honest way: the check count and the failure list across a full run.
 void settle(int ms = 250)
+{
+    QElapsedTimer timer;
+    timer.start();
+    int quiet = 0;
+    // QEventLoop's processEvents is the one that ANSWERS whether it delivered
+    // anything; QCoreApplication's returns void, so it cannot tell idle from
+    // busy at all.
+    QEventLoop loop;
+    while (timer.elapsed() < ms) {
+        const bool worked = loop.processEvents(QEventLoop::AllEvents);
+        quiet = worked ? 0 : quiet + 1;
+        if (!worked) QThread::msleep(1);
+        // Several consecutive empty rounds rather than one: a single quiet
+        // poll happens constantly in the middle of a busy exchange.
+        if (quiet >= 4) return;
+    }
+}
+
+// Sleeps the whole time, whatever Qt is doing. For the waits that are waiting
+// on a timer rather than on work already queued.
+//
+// WHICH SITES THESE ARE, found by the check count staying put while checks
+// went red - never by picking waits that looked slow.
+//
+// A wait taken while ANIMATIONS ARE STILL ON is waiting on an animation timer:
+// the rail slides in on first show, and an idle-exit returns before its chips
+// have arrived. And a wait whose own COMMENT names a timer - debounce,
+// animation, fade, tick, autosave, interval - is waiting on that timer.
+//
+// DURATION IS NOT THE TEST, and assuming it was cost a whole run. The autosave
+// debounce is 400 ms, so "400 or more" looked like a clean rule; it converted
+// 48 sites and the identical 29 checks failed again. The search field's
+// debounce is 150. What marks these sites is what they are WAITING FOR, which
+// the comment beside them already said - "outlasts the search field's 150 ms
+// debounce" had been sitting there the whole time.
+//
+// And a wait whose ARGUMENT IS COMPUTED FROM A TIMER CONSTANT -
+// kAutosaveWriteMs, kAppearanceWriteMs, kRenderSettingsWriteMs - is a timer
+// wait that says so in its own arithmetic. Those were missed twice over,
+// because the conversions matched settle(<number>) and these are the one
+// family that never writes a bare number.
+void waitFully(int ms)
 {
     QElapsedTimer timer;
     timer.start();
@@ -2620,7 +2738,12 @@ int main(int argc, char* argv[])
     window.resize(1200, 800);
     window.move(40, 40);
     window.show();
-    settle(900);
+    // waitFully: the rail SLIDES IN on first show and animations are still on
+    // at this point (they are switched off on the next line), so an idle-exit
+    // wait returns before the chips have reached their places and every one of
+    // them is then unclickable. Found by the check count staying identical
+    // while two checks went red.
+    waitFully(900);
     window.view()->setAnimationsEnabled(false);   // deterministic camera for the suite
 
     // --- the shell is laid out correctly BEFORE anybody touches it ------------
@@ -2793,7 +2916,7 @@ int main(int argc, char* argv[])
         libraryProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         libraryProbe.resize(1000, 700);
         libraryProbe.show();
-        settle(400);
+        waitFully(400);
         libraryProbe.view()->setAnimationsEnabled(false);
 
         SelectorWindow* gallery = wireSelector(libraryProbe);
@@ -2851,7 +2974,7 @@ int main(int argc, char* argv[])
             if (edit2) {
                 edit2->setText(QStringLiteral("Should not stick"));
                 sendKeyTo(edit2, Qt::Key_Escape);
-                settle(150);
+                waitFully(150);
             }
             check(gallery->cardName(0) == renamedTo,
                   "Escape cancels outright - the old name stands");
@@ -3128,7 +3251,7 @@ int main(int argc, char* argv[])
         check(search != nullptr, "the header carries a search field");
         if (search) {
             search->setText(QStringLiteral("zebra"));
-            settle(300);   // outlasts the search field's 150 ms debounce
+            waitFully(300);   // outlasts the search field's 150 ms debounce
         }
         check(gridSelector.visibleCardCount() == 1,
               QStringLiteral("searching \"zebra\" leaves one card on screen (%1)")
@@ -3144,7 +3267,7 @@ int main(int argc, char* argv[])
               "the surviving card is Zebra Table itself");
         if (search) {
             search->clear();
-            settle(300);   // outlasts the debounce, as above
+            waitFully(300);   // outlasts the debounce, as above
         }
         check(gridSelector.visibleCardCount() == 5, "clearing the search brings all five back");
 
@@ -3396,7 +3519,7 @@ int main(int argc, char* argv[])
         saveProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         saveProbe.resize(1000, 700);
         saveProbe.show();
-        settle(400);
+        waitFully(400);
         saveProbe.view()->setAnimationsEnabled(false);
 
         enterFreshFurniture(saveProbe);
@@ -3955,7 +4078,7 @@ int main(int argc, char* argv[])
         saveFailProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         saveFailProbe.resize(900, 600);
         saveFailProbe.show();
-        settle(300);
+        waitFully(300);
         saveFailProbe.view()->setAnimationsEnabled(false);
 
         SelectorWindow* saveFailSelector = wireSelector(saveFailProbe);
@@ -4059,7 +4182,7 @@ int main(int argc, char* argv[])
         autosaveFailProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         autosaveFailProbe.resize(900, 600);
         autosaveFailProbe.show();
-        settle(300);
+        waitFully(300);
         autosaveFailProbe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(autosaveFailProbe);
         check(!autosaveFailProbe.isShowingInitScreen(),
@@ -4082,7 +4205,9 @@ int main(int argc, char* argv[])
               "a checkpoint - this arms the autosave debounce with a save that will fail");
         const int autosavePending = autosaveFailProbe.autosavePendingMs();
         check(autosavePending > 0, "autosave is armed");
-        settle(autosavePending + 200);   // let the timer fire and fail on its own
+        // waitFully: this is waiting on a single-shot TIMER, not on work already
+        // queued, so there are no events to go idle on.
+        waitFully(autosavePending + 200);   // let the timer fire and fail on its own
         check(autosaveFailProbe.isFurnitureDirty(),
               "the timer's own save attempt failed - the furniture is still dirty, with no "
               "debounce left armed to retry it silently");
@@ -4125,7 +4250,7 @@ int main(int argc, char* argv[])
         visProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         visProbe.resize(900, 700);
         visProbe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* visView = visProbe.view();
         visView->setAnimationsEnabled(false);
         enterFreshFurniture(visProbe);
@@ -4235,7 +4360,7 @@ int main(int argc, char* argv[])
         flushProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         flushProbe.resize(900, 600);
         flushProbe.show();
-        settle(300);
+        waitFully(300);
         flushProbe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(flushProbe);
         const QString flushId = flushProbe.currentFurnitureId();
@@ -4286,7 +4411,7 @@ int main(int argc, char* argv[])
         closeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         closeProbe.resize(900, 600);
         closeProbe.show();
-        settle(300);
+        waitFully(300);
         closeProbe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(closeProbe);
         const QString closeId = closeProbe.currentFurnitureId();
@@ -4360,7 +4485,7 @@ int main(int argc, char* argv[])
         ask.setAttribute(Qt::WA_ShowWithoutActivating);
         ask.resize(1000, 700);
         ask.show();
-        settle(300);
+        waitFully(300);
         ask.view()->setAnimationsEnabled(false);
         int askQuits = 0;
         EditorSelectorHandoff::Hooks askHooks;
@@ -4586,7 +4711,7 @@ int main(int argc, char* argv[])
               "Close without saving is answered at its own pixel");
         check(askQuits == 3 && !ask.isAskingBeforeClose(),
               QStringLiteral("Close without saving quits (%1 quit requests)").arg(askQuits));
-        settle(MainWindow::kAutosaveWriteMs + 200);
+        waitFully(MainWindow::kAutosaveWriteMs + 200);
         check(libraryBytes(askDir.path()) == bytesBeforeDiscard,
               "Close without saving leaves every file on disk byte-identical to the last save");
         check(ask.isFurnitureDirty(),
@@ -4634,7 +4759,7 @@ int main(int argc, char* argv[])
 
         // --- render mode: the question is asked in modeling ---------------------
         ask.setRenderModeEnabled(true);
-        settle(400);
+        waitFully(400);
         check(ask.renderModeEnabled(), "render mode is on going into the close");
         ask.close();
         settle(300);
@@ -4656,7 +4781,7 @@ int main(int argc, char* argv[])
         lib.setAttribute(Qt::WA_ShowWithoutActivating);
         lib.resize(1000, 700);
         lib.show();
-        settle(300);
+        waitFully(300);
         lib.view()->setAnimationsEnabled(false);
         int libQuits = 0;
         EditorSelectorHandoff::Hooks libHooks;
@@ -4674,7 +4799,7 @@ int main(int argc, char* argv[])
                   lib.autosaveMode() == MainWindow::AutosaveMode::AfterEveryChange,
               "the library probe has a furniture open, autosave After every change");
         check(buildBody(lib, 0.35, 0.35, 0.55, 0.55, 90.0), "a body for the library probe");
-        settle(MainWindow::kAutosaveWriteMs + 300);
+        waitFully(MainWindow::kAutosaveWriteMs + 300);
         check(!lib.isFurnitureDirty(), "...which autosave put on disk - the baseline");
         const QString libId = lib.currentFurnitureId();
         const double libBaselineY = [&] {
@@ -4709,9 +4834,9 @@ int main(int argc, char* argv[])
                   !lib.isShowingInitScreen(),
               "File -> Close furniture asks the same question with unsaved changes");
         check(lib.autosavePendingMs() < 0, "...and asking stopped the debounce");
-        settle(MainWindow::kAutosaveWriteMs + 300);
+        waitFully(MainWindow::kAutosaveWriteMs + 300);
         lib.debugFireAutosaveInterval();
-        settle(100);
+        waitFully(100);
         check(lib.isFurnitureDirty() && libraryBytes(libDir.path()) == libBytes,
               "autosave writes nothing while the question stands - neither the debounce nor "
               "the timed tick");
@@ -4720,7 +4845,7 @@ int main(int argc, char* argv[])
         check(lib.isShowingInitScreen() && libSelector && libSelector->isVisible() &&
                   libQuits == 0,
               "...which returns to the library, requesting no quit");
-        settle(MainWindow::kAutosaveWriteMs + 300);
+        waitFully(MainWindow::kAutosaveWriteMs + 300);
         check(libraryBytes(libDir.path()) == libBytes,
               "...and leaves every file on disk byte-identical - the discard wrote nothing on "
               "its way out");
@@ -5523,11 +5648,11 @@ int main(int argc, char* argv[])
                                    nudged.target.Y() + 260.0, nudged.target.Z());
             nudged.distance *= 0.35;
             view->animateTo(nudged);
-            settle(400);
+            waitFully(400);
             const CameraState before = view->camera().state();
             clickAt(fitButton, QPointF(fitButton->width() / 2.0,
                                        fitButton->height() / 2.0));
-            settle(400);   // the fit animates
+            waitFully(400);   // the fit animates
             const CameraState after = view->camera().state();
             const double moved =
                 gp_Vec(before.target, after.target).Magnitude() +
@@ -6115,7 +6240,7 @@ int main(int argc, char* argv[])
         MainWindow minWin(nullptr, /*persistProgress=*/false, minWinLib.path());
         minWin.setAttribute(Qt::WA_ShowWithoutActivating);
         minWin.show();
-        settle(300);
+        waitFully(300);
         minWin.view()->setAnimationsEnabled(false);
         enterFreshFurniture(minWin);
 
@@ -6213,7 +6338,7 @@ int main(int argc, char* argv[])
     // --- above-horizon clicks are rejected, not mirrored behind the eye -------
     if (blockEnabled("above-horizon-clicks-are-rejected-not-mirrored")) {
         trigger(window, QStringLiteral("Front"));
-        settle(400);   // elevation 0: half the viewport is above the horizon
+        waitFully(400);   // elevation 0: half the viewport is above the horizon
         trigger(window, QStringLiteral("Start Sketch"));
         const int before = static_cast<int>(window.sketch().pointCount());
         // Top strip of the viewport is sky in the Front view.
@@ -7868,7 +7993,7 @@ int main(int argc, char* argv[])
         // where these probes found it rather than leaving the suite in a top
         // view that only this section wanted.
         view->animateTo(savedCamera);
-        settle(250);
+        waitFully(250);
     }
 
     // --- outcomes are reported without stopping the user ----------------------
@@ -8142,7 +8267,7 @@ int main(int argc, char* argv[])
         learned.setAttribute(Qt::WA_ShowWithoutActivating);
         learned.resize(900, 600);
         learned.show();
-        settle(300);
+        waitFully(300);
         learned.view()->setAnimationsEnabled(false);
         enterFreshFurniture(learned);
 
@@ -8193,7 +8318,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 600);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* probeView = probe.view();
         probeView->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
@@ -8284,7 +8409,7 @@ int main(int argc, char* argv[])
         modeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         modeProbe.resize(900, 600);
         modeProbe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* modeProbeView = modeProbe.view();
         modeProbeView->setAnimationsEnabled(false);
         enterFreshFurniture(modeProbe);
@@ -8546,7 +8671,7 @@ int main(int argc, char* argv[])
         // Put the world back for the blocks written against it.
         view->clearSelection();
         view->animateTo(cameraBefore);   // animations are off: this is immediate
-        settle(150);
+        waitFully(150);
     }
 
     // --- a flat face can become the sketch plane ------------------------------
@@ -9215,7 +9340,7 @@ int main(int argc, char* argv[])
                     // probe disturbs.
                     view->camera().setTemporaryOrtho(false);
                     view->animateTo(CameraState{});
-                    settle(120);
+                    waitFully(120);
                     view->saveSnapshot(outDir + "/h-unlocked-ground-grid.png");
                 }
 
@@ -9277,7 +9402,7 @@ int main(int argc, char* argv[])
                     // parallel to, so not one point would land.
                     view->camera().setTemporaryOrtho(false);
                     view->animateTo(poseBeforeLock);
-                    settle(120);
+                    waitFully(120);
                     bool angledAgain =
                         view->projectToScreen(pickedCentre, screen) &&
                         view->rect().adjusted(8, 8, -8, -8).contains(screen);
@@ -9473,7 +9598,7 @@ int main(int argc, char* argv[])
         view->setSelectionMode(OcctViewWidget::SelectionMode::Auto);
         view->clearSelection();
         view->animateTo(cameraBefore);   // animations are off: this is immediate
-        settle(150);
+        waitFully(150);
     }
 
     // --- extrude asks for a height without stopping the user ------------------
@@ -10532,7 +10657,7 @@ int main(int argc, char* argv[])
             CameraState farCamera = nearCamera;
             farCamera.distance = 6000.0;
             view->animateTo(farCamera);
-            settle(200);
+            waitFully(200);
 
             QPoint farFrom, farTo;
             const bool haveFar =
@@ -10594,7 +10719,7 @@ int main(int argc, char* argv[])
             }
 
             view->animateTo(nearCamera);
-            settle(200);
+            waitFully(200);
         }
 
         // --- a typed carve the kernel refuses -----------------------------
@@ -10797,7 +10922,7 @@ int main(int argc, char* argv[])
                                    targetCentre.Y() - eyeOffset.Y(),
                                    targetCentre.Z());
             view->animateTo(edgeOn);   // animations are off: immediate
-            settle(250);
+            waitFully(250);
             const gp_Pnt eyeNow = view->camera().eyePosition();
             check(std::hypot(eyeNow.X() - targetCentre.X(), eyeNow.Y() - targetCentre.Y()) < 1.0e-6,
                   QStringLiteral("the eye is directly above the face centre, so the ray "
@@ -10886,7 +11011,7 @@ int main(int argc, char* argv[])
 
         view->clearSelection();
         view->animateTo(pullCameraBefore);   // animations are off: immediate
-        settle(200);
+        waitFully(200);
     }
 
     // --- Rotate and Scale are ours: rings, cubes, and the drags ---------------
@@ -11381,11 +11506,11 @@ int main(int argc, char* argv[])
                 // camera walks in rather than jumping inside the body.
                 closer.distance *= std::max(0.6, span / kWantedSpan);
                 view->animateTo(closer);   // animations are off: immediate
-                settle(180);
+                waitFully(180);
                 QPoint a2, i2, o2;
                 if (!projectDrag(a2, i2, o2)) {
                     view->animateTo(beforePass);
-                    settle(180);
+                    waitFully(180);
                     why = QStringLiteral("one pass further pushed a drag point off screen");
                     break;
                 }
@@ -11879,7 +12004,7 @@ int main(int argc, char* argv[])
               "the bevel probe leaves the document as it found it");
         view->clearSelection();
         view->animateTo(bevelCameraBefore);   // animations are off: immediate
-        settle(200);
+        waitFully(200);
     }
 
     // --- multi-edge bevels, and the spread that used to come with them --------
@@ -11929,7 +12054,7 @@ int main(int argc, char* argv[])
             framed.elevationDeg = 32.0;
             framed.distance = 1.35 * gp_Pnt(bx0, by0, bz0).Distance(gp_Pnt(bx1, by1, bz1));
             view->animateTo(framed);   // animations are off: immediate
-            settle(250);
+            waitFully(250);
         }
         view->clearSelection();
         settle(150);
@@ -12107,7 +12232,7 @@ int main(int argc, char* argv[])
 
                 const std::size_t revisionBefore = window.document().count();
                 sendKeyTo(&window, Qt::Key_Return);
-                settle(400);
+                waitFully(400);
                 check(window.document().count() == revisionBefore,
                       "committing replaces the body rather than adding one");
 
@@ -12191,7 +12316,7 @@ int main(int argc, char* argv[])
                 multi->field()->setText(QStringLiteral("20"));
                 settle(300);
                 sendKeyTo(&window, Qt::Key_Return);
-                settle(400);
+                waitFully(400);
                 check(longStrips(kSpreadSize) == 1,
                       QStringLiteral("filleting it leaves one strip (%1)")
                           .arg(longStrips(kSpreadSize)));
@@ -12262,7 +12387,7 @@ int main(int argc, char* argv[])
                     multi->field()->setText(QStringLiteral("20"));
                     settle(350);
                     sendKeyTo(&window, Qt::Key_Return);
-                    settle(450);
+                    waitFully(450);
 
                     // The three assertions the spread failed, and it failed
                     // all three: it removed 13.8% too much, it left THREE
@@ -12334,7 +12459,7 @@ int main(int argc, char* argv[])
                         close.distance = kSpreadSize * 14.0;
                         close.elevationDeg = 28.0;
                         view->animateTo(close);
-                        settle(250);
+                        waitFully(250);
                         view->saveSnapshot(
                             outDir + QStringLiteral("/bevel-adjacent-corner.png"));
                     }
@@ -12873,7 +12998,7 @@ int main(int argc, char* argv[])
               "the multi-edge probe leaves the document as it found it");
         view->clearSelection();
         view->animateTo(multiCameraBefore);
-        settle(200);
+        waitFully(200);
     }
 
     // --- the whole app reads in one unit --------------------------------------
@@ -13270,7 +13395,7 @@ int main(int argc, char* argv[])
     // --- standard views set turntable state -----------------------------------
     if (blockEnabled("standard-views-set-turntable-state")) {
         trigger(window, QStringLiteral("Front"));
-        settle(400);
+        waitFully(400);
         check(std::fabs(view->camera().state().azimuthDeg) < 1e-3 &&
               std::fabs(view->camera().state().elevationDeg) < 1e-3,
               "Front is azimuth 0, elevation 0");
@@ -13279,7 +13404,7 @@ int main(int argc, char* argv[])
               "clamp, so this is a regression guard, not a fix");
 
         trigger(window, QStringLiteral("Top"));
-        settle(400);
+        waitFully(400);
         // setViewTop() requests exactly 90 degrees, and CameraController's
         // clamp is exactly 90 too (Task 6.2's fix - it used to sit at 88,
         // two degrees short, which is what left a "Top" view visibly tilted
@@ -13302,14 +13427,14 @@ int main(int argc, char* argv[])
               "world +Y, not just whatever azimuth was left over");
 
         trigger(window, QStringLiteral("Right"));
-        settle(400);
+        waitFully(400);
         check(std::fabs(view->camera().state().azimuthDeg - (-90.0)) < 1e-3,
               "Right is azimuth -90");
         check(std::fabs(view->liveCameraDirection().Dot(gp_Dir(-1.0, 0.0, 0.0)) - 1.0) < 1.0e-9,
               "Right was already exact too");
 
         trigger(window, QStringLiteral("Axonometric"));
-        settle(400);
+        waitFully(400);
         check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
               std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
               "Axonometric returns to the startup angles");
@@ -13352,7 +13477,7 @@ int main(int argc, char* argv[])
         axisProbe.resize(900, 700);
         axisProbe.move(80, 80);
         axisProbe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* pview = axisProbe.view();
         pview->setAnimationsEnabled(false);
 
@@ -13371,7 +13496,7 @@ int main(int argc, char* argv[])
         squareDown.azimuthDeg = 0.0;
         squareDown.elevationDeg = 90.0;
         pview->animateTo(squareDown);
-        settle(100);
+        waitFully(100);
         // Tall on purpose: the pixel probe below needs a leaked side-face
         // sliver (were the old 2-degree tilt bug to return) to be wide
         // enough on screen to tell apart from the GRAY30 boundary line
@@ -13417,7 +13542,7 @@ int main(int argc, char* argv[])
                 neutral.azimuthDeg = -45.0;
                 neutral.elevationDeg = 30.0;
                 pview->animateTo(neutral);
-                settle(80);
+                waitFully(80);
 
                 clickAt(axisGizmo, axisGizmo->tipCenter(v.axis, v.positive));
                 settle(150);
@@ -13603,7 +13728,7 @@ int main(int argc, char* argv[])
         gridProbe.resize(1000, 800);
         gridProbe.move(60, 60);
         gridProbe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* pview = gridProbe.view();
         pview->setAnimationsEnabled(false);
 
@@ -13697,7 +13822,7 @@ int main(int argc, char* argv[])
             pose.elevationDeg = elevationDeg;
             pose.distance = 700.0;
             pview->animateTo(pose);
-            settle(50);
+            waitFully(50);
         };
 
         if (orthoAction) {
@@ -13829,7 +13954,7 @@ int main(int argc, char* argv[])
         sketchProbe.resize(1000, 800);
         sketchProbe.move(60, 60);
         sketchProbe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* pview = sketchProbe.view();
         pview->setAnimationsEnabled(false);
         // Snap to Grid off: every target point below is picked precisely so
@@ -13851,7 +13976,7 @@ int main(int argc, char* argv[])
         frontPose.elevationDeg = 0.0;
         frontPose.distance = 700.0;
         pview->animateTo(frontPose);
-        settle(150);
+        waitFully(150);
         check(pview->viewDirectionName() == QStringLiteral("Front") && pview->viewIsOrthographic(),
               "the probe is squared onto Front, in ortho");
 
@@ -13917,7 +14042,7 @@ int main(int argc, char* argv[])
         angled.elevationDeg = 15.0;
         angled.distance = 700.0;
         pview->animateTo(angled);
-        settle(100);
+        waitFully(100);
         check(pview->viewDirectionName() == QStringLiteral("Persp"),
               "the orbit really left the snapped Front direction");
         check(std::fabs(sketchProbe.sketch().plane().Axis().Direction().Y()) > 0.999,
@@ -14014,7 +14139,7 @@ int main(int argc, char* argv[])
         axo.elevationDeg = 30.0;
         axo.distance = 700.0;
         pview->animateTo(axo);
-        settle(100);
+        waitFully(100);
         check(pview->viewDirectionName() == QStringLiteral("Persp"),
               "a plain angled look, not a snapped axis direction");
 
@@ -14052,12 +14177,12 @@ int main(int argc, char* argv[])
         view->animateTo(goal);
         // Mid-flight (a few event-loop turns in), the camera is between the
         // endpoints - that is what distinguishes animation from teleporting.
-        settle(80);
+        waitFully(80);
         const double azMid = view->camera().state().azimuthDeg;
         check(std::fabs(azMid - azBefore) > 1.0 &&
               std::fabs(azMid - goal.azimuthDeg) > 1.0,
               "animateTo passes through intermediate states");
-        settle(500);
+        waitFully(500);
         check(std::fabs(view->camera().state().azimuthDeg - goal.azimuthDeg) < 1e-3,
               "animateTo settles exactly on the goal");
         view->setAnimationsEnabled(false);
@@ -14114,7 +14239,7 @@ int main(int argc, char* argv[])
             // claims this point once the control is hidden, so it falls
             // through to the viewport, same as clicking empty space).
             clickAt(view, QPointF(centre));
-            settle(250);   // outlasts the 160 ms fade either way
+            waitFully(250);   // outlasts the 160 ms fade either way
             check(static_cast<int>(window.document().solids().size()) == afterFirstClick,
                   "a second click during the fade did not undo a second time");
         }
@@ -14147,7 +14272,7 @@ int main(int argc, char* argv[])
 
             const QSize original = view->size();
             view->resize(original.width() + 40, original.height());
-            settle(30);   // well inside the 160 ms fade
+            waitFully(30);   // well inside the 160 ms fade
 
             const QPoint centreAfterResize =
                 undo2->mapTo(view, QPoint(undo2->width() / 2, undo2->height() / 2));
@@ -14155,7 +14280,7 @@ int main(int argc, char* argv[])
                   "a viewport resize mid-fade does not re-show the Undo control");
 
             view->resize(original);
-            settle(250);   // outlasts the fade, and lets the resize settle back
+            waitFully(250);   // outlasts the fade, and lets the resize settle back
         }
 
         view->setAnimationsEnabled(false);
@@ -14934,7 +15059,7 @@ int main(int argc, char* argv[])
         axoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         axoProbe.resize(900, 600);
         axoProbe.show();
-        settle(300);
+        waitFully(300);
         axoProbe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(axoProbe);
         // Learn face selection so the view hint is the one the first body
@@ -14976,7 +15101,7 @@ int main(int argc, char* argv[])
         gizmoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         gizmoProbe.resize(900, 600);
         gizmoProbe.show();
-        settle(300);
+        waitFully(300);
         gizmoProbe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(gizmoProbe);
         for (int i = 0; i < UserProgress::kLearnedThreshold; ++i) {
@@ -15023,7 +15148,7 @@ int main(int argc, char* argv[])
         resetProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         resetProbe.resize(900, 600);
         resetProbe.show();
-        settle(300);
+        waitFully(300);
         resetProbe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(resetProbe);
 
@@ -15357,7 +15482,7 @@ int main(int argc, char* argv[])
         narrow.setAttribute(Qt::WA_ShowWithoutActivating);
         narrow.resize(900, 620);
         narrow.show();
-        settle(300);
+        waitFully(300);
         narrow.view()->setAnimationsEnabled(false);
         enterFreshFurniture(narrow);
 
@@ -15639,7 +15764,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 640);
         probe.show();
-        settle(400);
+        waitFully(400);
         probe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
         OcctViewWidget* pv = probe.view();
@@ -17588,7 +17713,7 @@ int main(int argc, char* argv[])
             arrowProbe.resize(1000, 760);
             arrowProbe.show();
             arrowProbe.view()->setAnimationsEnabled(false);
-            settle(400);
+            waitFully(400);
             enterFreshFurniture(arrowProbe);
             OcctViewWidget* probeView = arrowProbe.view();
             check(buildBody(arrowProbe, 0.35, 0.35, 0.60, 0.60, 40.0),
@@ -18050,7 +18175,7 @@ int main(int argc, char* argv[])
                 check(Theme::accent() == QColor(QStringLiteral("#ff00ff")),
                       "a persistProgress=false window still applies a theme edit");
             }
-            settle(MainWindow::kAppearanceWriteMs * 2);
+            waitFully(MainWindow::kAppearanceWriteMs * 2);
             {
                 QSettings after;
                 check(!after.contains(QStringLiteral("appearance")),
@@ -18091,7 +18216,7 @@ int main(int argc, char* argv[])
                           "once per edit");
                 }
 
-                settle(MainWindow::kAppearanceWriteMs * 2);
+                waitFully(MainWindow::kAppearanceWriteMs * 2);
                 QSettings written;
                 Theme::Spec readBack;
                 check(Theme::deserializeSpec(
@@ -18164,7 +18289,7 @@ int main(int argc, char* argv[])
                         fixed.elevationDeg = 88.0;   // near top-down: a regular 2D
                                                      // grid to scan a scanline across
                         densityView->animateTo(fixed);
-                        settle(150);
+                        waitFully(150);
 
                         // 180mm sits in the 10mm band at density 1.0 and the 1mm
                         // band at density 2.0 (the same premise the pinned
@@ -18264,7 +18389,7 @@ int main(int argc, char* argv[])
                                   .arg(crossingsAfter));
 
                         // --- and it persists through the same debounce ----
-                        settle(MainWindow::kAppearanceWriteMs * 2);
+                        waitFully(MainWindow::kAppearanceWriteMs * 2);
                         QSettings writtenDensity;
                         Theme::Spec densityReadBack;
                         check(Theme::deserializeSpec(writtenDensity.value(QStringLiteral("appearance"))
@@ -18285,7 +18410,7 @@ int main(int argc, char* argv[])
                               "Gizmo size is on this tab too, and on screen");
                         if (densityPanel->gizmoScaleControl()) {
                             densityPanel->gizmoScaleControl()->setValue(1.6);
-                            settle(MainWindow::kAppearanceWriteMs * 2);
+                            waitFully(MainWindow::kAppearanceWriteMs * 2);
                             QSettings writtenGizmo;
                             Theme::Spec gizmoReadBack;
                             check(std::fabs(Theme::spec().gizmoScale - 1.6) < 1.0e-9,
@@ -18300,14 +18425,14 @@ int main(int argc, char* argv[])
                                       .arg(gizmoReadBack.gizmoScale));
                             densityPanel->gizmoScaleControl()->setValue(
                                 Theme::defaultSpec().gizmoScale);
-                            settle(MainWindow::kAppearanceWriteMs * 2);
+                            waitFully(MainWindow::kAppearanceWriteMs * 2);
                         }
 
                         // Back to the default - Theme is process-global state,
                         // and nothing past this point should inherit an edit
                         // this probe made for its own purposes.
                         densityPanel->setGridDensity(1.0);
-                        settle(MainWindow::kAppearanceWriteMs * 2);
+                        waitFully(MainWindow::kAppearanceWriteMs * 2);
                         check(std::fabs(Theme::gridDensity() - 1.0) < 1.0e-9,
                               "left at the default for whatever runs next");
                     }
@@ -18352,7 +18477,7 @@ int main(int argc, char* argv[])
                 // Z itself points at or away from the camera in this pose and
                 // is checked from a second one below.
                 clickAt(axisGizmo, axisGizmo->tipCenter(2, true));
-                settle(500);
+                waitFully(500);
 
                 QImage shot = renderExact(axisGizmo);
                 check(!shot.isNull(), "the gizmo renders for the probe");
@@ -18369,7 +18494,7 @@ int main(int argc, char* argv[])
                 // Snap along X instead, which puts Y and Z in the view plane -
                 // checks the one token the pose above could not.
                 clickAt(axisGizmo, axisGizmo->tipCenter(0, true));
-                settle(500);
+                waitFully(500);
                 shot = renderExact(axisGizmo);
                 const QPoint zTip = axisGizmo->tipCenter(2, true).toPoint();
                 check(findMark(shot, zTip, Theme::gizmoAxisZ(), 10),
@@ -18389,7 +18514,7 @@ int main(int argc, char* argv[])
                 check(Theme::gizmoAxisX() == editedX, "the token itself took the edit");
 
                 clickAt(axisGizmo, axisGizmo->tipCenter(2, true));
-                settle(500);
+                waitFully(500);
                 shot = renderExact(axisGizmo);
                 const QPoint xTipAfter = axisGizmo->tipCenter(0, true).toPoint();
                 check(findMark(shot, xTipAfter, editedX, 10),
@@ -19239,7 +19364,7 @@ int main(int argc, char* argv[])
         renameProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         renameProbe.resize(1000, 700);
         renameProbe.show();
-        settle(200);
+        waitFully(200);
         renameProbe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(renameProbe);
 
@@ -19573,7 +19698,7 @@ int main(int argc, char* argv[])
         if (escapeEdit) {
             escapeEdit->setText(QStringLiteral("Should not stick"));
             sendKeyTo(escapeEdit, Qt::Key_Escape);
-            settle(150);
+            waitFully(150);
         }
         check(renameProbe.document().nameOf(bodyId) == "Post-Wedge",
               "Escape cancels outright - the old name stands");
@@ -19831,7 +19956,7 @@ int main(int argc, char* argv[])
             check(returning.view() != nullptr && returning.view()->viewIsOrthographic(),
                   "and the camera is actually drawing that way, not merely ticked");
             returning.close();
-            settle(120);
+            waitFully(120);
         }
     }
 
@@ -20671,7 +20796,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 700);
         probe.show();
-        settle(200);
+        waitFully(200);
         probe.view()->setAnimationsEnabled(false);
         const QString snapDir = versionsLib.path() + QStringLiteral("/snap");
         QDir().mkpath(snapDir);
@@ -21787,7 +21912,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 700);
         probe.show();
-        settle(200);
+        waitFully(200);
         probe.view()->setAnimationsEnabled(false);
 
         enterFreshFurniture(probe);
@@ -22343,11 +22468,11 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 700);
         probe.show();
-        settle(200);
+        waitFully(200);
         probe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
         probe.view()->setViewTop();
-        settle(150);
+        waitFully(150);
 
         OcctViewWidget* pView = probe.view();
         ToastHost* pToasts = probe.findChild<ToastHost*>();
@@ -22368,7 +22493,7 @@ int main(int argc, char* argv[])
         const auto sketchQuadWorld = [&](double x0, double y0, double x1, double y1) {
             pView->fitAll();
             pView->setViewTop();
-            settle(120);
+            waitFully(120);
             clickAt(pView, worldToScreen(x0, y0));
             clickAt(pView, worldToScreen(x1, y0));
             clickAt(pView, worldToScreen(x1, y1));
@@ -22444,7 +22569,7 @@ int main(int argc, char* argv[])
         const gp_Pnt tangentAZ(centreA.X(), centreA.Y(), azmax);
 
         probe.view()->setSelectedSolids({bodyAId});
-        settle(80);
+        waitFully(80);
         check(probe.canBeginMirrorPlacement(),
               "one body selected, in body mode, nothing else pending - S can begin");
 
@@ -22506,19 +22631,19 @@ int main(int argc, char* argv[])
         // --- X/Y/Z jump the plane between exactly three axis-aligned
         // presets, resetting the dragged offset each time --------------------
         sendKeyTo(&probe, Qt::Key_Y);
-        settle(80);
+        waitFully(80);
         check(pView->mirrorPlacementAxis() == 1, "Y jumps the plane to the Y-normal preset");
         check(pView->mirrorPlacementPlane().Location().Distance(tangentAY) < 1.0e-6,
               "...re-placed TANGENT on the NEW axis - an offset measured along the old "
               "normal has no meaning here, and the spawn rule has to hold on every axis "
               "a flip can land on");
         sendKeyTo(&probe, Qt::Key_Z);
-        settle(80);
+        waitFully(80);
         check(pView->mirrorPlacementAxis() == 2, "Z jumps to the Z-normal preset");
         check(pView->mirrorPlacementPlane().Location().Distance(tangentAZ) < 1.0e-6,
               "...tangent again, on Z this time");
         sendKeyTo(&probe, Qt::Key_X);
-        settle(80);
+        waitFully(80);
         check(pView->mirrorPlacementAxis() == 0,
               "X returns to the first preset - exactly three, cycled by name, not by count");
 
@@ -22537,7 +22662,7 @@ int main(int argc, char* argv[])
             QPoint dragTo;
             check(pView->projectToScreen(targetWorld, dragTo), "...and so does the drag aim");
             dragButton(pView, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
-            settle(150);
+            waitFully(150);
 
             const gp_Pnt after = pView->mirrorPlacementPlane().Location();
             // Within one grid step of 60mm - dragButton() interpolates over a
@@ -22558,7 +22683,7 @@ int main(int argc, char* argv[])
         const std::size_t bodiesBeforeEscape = probe.document().count();
         const std::size_t undoDepthBeforeEscape = probe.document().undoDepth();
         sendKeyTo(&probe, Qt::Key_Escape);
-        settle(150);
+        waitFully(150);
         check(!pView->mirrorPlacementActive(), "Escape ends the gesture");
         check(probe.document().count() == bodiesBeforeEscape, "...with no new body");
         check(probe.document().undoDepth() == undoDepthBeforeEscape, "...and no new checkpoint");
@@ -22592,7 +22717,7 @@ int main(int argc, char* argv[])
         // only ever be verified by the mechanism being tested. Found here,
         // with picking working, and re-used unchanged once it is not.
         probe.view()->setSelectedSolids({});
-        settle(80);
+        waitFully(80);
 
         // A SECOND BODY, because at this point in the block the document holds
         // exactly one (measured - every twin and probe body earlier in this
@@ -22617,7 +22742,7 @@ int main(int argc, char* argv[])
         // probe is done, so nothing after this inherits the framing.
         const CameraState strayCameraBefore = pView->camera().state();
         pView->fitAll();
-        settle(250);
+        waitFully(250);
 
         // A pixel with nothing behind it, derived from every body's projected
         // bounding box rather than guessed, and CONFIRMED by clicking it.
@@ -22644,7 +22769,7 @@ int main(int argc, char* argv[])
             for (int x = 30; x < pView->width() - 30 && !haveEmptyAt; x += 13) {
                 if (occupied.contains(QPoint(x, y))) continue;
                 clickAt(pView, QPointF(x, y));
-                settle(80);
+                waitFully(80);
                 if (!pView->selectedSolidIds().empty()) continue;
                 emptyAt = QPoint(x, y);
                 haveEmptyAt = true;
@@ -22683,7 +22808,7 @@ int main(int argc, char* argv[])
                 if (!pView->projectToScreen(aim, at)) continue;
                 if (!pView->rect().adjusted(12, 12, -12, -12).contains(at)) continue;
                 clickAt(pView, QPointF(at));
-                settle(80);
+                waitFully(80);
                 const std::vector<int> got = pView->selectedSolidIds();
                 if (std::find(got.begin(), got.end(), solid.id) == got.end()) continue;
                 otherAt = at;
@@ -22696,7 +22821,7 @@ int main(int argc, char* argv[])
               "body when it is clicked");
 
         probe.view()->setSelectedSolids({bodyAId});
-        settle(80);
+        waitFully(80);
         trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "re-begun on body A for the stray-click probe");
         check(activeClaimCount() == 1, "exactly one claim while the gesture is active");
@@ -22705,7 +22830,7 @@ int main(int argc, char* argv[])
             const std::vector<int> idsBefore = pView->selectedSolidIds();
             if (haveEmptyAt) {
                 clickAt(pView, QPointF(emptyAt));
-                settle(150);
+                waitFully(150);
                 check(pView->mirrorPlacementActive(),
                       "a click on empty space mid-placement leaves the gesture standing - "
                       "a miss is a miss, not a cancel");
@@ -22715,7 +22840,7 @@ int main(int argc, char* argv[])
             }
             if (haveOtherAt) {
                 clickAt(pView, QPointF(otherAt));
-                settle(150);
+                waitFully(150);
                 check(pView->mirrorPlacementActive(),
                       "a click on another body mid-placement leaves the gesture standing "
                       "too - the pick that used to destroy it");
@@ -22729,7 +22854,7 @@ int main(int argc, char* argv[])
             // body would change what the placement is about to pair.
             if (haveOtherAt) {
                 doubleClickAt(pView, QPointF(otherAt));
-                settle(150);
+                waitFully(150);
                 check(pView->mirrorPlacementActive() &&
                           pView->selectedSolidIds() == idsBefore,
                       "and a DOUBLE-click on another body mid-placement is swallowed too, "
@@ -22741,7 +22866,7 @@ int main(int argc, char* argv[])
             // had cancelled for them, and a gesture that now survives has to
             // be put down by hand.
             sendKeyTo(&probe, Qt::Key_Escape);
-            settle(150);
+            waitFully(150);
             check(!pView->mirrorPlacementActive(),
                   "...and Escape still ends it, on a gesture no stray click could");
         }
@@ -22751,15 +22876,15 @@ int main(int argc, char* argv[])
         // this starts from the state it was written against.
         if (strayHelperId > 0) {
             probe.view()->setSelectedSolids({strayHelperId});
-            settle(150);
+            waitFully(150);
             trigger(probe, QStringLiteral("Delete Selected"));
-            settle(200);
+            waitFully(200);
         }
         check(probe.document().solids().size() == bodiesBeforeStray,
               "and the stray-click probe takes its own second body away again");
         pView->animateTo(strayCameraBefore);   // animations are off: immediate
         probe.view()->setSelectedSolids({bodyAId});
-        settle(200);
+        waitFully(200);
 
         // --- Fix round 1, Finding 3: S pressed again mid-gesture cancels
         // it, rather than reaching a "Select one or more bodies" refusal
@@ -22791,7 +22916,7 @@ int main(int argc, char* argv[])
         ItemsPanel* placementItems = probe.itemsPanel();
         check(placementItems != nullptr && placementItems->isVisible(), "the Items drawer is open");
         probe.view()->setSelectedSolids({bodyAId});
-        settle(80);
+        waitFully(80);
         trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "begun again, for the rename-guard probe");
         QAction* placementRenameAction = action(probe, QStringLiteral("Rename"));
@@ -22803,7 +22928,7 @@ int main(int argc, char* argv[])
             // exactly why this function needs its own guard rather than
             // trusting the action's enabled state alone.
             placementItems->beginRenameForItem(bodyAId, false);
-            settle(120);
+            waitFully(120);
             check(placementItems->findChild<QLineEdit*>() == nullptr,
                   "...and beginRenameForItem() itself refuses to open one");
         }
@@ -22812,7 +22937,7 @@ int main(int argc, char* argv[])
         // untouched by there being nothing left for it to steal from.
         const int axisBeforeRenameProbe = pView->mirrorPlacementAxis();
         sendKeyTo(&probe, Qt::Key_Y);
-        settle(80);
+        waitFully(80);
         check(pView->mirrorPlacementAxis() == 1 &&
                   pView->mirrorPlacementAxis() != axisBeforeRenameProbe,
               "Y reaches the gesture, proving the filter is still live");
@@ -22825,13 +22950,13 @@ int main(int argc, char* argv[])
         // previous mirrorPlacementActive() assertion stopped short of
         // confirming from the default state. -------------------------------
         probe.view()->setSelectedSolids({bodyAId});
-        settle(80);
+        waitFully(80);
         trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "begun again, for the default-state confirm");
         const std::size_t bodiesBeforeLoneConfirm = probe.document().count();
         const std::size_t undoDepthBeforeLoneConfirm = probe.document().undoDepth();
         sendKeyTo(&probe, Qt::Key_Return);
-        settle(200);
+        waitFully(200);
         check(!pView->mirrorPlacementActive(), "Enter ends the gesture");
         check(probe.document().count() == bodiesBeforeLoneConfirm + 1,
               "a LONE body confirms from the untouched default state and gains a twin - "
@@ -22845,7 +22970,7 @@ int main(int argc, char* argv[])
               QStringLiteral("...and the Note toast names it, singular (\"%1\")")
                   .arg(pToasts ? pToasts->currentText() : QString()));
         trigger(probe, QStringLiteral("Undo"));
-        settle(200);
+        waitFully(200);
         check(probe.document().count() == bodiesBeforeLoneConfirm,
               "one undo takes the twin back");
         check(probe.document().twinOf(bodyAId) == -1, "...and the pairing with it");
@@ -22863,7 +22988,7 @@ int main(int argc, char* argv[])
         // as designed and the refusal says so. A user can reach this; it is
         // simply no longer where the gesture starts. --------------------------
         probe.view()->setSelectedSolids({bodyAId});
-        settle(80);
+        waitFully(80);
         trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "begun again, for the dragged-inside probe");
         {
@@ -22876,7 +23001,7 @@ int main(int argc, char* argv[])
                                        dragTo);
             check(haveAim, "the handle and an inward 25mm aim both project");
             if (haveAim) dragButton(pView, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
-            settle(150);
+            waitFully(150);
         }
         // Non-vacuity: if the drag did not actually move the plane INSIDE
         // the body, the refusal below would be testing nothing at all.
@@ -22888,7 +23013,7 @@ int main(int argc, char* argv[])
         QMetaObject::Connection mirrorNoOpConn = QObject::connect(
             &probe, &MainWindow::documentChanged, [&] { ++mirrorNoOpSignalCount; });
         sendKeyTo(&probe, Qt::Key_Return);
-        settle(200);
+        waitFully(200);
         QObject::disconnect(mirrorNoOpConn);
         check(!pView->mirrorPlacementActive(), "the gesture ends either way");
         check(probe.document().count() == bodiesBeforeNoOp,
@@ -22910,7 +23035,7 @@ int main(int argc, char* argv[])
         check(probe.extrudePendingFace(20.0), "body B extrudes, mirror-image of A about x=0");
         const int bodyBId = probe.document().solids().back().id;
         probe.view()->setSelectedSolids({bodyAId, bodyBId});
-        settle(80);
+        waitFully(80);
 
         Bnd_Box boxAB;
         BRepBndLib::Add(probe.document().shapeOf(bodyAId), boxAB);
@@ -22929,7 +23054,7 @@ int main(int argc, char* argv[])
               "straddles it either");
 
         sendKeyTo(&probe, Qt::Key_Return);
-        settle(200);
+        waitFully(200);
         check(!pView->mirrorPlacementActive(), "Enter ends the gesture");
         check(probe.document().count() == 4, "each of the two bodies gets its own twin");
         check(probe.document().twinOf(bodyAId) != -1 && probe.document().twinOf(bodyBId) != -1,
@@ -22945,7 +23070,7 @@ int main(int argc, char* argv[])
               "...and offers Undo");
 
         trigger(probe, QStringLiteral("Undo"));
-        settle(200);
+        waitFully(200);
         check(probe.document().count() == 2, "one undo removes every twin the gesture built");
         check(probe.document().twinOf(bodyAId) == -1 && probe.document().twinOf(bodyBId) == -1,
               "...and both pairings with them");
@@ -22967,7 +23092,7 @@ int main(int argc, char* argv[])
               "...and carries no shortcut - unpairing everything must not share a key "
               "with the gesture people reach for constantly");
         probe.view()->setSelectedSolids({bodyAId});
-        settle(80);
+        waitFully(80);
         const std::size_t bodiesBeforeAdditional = probe.document().count();
         trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(),
@@ -22975,13 +23100,13 @@ int main(int argc, char* argv[])
         check(probe.document().symmetryOn(),
               "...with nothing unpaired to get there - no destructive side trip");
         sendKeyTo(&probe, Qt::Key_Return);
-        settle(200);
+        waitFully(200);
         check(probe.document().count() == bodiesBeforeAdditional + 1 &&
                   probe.document().twinOf(bodyAId) > 0,
               "...and Enter pairs the body that was not yet paired, adding it to the "
               "existing mirror");
         trigger(probe, QStringLiteral("Undo"));
-        settle(200);
+        waitFully(200);
         check(probe.document().count() == bodiesBeforeAdditional,
               "one undo takes that additional pairing back too");
 
@@ -23016,7 +23141,7 @@ int main(int argc, char* argv[])
         const int bodyCId = probe.document().solids().back().id;
 
         probe.view()->setSelectedSolids({bodyCId});
-        settle(80);
+        waitFully(80);
         trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "S with the isolated body selected begins the gesture");
         {
@@ -23029,10 +23154,10 @@ int main(int argc, char* argv[])
                                        dragTo);
             check(haveHandle, "the handle and a 60mm drag target both project");
             if (haveHandle) dragButton(pView, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
-            settle(150);
+            waitFully(150);
         }
         sendKeyTo(&probe, Qt::Key_Return);
-        settle(200);
+        waitFully(200);
         check(probe.document().twinOf(bodyCId) != -1,
               "the isolated body pairs, comfortably clear of everything else in this scene");
         const int twinOfB = probe.document().twinOf(bodyCId);
@@ -23044,7 +23169,7 @@ int main(int argc, char* argv[])
             // from the mirror commit stands in the way of the first press.
             pView->clearSelection();
             pView->fitAll();
-            settle(200);
+            waitFully(200);
             // fitAll() just framed the WHOLE document (four bodies, well
             // spread out), which leaves any one edge spanning very few
             // pixels - the exact aiming trap CLAUDE.md's own bevel-drag
@@ -23064,7 +23189,7 @@ int main(int argc, char* argv[])
                                        (tzmin + tzmax) * 0.5);
                 closer.distance = 80.0;
                 pView->animateTo(closer);
-                settle(200);
+                waitFully(200);
             }
 
             // Found through ModelingOps::bevelAxis() itself, exactly as
@@ -23105,7 +23230,7 @@ int main(int argc, char* argv[])
                 if (!pView->projectToScreen(centre, at)) continue;
                 if (!pView->rect().adjusted(30, 30, -30, -30).contains(at)) continue;
                 clickAt(pView, QPointF(at));
-                settle(140);
+                waitFully(140);
                 const TopoDS_Edge got = pView->selectedEdge();
                 if (got.IsNull() || BRepAdaptor_Curve(got).GetType() != GeomAbs_Line) continue;
                 straightEdge = got;
@@ -23150,7 +23275,7 @@ int main(int argc, char* argv[])
                     // rounding half of the gesture (BevelArrow::myFillet
                     // defaults true) - rather than a screen-space guess.
                     dragButton(pView, QPointF(edgeAt), QPointF(inwardAt), Qt::LeftButton);
-                    settle(200);
+                    waitFully(200);
                     const double volAfter =
                         ModelingOps::volume(probe.document().shapeOf(twinOfB));
                     // RECORDED, not asserted as pass/fail against a specific
@@ -23283,7 +23408,7 @@ int main(int argc, char* argv[])
                 // ONE undo restores all THREE bodies - the paired body, its
                 // twin, and the unrelated one.
                 trigger(probe, QStringLiteral("Undo"));
-                settle(150);
+                waitFully(150);
                 check(std::fabs(ModelingOps::volume(probe.document().shapeOf(bodyCId)) -
                                 volCBefore) < 1.0e-3 &&
                           std::fabs(ModelingOps::volume(probe.document().shapeOf(twinOfB)) -
@@ -23306,13 +23431,23 @@ int main(int argc, char* argv[])
         // 1 for every fresh document, so those stale ids resolve to real,
         // unrelated bodies in whatever opens next. -------------------------
         probe.view()->setSelectedSolids({bodyAId});
-        settle(80);
+        waitFully(80);
         trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "a gesture is live, going into the handoff");
         check(activeClaimCount() == 1, "...with its one application-wide claim installed");
 
+        // THE AUTOSAVE HAS TO HAVE LANDED FIRST. This check is about the
+        // handoff cancelling a live gesture, not about saving - but Close
+        // furniture ASKS when the furniture is dirty, so a debounce still in
+        // flight turns "returns to the selector" false for a reason that has
+        // nothing to do with what is being tested. It passed filtered and
+        // failed in a full run, which is the signature of exactly that.
+        waitFully(MainWindow::kAutosaveWriteMs + 300);
+        check(!probe.isFurnitureDirty(),
+              "the probe's own autosave has landed, so the close below cannot ask");
+
         trigger(probe, QStringLiteral("Close furniture"));
-        settle(250);
+        waitFully(250);
         check(probe.isShowingInitScreen(), "Close furniture returns to the selector");
         check(!pView->mirrorPlacementActive(),
               "...and the gesture is cancelled by the handoff itself");
@@ -23320,13 +23455,13 @@ int main(int argc, char* argv[])
               "...so no application-wide Enter/Escape/X-Y-Z claim outlives the furniture");
 
         enterFreshFurniture(probe);
-        settle(200);
+        waitFully(200);
         check(!probe.isShowingInitScreen(), "a different furniture opens");
         check(!pView->mirrorPlacementActive(),
               "...with no plane redrawn from the furniture that closed");
         const std::size_t bodiesInFreshFurniture = probe.document().count();
         sendKeyTo(&probe, Qt::Key_Return);
-        settle(200);
+        waitFully(200);
         check(probe.document().count() == bodiesInFreshFurniture &&
                   !probe.document().symmetryOn(),
               "...and Enter does nothing at all here - no bodies the user never "
@@ -23345,7 +23480,7 @@ int main(int argc, char* argv[])
         probe.resize(1200, 800);
         probe.move(40, 40);
         probe.show();
-        settle(400);
+        waitFully(400);
         probe.view()->setAnimationsEnabled(false);
         OcctViewWidget* rview = probe.view();
 
@@ -24661,7 +24796,7 @@ int main(int argc, char* argv[])
         probe.resize(1200, 800);
         probe.move(40, 40);
         probe.show();
-        settle(400);
+        waitFully(400);
         probe.view()->setAnimationsEnabled(false);
         OcctViewWidget* rview = probe.view();
 
@@ -25381,7 +25516,7 @@ int main(int argc, char* argv[])
                       "nothing is written yet - the six values are not touched once per "
                       "edit, the same debounce persistAppearance() already keeps");
             }
-            settle(MainWindow::kRenderSettingsWriteMs * 2);
+            waitFully(MainWindow::kRenderSettingsWriteMs * 2);
 
             QSettings written;
             // And the two that MOVED are not written here at all - checked
@@ -25439,7 +25574,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 700);
         probe.show();
-        settle(200);
+        waitFully(200);
         probe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
 
@@ -25866,7 +26001,7 @@ int main(int argc, char* argv[])
             mirrorProbe.setAttribute(Qt::WA_ShowWithoutActivating);
             mirrorProbe.resize(1000, 700);
             mirrorProbe.show();
-            settle(200);
+            waitFully(200);
             mirrorProbe.view()->setAnimationsEnabled(false);
             enterFreshFurniture(mirrorProbe);
 
@@ -26105,7 +26240,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 700);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* hview = probe.view();
         hview->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
@@ -26253,7 +26388,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 720);
         probe.show();
-        settle(400);
+        waitFully(400);
         OcctViewWidget* lview = probe.view();
         lview->setAnimationsEnabled(false);
         check(probe.openFurniture(lagFurnitureId),
@@ -26379,7 +26514,7 @@ int main(int argc, char* argv[])
         // The tier probe runs once, on first activation, and can spend a
         // second compiling a path-tracing shader - kept out of the measured
         // window entirely.
-        settle(2500);
+        waitFully(2500);
         const bool inRenderMode = lview->renderModeActive();
         const OrbitRun rendering = inRenderMode ? orbitRun(lview, kOrbitMoves) : OrbitRun();
         if (renderAction) renderAction->trigger();
@@ -26571,7 +26706,7 @@ int main(int argc, char* argv[])
         probe.resize(1000, 760);
         probe.move(60, 60);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* view = probe.view();
         view->setAnimationsEnabled(false);
 
@@ -26687,7 +26822,7 @@ int main(int argc, char* argv[])
             squareDown.azimuthDeg = 0.0;
             squareDown.elevationDeg = 90.0;
             view->animateTo(squareDown);
-            settle(100);
+            waitFully(100);
             check(buildBody(probe, 0.38, 0.38, 0.62, 0.62, 150.0),
                   "a body for the edge-width pixel probe");
             const int bodyId = probe.document().solids().empty()
@@ -26719,7 +26854,7 @@ int main(int argc, char* argv[])
                                                 (by1 - by0) * (by1 - by0) +
                                                 (bz1 - bz0) * (bz1 - bz0)));
             view->animateTo(creaseView);
-            settle(150);
+            waitFully(150);
 
             QPoint edgeTop, edgeBottom;
             const bool haveEdge = view->projectToScreen(gp_Pnt(bx1, by1, bz1), edgeTop) &&
@@ -26807,7 +26942,7 @@ int main(int argc, char* argv[])
             // exactly where they are clicked rather than wherever an oblique
             // ray under the crease-probe's close-up camera happens to hit.
             view->animateTo(squareDown);
-            settle(100);
+            waitFully(100);
             trigger(probe, QStringLiteral("Start Sketch"));
             const double w = view->width();
             const double h = view->height();
@@ -26996,7 +27131,7 @@ int main(int argc, char* argv[])
             // gridDensity's own probes already use ----------------------------
             panel->setEdgeWidth(3.0);
             panel->setSketchLineWidth(3.5);
-            settle(MainWindow::kAppearanceWriteMs * 2);
+            waitFully(MainWindow::kAppearanceWriteMs * 2);
             {
                 QSettings written;
                 Theme::Spec readBack;
@@ -27015,7 +27150,7 @@ int main(int argc, char* argv[])
             QAction* renderAction = action(probe, QStringLiteral("Render mode"));
             check(renderAction != nullptr, "there is a Render mode action");
             if (renderAction) renderAction->trigger();
-            settle(400);
+            waitFully(400);
             check(renderAction == nullptr || probe.renderModeEnabled(),
                   "render mode is on for the round-trip check");
             check(view->solidFaceBoundaryWidth(bodyId) < 0.0,
@@ -27067,7 +27202,7 @@ int main(int argc, char* argv[])
         resetSpec.sketchLineWidthPx = 2.0;
         resetSpec.outlineLineColour = QColor(QStringLiteral("#ffff00"));
         Theme::setSpec(resetSpec);
-        settle(MainWindow::kAppearanceWriteMs * 2);
+        waitFully(MainWindow::kAppearanceWriteMs * 2);
 
         probe.close();
     }
@@ -27084,7 +27219,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 700);
         probe.show();
-        settle(200);
+        waitFully(200);
         probe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
 
@@ -27482,7 +27617,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 700);
         probe.show();
-        settle(200);
+        waitFully(200);
         probe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
         OcctViewWidget* fView = probe.view();
@@ -27707,7 +27842,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 700);
         probe.show();
-        settle(200);
+        waitFully(200);
         probe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
 
@@ -27863,7 +27998,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1100, 800);
         probe.show();
-        settle(300);
+        waitFully(300);
         probe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
         check(buildBody(probe, 0.30, 0.30, 0.55, 0.55, 40.0), "a body for the shots probe");
@@ -28269,7 +28404,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 700);
         probe.show();
-        settle(300);
+        waitFully(300);
         probe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
         OcctViewWidget* wview = probe.view();
@@ -28286,7 +28421,7 @@ int main(int argc, char* argv[])
         QAction* renderAction = action(probe, QStringLiteral("Render mode"));
         check(renderAction != nullptr, "there is a Render mode action");
         if (renderAction) renderAction->trigger();
-        settle(500);
+        waitFully(500);
 
         // Where each body actually IS on screen, from its own measured box
         // rather than from the fractions it was sketched at - the camera has
@@ -28326,7 +28461,7 @@ int main(int argc, char* argv[])
         // nothing to do with per-body wood.
         check(wview->renderWood(),
               "wood is on, so the two samples below are measuring woods at all");
-        settle(600);
+        waitFully(600);
 
         const QString path = outDir + QStringLiteral("/two-woods.png");
         check(wview->saveSnapshot(path), "a snapshot is taken");
@@ -28388,7 +28523,7 @@ int main(int argc, char* argv[])
         wview->clearBodyWood();
         check(!wview->hasBodyWood(leftId) && !wview->hasBodyWood(rightId),
               "the per-body woods are cleared");
-        settle(600);
+        waitFully(600);
         const QString plainPath = outDir + QStringLiteral("/one-wood.png");
         check(wview->saveSnapshot(plainPath), "a second snapshot is taken");
         const QImage plain(plainPath);
@@ -29360,7 +29495,7 @@ int main(int argc, char* argv[])
             }
             check(renderToggle != nullptr, "...and Render mode is reachable as an action");
             if (renderToggle) renderToggle->trigger();
-            settle(800);
+            waitFully(800);
             check(scene.studio()->isEnabled(),
                   "render mode turns on from a selection without taking the app down");
             check(!scene.view()->hasMoveGizmo() && !scene.view()->hasRotateGizmo(),
@@ -29368,7 +29503,7 @@ int main(int argc, char* argv[])
             const QString selPath = outDir + QStringLiteral("/scene-render-from-selection.png");
             check(scene.view()->saveSnapshot(selPath), "...and it renders a picture");
             if (renderToggle) renderToggle->trigger();
-            settle(500);
+            waitFully(500);
             check(!scene.studio()->isEnabled(), "...and turns back off again");
         }
 
@@ -29378,7 +29513,7 @@ int main(int argc, char* argv[])
         scene.view()->setSelectedSolids({});
         settle(150);
         scene.studio()->setEnabled(true);
-        settle(400);
+        waitFully(400);
         check(scene.studio()->isEnabled(), "render mode turns on in a scene");
         check(scene.findChild<RenderSettingsPanel*>() != nullptr,
               "...showing the editor's own RenderSettingsPanel class");
@@ -29634,7 +29769,7 @@ int main(int argc, char* argv[])
         check(empty.openScene(emptyId), "an empty scene opens");
         check(empty.scene().pieces().empty(), "and it really is empty");
         empty.studio()->setEnabled(true);
-        settle(400);
+        waitFully(400);
         check(empty.studio()->isEnabled(), "render mode turns on over nothing at all");
         const QString emptyPath = outDir + QStringLiteral("/empty-scene.png");
         check(empty.view()->saveSnapshot(emptyPath),
@@ -29643,6 +29778,11 @@ int main(int argc, char* argv[])
         empty.close();
     }
 
+    // --- a piece snaps to another, and stacks on it -------------------------
+    // Phase 2. The magnet already built candidates from every other box's
+    // low/centre/high on the dragged axis - so lo->hi IS flush side-to-side -
+    // but it required ONE selected body and a scene selects a whole piece, so
+    // it collected nothing and snapping did not exist here at all.
     // --- each piece renders in its own furniture's wood ---------------------
     // Its own scene, with exactly TWO pieces and nothing else in frame. The
     // shared block grew to five pieces that occlude one another, and a sample
@@ -29779,7 +29919,7 @@ int main(int argc, char* argv[])
                 tex.view()->fitAll();
                 settle(200);
                 tex.studio()->setEnabled(true);
-                settle(900);
+                waitFully(900);
                 const QString texPath = outDir + QStringLiteral("/two-wood-images.png");
                 check(tex.view()->saveSnapshot(texPath), "a render is taken");
                 const QImage texShot(texPath);
@@ -29842,7 +29982,7 @@ int main(int argc, char* argv[])
         woodScene.view()->fitAll();
         settle(300);
         woodScene.studio()->setEnabled(true);
-        settle(900);
+        waitFully(900);
         check(woodScene.view()->renderWood(), "a scene renders its furniture in wood");
 
         const QString twoPath = outDir + QStringLiteral("/two-piece-woods.png");
@@ -29899,7 +30039,7 @@ int main(int argc, char* argv[])
         many.setAttribute(Qt::WA_ShowWithoutActivating);
         many.resize(1100, 780);
         many.show();
-        settle(300);
+        waitFully(300);
         many.view()->setAnimationsEnabled(false);
         // Built through the STORE and opened, which is the ordinary route a
         // heavy furniture reaches the viewport by.
@@ -29915,7 +30055,7 @@ int main(int argc, char* argv[])
                   "a furniture of 100 bodies is saved");
         }
         check(many.openFurniture(manyId), "it opens in the editor");
-        settle(800);
+        waitFully(800);
         check(many.document().solids().size() == 100,
               QStringLiteral("...with all 100 on screen (%1)")
                   .arg(static_cast<int>(many.document().solids().size())));
@@ -29923,11 +30063,11 @@ int main(int argc, char* argv[])
         QAction* manyRender = action(many, QStringLiteral("Render mode"));
         check(manyRender != nullptr, "the editor's Render mode is reachable");
         if (manyRender) manyRender->trigger();
-        settle(1500);
+        waitFully(1500);
         check(many.view()->renderModeTierProbed(),
               "THE EDITOR SURVIVES render mode with wood on at 100 bodies");
         if (manyRender) manyRender->trigger();
-        settle(400);
+        waitFully(400);
     }
 
     // --- a REAL scene, from a copy of the real library ----------------------
@@ -29950,10 +30090,10 @@ int main(int argc, char* argv[])
                 real.setAttribute(Qt::WA_ShowWithoutActivating);
                 real.resize(1200, 820);
                 real.show();
-                settle(400);
+                waitFully(400);
                 check(real.openScene(realScenes.front().id),
                       "the user's own scene opens");
-                settle(600);
+                waitFully(600);
                 check(!real.scene().pieces().empty(),
                       QStringLiteral("...with its pieces (%1)")
                           .arg(static_cast<int>(real.scene().pieces().size())));
@@ -29986,19 +30126,19 @@ int main(int argc, char* argv[])
                     edit.setAttribute(Qt::WA_ShowWithoutActivating);
                     edit.resize(1200, 820);
                     edit.show();
-                    settle(400);
+                    waitFully(400);
                     edit.view()->setAnimationsEnabled(false);
                     check(edit.openFurniture(heaviestId), "it opens in the EDITOR");
-                    settle(600);
+                    waitFully(600);
                     edit.view()->setRenderWood(true);
                     QAction* editRender = action(edit, QStringLiteral("Render mode"));
                     check(editRender != nullptr, "the editor's Render mode is reachable");
                     if (editRender) editRender->trigger();
-                    settle(1500);
+                    waitFully(1500);
                     check(edit.view()->renderModeTierProbed() || true,
                           "THE EDITOR survives render mode with wood on at that body count");
                     if (editRender) editRender->trigger();
-                    settle(400);
+                    waitFully(400);
                     edit.close();
                 }
 
@@ -30023,7 +30163,7 @@ int main(int argc, char* argv[])
                 }
                 check(realRender != nullptr, "...and Render mode is reachable");
                 if (realRender) realRender->trigger();
-                settle(1500);
+                waitFully(1500);
                 check(real.studio()->isEnabled(),
                       "RENDER MODE TURNS ON over the real scene without taking the app down");
                 const QString realPath = outDir + QStringLiteral("/real-scene-render.png");
@@ -30046,7 +30186,7 @@ int main(int argc, char* argv[])
         autoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         autoProbe.resize(1000, 700);
         autoProbe.show();
-        settle(300);
+        waitFully(300);
         autoProbe.view()->setAnimationsEnabled(false);
         enterFreshFurniture(autoProbe);
         check(!autoProbe.isShowingInitScreen(),
@@ -30152,7 +30292,7 @@ int main(int argc, char* argv[])
               "the furniture's shapes file already exists, from creation");
         const QDateTime mtimeAtOpen = QFileInfo(autoShapesPath).lastModified();
         autoProbe.debugFireAutosaveInterval();
-        settle(80);
+        waitFully(80);
         check(!autoProbe.isFurnitureDirty(), "still clean after a clean-fire tick");
         check(QFileInfo(autoShapesPath).lastModified() == mtimeAtOpen,
               "a clean fire wrote nothing at all - shapes.bin's own modification time is "
@@ -30166,7 +30306,7 @@ int main(int argc, char* argv[])
         check(autoProbe.autosavePendingMs() < 0,
               "...and a checkpoint under a timed mode arms no After-every-change debounce");
         autoProbe.debugFireAutosaveInterval();
-        settle(80);
+        waitFully(80);
         check(!autoProbe.isFurnitureDirty(), "the forced tick saved the dirty furniture");
         {
             DocumentModel reloadedTimed;
@@ -30182,7 +30322,7 @@ int main(int argc, char* argv[])
         // --- no-op when clean, proven a second way: mtime does not move -----
         const QDateTime beforeCleanTick = QFileInfo(autoShapesPath).lastModified();
         autoProbe.debugFireAutosaveInterval();
-        settle(80);
+        waitFully(80);
         check(QFileInfo(autoShapesPath).lastModified() == beforeCleanTick,
               "a clean fire after a real save still writes nothing - shapes.bin's own "
               "modification time is untouched");
@@ -30233,7 +30373,7 @@ int main(int argc, char* argv[])
         ToastHost* autoToasts = autoProbe.findChild<ToastHost*>();
         check(autoToasts != nullptr, "the probe has a toast host");
         autoProbe.debugFireAutosaveInterval();
-        settle(100);
+        waitFully(100);
         check(autoProbe.isFurnitureDirty(), "the blocked tick failed to save - still dirty");
         const QString firstFailureText = autoToasts ? autoToasts->currentText() : QString();
         check(autoToasts != nullptr && firstFailureText.contains(QStringLiteral("Couldn't save")),
@@ -30247,7 +30387,7 @@ int main(int argc, char* argv[])
         // NOT re-toast - the countdown keeps falling rather than jumping back
         // up to a freshly restarted Failure's own full lifetime.
         autoProbe.debugFireAutosaveInterval();
-        settle(80);
+        waitFully(80);
         const int afterSecondTickCountdown = autoToasts ? autoToasts->remainingMs() : -1;
         check(autoProbe.isFurnitureDirty(), "...still dirty, still blocked");
         check(afterSecondTickCountdown >= 0 && afterSecondTickCountdown <= midCountdown,
@@ -30264,7 +30404,7 @@ int main(int argc, char* argv[])
         settle(150);
         const int beforeRearmedTickCountdown = autoToasts ? autoToasts->remainingMs() : -1;
         autoProbe.debugFireAutosaveInterval();
-        settle(80);
+        waitFully(80);
         const int afterRearmedTickCountdown = autoToasts ? autoToasts->remainingMs() : -1;
         check(afterRearmedTickCountdown > beforeRearmedTickCountdown,
               QStringLiteral("...a NEW edit re-arms the report - the retry on the new "
@@ -30277,7 +30417,7 @@ int main(int argc, char* argv[])
         // "re-armed by ... a successful save" too.
         check(QDir(blockedTmpPath).removeRecursively(), "the blocking directory is cleared");
         autoProbe.debugFireAutosaveInterval();
-        settle(100);
+        waitFully(100);
         check(!autoProbe.isFurnitureDirty(),
               "unblocked, the tick finally saves - re-armed by success as well as by an edit");
 
@@ -30477,7 +30617,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 700);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* av = probe.view();
         av->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
@@ -30995,7 +31135,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 700);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* av = probe.view();
         av->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
@@ -31223,7 +31363,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1100, 800);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* mv = probe.view();
         mv->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
@@ -31510,9 +31650,16 @@ int main(int argc, char* argv[])
                 check(std::fabs(chip->distance() - 30.0) < 10.001,
                       QStringLiteral("with the snapped distance the drag reached (%1 mm)")
                           .arg(chip->distance()));
+                // BOTH halves are named in the message. They can disagree:
+                // every other gizmo's refresh() clears this channel on the
+                // way past, so an appStateChanged landing mid-drag leaves the
+                // chip's own flag standing over an empty viewport channel -
+                // and an ANDed check cannot say which half went.
                 check(chip->hasPreview() && mv->hasModelingPreview(),
-                      "and a live ghost of where the body is going, on the dedicated "
-                      "modeling-preview channel");
+                      QStringLiteral("and a live ghost of where the body is going, on the "
+                                     "dedicated modeling-preview channel (chip %1, view %2)")
+                          .arg(chip->hasPreview() ? "yes" : "no")
+                          .arg(mv->hasModelingPreview() ? "yes" : "no"));
                 // The number on the chip is Measure's, in the display unit -
                 // the same formatter every other length in this app goes
                 // through, which is what makes it follow a unit switch.
@@ -31820,7 +31967,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1100, 800);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* gv = probe.view();
         gv->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
@@ -32036,7 +32183,7 @@ int main(int argc, char* argv[])
                     around.azimuthDeg = look.azimuth;
                     around.elevationDeg = look.elevation;
                     gv->animateTo(around);   // animations are off: immediate
-                    settle(220);
+                    waitFully(220);
                     const QString path =
                         outDir + QStringLiteral("/gizmo3d-%1-az%2.png")
                                      .arg(QLatin1String(toolNames[tool]))
@@ -32110,7 +32257,7 @@ int main(int argc, char* argv[])
         fw.setAttribute(Qt::WA_ShowWithoutActivating);
         fw.resize(900, 700);
         fw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* fv = fw.view();
         fv->setAnimationsEnabled(false);
         enterFreshFurniture(fw);
@@ -32123,14 +32270,14 @@ int main(int argc, char* argv[])
         check(renderMode != nullptr, "the Render mode entry exists");
         if (renderMode) {
             renderMode->trigger();
-            settle(900);
+            waitFully(900);
             fv->setRenderWood(true);
-            settle(900);
+            waitFully(900);
             // THE REBUILD: a background override runs
             // applyBackgroundForMode(), which re-makes the floor - the exact
             // route that used to destroy it while wood stood in.
             fv->setRenderBackgroundOverride(QColor(0xba, 0xba, 0xba));
-            settle(1200);
+            waitFully(1200);
 
             const QString floorShot = outDir + QStringLiteral("/render-floor-under-wood.png");
             check(fv->saveSnapshot(floorShot), "the render is captured");
@@ -32161,7 +32308,7 @@ int main(int argc, char* argv[])
                           .arg(lit - darkest).arg(lit).arg(darkest));
             }
             renderMode->trigger();
-            settle(400);
+            waitFully(400);
         }
         check(fw.findChild<QDialog*>() == nullptr, "and no modal appeared for any of it");
     }
@@ -32172,7 +32319,7 @@ int main(int argc, char* argv[])
         shapeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         shapeProbe.resize(1100, 800);
         shapeProbe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* sv = shapeProbe.view();
         sv->setAnimationsEnabled(false);
         enterFreshFurniture(shapeProbe);
@@ -32264,7 +32411,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1100, 800);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* iv = probe.view();
         iv->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
@@ -32358,7 +32505,7 @@ int main(int argc, char* argv[])
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1100, 800);
         probe.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* mgv = probe.view();
         mgv->setAnimationsEnabled(false);
         enterFreshFurniture(probe);
@@ -32391,7 +32538,7 @@ int main(int argc, char* argv[])
               "Snap to Grid is off for the anchor build");
         check(buildBody(probe, 0.573, 0.30, 0.731, 0.44, 40.0), "and one to stick to");
         if (magnetSnapAction) magnetSnapAction->trigger();
-        settle(100);
+        waitFully(100);
         check(magnetSnapAction && magnetSnapAction->isChecked(),
               "...and back on for the drag itself");
         const auto& magSolids = probe.document().solids();
@@ -32523,7 +32670,7 @@ int main(int argc, char* argv[])
                 check(std::fabs(dx - alignDelta) > 0.5,
                       "...and NOT at the alignment - the stick really was Magnet's");
                 trigger(probe, QStringLiteral("Undo"));
-                settle(250);
+                waitFully(250);
             }
             if (magnet && !magnet->isChecked()) { magnet->trigger(); settle(120); }
         }
@@ -32587,11 +32734,11 @@ int main(int argc, char* argv[])
         jw.setAttribute(Qt::WA_ShowWithoutActivating);
         jw.resize(1000, 700);
         jw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* jv = jw.view();
         jv->setAnimationsEnabled(false);
         check(jw.openFurniture(furnitureId), "joints: the seeded furniture opens");
-        settle(250);
+        waitFully(250);
         // Since Task 12 a joint draws only while the joints drawer is open or
         // that joint is selected. Every check below measures the document's
         // joint on screen through state changes that clear any selection, so
@@ -33117,7 +33264,7 @@ int main(int argc, char* argv[])
                 settle(200);
                 check(jv->jointsShown() == 1, "joints: the hardware is back up before render mode");
                 jw.setRenderModeEnabled(true);
-                settle(400);
+                waitFully(400);
                 check(jv->renderModeActive(), "joints: render mode is on");
                 check(jv->jointsShown() == 0 && jv->jointItemsShown() == 0,
                       "joints: entering render mode takes the hardware away");
@@ -33323,7 +33470,7 @@ int main(int argc, char* argv[])
         pw.setAttribute(Qt::WA_ShowWithoutActivating);
         pw.resize(1000, 700);
         pw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* pv = pw.view();
         pv->setAnimationsEnabled(false);
         ToastHost* toasts = pw.findChild<ToastHost*>();
@@ -33958,11 +34105,11 @@ int main(int argc, char* argv[])
         dw.setAttribute(Qt::WA_ShowWithoutActivating);
         dw.resize(1180, 860);
         dw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* dv = dw.view();
         dv->setAnimationsEnabled(false);
         check(dw.openFurniture(drawerFurnitureId), "drawer: the seeded furniture opens");
-        settle(300);
+        waitFully(300);
         dv->fitAll();
         settle(200);
         // The Items drawer shares the TopLeft column; closed, so the joints
@@ -34855,7 +35002,7 @@ int main(int argc, char* argv[])
                     gp_Trsf away;
                     away.SetTranslation(gp_Vec(0.0, 0.0, 900.0));
                     check(dw.transformBody(shelf, away), "drawer: the shelf is moved clear of its panel");
-                    settle(400);
+                    waitFully(400);
                     // The shelf carries three joints; all three break and sort first.
                     bool topThreeBroken = panel->rowCount() == static_cast<int>(joints.size());
                     for (int i = 0; topThreeBroken && i < 3; ++i) topThreeBroken = panel->isBrokenAt(i);
@@ -34909,7 +35056,7 @@ int main(int argc, char* argv[])
                     checkNoBlackLine(brokenShot, QStringLiteral("joints drawer (broken row, band open)"));
 
                     trigger(dw, QStringLiteral("Undo"));
-                    settle(400);
+                    waitFully(400);
                     bool anyBroken = false;
                     for (int i = 0; i < panel->rowCount(); ++i) anyBroken = anyBroken || panel->isBrokenAt(i);
                     check(!anyBroken, "drawer: undoing the move heals every joint on the shelf");
@@ -34995,7 +35142,7 @@ int main(int argc, char* argv[])
                     if (glContext != nullptr) {
                         const int releasesBefore = OcctViewWidget::glReleaseCount();
                         emit glContext->aboutToBeDestroyed();
-                        settle(400);
+                        waitFully(400);
                         check(OcctViewWidget::glReleaseCount() == releasesBefore + 1 &&
                                   dw.selectedJointId() == placedId && dv->jointsShown() == 1,
                               QStringLiteral("drawer: a lost GL context changed no document, so the joint stays "
@@ -35134,11 +35281,11 @@ int main(int argc, char* argv[])
         cw.setAttribute(Qt::WA_ShowWithoutActivating);
         cw.resize(1180, 820);
         cw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* cv = cw.view();
         cv->setAnimationsEnabled(false);
         check(cw.openFurniture(chipFurnitureId), "chip: the seeded furniture opens");
-        settle(300);
+        waitFully(300);
         cv->fitAll();
         settle(250);
         ToastHost* toasts = cw.findChild<ToastHost*>();
@@ -35976,7 +36123,7 @@ int main(int argc, char* argv[])
                 if (glContext != nullptr) {
                     const int releasesBefore = OcctViewWidget::glReleaseCount();
                     emit glContext->aboutToBeDestroyed();
-                    settle(400);
+                    waitFully(400);
                     check(OcctViewWidget::glReleaseCount() == releasesBefore + 1,
                           "chip: the loss really released the viewer");
                     check(cw.selectedJointId() == jDowel && cv->jointsShown() == shownBefore,
@@ -36045,11 +36192,11 @@ int main(int argc, char* argv[])
         rw.setAttribute(Qt::WA_ShowWithoutActivating);
         rw.resize(1100, 800);
         rw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* rv = rw.view();
         rv->setAnimationsEnabled(false);
         check(rw.openFurniture(restFurnitureId), "rest: the seeded furniture opens");
-        settle(300);
+        waitFully(300);
         rv->fitAll();
         settle(200);
         ToastHost* restToasts = rw.findChild<ToastHost*>();
@@ -36209,13 +36356,13 @@ int main(int argc, char* argv[])
                   "rest: there is a checkable Render mode action");
             if (restRenderAction != nullptr) {
                 restRenderAction->trigger();
-                settle(900);
+                waitFully(900);
                 check(restRenderAction->isChecked() && rv->jointsShown() == 0,
                       QStringLiteral("rest: entering render mode takes every joint off the "
                                      "scene - hardware is decoration like the grid (%1 drawn)")
                           .arg(rv->jointsShown()));
                 restRenderAction->trigger();
-                settle(600);
+                waitFully(600);
                 check(!restRenderAction->isChecked() && rv->jointsShown() == 2,
                       QStringLiteral("rest: and leaving it brings both back (%1 drawn)")
                           .arg(rv->jointsShown()));
@@ -36366,11 +36513,11 @@ int main(int argc, char* argv[])
         mw.setAttribute(Qt::WA_ShowWithoutActivating);
         mw.resize(1100, 800);
         mw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* mv = mw.view();
         mv->setAnimationsEnabled(false);
         check(mw.openFurniture(mitreFurnitureId), "mitre: the seeded furniture opens");
-        settle(300);
+        waitFully(300);
         ToastHost* mToasts = mw.findChild<ToastHost*>();
         MitreTool* tool = mw.mitreTool();
         QAction* mitreAction = action(mw, QStringLiteral("Mitre end"));
@@ -36393,7 +36540,7 @@ int main(int argc, char* argv[])
         endView.elevationDeg = 25.0;
         endView.distance = 320.0;
         mv->setCameraStateNow(endView);
-        settle(200);
+        waitFully(200);
 
         const auto faceNear = [&](int bodyId, const gp_Pnt& at) {
             TopoDS_Face best;
@@ -36415,11 +36562,11 @@ int main(int argc, char* argv[])
         // app selected exactly that face.
         const auto pickBoardEnd = [&]() {
             mv->clearSelection();
-            settle(80);
+            waitFully(80);
             QPoint at;
             if (!mv->projectToScreen(endCentre, at)) return false;
             clickAt(mv, QPointF(at));
-            settle(120);
+            waitFully(120);
             const TopoDS_Face want = faceNear(board, endCentre);
             return !mv->selectedFace().IsNull() && mv->selectedFace().IsSame(want);
         };
@@ -36427,14 +36574,14 @@ int main(int argc, char* argv[])
 
         // --- M is available on a board end and nowhere else ------------------
         mv->clearSelection();
-        settle(100);
+        waitFully(100);
         check(!mitreEnabled(), "mitre: M is disabled with nothing selected");
         check(mitreAction && !mitreAction->toolTip().isEmpty() &&
                   mitreAction->toolTip() != MainWindow::mitreActionTooltip(),
               "mitre: and its tooltip says why rather than advertising the tool");
 
         mv->setSelectedSolids({board});   // the kind as setup - the seam's sanctioned use
-        settle(100);
+        waitFully(100);
         check(mv->selectionKind() == OcctViewWidget::PickKind::Body && !mitreEnabled(),
               "mitre: M is disabled with a whole body selected");
 
@@ -36453,13 +36600,13 @@ int main(int argc, char* argv[])
             CameraState postView = endView;
             postView.target = gp_Pnt(150.0, -120.0, 50.0);
             mv->setCameraStateNow(postView);
-            settle(150);
+            waitFully(150);
             mv->clearSelection();
-            settle(80);
+            waitFully(80);
             QPoint sideAt;
             const bool projected = mv->projectToScreen(onSide, sideAt);
             if (projected) clickAt(mv, QPointF(sideAt));
-            settle(120);
+            waitFully(120);
             const TopoDS_Face curved = mv->selectedFace();
             check(!curved.IsNull() &&
                       BRepAdaptor_Surface(curved).GetType() == GeomAbs_Cylinder &&
@@ -36469,7 +36616,7 @@ int main(int argc, char* argv[])
             check(mitreAction && mitreAction->toolTip() != MainWindow::mitreActionTooltip(),
                   "mitre: and says why");
             mv->setCameraStateNow(endView);
-            settle(150);
+            waitFully(150);
         }
 
         check(pickBoardEnd(), "mitre: a click on the board's end selects that face");
@@ -36485,7 +36632,7 @@ int main(int argc, char* argv[])
         const std::size_t depthBefore = mw.document().undoDepth();
         const int revisionBefore = mw.document().revision();
         trigger(mw, QStringLiteral("Mitre end"));
-        settle(150);
+        waitFully(150);
         check(mw.mitreEndActive(), "mitre: M begins the gesture");
         check(tool && tool->isVisible(), "mitre: the chip is on screen");
         check(mv->hasMitreDial(), "mitre: the dial is drawn in the viewport");
@@ -36511,7 +36658,7 @@ int main(int argc, char* argv[])
         {
             // One capture of the live dial and chip, for looking at against
             // the mockup - the composited window, so the chip is in it.
-            settle(200);
+            waitFully(200);
             const QImage shot =
                 printWindowCapture(&mw, outDir + QStringLiteral("/mitre-live.png"));
             check(!shot.isNull(), "mitre: the live dial and chip are captured");
@@ -36556,7 +36703,7 @@ int main(int argc, char* argv[])
 
         // --- typing ----------------------------------------------------------
         if (mField) mField->setText(QStringLiteral("30"));
-        settle(120);
+        waitFully(120);
         check(tool && std::fabs(tool->angle() - 30.0) < 1.0e-9 &&
                   std::fabs(mv->mitreDialAngle() - 30.0) < 1.0e-9,
               "mitre: typing 30 moves the angle and the dial");
@@ -36567,7 +36714,7 @@ int main(int argc, char* argv[])
                   .arg(boardVolume - ModelingOps::volume(mv->modelingPreviewShape())));
 
         if (mField) mField->setText(QStringLiteral("32.5"));
-        settle(120);
+        waitFully(120);
         const double ghostAt325 = ModelingOps::volume(mv->modelingPreviewShape());
         check(std::fabs(boardVolume - ghostAt325 - removedAt(32.5)) < removedAt(32.5) * 1.0e-3,
               QStringLiteral("mitre: a typed 32.5 is EXACT - the ghost is the preview the commit "
@@ -36576,30 +36723,30 @@ int main(int argc, char* argv[])
                   .arg(removedAt(32.5)));
 
         if (mField) mField->setText(QStringLiteral("abc"));
-        settle(120);
+        waitFully(120);
         check(mv->hasModelingPreview() &&
                   std::fabs(ModelingOps::volume(mv->modelingPreviewShape()) - ghostAt325) < 1.0e-6,
               "mitre: unreadable input keeps the last good ghost");
         check(tool && tool->reasonText() == MainWindow::mitreAngleRangeRefusalText(),
               "mitre: and the chip says what it wants");
         if (mField) mField->setText(QStringLiteral("95"));
-        settle(120);
+        waitFully(120);
         check(mv->hasModelingPreview() &&
                   std::fabs(ModelingOps::volume(mv->modelingPreviewShape()) - ghostAt325) < 1.0e-6,
               "mitre: an angle past 89 keeps the last good ghost too");
 
         // 60 * tan(89) runs far past a 300 mm board.
         if (mField) mField->setText(QStringLiteral("89"));
-        settle(150);
+        waitFully(150);
         check(!mv->hasModelingPreview() && tool && !tool->hasPreview(),
               "mitre: an angle the board is too short for shows NO ghost");
         check(tool && tool->reasonText() == MainWindow::mitreTooLongRefusalText(),
               "mitre: and the chip says why");
         mv->setFocus();
-        settle(60);
+        waitFully(60);
         std::size_t depthRefused = mw.document().undoDepth();
         sendKeyTo(&mw, Qt::Key_Return);
-        settle(150);
+        waitFully(150);
         check(mw.mitreEndActive() && mw.document().undoDepth() == depthRefused &&
                   mw.document().shapeOf(board).IsSame(originalShape),
               "mitre: Enter on a refused angle changes nothing and leaves the gesture live");
@@ -36614,13 +36761,13 @@ int main(int argc, char* argv[])
         // kept is asserted by where the ghost's mass went: across Y for the
         // width pair, across Z for the thickness pair.
         if (mField) mField->setText(QStringLiteral("45"));
-        settle(120);
+        waitFully(120);
         const auto ghostRemoved = [&]() {
             return boardVolume - ModelingOps::volume(mv->modelingPreviewShape());
         };
         const auto clickFlip = [&]() {
             if (mFlip) clickAt(mFlip, QPointF(mFlip->rect().center()));
-            settle(150);
+            waitFully(150);
         };
         const gp_Pnt ghostCentre = ModelingOps::centreOfMass(mv->modelingPreviewShape());
         const gp_Dir widthDialNormal = mv->mitreDialNormal();
@@ -36665,7 +36812,7 @@ int main(int argc, char* argv[])
                   .arg(stateLabelText(mw)));
         {
             // The thickness side live, dial and chip, for looking at.
-            settle(200);
+            waitFully(200);
             const QImage shot =
                 printWindowCapture(&mw, outDir + QStringLiteral("/mitre-thickness.png"));
             check(!shot.isNull(), "mitre: the live thickness-side dial and chip are captured");
@@ -36714,7 +36861,7 @@ int main(int argc, char* argv[])
         {
             QAction* snapAction = action(mw, QStringLiteral("Snap to Grid"));
             if (snapAction && !snapAction->isChecked()) snapAction->trigger();
-            settle(80);
+            waitFully(80);
             check(mv->snapEnabled(), "mitre: (Snap to Grid is on for the snapped drag)");
             gp_Pnt handle, aim;
             QPoint handleAt, aimAt;
@@ -36725,7 +36872,7 @@ int main(int argc, char* argv[])
                   "mitre: the dial's handle claims its own projected pixel");
             const std::size_t depthDrag = mw.document().undoDepth();
             if (located) dragButton(mv, QPointF(handleAt), QPointF(aimAt), Qt::LeftButton);
-            settle(150);
+            waitFully(150);
             check(tool && std::fabs(tool->angle() - 60.0) < 1.0e-9 && mField &&
                       mField->text() == QStringLiteral("60°"),
                   QStringLiteral("mitre: dragging the handle toward 62 degrees lands on 60 - "
@@ -36740,7 +36887,7 @@ int main(int argc, char* argv[])
                   "mitre: the dragged angle previews through the same path");
 
             if (snapAction) snapAction->trigger();
-            settle(80);
+            waitFully(80);
             gp_Pnt handle2, aim2;
             QPoint handle2At, aim2At;
             const bool located2 = mv->mitreDialHandle(handle2) &&
@@ -36748,21 +36895,21 @@ int main(int argc, char* argv[])
                                   mv->mitreDialPointAt(37.0, aim2) &&
                                   mv->projectToScreen(aim2, aim2At);
             if (located2) dragButton(mv, QPointF(handle2At), QPointF(aim2At), Qt::LeftButton);
-            settle(150);
+            waitFully(150);
             check(!mv->snapEnabled() && tool && std::fabs(tool->angle() - 37.0) < 2.5 &&
                       std::fabs(tool->angle() - std::round(tool->angle() / 5.0) * 5.0) > 1.0e-6,
                   QStringLiteral("mitre: with Snap to Grid off the drag is free (aimed at 37, "
                                  "got %1)")
                       .arg(tool ? tool->angle() : -1.0));
             if (snapAction && !snapAction->isChecked()) snapAction->trigger();
-            settle(80);
+            waitFully(80);
         }
 
         // --- Escape cancels, byte-identical ---------------------------------
         mv->setFocus();
-        settle(60);
+        waitFully(60);
         sendKeyTo(&mw, Qt::Key_Escape);
-        settle(150);
+        waitFully(150);
         check(!mw.mitreEndActive() && tool && !tool->isVisible() && !mv->hasMitreDial() &&
                   !mv->hasModelingPreview(),
               "mitre: Esc ends the gesture - no chip, no dial, no ghost");
@@ -36777,29 +36924,29 @@ int main(int argc, char* argv[])
 
         // --- a selection change cancels -------------------------------------
         trigger(mw, QStringLiteral("Mitre end"));
-        settle(120);
+        waitFully(120);
         check(mw.mitreEndActive(), "mitre: M begins again on the still-selected end");
         QPoint otherEdgeAt;
         TopoDS_Edge otherEdge;
         pickEdgeOf(mw, board, otherEdgeAt, otherEdge);
-        settle(120);
+        waitFully(120);
         check(!mw.mitreEndActive() && tool && !tool->isVisible() && !mv->hasMitreDial(),
               "mitre: a selection change ends the gesture");
 
         // --- Enter commits one checkpoint ------------------------------------
         check(pickBoardEnd(), "mitre: the end is picked again");
         trigger(mw, QStringLiteral("Mitre end"));
-        settle(120);
+        waitFully(120);
         if (mField) mField->setText(QStringLiteral("30"));
-        settle(120);
+        waitFully(120);
         const double ghostAt30 = ModelingOps::volume(mv->modelingPreviewShape());
         const std::size_t depthCommit = mw.document().undoDepth();
         // Focus deliberately OFF the field: Enter belongs to the gesture
         // whatever holds focus.
         mv->setFocus();
-        settle(60);
+        waitFully(60);
         sendKeyTo(&mw, Qt::Key_Return);
-        settle(200);
+        waitFully(200);
         const double committed = ModelingOps::volume(mw.document().shapeOf(board));
         check(!mw.mitreEndActive(), "mitre: Enter, with focus on the viewport, commits");
         check(mw.document().undoDepth() == depthCommit + 1,
@@ -36817,7 +36964,7 @@ int main(int argc, char* argv[])
                   .arg(mToasts ? mToasts->currentText() : QString()));
 
         trigger(mw, QStringLiteral("Undo"));
-        settle(200);
+        waitFully(200);
         check(std::fabs(ModelingOps::volume(mw.document().shapeOf(board)) - boardVolume) < 1.0e-6 &&
                   mw.document().undoDepth() == depthCommit,
               "mitre: one Undo restores the original board");
@@ -36825,19 +36972,19 @@ int main(int argc, char* argv[])
         // --- a thickness side commits one checkpoint too --------------------
         check(pickBoardEnd(), "mitre: the end is picked for a thickness-side mitre");
         trigger(mw, QStringLiteral("Mitre end"));
-        settle(120);
+        waitFully(120);
         if (tool) tool->flip();   // WidthA -> ThicknessA
-        settle(120);
+        waitFully(120);
         if (mField) mField->setText(QStringLiteral("30"));
-        settle(120);
+        waitFully(120);
         const double ghostThrough30 = ModelingOps::volume(mv->modelingPreviewShape());
         const std::size_t depthThrough = mw.document().undoDepth();
         check(tool && tool->side() == ModelingOps::MitreSide::ThicknessA,
               "mitre: (the live side is ThicknessA before Enter)");
         mv->setFocus();
-        settle(60);
+        waitFully(60);
         sendKeyTo(&mw, Qt::Key_Return);
-        settle(200);
+        waitFully(200);
         const double committedThrough = ModelingOps::volume(mw.document().shapeOf(board));
         check(!mw.mitreEndActive() && mw.document().undoDepth() == depthThrough + 1,
               QStringLiteral("mitre: a thickness-side mitre commits exactly ONE checkpoint (%1 -> %2)")
@@ -36851,30 +36998,30 @@ int main(int argc, char* argv[])
                   mToasts->toast() && mToasts->toast()->hasUndo(),
               "mitre: and a Note with Undo names it");
         trigger(mw, QStringLiteral("Undo"));
-        settle(200);
+        waitFully(200);
         check(std::fabs(ModelingOps::volume(mw.document().shapeOf(board)) - boardVolume) < 1.0e-6 &&
                   mw.document().undoDepth() == depthThrough,
               "mitre: one Undo restores the board after a thickness-side mitre");
 
         // --- a mirrored twin follows ----------------------------------------
         mv->setSelectedSolids({board});
-        settle(100);
+        waitFully(100);
         trigger(mw, QStringLiteral("Mirror"));
         sendKeyTo(&mw, Qt::Key_Y);   // tangent on +Y, clear of the board's end
         sendKeyTo(&mw, Qt::Key_Return);
-        settle(250);
+        waitFully(250);
         const int twin = mw.document().twinOf(board);
         check(mw.document().symmetryOn() && twin > 0, "mitre: the board is mirrored");
         check(pickBoardEnd(), "mitre: the ORIGINAL board's end is picked beside its twin");
         trigger(mw, QStringLiteral("Mitre end"));
-        settle(120);
+        waitFully(120);
         if (mField) mField->setText(QStringLiteral("45"));
-        settle(120);
+        waitFully(120);
         mv->setFocus();
-        settle(60);
+        waitFully(60);
         const std::size_t depthTwin = mw.document().undoDepth();
         sendKeyTo(&mw, Qt::Key_Return);
-        settle(250);
+        waitFully(250);
         if (twin > 0) {
             const TopoDS_Shape mitred = mw.document().shapeOf(board);
             const TopoDS_Shape twinShape = mw.document().shapeOf(twin);
@@ -36923,10 +37070,10 @@ int main(int argc, char* argv[])
         aw.setAttribute(Qt::WA_ShowWithoutActivating);
         aw.resize(1000, 760);
         aw.show();
-        settle(300);
+        waitFully(300);
         aw.view()->setAnimationsEnabled(false);
         check(aw.openFurniture(allFurnitureId), "select all: the furniture opens");
-        settle(300);
+        waitFully(300);
 
         QAction* selectAll = action(aw, QStringLiteral("Select All"));
         check(selectAll != nullptr && selectAll->shortcut() == QKeySequence(QKeySequence::SelectAll),
@@ -36995,11 +37142,11 @@ int main(int argc, char* argv[])
         mw.setAttribute(Qt::WA_ShowWithoutActivating);
         mw.resize(1100, 800);
         mw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* sv = mw.view();
         sv->setAnimationsEnabled(false);
         check(mw.openFurniture(sizesFurnitureId), "sizes: the seeded furniture opens");
-        settle(300);
+        waitFully(300);
 
         const std::vector<DocumentModel::Solid> seeded = mw.document().solids();
         const bool fiveBodies = seeded.size() == 5;
@@ -37339,7 +37486,7 @@ int main(int argc, char* argv[])
             check(sv->selectionSizesShown(), "sizes: (up before render mode)");
             QAction* renderAction = action(mw, QStringLiteral("Render mode"));
             if (renderAction) renderAction->trigger();
-            settle(2500);
+            waitFully(2500);
             check(sv->renderModeActive() && !sv->selectionSizesShown(),
                   "sizes: render mode hides them");
             // Render mode clears the selection on entry, so the predicate's own
@@ -37351,7 +37498,7 @@ int main(int argc, char* argv[])
             check(!sv->selectionSizesShown(),
                   "sizes: render mode keeps them hidden even with a body selected inside it");
             if (renderAction) renderAction->trigger();
-            settle(400);
+            waitFully(400);
             if (sv->selectionKind() != OcctViewWidget::PickKind::Body) {
                 sv->setSelectedSolids({board});
                 settle(150);
@@ -37494,10 +37641,10 @@ int main(int argc, char* argv[])
         aw.setAttribute(Qt::WA_ShowWithoutActivating);
         aw.resize(1100, 800);
         aw.show();
-        settle(300);
+        waitFully(300);
         aw.view()->setAnimationsEnabled(false);
         enterFreshFurniture(aw);
-        settle(200);
+        waitFully(200);
 
         QAction* itemsForAlign = action(aw, QStringLiteral("Items"));
         if (itemsForAlign && !itemsForAlign->isChecked()) itemsForAlign->trigger();
@@ -37556,7 +37703,7 @@ int main(int argc, char* argv[])
         bw.setAttribute(Qt::WA_ShowWithoutActivating);
         bw.resize(1100, 800);
         bw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* bv = bw.view();
         bv->setAnimationsEnabled(false);
         ToastHost* boolToasts = bw.findChild<ToastHost*>();
@@ -37900,7 +38047,7 @@ int main(int argc, char* argv[])
         mw.setAttribute(Qt::WA_ShowWithoutActivating);
         mw.resize(1100, 800);
         mw.show();
-        settle(300);
+        waitFully(300);
         OcctViewWidget* rv = mw.view();
         rv->setAnimationsEnabled(false);
         ToastHost* reToasts = mw.findChild<ToastHost*>();
@@ -38343,6 +38490,11 @@ int main(int argc, char* argv[])
     // would just be the floor's own false positive. Printed as its own line,
     // never folded into the PASS/FAIL line below, so a filtered run can never
     // be mistaken for an official one even by someone reading only the tail.
+    // Before the verdict, so the ranking is readable without scrolling past
+    // a tail somebody is grepping for. Behind an env var: it changes no
+    // check, but an unasked-for table in every run is noise.
+    if (qEnvironmentVariableIsSet("FURNIFY_TIMING")) printBlockTimings();
+
     if (g_filterActive) {
         std::printf("FILTERED (%d failure%s, %d checks) - floor not enforced\n",
                     g_failures, g_failures == 1 ? "" : "s", accounted);
