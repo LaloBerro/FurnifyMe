@@ -27,6 +27,7 @@
 #include "Theme.h"
 
 // OCCT before Qt, for the Handle() macro clash.
+#include <AIS_TextLabel.hxx>
 #include <AIS_DisplayMode.hxx>
 #include <AIS_SelectionScheme.hxx>
 #include <Aspect_DisplayConnection.hxx>
@@ -250,6 +251,10 @@ public:
 // comparison. Eight matches Auto's edge-hover promise: the two are the same
 // kind of forgiveness.
 constexpr double kMagnetSnapPx = 8.0;
+// Under this, two faces are touching and the readout says so in a word.
+// A gap of 0 mm reads as a measurement that happens to be zero; what the
+// user wants to know is that the faces MEET.
+constexpr double kMagnetFlushMm = 0.05;
 
 // The wood look (Milestone 5): one mid-tone the PBR/BSDF albedo and the
 // Phong diffuse both derive from, so the two pipelines disagree about
@@ -2529,10 +2534,14 @@ void OcctViewWidget::collectMagnetCandidates(int axis)
     myMoveMagnetAxis = axis;
     if (!myMagnetEnabled || axis < 0 || axis > 2 || myContext.IsNull()) return;
 
-    // The Move gizmo stands on exactly one whole selected body - its
-    // predicate says so - and that body is the one being dragged.
+    // In the EDITOR the Move gizmo stands on exactly one whole selected body.
+    // In a SCENE the selection is a whole piece - every body of it - so the
+    // size check that guards the editor's case would refuse every scene drag,
+    // which is exactly why snapping was absent there.
     const std::vector<int> selected = selectedSolidIds();
-    if (selected.size() != 1) return;
+    if (selected.empty()) return;
+    const bool grouped = !myMagnetGroups.empty();
+    if (!grouped && selected.size() != 1) return;
     const int movingId = selected.front();
 
     struct Box {
@@ -2553,37 +2562,83 @@ void OcctViewWidget::collectMagnetCandidates(int axis)
         return true;
     };
 
-    const auto movingIt = mySolids.find(movingId);
-    Box moving;
-    if (movingIt == mySolids.end() || movingIt->second.IsNull() ||
-        !boxOf(placedShapeOf(movingIt->second), moving))
-        return;
-    const double movingFeatures[3] = {moving.lo[axis], 0.5 * (moving.lo[axis] + moving.hi[axis]),
-                                      moving.hi[axis]};
+    // ONE BOX PER THING THE MAGNET ALIGNS: a body in the editor, a whole
+    // piece in a scene. Built by unioning the group's own bodies, each one
+    // measured where it is DRAWN.
+    const auto groupOfBody = [this](int bodyId) {
+        const auto at = myMagnetGroups.find(bodyId);
+        return at == myMagnetGroups.end() ? 0 : at->second;
+    };
+    std::map<int, Box> boxes;          // key: group id, or body id when ungrouped
+    const int movingKey = grouped ? groupOfBody(movingId) : movingId;
+    if (grouped && movingKey == 0) return;
 
     for (const auto& entry : mySolids) {
-        if (entry.first == movingId || entry.second.IsNull()) continue;
+        if (entry.second.IsNull()) continue;
         // A hidden body offers no alignment - the user cannot see what the
         // drag would be sticking to.
         if (!myContext->IsDisplayed(entry.second)) continue;
-        Box other;
-        if (!boxOf(placedShapeOf(entry.second), other)) continue;
+        const int key = grouped ? groupOfBody(entry.first) : entry.first;
+        if (grouped && key == 0) continue;
+        Box one;
+        if (!boxOf(placedShapeOf(entry.second), one)) continue;
+        const auto found = boxes.find(key);
+        if (found == boxes.end()) {
+            boxes[key] = one;
+            continue;
+        }
+        for (int i = 0; i < 3; ++i) {
+            found->second.lo[i] = std::min(found->second.lo[i], one.lo[i]);
+            found->second.hi[i] = std::max(found->second.hi[i], one.hi[i]);
+        }
+        found->second.centre =
+            gp_Pnt(0.5 * (found->second.lo[0] + found->second.hi[0]),
+                   0.5 * (found->second.lo[1] + found->second.hi[1]),
+                   0.5 * (found->second.lo[2] + found->second.hi[2]));
+    }
+
+    const auto movingAt = boxes.find(movingKey);
+    if (movingAt == boxes.end()) return;
+    const Box moving = movingAt->second;
+    const double movingFeatures[3] = {moving.lo[axis], 0.5 * (moving.lo[axis] + moving.hi[axis]),
+                                      moving.hi[axis]};
+
+    for (const auto& entry : boxes) {
+        if (entry.first == movingKey) continue;
+        const Box& other = entry.second;
         const double targets[3] = {other.lo[axis], 0.5 * (other.lo[axis] + other.hi[axis]),
                                    other.hi[axis]};
-        for (double target : targets) {
-            for (double feature : movingFeatures) {
+        for (int t = 0; t < 3; ++t) {
+            for (int f = 0; f < 3; ++f) {
                 MagnetCandidate candidate;
-                candidate.value = target - feature;
-                candidate.target = target;
+                candidate.value = targets[t] - movingFeatures[f];
+                candidate.target = targets[t];
                 candidate.movingCentre = moving.centre;
                 candidate.targetCentre = other.centre;
+                // My LOW face onto your HIGH, or my HIGH onto your LOW. Those
+                // two put faces together; the rest line centres up, which is
+                // a real alignment but not a contact.
+                candidate.faceContact = (f == 0 && t == 2) || (f == 2 && t == 0);
+                // What is left between the two boxes once this lands. Zero is
+                // "flush"; the centre alignments can leave them overlapping,
+                // which is why only a face contact carries the readout.
+                const double movedLo = moving.lo[axis] + candidate.value;
+                const double movedHi = moving.hi[axis] + candidate.value;
+                candidate.gap = std::max(0.0, std::max(other.lo[axis] - movedHi,
+                                                       movedLo - other.hi[axis]));
                 myMoveMagnetCandidates.push_back(candidate);
             }
         }
     }
 }
 
-bool OcctViewWidget::magnetSnap(double raw, double& value, gp_Pnt& guideA, gp_Pnt& guideB) const
+void OcctViewWidget::setMagnetGroups(const std::map<int, int>& bodyToGroup)
+{
+    myMagnetGroups = bodyToGroup;
+}
+
+bool OcctViewWidget::magnetSnap(double raw, double& value, gp_Pnt& guideA,
+                                gp_Pnt& guideB, QString* readout) const
 {
     if (!myMagnetEnabled || myMoveMagnetCandidates.empty()) return false;
     // At the DRAGGED BODY's depth, not the camera target's - the same
@@ -2617,6 +2672,17 @@ bool OcctViewWidget::magnetSnap(double raw, double& value, gp_Pnt& guideA, gp_Pn
     // drag, so the press-time capture is still where the body is.
     guideA = best->movingCentre;
     guideB = best->targetCentre;
+    if (readout) {
+        // ONLY A FACE CONTACT CARRIES A NUMBER. A centre alignment can leave
+        // the two boxes overlapping, where "flush" would be a lie and a gap of
+        // zero would be a measurement that is not true.
+        *readout = QString();
+        if (best->faceContact) {
+            *readout = best->gap <= kMagnetFlushMm
+                           ? tr("flush")
+                           : QString::fromStdString(Measure::formatLength(best->gap));
+        }
+    }
     switch (myMoveMagnetAxis) {
         case 0: guideA.SetX(best->target); guideB.SetX(best->target); break;
         case 1: guideA.SetY(best->target); guideB.SetY(best->target); break;
@@ -2627,7 +2693,7 @@ bool OcctViewWidget::magnetSnap(double raw, double& value, gp_Pnt& guideA, gp_Pn
     return true;
 }
 
-void OcctViewWidget::showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b)
+void OcctViewWidget::showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b, const QString& readout)
 {
     if (myContext.IsNull()) return;
     if (a.Distance(b) < 1.0e-6) {
@@ -2635,9 +2701,11 @@ void OcctViewWidget::showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b)
         return;
     }
     // Equal-guard: the guide only ever moves between alignments, so most
-    // drag steps re-ask for the line already on screen.
+    // drag steps re-ask for the line already on screen. The TEXT joins the
+    // guard - a guide whose number changed while its endpoints did not is a
+    // guide that would otherwise keep a stale reading.
     if (myMagnetGuideShown && myMagnetGuideA.IsEqual(a, 1.0e-9) &&
-        myMagnetGuideB.IsEqual(b, 1.0e-9))
+        myMagnetGuideB.IsEqual(b, 1.0e-9) && myMagnetGuideText == readout)
         return;
 
     clearMagnetGuide();
@@ -2654,6 +2722,25 @@ void OcctViewWidget::showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b)
     guide->colour = toOcctColor(Theme::accent());
     guide->width = 2.0;
     myContext->Display(guide, 0, -1, Standard_False);   // never pickable
+    myMagnetGuideText = readout;
+    if (!readout.isEmpty()) {
+        // At the midpoint of what the guide spans, screen-sized under the same
+        // zoom-rotate persistence every other annotation in this app uses, so
+        // it stays readable at any framing a scene is viewed at.
+        Handle(AIS_TextLabel) label = new AIS_TextLabel();
+        label->SetText(TCollection_ExtendedString(readout.toUtf8().constData(), Standard_True));
+        label->SetPosition(gp_Pnt(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                                  0.5 * (a.Z() + b.Z())));
+        label->SetColor(toOcctColor(Theme::accent()));
+        label->SetHeight(14.0);
+        label->SetZLayer(gizmoZLayer());
+        label->SetTransformPersistence(
+            new Graphic3d_TransformPers(Graphic3d_TMF_ZoomPers,
+                                        gp_Pnt(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                                               0.5 * (a.Z() + b.Z()))));
+        myContext->Display(label, 0, -1, Standard_False);
+        myMagnetLabel = label;
+    }
     // The gizmo's own depth-cleared immediate layer, so the guide is visible
     // through the bodies it aligns - a guide the nearer body hides is no
     // guide during exactly the drags it exists for.
@@ -2672,6 +2759,10 @@ void OcctViewWidget::clearMagnetGuide()
     if (!myMagnetGuideShown && myMagnetGuide.IsNull()) return;
     if (!myContext.IsNull() && !myMagnetGuide.IsNull())
         myContext->Remove(myMagnetGuide, Standard_False);
+    if (!myContext.IsNull() && !myMagnetLabel.IsNull())
+        myContext->Remove(myMagnetLabel, Standard_False);
+    myMagnetLabel.Nullify();
+    myMagnetGuideText.clear();
     myMagnetGuide.Nullify();
     myMagnetGuideShown = false;
     scheduleRedraw();
@@ -8007,9 +8098,10 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         if (myMoveDragAxis >= 0 && measureAxisDrag(myMoveDrag, myMoveDragLine, pos, raw)) {
             double value = raw;
             gp_Pnt guideA, guideB;
-            const bool magnetHeld = magnetSnap(raw, value, guideA, guideB);
+            QString magnetReadout;
+            const bool magnetHeld = magnetSnap(raw, value, guideA, guideB, &magnetReadout);
             if (magnetHeld)
-                showMagnetGuide(guideA, guideB);
+                showMagnetGuide(guideA, guideB, magnetReadout);
             else {
                 clearMagnetGuide();
                 if (mySnapEnabled && mySnapStep > 0.0)

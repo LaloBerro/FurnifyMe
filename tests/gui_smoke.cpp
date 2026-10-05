@@ -740,7 +740,22 @@ void skipByEnvironment(int checks, const QString& why)
 // FAILED, which is exactly and only what this constant exists to do: a probe
 // that edits global state needs a window nobody else is using, and nothing
 // else in the suite would have said so.
-constexpr int kCheckFloor = 5200;
+//
+// RE-RATCHETED (2026-10-05, the scene-editor branch): the scene window and its
+// pieces list, per-furniture wood, the piece/eye/Fit All repairs, the frame
+// audit, snapping pieces to each other, and the suite-speed pass's own one
+// added check. TWO consecutive unfiltered runs measured 5278 checks + 1
+// environment skip, agreeing to the digit, against the binary this carries -
+// and both GREEN, which the previous ratchet's own note could not say.
+//
+// This one is worth a sentence because the suite got 30% FASTER in the same
+// breath (774 s -> 546 s), and this constant is the only thing standing
+// between "faster" and "quietly running less". The count did not move at any
+// step of that work: 5277 before the one check the mirror-placement repair
+// added, 5278 after, measured at every stage rather than reasoned about. A
+// speed pass is exactly the change this floor exists to police, because every
+// wait it shortens is a chance for a check to stop being reached.
+constexpr int kCheckFloor = 5278;
 
 void check(bool condition, const QString& what)
 {
@@ -917,6 +932,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-hub-lists-scenes-in-their-own-section", false, true },
     { "a-scene-window-opens-a-scene", false, true },
     { "each-piece-renders-in-its-own-furnitures-wood", false, true },
+    { "pieces-snap-to-each-other-and-stack", false, true },
     { "the-real-librarys-own-scene-renders", false, true },
     { "wood-at-a-hundred-bodies-in-the-editor", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
@@ -29783,6 +29799,230 @@ int main(int argc, char* argv[])
     // low/centre/high on the dragged axis - so lo->hi IS flush side-to-side -
     // but it required ONE selected body and a scene selects a whole piece, so
     // it collected nothing and snapping did not exist here at all.
+    if (blockEnabled("pieces-snap-to-each-other-and-stack")) {
+        RequiredTempDir snapDir;
+        FurnitureStore snapStore(snapDir.path());
+        auto makeBox = [&snapStore](const QString& name, double dx, double dy, double dz) {
+            const QString id = snapStore.createFurniture(name);
+            DocumentModel doc;
+            doc.addSolid(BRepPrimAPI_MakeBox(dx, dy, dz).Shape());
+            return snapStore.saveFurniture(id, doc, QImage()) ? id : QString();
+        };
+        const QString slabId = makeBox(QStringLiteral("Slab"), 400.0, 300.0, 20.0);
+        // TWO BODIES, deliberately. The magnet's own guard is
+        // "selected.size() != 1", so a one-body piece snaps identically whether
+        // or not it groups - and a mutation removing the grouping reddened
+        // NOTHING until the dragged piece had more than one body. A fixture
+        // that cannot express the defect is not a fixture.
+        const QString blockId = snapStore.createFurniture(QStringLiteral("Block"));
+        {
+            DocumentModel doc;
+            doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 100.0, 50.0, 100.0).Shape());
+            doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(0.0, 50.0, 0.0), 100.0, 50.0, 100.0).Shape());
+            check(!blockId.isEmpty() && snapStore.saveFurniture(blockId, doc, QImage()),
+                  "the dragged piece is made of TWO bodies");
+        }
+        const QString sceneId = snapStore.createScene(QStringLiteral("Snapping"));
+        check(!slabId.isEmpty() && !blockId.isEmpty() && !sceneId.isEmpty(),
+              "a slab, a block and a scene to put them in");
+
+        SceneWindow snap(&snapStore);
+        snap.setAttribute(Qt::WA_ShowWithoutActivating);
+        snap.resize(1100, 820);
+        snap.show();
+        settle(300);
+        check(snap.openScene(sceneId) && snap.addPiece(slabId) && snap.addPiece(blockId),
+              "both pieces go in");
+        settle(300);
+        const int slab = snap.scene().pieces()[0].id;
+        const int block = snap.scene().pieces()[1].id;
+
+        OcctViewWidget* sv = snap.view();
+        auto placedBox = [&snap](int pieceId, double* lo, double* hi) {
+            Bnd_Box box;
+            for (const TopoDS_Shape& shape : snap.placedShapesForPiece(pieceId)) {
+                if (!shape.IsNull()) BRepBndLib::Add(shape, box);
+            }
+            if (box.IsVoid()) return false;
+            box.Get(lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+            return true;
+        };
+        double slabLo[3], slabHi[3], blockLo[3], blockHi[3];
+        check(placedBox(slab, slabLo, slabHi) && placedBox(block, blockLo, blockHi),
+              "both pieces are measurable where they stand");
+
+        // --- flush, side to side ---------------------------------------------
+        // The block is put a DELIBERATELY NON-ROUND distance from flush, so a
+        // landing exactly at contact cannot be the 10 mm grid's doing.
+        {
+            const double flushX = slabHi[0];          // the block's low face meets it
+            gp_Trsf aim;
+            aim.SetTranslation(gp_Vec(flushX - blockLo[0] + 3.7, 0.0, 0.0));
+            check(snap.setPiecePlacement(block, aim.Multiplied(
+                      snap.scene().piece(block)->placement)),
+                  "the block starts 3.7 mm shy of flush - not a grid step");
+            settle(200);
+
+            sv->setSelectedSolids(snap.bodyIdsForPiece(block));
+            settle(200);
+            check(snap.selectedPieceId() == block && sv->hasMoveGizmo(),
+                  "it is selected with its Move gizmo up");
+
+            gp_Pnt tip;
+            QPoint grabAt, dragTo;
+            const gp_Pnt pivot = sv->moveGizmoPivot();
+            const bool haveArm = sv->moveGizmoArmTip(0, tip) &&
+                                 sv->projectToScreen(
+                                     pivot.Translated(gp_Vec(pivot, tip) * 0.65), grabAt);
+            check(haveArm && sv->moveGizmoAxisAt(grabAt) == 0,
+                  "a pixel on the X arm is found and the hit test claims it");
+            // Aimed at the flush position itself; the 3.7 mm head start is what
+            // the magnet has to close.
+            const bool haveTarget =
+                haveArm && sv->projectToScreen(
+                    pivot.Translated(gp_Vec(pivot, tip) * 0.65).Translated(
+                        gp_Vec(-3.7, 0.0, 0.0)), dragTo);
+            check(haveTarget, "and a target 3.7 mm back along X projects in");
+
+            if (haveTarget) {
+                // Press and MOVE, holding the drag, so the live guide can be
+                // read before the release clears it.
+                QMouseEvent press(QEvent::MouseButtonPress, QPointF(grabAt),
+                                  sv->mapToGlobal(grabAt), Qt::LeftButton, Qt::LeftButton,
+                                  Qt::NoModifier);
+                QCoreApplication::sendEvent(sv, &press);
+                QMouseEvent move(QEvent::MouseMove, QPointF(dragTo), sv->mapToGlobal(dragTo),
+                                 Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(sv, &move);
+                settle(200);
+
+                check(sv->magnetGuideShown(),
+                      "the drag latches onto the slab - a guide line is up");
+                check(sv->magnetReadout() == QStringLiteral("flush"),
+                      QStringLiteral("...and the number the user sees says flush (\"%1\")")
+                          .arg(sv->magnetReadout()));
+
+                QMouseEvent release(QEvent::MouseButtonRelease, QPointF(dragTo),
+                                    sv->mapToGlobal(dragTo), Qt::LeftButton, Qt::NoButton,
+                                    Qt::NoModifier);
+                QCoreApplication::sendEvent(sv, &release);
+                settle(300);
+            }
+
+            double nowLo[3], nowHi[3];
+            check(placedBox(block, nowLo, nowHi), "the block is measurable after the drag");
+            check(std::fabs(nowLo[0] - slabHi[0]) < 0.01,
+                  QStringLiteral("it lands EXACTLY flush against the slab's face (%1 against "
+                                 "%2)").arg(nowLo[0], 0, 'f', 3).arg(slabHi[0], 0, 'f', 3));
+            // NOT THE GRID. The landing point is the slab's own face; the
+            // check is that the block moved the full 3.7 mm to reach it, which
+            // no 10 mm step can produce.
+            check(std::fabs((nowLo[0] - (slabHi[0] + 3.7)) + 3.7) < 0.01,
+                  QStringLiteral("...having closed the whole 3.7 mm, which no 10 mm grid "
+                                 "step can do (moved %1 mm)")
+                      .arg((slabHi[0] + 3.7) - nowLo[0], 0, 'f', 3));
+        }
+
+        // --- it stacks: dropped over the slab, it lands ON it ------------------
+        {
+            gp_Trsf over;
+            over.SetTranslation(gp_Vec(slabLo[0] + 150.0 - blockLo[0],
+                                       slabLo[1] + 100.0 - blockLo[1], 0.0));
+            check(snap.setPiecePlacement(block, over.Multiplied(
+                      snap.scene().piece(block)->placement)),
+                  "the block is put over the slab's footprint");
+            settle(200);
+            // A nudge along X commits the gesture, which is where the settle runs.
+            sv->setSelectedSolids(snap.bodyIdsForPiece(block));
+            settle(150);
+            gp_Pnt tip2;
+            QPoint grab2, to2;
+            const gp_Pnt pivot2 = sv->moveGizmoPivot();
+            if (sv->moveGizmoArmTip(0, tip2) &&
+                sv->projectToScreen(pivot2.Translated(gp_Vec(pivot2, tip2) * 0.65), grab2) &&
+                sv->projectToScreen(
+                    pivot2.Translated(gp_Vec(pivot2, tip2) * 0.65).Translated(
+                        gp_Vec(10.0, 0.0, 0.0)), to2)) {
+                dragButton(sv, QPointF(grab2), QPointF(to2), Qt::LeftButton);
+                settle(300);
+            }
+            double onLo[3], onHi[3];
+            check(placedBox(block, onLo, onHi), "measurable again");
+            check(std::fabs(onLo[2] - slabHi[2]) < 0.01,
+                  QStringLiteral("it sits ON the slab, not on the floor (z %1, slab top %2)")
+                      .arg(onLo[2], 0, 'f', 3).arg(slabHi[2], 0, 'f', 3));
+        }
+
+        // --- and beside it, it still lands on the floor ------------------------
+        {
+            gp_Trsf aside;
+            aside.SetTranslation(gp_Vec(slabHi[0] + 400.0 - blockLo[0], 0.0, 0.0));
+            check(snap.setPiecePlacement(block, aside.Multiplied(
+                      snap.scene().piece(block)->placement)),
+                  "the block is moved well clear of the slab");
+            settle(200);
+            sv->setSelectedSolids(snap.bodyIdsForPiece(block));
+            settle(150);
+            const double asideX = snap.scene().piece(block)->placement.TranslationPart().X();
+            gp_Pnt tip3;
+            QPoint grab3, to3;
+            const gp_Pnt pivot3 = sv->moveGizmoPivot();
+            if (sv->moveGizmoArmTip(0, tip3) &&
+                sv->projectToScreen(pivot3.Translated(gp_Vec(pivot3, tip3) * 0.65), grab3) &&
+                sv->projectToScreen(
+                    pivot3.Translated(gp_Vec(pivot3, tip3) * 0.65).Translated(
+                        gp_Vec(80.0, 0.0, 0.0)), to3)) {
+                dragButton(sv, QPointF(grab3), QPointF(to3), Qt::LeftButton);
+                settle(300);
+            }
+            // THE GESTURE HAS TO HAVE COMMITTED, or the settle never ran and
+            // the floor check below would be reporting on a drag that never
+            // happened - which is exactly how it first failed.
+            check(std::fabs(snap.scene().piece(block)->placement.TranslationPart().X() -
+                            asideX) > 1.0,
+                  "the nudge really moved it, so the gesture committed");
+            double offLo[3], offHi[3];
+            check(placedBox(block, offLo, offHi), "measurable again");
+            check(std::fabs(offLo[2]) < 0.01,
+                  QStringLiteral("standing beside it, it is back on the FLOOR (z %1) - the "
+                                 "rule is one rule, not two").arg(offLo[2], 0, 'f', 3));
+        }
+
+        // --- a Z drag is the user placing it at a height ----------------------
+        // Reported by the user as "i cannot move the furniture in the z axis":
+        // the settle ran after EVERY gesture, so the piece rose with the hand
+        // and was pulled back down on release. Vertical movement was impossible
+        // by construction, and every floor check passed while it was.
+        {
+            sv->setSelectedSolids(snap.bodyIdsForPiece(block));
+            settle(150);
+            double beforeLo[3], beforeHi[3];
+            placedBox(block, beforeLo, beforeHi);
+            gp_Pnt tipZ;
+            QPoint grabZ, toZ;
+            const gp_Pnt pivotZ = sv->moveGizmoPivot();
+            const bool haveZ =
+                sv->moveGizmoArmTip(2, tipZ) &&
+                sv->projectToScreen(pivotZ.Translated(gp_Vec(pivotZ, tipZ) * 0.65), grabZ) &&
+                sv->projectToScreen(
+                    pivotZ.Translated(gp_Vec(pivotZ, tipZ) * 0.65).Translated(
+                        gp_Vec(0.0, 0.0, 200.0)), toZ);
+            check(haveZ && sv->moveGizmoAxisAt(grabZ) == 2,
+                  "a pixel on the Z arm is found and claimed");
+            if (haveZ) {
+                dragButton(sv, QPointF(grabZ), QPointF(toZ), Qt::LeftButton);
+                settle(300);
+            }
+            double afterLo[3], afterHi[3];
+            check(placedBox(block, afterLo, afterHi), "measurable after the lift");
+            check(afterLo[2] > beforeLo[2] + 50.0,
+                  QStringLiteral("a Z drag LEAVES IT at the height it was put (%1 -> %2)")
+                      .arg(beforeLo[2], 0, 'f', 1).arg(afterLo[2], 0, 'f', 1));
+        }
+
+        snap.close();
+    }
+
     // --- each piece renders in its own furniture's wood ---------------------
     // Its own scene, with exactly TWO pieces and nothing else in frame. The
     // shared block grew to five pieces that occlude one another, and a sample

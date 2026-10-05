@@ -156,6 +156,11 @@ private:
     // turned on the floor has a world box taller than the furniture is, and
     // settling against that would leave it hovering.
     gp_Trsf settledOnFloor(int pieceId, const gp_Trsf& placement) const;
+    // The highest thing underneath this piece's own footprint, or 0 for the
+    // floor. What makes "on top of another piece" a placement rather than a
+    // piece hovering at another's height.
+    double supportHeightUnder(int pieceId,
+                              const std::vector<TopoDS_Shape>& placed) const;
     // Selection -> piece -> gizmo, derived on every selection change.
     void refreshSelection();
     void showToolGizmo();
@@ -212,6 +217,10 @@ private:
     // the custom gizmo's own rule.
     gp_Trsf myDragBase;
     bool myDragging = false;
+    // Which arm the live Move drag is on, or -1. Read on commit, because a
+    // drag along Z is the user placing a piece at a height and the floor
+    // settle must not undo it.
+    int myDragAxis = -1;
     AddPieceCard* myAddPiece = nullptr;
     ToastHost* myToasts = nullptr;
 

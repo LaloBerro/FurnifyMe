@@ -1618,6 +1618,14 @@ public:
     // angleDeg, so this costs nothing but the lookup: see
     // refreshWoodOverlays().
     void setBodyGrainAcross(const std::vector<int>& bodyIds);
+    // Groups bodies for the magnet, so a drag aligns whole PIECES rather than
+    // the one body that happens to be selected. Empty restores the editor's
+    // per-body behaviour, which is what the editor wants and never sets.
+    void setMagnetGroups(const std::map<int, int>& bodyToGroup);
+    // What the live guide is saying, for a check that must read the number the
+    // user sees rather than recompute it.
+    QString magnetReadout() const { return myMagnetGuideText; }
+    bool magnetGuideShown() const { return myMagnetGuideShown; }
     // Drops every per-path texture this widget has built. Called when the
     // bodies they belong to go away, so a long session of opening scenes does
     // not accumulate images nothing references.
@@ -2432,8 +2440,13 @@ private:
     // Magnet's own pieces - see setMagnetEnabled(). Candidates at the press,
     // nearest-within-tolerance at each move, one guide line while it holds.
     void collectMagnetCandidates(int axis);
-    bool magnetSnap(double raw, double& value, gp_Pnt& guideA, gp_Pnt& guideB) const;
-    void showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b);
+    // `readout` comes back with what the winning alignment DID - a gap, or
+    // "flush" - and is left empty for a centre alignment, where neither
+    // word means anything.
+    bool magnetSnap(double raw, double& value, gp_Pnt& guideA, gp_Pnt& guideB,
+                    QString* readout = nullptr) const;
+    void showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b,
+                         const QString& readout = QString());
     void clearMagnetGuide();
     // Rebuilds the symmetry plane indicator from myCamera's current distance
     // (screen-sized, so it has to follow zoom) - guarded against rebuilding on
@@ -3012,11 +3025,25 @@ private:
         double target;         // the aligned coordinate along the drag axis
         gp_Pnt movingCentre;   // moving body's bbox centre at the press
         gp_Pnt targetCentre;   // aligned body's bbox centre
+        // MY LOW FACE MEETS YOUR HIGH, or the other way round - the alignment
+        // that actually puts two faces together. The centre-to-centre
+        // alignments are useful and stay, but "flush" and a gap only MEAN
+        // anything for this kind, so only this kind carries the readout.
+        bool faceContact = false;
+        double gap = 0.0;      // clearance left between the two boxes, >= 0
     };
     std::vector<MagnetCandidate> myMoveMagnetCandidates;
+    // Body -> group. EMPTY in the furniture editor, where the magnet aligns
+    // one body against other bodies and always has. A SCENE sets it, because
+    // the thing being dragged there is a PIECE of many bodies - the user's own
+    // scene has pieces of fifty - and a per-body magnet collects nothing at
+    // all when the selection is a whole piece.
+    std::map<int, int> myMagnetGroups;
     int myMoveMagnetAxis = -1;
     Handle(AIS_InteractiveObject) myMagnetGuide;
     bool myMagnetGuideShown = false;
+    Handle(AIS_InteractiveObject) myMagnetLabel;
+    QString myMagnetGuideText;
     gp_Pnt myMagnetGuideA, myMagnetGuideB;
 
     // The two axis drags, one per arrow. See AxisDrag above.

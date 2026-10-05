@@ -36,6 +36,10 @@ constexpr double kNewPieceGapMm = 120.0;
 // gesture - a scene that snapped to a different number from the furniture
 // inside it would make an aligned cabinet unalignable.
 constexpr double kSnapStepMm = 10.0;
+// How much footprint two pieces must share before one counts as standing
+// ON the other. A hair, so pieces that merely touch along an edge are not
+// treated as supports.
+constexpr double kSupportTouchMm = 0.5;
 }  // namespace
 
 SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
@@ -75,6 +79,7 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
             myDragBase = piece->placement;
             myDragging = true;
         }
+        myDragAxis = axis;
         gp_Vec along(axis == 0 ? 1.0 : 0.0, axis == 1 ? 1.0 : 0.0, axis == 2 ? 1.0 : 0.0);
         gp_Trsf step;
         step.SetTranslation(along * distance);
@@ -748,11 +753,62 @@ gp_Trsf SceneWindow::settledOnFloor(int pieceId, const gp_Trsf& placement) const
             }
         }
     }
-    if (std::fabs(lowest) < 1.0e-9) return placement;
+    // WHAT IS BENEATH IT, not the ground. Phase 1 settled every piece onto
+    // Z = 0, which is right until a piece is put ON another one: a lamp
+    // dropped on a table belongs on the table. One rule rather than two -
+    // with nothing underneath, `support` stays 0 and this is exactly the
+    // phase 1 behaviour.
+    const double support = supportHeightUnder(pieceId, placed);
+    const double drop = lowest - support;
+    if (std::fabs(drop) < 1.0e-9) return placement;
 
-    gp_Trsf drop;
-    drop.SetTranslation(gp_Vec(0.0, 0.0, -lowest));
-    return drop.Multiplied(placement);
+    gp_Trsf down;
+    down.SetTranslation(gp_Vec(0.0, 0.0, -drop));
+    return down.Multiplied(placement);
+}
+
+double SceneWindow::supportHeightUnder(int pieceId,
+                                       const std::vector<TopoDS_Shape>& placed) const
+{
+    // The piece's own footprint on the floor plane.
+    Bnd_Box mine;
+    for (const TopoDS_Shape& shape : placed) {
+        if (!shape.IsNull()) BRepBndLib::Add(shape, mine);
+    }
+    if (mine.IsVoid()) return 0.0;
+    double myX0, myY0, myZ0, myX1, myY1, myZ1;
+    mine.Get(myX0, myY0, myZ0, myX1, myY1, myZ1);
+
+    double support = 0.0;
+    for (const SceneModel::Piece& other : myScene.pieces()) {
+        if (other.id == pieceId) continue;
+        // A piece the user cannot see holds nothing up.
+        bool visible = false;
+        for (int bodyId : bodyIdsForPiece(other.id)) {
+            if (myView && myView->isSolidVisible(bodyId)) visible = true;
+        }
+        if (!visible) continue;
+
+        Bnd_Box theirs;
+        for (const TopoDS_Shape& shape : placedShapesForPiece(other.id)) {
+            if (!shape.IsNull()) BRepBndLib::Add(shape, theirs);
+        }
+        if (theirs.IsVoid()) continue;
+        double x0, y0, z0, x1, y1, z1;
+        theirs.Get(x0, y0, z0, x1, y1, z1);
+
+        // OVERLAPPING FOOTPRINTS ONLY. A piece standing beside this one is
+        // not under it, however tall it is - which is the whole difference
+        // between "it sits on the table" and "it floats at table height".
+        const bool overlaps = myX0 < x1 - kSupportTouchMm && myX1 > x0 + kSupportTouchMm &&
+                              myY0 < y1 - kSupportTouchMm && myY1 > y0 + kSupportTouchMm;
+        if (!overlaps) continue;
+        // And only what is BELOW the piece's own top, so a tall neighbour it
+        // is already inside does not teleport it to the ceiling.
+        if (z1 > myZ1 + kSupportTouchMm) continue;
+        support = std::max(support, z1);
+    }
+    return support;
 }
 
 void SceneWindow::commitDrag(bool dragged)
@@ -766,7 +822,17 @@ void SceneWindow::commitDrag(bool dragged)
     if (!piece) return;
     // Settled on the way OUT of the gesture, not on every step: a piece that
     // climbed back to the floor mid-drag would fight the hand moving it.
-    applyPlacement(mySelectedPiece, settledOnFloor(mySelectedPiece, piece->placement));
+    //
+    // EXCEPT WHEN THE USER DRAGGED IT UP. The settle exists so a piece that
+    // ARRIVES, or is slid across the floor, lands on something solid - not to
+    // forbid putting one at a height. Running it after a Z drag made vertical
+    // movement impossible by construction: the piece rose with the hand and
+    // was pulled straight back down on release, which is exactly what the user
+    // reported ("i cannot move the furniture in the z axis").
+    const bool liftedByHand = myDragAxis == 2;
+    myDragAxis = -1;
+    if (!liftedByHand)
+        applyPlacement(mySelectedPiece, settledOnFloor(mySelectedPiece, piece->placement));
     showToolGizmo();
     refreshSurfaces();
 }
@@ -950,6 +1016,10 @@ void SceneWindow::refreshSurfaces()
         myAddPiece->move(Theme::snapToDevicePixels(std::max(0, cardX), origin.x(), dpr),
                          Theme::snapToDevicePixels(std::max(0, cardY), origin.y(), dpr));
     }
+    // WHICH BODIES ARE ONE PIECE. Without this the magnet measures single
+    // bodies and the selection is a whole piece, so it collected nothing and
+    // snapping simply did not exist in a scene.
+    if (myView) myView->setMagnetGroups(myBodyPiece);
     if (myMoveAction) myMoveAction->setChecked(myTool == Tool::Move);
     if (myRotateAction) myRotateAction->setChecked(myTool == Tool::Rotate);
     if (myNameMark) {
