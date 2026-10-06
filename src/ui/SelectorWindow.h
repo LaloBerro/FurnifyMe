@@ -32,8 +32,9 @@
 // itself (hide this, open a MainWindow on the chosen id, show that instead)
 // is main.cpp's wiring - this window only ever reports intent through its
 // two signals below, and performs its OWN FurnitureStore calls for create/
-// rename/delete, reporting either outcome (never silently) through its own
-// inline failure banner - it has no OcctViewWidget to hang a ToastHost off.
+// rename/delete, reporting a refusal (never silently) through its own inline
+// failure banner, and a furniture delete through a Note from a ToastHost
+// hosted on this window itself (ToastHost takes a plain host since F15).
 #include <QDateTime>
 #include <QString>
 #include <QStringList>
@@ -43,12 +44,14 @@
 
 class FurnitureStore;
 class QCloseEvent;
+class QFontMetrics;
 class QLabel;
 class QLineEdit;
 class QPushButton;
 class QScrollArea;
 class QTimer;
 class QVBoxLayout;
+class ToastHost;
 class WindowButtons;
 
 class SelectorWindow : public QWidget {
@@ -144,6 +147,36 @@ public:
     QString currentFailureText() const;
     bool failureVisible() const;
 
+    // The one-toast machinery the editor and the scene window use, hosted on
+    // this window itself (the 2026-10 review's F15) - so far for one Note,
+    // the report after a furniture is deleted.
+    ToastHost* toasts() const { return myToasts; }
+    // That Note's words: "Deleted Bench", or with the scenes that now show it
+    // as missing counted. Static so the sweep reads the same composition.
+    static QString deletedNoteText(const QString& name, int scenes);
+
+    // The armed Delete's "Used in ..." strip on furniture card `index` -
+    // its text while it is up, empty when it is not; and the strip itself,
+    // for a geometry check.
+    QString usedInTextAt(int index) const;
+    QLabel* usedInLabelAt(int index) const;
+    // The strip's composition, in a text column `width` wide: every name
+    // while they fit, then as many as fit and "and N more", then the count.
+    static QString usedInText(const QStringList& names, int width, const QFontMetrics& fm);
+
+    // The line a search with no match shows under the header.
+    static QString noMatchText(const QString& query);
+    bool noMatchVisible() const;
+    QString noMatchShown() const;   // empty while hidden
+    QLabel* noMatchLabel() const { return myNoMatch; }
+
+    // A scene card's thumbnail - thumbnailAt()'s twin for the scenes section.
+    QWidget* sceneThumbnailAt(int index) const;
+    // The cached placeholder image a thumbnail with no picture paints, by its
+    // QPixmap::cacheKey(), or 0 when the thumbnail has a real picture. The
+    // same key across two paints is what "rasterised once" means.
+    static qint64 thumbnailPlaceholderKey(const QWidget* thumbnail);
+
     // Every string this window paints itself - furniture NAMES are
     // deliberately excluded, the same isUserData exemption InitScreen's own
     // paintedTexts() already established (a furniture literally named
@@ -151,6 +184,9 @@ public:
     // Every failure banner message actually shown this run is included,
     // Toast::paintedTexts()'s own honest-limit shape.
     QStringList paintedTexts() const;
+    // The user's own words this window's copy embeds - a search query, the
+    // scene names an armed Delete lists - swept with isUserData=true.
+    QStringList paintedUserTexts() const;
 
 signals:
     // An existing card was opened by a plain click.
@@ -242,6 +278,8 @@ private:
     QPushButton* mySortRecent = nullptr;
     QPushButton* mySortName = nullptr;
     QLabel* myFailureBanner = nullptr;   // built lazily, see showFailure()
+    QLabel* myNoMatch = nullptr;         // see noMatchText()
+    ToastHost* myToasts = nullptr;       // see toasts()
     class NameFurnitureCard* myNameCard = nullptr;
     // Creates `name` and reports it chosen - the + card's own tail, moved out
     // of the click so the name question can call it once it is answered.

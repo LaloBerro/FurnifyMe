@@ -173,6 +173,14 @@ public:
     // layout is store-private exactly as the furniture layout is - nothing
     // outside this class touches a path inside it.
     QVector<SceneInfo> listScenes() const;
+    // Every scene with at least one piece naming `furnitureId`, in
+    // listScenes()'s order - what deleting that furniture would break (the
+    // 2026-10 review's F15: the hub names them before the second click).
+    // Reads each scene file's piece list and nothing else: no placement is
+    // checked and no furniture is opened, so it costs one small JSON parse per
+    // scene. A scene file that does not parse is not listed, listScenes()'s
+    // own rule.
+    QVector<SceneInfo> scenesUsingFurniture(const QString& furnitureId) const;
     // "Scene 03" - the first FREE number, so deleting one and making another
     // does not produce two rows with one name. nextFurnitureName()'s own rule.
     QString nextSceneName() const;

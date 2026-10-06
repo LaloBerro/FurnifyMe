@@ -843,6 +843,9 @@ constexpr BlockInfo kBlocks[] = {
     { "delete-hover-reveals-it-two-clicks-confirm-it", true, true },
     { "selectorwindow-the-type-scale-and-the-opaque-paint", true, false },
     { "the-gallery-grid-three-columns-search-and-sort", false, true },
+    { "a-hub-card-with-no-picture-paints-a-placeholder", false, true },
+    { "a-hub-search-with-no-match-says-so", false, true },
+    { "the-hub-names-what-a-delete-breaks-and-reports-it", false, true },
     { "the-gallery-s-two-now-three-refusals-are-never", true, true },
     { "a-hand-corrupted-shapes-bin-the-failure-toast-is", true, true },
     { "save-the-dirty-star-autosave-and-close-furniture", true, true },
@@ -2208,6 +2211,29 @@ QImage printWindowCapture(QWidget* widget, const QString& path)
 #endif
 }
 
+// How many device rows of native frame sit above a window's client area -
+// GetWindowRect's top against the client origin in screen coordinates. A
+// window with the OS caption reads the caption's height plus the sizing frame
+// (about 31 at 100%); a window WindowChrome has eaten the caption from reads
+// 0, because its WM_NCCALCSIZE leaves the client flush with the true top edge
+// while not maximized. Read off the real HWND rather than off any flag
+// WindowChrome keeps: the question is what Windows drew, and WindowChrome is
+// not Qt::FramelessWindowHint, so no Qt flag answers it. -1 off Windows.
+int nativeCaptionRows(QWidget* widget)
+{
+#ifdef _WIN32
+    HWND hwnd = reinterpret_cast<HWND>(widget->window()->winId());
+    RECT frame{};
+    if (!GetWindowRect(hwnd, &frame)) return -1;
+    POINT origin{0, 0};
+    if (!ClientToScreen(hwnd, &origin)) return -1;
+    return origin.y - frame.top;
+#else
+    Q_UNUSED(widget);
+    return -1;
+#endif
+}
+
 // Straight-line RGB distance - used to say "this pixel reads as X, not Y"
 // without demanding bit-exact equality, which a 1px antialiased stroke can
 // never guarantee at the exact pixel a naive test would pick.
@@ -3232,6 +3258,18 @@ int main(int argc, char* argv[])
               "the second click actually removes it - the gallery rebuilds with none left");
         check(deleteSeedStore.listFurniture().isEmpty(),
               "...and FurnitureStore genuinely lost the directory, not just the card");
+        // It used to say nothing at all (the 2026-10 review's F15). A Note
+        // now, and with no Undo - a deleted furniture is file data, as a
+        // deleted version is. No scene used this one, so it names no scenes.
+        {
+            ToastHost* hubToasts = deleteGallery ? deleteGallery->toasts() : nullptr;
+            check(hubToasts != nullptr && hubToasts->isShowing() &&
+                      hubToasts->currentText() == QStringLiteral("Deleted Doomed Stool") &&
+                      hubToasts->toast()->kind() == Toast::Kind::Note &&
+                      !hubToasts->toast()->hasUndo(),
+                  QStringLiteral("...and the hub reports it - a Note with no Undo (\"%1\")")
+                      .arg(hubToasts ? hubToasts->currentText() : QString()));
+        }
 
         check(deleteProbe.findChild<QDialog*>() == nullptr,
               "delete never opened a QDialog either - the two-click confirm is this "
@@ -3273,6 +3311,34 @@ int main(int argc, char* argv[])
         // user meets first. Written at rest, before the hover below, because
         // resting is the state this window is in when it is read.
         printWindowCapture(&sweepSelector, outDir + QStringLiteral("/selector-hub.png"));
+
+        // THE HUB WEARS THE APP'S OWN TITLE STRIP, and Windows draws no
+        // caption above it (the 2026-10 review's F12, where two reviewers
+        // disagreed - one read the capture above as the OS caption, the other
+        // found WindowChrome::attach() in the constructor). Settled by asking
+        // the window, not the picture: the client area starts at the window's
+        // true top edge, which is exactly what WindowChrome's WM_NCCALCSIZE
+        // does and what a native caption cannot leave. And the strip the
+        // capture shows is ours - it stands at the client's own row 0.
+        {
+            const int captionRows = nativeCaptionRows(&sweepSelector);
+            if (captionRows < 0) {
+                skipByEnvironment(1, QStringLiteral("no native window to measure the hub's "
+                                                    "caption on"));
+            } else {
+                check(captionRows == 0,
+                      QStringLiteral("the hub has no OS caption - its client area starts at the "
+                                     "window's top edge (%1 rows of native frame above it)")
+                          .arg(captionRows));
+            }
+            QWidget* strip = nullptr;
+            for (QWidget* w : sweepSelector.findChildren<QWidget*>()) {
+                if (w->inherits("WindowButtons")) strip = w->parentWidget();
+            }
+            check(strip != nullptr && strip->mapTo(&sweepSelector, QPoint(0, 0)).y() == 0 &&
+                      strip->isVisible(),
+                  "...and the strip carrying its window buttons stands at the window's own row 0");
+        }
 
         QSet<double> scale;
         for (const QFont& f :
@@ -3425,16 +3491,385 @@ int main(int argc, char* argv[])
         check(!gridSelector.sortedByName(), "clicking Recent switches back");
     }
 
+    // --- a hub card with no picture paints a placeholder (F12) ---------------
+    // A furniture never saved with a thumbnail - and every scene before its
+    // first save - showed a bare grey panel, which reads as a picture that
+    // failed to load. A monogram now: the name's first letter in textMuted on
+    // a disc of the chip tone, rasterised once and cached. Pinned AS PIXELS in
+    // both directions - the bare card's centre is the disc's exact token, the
+    // pictured card's centre is its picture and not one disc pixel - plus the
+    // panel beside the disc, so a disc that grew to fill the card would fail.
+    if (blockEnabled("a-hub-card-with-no-picture-paints-a-placeholder")) {
+        RequiredTempDir dir;
+        FurnitureStore store(dir.path());
+        const QString bareId = store.createFurniture(QStringLiteral("Sweep Chair"));
+        const QString picturedId = store.createFurniture(QStringLiteral("Pictured Desk"));
+        const QString sceneId = store.createScene(QStringLiteral("Bare Scene"));
+        {
+            DocumentModel empty;
+            QImage picture(320, 200, QImage::Format_RGB32);
+            picture.fill(QColor(200, 40, 40));
+            check(!bareId.isEmpty() && !picturedId.isEmpty() && !sceneId.isEmpty() &&
+                      store.saveFurniture(picturedId, empty, picture),
+                  "seeding a bare furniture, a pictured one and a bare scene");
+        }
+
+        SelectorWindow hub(store);
+        hub.setAttribute(Qt::WA_ShowWithoutActivating);
+        hub.resize(900, 640);
+        hub.show();
+        settle(300);
+        printWindowCapture(&hub, outDir + QStringLiteral("/hub-placeholder.png"));
+
+        int bare = -1, pictured = -1;
+        for (int i = 0; i < hub.furnitureCount(); ++i) {
+            if (hub.cardName(i) == QStringLiteral("Sweep Chair")) bare = i;
+            if (hub.cardName(i) == QStringLiteral("Pictured Desk")) pictured = i;
+        }
+        check(bare >= 0 && pictured >= 0 && hub.sceneCount() == 1,
+              "the hub lists both furniture and the scene");
+
+        // Exact-token pixels inside the disc (the token IS the subject here,
+        // and the disc's interior is a flat fill), ink near textMuted for the
+        // letter, and the panel 60 px to the disc's left - all in the
+        // thumbnail's own grab, whose device pixels are its own coordinates.
+        struct Reading { int samples = 0; int disc = 0; int ink = 0; double beside = 1e9; };
+        auto read = [](QWidget* thumb) {
+            Reading r;
+            if (!thumb) return r;
+            const QImage img = thumb->grab().toImage();
+            const double dpr = img.devicePixelRatio();
+            const QPointF c(img.width() / 2.0, img.height() / 2.0);
+            const double radius = 24.0 * dpr;   // inside the 28 px disc's antialiased rim
+            const QColor chip = Theme::chip();
+            for (int y = static_cast<int>(c.y() - radius); y <= static_cast<int>(c.y() + radius); ++y) {
+                for (int x = static_cast<int>(c.x() - radius); x <= static_cast<int>(c.x() + radius); ++x) {
+                    if (x < 0 || y < 0 || x >= img.width() || y >= img.height()) continue;
+                    if (std::hypot(x - c.x(), y - c.y()) > radius) continue;
+                    ++r.samples;
+                    const QColor px = img.pixelColor(x, y);
+                    if (px.rgb() == chip.rgb()) ++r.disc;
+                    if (colorDistance(px, Theme::textMuted()) < 40.0) ++r.ink;
+                }
+            }
+            const int bx = static_cast<int>(c.x() - 60.0 * dpr);
+            if (bx >= 0) r.beside = colorDistance(img.pixelColor(bx, static_cast<int>(c.y())),
+                                                  Theme::panel());
+            return r;
+        };
+
+        QWidget* bareThumb = bare >= 0 ? hub.thumbnailAt(bare) : nullptr;
+        const Reading bareRead = read(bareThumb);
+        check(bareRead.samples > 0 && bareRead.disc * 10 > bareRead.samples * 5,
+              QStringLiteral("a card with no picture paints the placeholder disc - %1 of %2 "
+                             "centre pixels are the chip token")
+                  .arg(bareRead.disc).arg(bareRead.samples));
+        check(bareRead.ink > 10,
+              QStringLiteral("...with the name's initial on it in the muted ink (%1 pixels)")
+                  .arg(bareRead.ink));
+        check(bareRead.beside < 3.0,
+              QStringLiteral("...and the card's own panel beside it - a disc, not a fill "
+                             "(distance %1)").arg(bareRead.beside, 0, 'f', 1));
+
+        // Rasterised ONCE: the same cached image across two paints.
+        const qint64 keyBefore = SelectorWindow::thumbnailPlaceholderKey(bareThumb);
+        if (bareThumb) {
+            bareThumb->repaint();
+            bareThumb->grab();
+        }
+        check(keyBefore != 0 && SelectorWindow::thumbnailPlaceholderKey(bareThumb) == keyBefore,
+              "the placeholder is one cached image - two paints draw the same pixmap");
+
+        QWidget* picturedThumb = pictured >= 0 ? hub.thumbnailAt(pictured) : nullptr;
+        const Reading picturedRead = read(picturedThumb);
+        check(SelectorWindow::thumbnailPlaceholderKey(picturedThumb) == 0 &&
+                  picturedRead.samples > 0 && picturedRead.disc == 0,
+              QStringLiteral("a card WITH a picture paints no placeholder (%1 disc pixels)")
+                  .arg(picturedRead.disc));
+
+        QWidget* sceneThumb = hub.sceneThumbnailAt(0);
+        const Reading sceneRead = read(sceneThumb);
+        check(SelectorWindow::thumbnailPlaceholderKey(sceneThumb) != 0 &&
+                  sceneRead.disc * 10 > sceneRead.samples * 5,
+              QStringLiteral("a scene card with no picture wears the same placeholder "
+                             "(%1 of %2)").arg(sceneRead.disc).arg(sceneRead.samples));
+    }
+
+    // --- a hub search with no match says so (T-060 b) -----------------------
+    // It used to leave the two New cards over an empty grid, which reads as an
+    // empty library. A plain line under the header now, echoing the query as
+    // the user's own words, and gone again the moment the query matches or is
+    // cleared - including a query only a SCENE matches.
+    if (blockEnabled("a-hub-search-with-no-match-says-so")) {
+        RequiredTempDir dir;
+        FurnitureStore store(dir.path());
+        check(!store.createFurniture(QStringLiteral("Bench")).isEmpty() &&
+                  !store.createScene(QStringLiteral("Dining set")).isEmpty(),
+              "seeding one furniture and one scene for the search probe");
+
+        SelectorWindow hub(store);
+        hub.setAttribute(Qt::WA_ShowWithoutActivating);
+        hub.resize(900, 640);
+        hub.show();
+        settle(300);
+
+        QLineEdit* search = hub.searchField();
+        check(search != nullptr && !hub.noMatchVisible(), "no line before anything is typed");
+        auto type = [&](const QString& text) {
+            if (search) search->setText(text);
+            waitFully(300);   // outlasts the 150 ms debounce
+        };
+
+        type(QStringLiteral("zebra"));
+        check(hub.noMatchVisible() &&
+                  hub.noMatchShown() == QStringLiteral("Nothing matches \"zebra\""),
+              QStringLiteral("a query nothing matches says so (\"%1\")").arg(hub.noMatchShown()));
+        {
+            QLabel* line = hub.noMatchLabel();
+            QPushButton* newCard = hub.newFurnitureButton();
+            const QRect lineRect = line ? QRect(line->mapTo(&hub, QPoint(0, 0)), line->size())
+                                        : QRect();
+            const QRect searchRect = search ? QRect(search->mapTo(&hub, QPoint(0, 0)),
+                                                    search->size())
+                                            : QRect();
+            const int newTop = newCard ? newCard->mapTo(&hub, QPoint(0, 0)).y() : -1;
+            check(line && newCard && lineRect.top() >= searchRect.bottom() &&
+                      lineRect.bottom() <= newTop,
+                  QStringLiteral("...on a line of its own between the header and the grid, in "
+                                 "the window's coordinates (line %1-%2, search ends %3, grid "
+                                 "starts %4)")
+                      .arg(lineRect.top()).arg(lineRect.bottom())
+                      .arg(searchRect.bottom()).arg(newTop));
+            check(line && hub.childAt(lineRect.center()) == line,
+                  "...and it is the widget actually at that place, not one under another");
+        }
+        printWindowCapture(&hub, outDir + QStringLiteral("/hub-no-match.png"));
+
+        type(QStringLiteral("ben"));
+        check(!hub.noMatchVisible() && hub.visibleCardCount() == 1,
+              "a query a furniture matches hides it again");
+        type(QStringLiteral("dining"));
+        check(!hub.noMatchVisible(), "...and so does one only a SCENE matches");
+        type(QStringLiteral("zebra"));
+        check(hub.noMatchVisible(), "(a miss again, before clearing)");
+        type(QString());
+        check(!hub.noMatchVisible(), "clearing the query hides it");
+
+        // The query is the user's word; the words around it are ours.
+        type(QStringLiteral("Fuse"));
+        QStringList offenders;
+        for (const QString& text : hub.paintedTexts())
+            for (const QString& word : bannedWords())
+                if (usesBannedWord(text, word)) offenders << text + QStringLiteral(": ") + word;
+        for (const QString& text : hub.paintedUserTexts())
+            for (const QString& word : bannedWords())
+                if (usesBannedWord(text, word, /*isUserData=*/true)) offenders << text;
+        check(hub.noMatchShown() == QStringLiteral("Nothing matches \"Fuse\"") &&
+                  hub.paintedUserTexts().contains(QStringLiteral("Fuse")) && offenders.isEmpty(),
+              QStringLiteral("a typed banned word is the user's, and the line's own copy is "
+                             "clean (%1)").arg(offenders.join(QStringLiteral("; "))));
+        type(QString());
+    }
+
+    // --- the hub names what a delete breaks, and reports it (F15) ------------
+    // Deleting a furniture used to remove it and every version silently, and
+    // the scenes holding it broke later, in another window. The user's pick,
+    // "Name scenes + report it": arming Delete names the scenes that use the
+    // furniture on a strip across its thumbnail, and the delete itself is a
+    // Note (no Undo - file data) counting them. Seeded with three furniture:
+    // one two scenes use, one a single scene uses, one nothing uses.
+    if (blockEnabled("the-hub-names-what-a-delete-breaks-and-reports-it")) {
+        RequiredTempDir dir;
+        FurnitureStore store(dir.path());
+        const QString benchId = store.createFurniture(QStringLiteral("Bench"));
+        const QString stoolId = store.createFurniture(QStringLiteral("Stool"));
+        const QString lampId = store.createFurniture(QStringLiteral("Lamp"));
+        auto seedScene = [&](const QString& name, const QStringList& furniture) {
+            const QString id = store.createScene(name);
+            SceneModel scene;
+            for (const QString& f : furniture) scene.addPiece(f.toStdString(), "Piece");
+            return !id.isEmpty() && store.saveScene(id, scene, QImage());
+        };
+        check(!benchId.isEmpty() && !stoolId.isEmpty() && !lampId.isEmpty() &&
+                  seedScene(QStringLiteral("Dining set"), {benchId, stoolId}) &&
+                  seedScene(QStringLiteral("Kitchen"), {benchId, benchId}) &&
+                  seedScene(QStringLiteral("Hall"), {}),
+              "seeding Bench (two scenes), Stool (one) and Lamp (none)");
+        check(store.scenesUsingFurniture(benchId).size() == 2 &&
+                  store.scenesUsingFurniture(stoolId).size() == 1 &&
+                  store.scenesUsingFurniture(lampId).isEmpty(),
+              "FurnitureStore counts each furniture's scenes - a scene using Bench twice is "
+              "one scene");
+
+        SelectorWindow hub(store);
+        hub.setAttribute(Qt::WA_ShowWithoutActivating);
+        // The suite's rule for every toast: no fade, so a capture or a check
+        // never lands mid-arrival. The hub's host is no viewport, so it is
+        // switched on the host itself.
+        if (hub.toasts()) hub.toasts()->setAnimationsEnabled(false);
+        hub.resize(900, 760);
+        hub.show();
+        settle(300);
+
+        auto indexOf = [&](const QString& name) {
+            for (int i = 0; i < hub.furnitureCount(); ++i)
+                if (hub.cardName(i) == name) return i;
+            return -1;
+        };
+        auto hoverAndArm = [&](int index) {
+            QWidget* card = hub.cardAt(index);
+            if (!card) return;
+            const QPointF centre(card->width() / 2.0, card->height() / 2.0);
+            QEnterEvent enter(centre, centre, card->mapToGlobal(centre.toPoint()));
+            QCoreApplication::sendEvent(card, &enter);
+            settle(60);
+            if (QPushButton* del = hub.deleteButtonAt(index))
+                clickAt(del, QPointF(del->width() / 2.0, del->height() / 2.0));
+        };
+
+        // --- armed: Bench names both scenes -----------------------------------
+        const int bench = indexOf(QStringLiteral("Bench"));
+        hoverAndArm(bench);
+        const QString benchStrip = hub.usedInTextAt(bench);
+        check(hub.deleteArmedMsFor(bench) > 0 &&
+                  benchStrip.startsWith(QStringLiteral("Used in ")) &&
+                  benchStrip.contains(QStringLiteral("Dining set")) &&
+                  benchStrip.contains(QStringLiteral("Kitchen")) &&
+                  !benchStrip.contains(QStringLiteral("Hall")),
+              QStringLiteral("arming Delete on a furniture two scenes use names both (\"%1\")")
+                  .arg(benchStrip));
+        {
+            QLabel* strip = hub.usedInLabelAt(bench);
+            QWidget* thumb = hub.thumbnailAt(bench);
+            QWidget* card = hub.cardAt(bench);
+            QPushButton* del = hub.deleteButtonAt(bench);
+            const QRect stripInCard = strip && card
+                                          ? QRect(strip->mapTo(card, QPoint(0, 0)), strip->size())
+                                          : QRect();
+            const QRect thumbInCard = thumb && card
+                                          ? QRect(thumb->mapTo(card, QPoint(0, 0)), thumb->size())
+                                          : QRect();
+            const QRect delInCard = del && card
+                                        ? QRect(del->mapTo(card, QPoint(0, 0)), del->size())
+                                        : QRect();
+            check(strip && strip->isVisible() && thumbInCard.contains(stripInCard) &&
+                      !stripInCard.intersects(delInCard),
+                  QStringLiteral("...on a strip inside the thumbnail, clear of the Delete button "
+                                 "(card coordinates: strip %1,%2 %3x%4, thumbnail %5x%6)")
+                      .arg(stripInCard.x()).arg(stripInCard.y())
+                      .arg(stripInCard.width()).arg(stripInCard.height())
+                      .arg(thumbInCard.width()).arg(thumbInCard.height()));
+            // The width that decided where the names live, measured rather
+            // than asserted from memory: the strip's text column against the
+            // button-borne sentence the review first proposed.
+            const QFontMetrics fm(Theme::labelFont());
+            const int proposal = fm.horizontalAdvance(
+                QStringLiteral("Delete — used in Dining set and Kitchen — click again"));
+            std::printf("[info] the armed sentence in a button would need %d px plus padding; "
+                        "the whole under-row is %d px\n",
+                        proposal, card ? card->width() : -1);
+            check(strip && fm.horizontalAdvance(benchStrip) <= strip->width() - 18,
+                  "...and the strip's text fits its column, never clipped");
+            check(del && del->text() == QStringLiteral("Delete — click again"),
+                  "the button itself still says click again");
+        }
+        printWindowCapture(&hub, outDir + QStringLiteral("/hub-delete-armed.png"));
+
+        // --- armed: Lamp, which nothing uses, keeps the plain label -----------
+        const int lamp = indexOf(QStringLiteral("Lamp"));
+        hoverAndArm(lamp);
+        check(hub.deleteArmedMsFor(lamp) > 0 && hub.usedInTextAt(lamp).isEmpty() &&
+                  hub.deleteButtonAt(lamp) &&
+                  hub.deleteButtonAt(lamp)->text() == QStringLiteral("Delete — click again"),
+              QStringLiteral("a furniture no scene uses arms with the plain label and no strip "
+                             "(\"%1\")").arg(hub.usedInTextAt(lamp)));
+
+        // --- the delete itself reports, counting the scenes -------------------
+        if (QPushButton* del = hub.deleteButtonAt(bench))
+            clickAt(del, QPointF(del->width() / 2.0, del->height() / 2.0));
+        settle(300);
+        ToastHost* toasts = hub.toasts();
+        check(store.listFurniture().size() == 2 && indexOf(QStringLiteral("Bench")) < 0,
+              "the second click deletes Bench");
+        check(toasts && toasts->isShowing() &&
+                  toasts->currentText() ==
+                      QStringLiteral("Deleted Bench — 2 scenes now show it as missing") &&
+                  toasts->toast()->kind() == Toast::Kind::Note && !toasts->toast()->hasUndo(),
+              QStringLiteral("...and a Note with no Undo says what it broke (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+        {
+            Toast* toast = toasts ? toasts->toast() : nullptr;
+            const QRect inHub = toast ? QRect(toast->mapTo(&hub, QPoint(0, 0)), toast->size())
+                                      : QRect();
+            check(toast && toast->isVisible() && toast->opacity() == 1.0 &&
+                      hub.rect().contains(inHub) &&
+                      inHub.center().y() > hub.height() / 2,
+                  QStringLiteral("...standing inside the hub along its lower half (hub "
+                                 "coordinates: %1,%2 %3x%4)")
+                      .arg(inHub.x()).arg(inHub.y()).arg(inHub.width()).arg(inHub.height()));
+        }
+        printWindowCapture(&hub, outDir + QStringLiteral("/hub-delete-note.png"));
+
+        const int stool = indexOf(QStringLiteral("Stool"));
+        hoverAndArm(stool);
+        check(hub.usedInTextAt(stool) == QStringLiteral("Used in Dining set"),
+              QStringLiteral("one scene is named alone (\"%1\")").arg(hub.usedInTextAt(stool)));
+        if (QPushButton* del = hub.deleteButtonAt(stool))
+            clickAt(del, QPointF(del->width() / 2.0, del->height() / 2.0));
+        settle(100);
+        check(toasts && toasts->currentText() ==
+                            QStringLiteral("Deleted Stool — 1 scene now shows it as missing"),
+              QStringLiteral("one scene is counted in the singular (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+
+        const int lampNow = indexOf(QStringLiteral("Lamp"));
+        hoverAndArm(lampNow);
+        if (QPushButton* del = hub.deleteButtonAt(lampNow))
+            clickAt(del, QPointF(del->width() / 2.0, del->height() / 2.0));
+        settle(100);
+        check(toasts && toasts->currentText() == QStringLiteral("Deleted Lamp"),
+              QStringLiteral("a furniture nothing used is reported plainly (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+
+        // Fitting: names while they fit, then "and N more", then a count -
+        // asked of the composition directly at three widths.
+        {
+            const QFontMetrics fm(Theme::labelFont());
+            const QStringList names{QStringLiteral("Dining set"), QStringLiteral("Kitchen"),
+                                    QStringLiteral("Hall")};
+            const QString all = QStringLiteral("Used in Dining set, Kitchen and Hall");
+            const QString some = QStringLiteral("Used in Dining set and 2 more");
+            const QString count = QStringLiteral("Used in 3 scenes");
+            check(SelectorWindow::usedInText(names, fm.horizontalAdvance(all), fm) == all,
+                  "the strip lists every name while they fit");
+            check(SelectorWindow::usedInText(names, fm.horizontalAdvance(some), fm) == some,
+                  "...then as many as fit and how many more");
+            check(SelectorWindow::usedInText(names, fm.horizontalAdvance(count), fm) == count,
+                  "...then only the count, never a clipped name");
+            check(SelectorWindow::deletedNoteText(QStringLiteral("X"), 3) ==
+                      QStringLiteral("Deleted X — 3 scenes now show it as missing"),
+                  "three scenes are counted in the plural");
+        }
+
+        QStringList offenders;
+        for (const QString& text : hub.paintedTexts())
+            for (const QString& word : bannedWords())
+                if (usesBannedWord(text, word)) offenders << text + QStringLiteral(": ") + word;
+        check(!hub.paintedTexts().isEmpty() && offenders.isEmpty(),
+              QStringLiteral("the hub's new copy uses no banned word (%1)")
+                  .arg(offenders.join(QStringLiteral("; "))));
+        check(hub.findChild<QDialog*>() == nullptr, "and no dialog was opened by any of it");
+    }
+
     // --- the gallery's two (now three) refusals are never silent ---------------
     // createFurniture()/renameFurniture()/deleteFurniture() can all refuse;
     // before Milestone 3's fix round, InitScreen swallowed either of the
     // first two outright - a failed create did nothing at all, and a failed
     // rename simply repainted the old name with no report of why.
-    // SelectorWindow has no MainWindow toast to route these through (it
-    // never touches OcctViewWidget, which ToastHost is built around - see
-    // its own header) - each is reported through the window's own inline
-    // failure banner instead, forced here without needing real filesystem
-    // permissions (unreliable to twiddle portably).
+    // SelectorWindow reports each through the window's own inline failure
+    // banner (its ToastHost, since F15, carries the delete Note only), forced
+    // here without needing real filesystem permissions (unreliable to twiddle
+    // portably).
     if (blockEnabled("the-gallery-s-two-now-three-refusals-are-never")) {
         // createFurniture(): a REGULAR FILE sits where the library root would
         // need to be a directory, so QDir::mkpath() cannot create it - the

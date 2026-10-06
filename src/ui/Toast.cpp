@@ -376,11 +376,12 @@ QStringList Toast::paintedTexts() const
     return texts;
 }
 
-ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
+ToastHost::ToastHost(QWidget* host, QWidget* parent)
     : QObject(parent)
-    , myViewport(viewport)
+    , myHost(host)
+    , myViewport(qobject_cast<OcctViewWidget*>(host))
 {
-    myToast = new Toast(viewport);
+    myToast = new Toast(host);
     // Starts fully transparent: myToast is also hidden at this point, so
     // this matters only as the starting value the first show()'s fade-in
     // runs from.
@@ -393,7 +394,7 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
 
     // The hover pause's three inputs - see countdownPaused() in the header.
     // Filters only observe; every event still reaches its widget.
-    if (myViewport) myViewport->installEventFilter(this);
+    if (myHost) myHost->installEventFilter(this);
     myToast->installEventFilter(this);
     if (myToast->undoControl()) myToast->undoControl()->installEventFilter(this);
 
@@ -477,7 +478,7 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int docum
     // outright when animations are off, exactly as the fade is - the suite
     // reads this card's position against the solver's own answer, and a
     // toast caught mid-rise would be six pixels low.
-    if (arriving && myRise && myViewport && myViewport->animationsEnabled()) {
+    if (arriving && myRise && animationsOn()) {
         const QPoint home = myToast->pos();
         myRise->setTargetObject(myToast);
         myRise->setStartValue(home + QPoint(0, kRisePx));
@@ -501,7 +502,7 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int docum
 bool ToastHost::eventFilter(QObject* watched, QEvent* event)
 {
     const QEvent::Type type = event->type();
-    if (watched == myViewport) {
+    if (watched == myHost) {
         if (type == QEvent::MouseMove) {
             myPointer = static_cast<QMouseEvent*>(event)->position().toPoint();
             myPointerInViewport = true;
@@ -646,7 +647,7 @@ void ToastHost::fadeTo(double opacity, std::function<void()> onFinished)
     myFade->stop();
     myFadeFinished = nullptr;
 
-    if (!myViewport || !myViewport->animationsEnabled()) {
+    if (!animationsOn()) {
         // Mirrors OcctViewWidget::animateTo()'s own handling of a disabled
         // camera animation: skip it entirely and apply the end state
         // directly, synchronously, rather than starting the animation and
@@ -665,9 +666,14 @@ void ToastHost::fadeTo(double opacity, std::function<void()> onFinished)
     myFade->start();
 }
 
+bool ToastHost::animationsOn() const
+{
+    return myViewport ? myViewport->animationsEnabled() : myAnimationsEnabled;
+}
+
 void ToastHost::reposition()
 {
-    if (!myViewport || !myToast) return;
+    if (!myHost || !myToast) return;
     // Through Theme::wholeDevicePixels() - see Theme.h. This card's width is
     // its message's measured width, which is as arbitrary a number as exists
     // in this app, and its far edge landing between device rows leaves a row
@@ -676,10 +682,10 @@ void ToastHost::reposition()
     // sweep caught a 630-device-pixel 0,0,0 line along this card's bottom edge
     // at 175% scaling, dead centre, after the rail's had already been fixed.
     myToast->resize(Theme::wholeDevicePixels(myToast->sizeHint()));
-    const int centred = (myViewport->width() - myToast->width()) / 2;
-    const int limitX = std::max(0, myViewport->width() - myToast->width());
+    const int centred = (myHost->width() - myToast->width()) / 2;
+    const int limitX = std::max(0, myHost->width() - myToast->width());
     int x = centred;
-    int y = myViewport->height() - myToast->height() - kBottomMargin;
+    int y = myHost->height() - myToast->height() - kBottomMargin;
 
     // Everything the overlay has anchored: the walkthrough guide bottom
     // right, the Snap/Select cluster bottom left, the gizmo and unit readout
@@ -691,7 +697,7 @@ void ToastHost::reposition()
     // this file happens to know about, means a cluster added later is stepped
     // around for free.
     std::vector<QRect> obstacles;
-    if (const ViewportOverlay* overlay = myViewport->findChild<ViewportOverlay*>())
+    if (const ViewportOverlay* overlay = myHost->findChild<ViewportOverlay*>())
         obstacles = overlay->occupiedRects();
 
     // Solve one horizontal band at a time rather than nudging past obstacles
@@ -712,7 +718,7 @@ void ToastHost::reposition()
             // Only obstacles sharing this band matter.
             if (obstacle.bottom() < y || obstacle.top() > y + myToast->height() - 1) continue;
             highestTop = highestTop < 0 ? obstacle.top() : std::min(highestTop, obstacle.top());
-            if (obstacle.center().x() < myViewport->width() / 2)
+            if (obstacle.center().x() < myHost->width() / 2)
                 minX = std::max(minX, obstacle.right() + 1 + kClearance);
             else
                 maxX = std::min(maxX, obstacle.left() - kClearance - myToast->width());
@@ -739,8 +745,8 @@ void ToastHost::reposition()
     // after every avoidance clamp, and always downward, so it cannot push the
     // card back over an obstacle the clamps just moved it off.
     {
-        const QPoint origin = myViewport->mapTo(myViewport->window(), QPoint(0, 0));
-        const double dpr = myViewport->devicePixelRatioF();
+        const QPoint origin = myHost->mapTo(myHost->window(), QPoint(0, 0));
+        const double dpr = myHost->devicePixelRatioF();
         x = Theme::snapToDevicePixels(x, origin.x(), dpr);
         y = Theme::snapToDevicePixels(y, origin.y(), dpr);
     }
@@ -760,7 +766,7 @@ void ToastHost::reposition()
     // normally re-places a live balloon, but it only runs on
     // appStateChanged, which showing a toast does not itself emit. Nudge it
     // directly rather than waiting for the next unrelated state change.
-    if (HintBalloon* balloon = myViewport->findChild<HintBalloon*>()) {
+    if (HintBalloon* balloon = myHost->findChild<HintBalloon*>()) {
         balloon->reposition();
     }
 }

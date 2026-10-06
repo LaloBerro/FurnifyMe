@@ -184,7 +184,17 @@ class ToastHost : public QObject {
     Q_OBJECT
 
 public:
-    explicit ToastHost(OcctViewWidget* viewport, QWidget* parent = nullptr);
+    // `host` is the widget the toast floats over and is centred along the
+    // bottom of - the editor's and the scene window's viewport, or since the
+    // 2026-10 review's F15 the hub itself, which has no viewport at all. An
+    // OcctViewWidget host also lends its animationsEnabled() switch and its
+    // ViewportOverlay's obstacles; a plain host has neither, and uses
+    // setAnimationsEnabled() below for the first.
+    explicit ToastHost(QWidget* host, QWidget* parent = nullptr);
+
+    // For a host that is not an OcctViewWidget only - a viewport host answers
+    // from its own switch, which gui_smoke already turns off. Default true.
+    void setAnimationsEnabled(bool enabled) { myAnimationsEnabled = enabled; }
 
     // THE COUNTDOWN WAITS FOR A READER (the 2026-10 review's F13). While the
     // pointer is over the toast or its Undo pill the dismiss timer is
@@ -289,8 +299,14 @@ private:
     // never turn a lifetime check (isShowing(), remainingMs()) into
     // something that has to wait on a timer it does not itself own.
     void fadeTo(double opacity, std::function<void()> onFinished);
+    // The viewport's switch when the host is one, myAnimationsEnabled when not.
+    bool animationsOn() const;
 
+    // The widget the toast is placed in, always; myViewport is the same
+    // widget when it is an OcctViewWidget and null otherwise (the hub).
+    QWidget* myHost = nullptr;
     OcctViewWidget* myViewport = nullptr;
+    bool myAnimationsEnabled = true;
     // A QPointer, not a raw pointer: myToast is owned by the viewport (it is
     // parented to it, per the class comment above), not by ToastHost, so if
     // the viewport ever tore down first this would otherwise dangle - the

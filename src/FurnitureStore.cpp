@@ -853,6 +853,29 @@ QVector<FurnitureStore::SceneInfo> FurnitureStore::listScenes() const
     return result;
 }
 
+QVector<FurnitureStore::SceneInfo> FurnitureStore::scenesUsingFurniture(
+    const QString& furnitureId) const
+{
+    QVector<SceneInfo> result;
+    if (furnitureId.isEmpty()) return result;
+    for (const SceneInfo& info : listScenes()) {
+        QFile file(scenePath(info.id));
+        if (!file.open(QIODevice::ReadOnly)) continue;
+        const QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+        // The same key jsonToScene() reads a piece's furniture from - one
+        // spelling of the reference, so this cannot disagree with what the
+        // scene window will fail to resolve.
+        for (const QJsonValue& value : obj.value(QStringLiteral("pieces")).toArray()) {
+            if (value.toObject().value(QStringLiteral("furniture")).toString() == furnitureId) {
+                result.push_back(info);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
 QString FurnitureStore::nextSceneName() const
 {
     // The first FREE number, not count + 1: deleting one and making another

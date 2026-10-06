@@ -5,11 +5,13 @@
 #include "InlineRename.h"
 #include "NameFurnitureCard.h"
 #include "Theme.h"
+#include "Toast.h"
 #include "WindowChrome.h"
 
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -107,8 +109,34 @@ public:
         myPixmap = myHasImage ? pix.scaled(size(), Qt::KeepAspectRatioByExpanding,
                                            Qt::SmoothTransformation)
                               : QPixmap();
+        rebuildPlaceholder();
         update();
     }
+
+    // The letter the placeholder carries - the first letter or digit of the
+    // name, so "3-seat sofa" reads 3 and "  bench" reads B.
+    void setInitialFrom(const QString& name)
+    {
+        QChar initial;
+        for (const QChar c : name) {
+            if (c.isLetterOrNumber()) { initial = c.toUpper(); break; }
+        }
+        if (initial == myInitial) return;
+        myInitial = initial;
+        rebuildPlaceholder();
+        update();
+    }
+
+    // A theme edit recolours the placeholder: it is rasterised from tokens,
+    // so the cached image is redrawn here, once, rather than at paint time.
+    void restyle()
+    {
+        rebuildPlaceholder();
+        update();
+    }
+
+    bool showsPlaceholder() const { return !myHasImage; }
+    qint64 placeholderKey() const { return myHasImage ? 0 : myPlaceholder.cacheKey(); }
 
     void setHovered(bool hovered)
     {
@@ -142,6 +170,15 @@ protected:
             painter.setClipPath(clip);
             painter.drawPixmap(rect(), myPixmap);
             painter.restore();
+        } else {
+            // A display-scale change (the window dragged to another monitor)
+            // is the one thing that can stale the cached image without
+            // passing through a setter, so it is the one rebuild a paint may
+            // trigger - once per change, never per frame.
+            if (myPlaceholder.isNull() ||
+                !qFuzzyCompare(myPlaceholder.devicePixelRatio(), devicePixelRatioF()))
+                rebuildPlaceholder();
+            painter.drawPixmap(rect().topLeft(), myPlaceholder);
         }
 
         Theme::drawCrispBorder(painter, QRectF(rect()),
@@ -149,9 +186,48 @@ protected:
     }
 
 private:
+    // THE EMPTY THUMBNAIL IS A PLACEHOLDER, not a blank panel (the 2026-10
+    // review's F12): a furniture that has never been saved with a picture -
+    // and every scene before its first save - used to show a grey card that
+    // read as a thumbnail that failed to load. A quiet monogram instead: the
+    // name's first letter in the muted ink, on a disc of the chip tone,
+    // centred where the picture would be. Painted from tokens into ONE cached
+    // image here, never at paint time - CLAUDE.md's "no overlay paintEvent
+    // may decode, load or rescale an asset", applied to an asset we draw.
+    // Transparent around the disc, so the card's own panel shows through.
+    void rebuildPlaceholder()
+    {
+        if (myHasImage) { myPlaceholder = QPixmap(); return; }
+        const double dpr = devicePixelRatioF();
+        QPixmap pix(QSize(std::max(1, static_cast<int>(std::ceil(width() * dpr))),
+                          std::max(1, static_cast<int>(std::ceil(height() * dpr)))));
+        pix.setDevicePixelRatio(dpr);
+        pix.fill(Qt::transparent);
+        QPainter p(&pix);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::TextAntialiasing, true);
+        const QPointF centre(width() / 2.0, height() / 2.0);
+        p.setPen(Qt::NoPen);
+        p.setBrush(Theme::chip());
+        p.drawEllipse(centre, kPlaceholderRadius, kPlaceholderRadius);
+        if (!myInitial.isNull()) {
+            p.setPen(Theme::textMuted());
+            p.setFont(Theme::titleFont());
+            const QRectF disc(centre.x() - kPlaceholderRadius, centre.y() - kPlaceholderRadius,
+                              2.0 * kPlaceholderRadius, 2.0 * kPlaceholderRadius);
+            p.drawText(disc, Qt::AlignCenter, QString(myInitial));
+        }
+        p.end();
+        myPlaceholder = pix;
+    }
+
+    static constexpr double kPlaceholderRadius = 28.0;
+
     bool myHovered = false;
     bool myHasImage = false;
     QPixmap myPixmap;
+    QChar myInitial;
+    QPixmap myPlaceholder;   // see rebuildPlaceholder()
 };
 
 // One grid cell: the thumbnail above, an under-row below carrying the name
@@ -172,6 +248,16 @@ public:
 
         myThumb = new ThumbCardWidget(this);
         layout->addWidget(myThumb);
+
+        // The armed Delete's "Used in ..." strip - see usedInText(). A child
+        // of the thumbnail, standing across its foot, and transparent to the
+        // mouse so a click there still opens the card like any other.
+        myUsedIn = new QLabel(myThumb);
+        myUsedIn->setAttribute(Qt::WA_TransparentForMouseEvents);
+        myUsedIn->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        myUsedIn->setGeometry(kUsedInInset, myThumb->height() - kUsedInInset - kUsedInHeight,
+                              myThumb->width() - 2 * kUsedInInset, kUsedInHeight);
+        myUsedIn->hide();
 
         auto* underRow = new QWidget(this);
         underRow->setAttribute(Qt::WA_NoSystemBackground);
@@ -222,6 +308,17 @@ public:
             }
             myDeleteArmed = true;
             myDelete->setText(SelectorCardWidget::deleteArmedLabel());
+            // Asked HERE, once per arming - never per paint and never per
+            // hover: it reads every scene file in the library.
+            const QStringList names = usedIn ? usedIn() : QStringList();
+            if (!names.isEmpty()) {
+                // The text column: the strip less its 8 px padding each side
+                // and its 1 px border each side.
+                const int column = myUsedIn->width() - 2 * 8 - 2;
+                myUsedIn->setText(usedInText(names, column, QFontMetrics(Theme::labelFont())));
+                myUsedIn->show();
+                myUsedIn->raise();
+            }
             myDeleteTimer->start();
         });
 
@@ -267,6 +364,7 @@ public:
         myName->setText(name);
         myDate->setText(lastEdited.isValid() ? editedText(lastEdited.toLocalTime())
                                              : tr("Never saved"));
+        myThumb->setInitialFrom(name);
         myThumb->setThumbnailPath(thumbPath);
         update();
     }
@@ -278,8 +376,59 @@ public:
         const QString css = actionButtonCss();
         myRename->setStyleSheet(css);
         myDelete->setStyleSheet(css);
+        myUsedIn->setStyleSheet(
+            QStringLiteral("background-color: %1; color: %2; border: 1px solid %3; "
+                           "border-radius: 6px; padding: 0px 8px; font-size: %4pt;")
+                .arg(Theme::panel().name(), Theme::dangerText().name(), Theme::danger().name())
+                .arg(Theme::labelFont().pointSizeF()));
+        myThumb->restyle();
         update();
     }
+
+    // WHAT A DELETE WOULD BREAK, said before the second click (the 2026-10
+    // review's F15, the user's "Name scenes + report it"). The names go on a
+    // strip across the foot of the thumbnail rather than into the Delete
+    // button: the button shares a 260 px under-row with the name and Rename,
+    // and "Delete — used in Dining set and Kitchen — click again" measured
+    // wider than the whole row, so a button carrying it could only have been
+    // squashed or clipped. The strip has the card's full width.
+    //
+    // Fitted, never clipped: every name while they fit, then as many as fit
+    // with "and N more", then just the count. `width` is the strip's text
+    // column; the font is the strip's own.
+    static QString usedInText(const QStringList& names, int width, const QFontMetrics& fm)
+    {
+        if (names.isEmpty()) return QString();
+        auto listed = [](const QStringList& shown) {
+            if (shown.size() == 1) return shown.first();
+            return tr("%1 and %2").arg(QStringList(shown.mid(0, shown.size() - 1))
+                                           .join(QStringLiteral(", ")),
+                                       shown.last());
+        };
+        const QString all = tr("Used in %1").arg(listed(names));
+        if (fm.horizontalAdvance(all) <= width) return all;
+        for (int keep = static_cast<int>(names.size()) - 1; keep >= 1; --keep) {
+            const QString some = tr("Used in %1 and %2 more")
+                                     .arg(QStringList(names.mid(0, keep)).join(QStringLiteral(", ")))
+                                     .arg(names.size() - keep);
+            if (fm.horizontalAdvance(some) <= width) return some;
+        }
+        return names.size() == 1 ? tr("Used in 1 scene")
+                                 : tr("Used in %1 scenes").arg(names.size());
+    }
+    // The copy usedInText() composes, with the user's names left out - for
+    // SelectorWindow::paintedTexts()'s sweep.
+    static QStringList usedInTemplates()
+    {
+        return {tr("Used in %1"), tr("%1 and %2"), tr("Used in %1 and %2 more"),
+                tr("Used in 1 scene"), tr("Used in %1 scenes")};
+    }
+
+    QString usedInShown() const
+    {
+        return myUsedIn->isVisible() ? myUsedIn->text() : QString();
+    }
+    QLabel* usedInLabel() const { return myUsedIn; }
 
     QString nameText() const { return myName->text(); }
     QRect nameLabelGeometry() const
@@ -302,6 +451,11 @@ public:
     std::function<void()> onActivated;
     std::function<void()> onRenameRequested;
     std::function<void()> onDeleteRequested;
+    // The names of the scenes that would lose this card's furniture, asked
+    // when Delete arms. Unset on a scene card - nothing references a scene.
+    std::function<QStringList()> usedIn;
+
+    ThumbCardWidget* thumbCard() const { return myThumb; }
 
 protected:
     void enterEvent(QEnterEvent*) override { setHovered(true); }
@@ -320,9 +474,14 @@ private:
     {
         myDeleteArmed = false;
         myDelete->setText(SelectorCardWidget::deleteLabel());
+        myUsedIn->hide();
     }
 
+    static constexpr int kUsedInInset = 8;
+    static constexpr int kUsedInHeight = 26;
+
     ThumbCardWidget* myThumb = nullptr;
+    QLabel* myUsedIn = nullptr;   // see usedInText()
     QLabel* myName = nullptr;
     QLabel* myDate = nullptr;
     QPushButton* myRename = nullptr;
@@ -497,6 +656,16 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
 
     outer->addWidget(header);
 
+    // A SEARCH THAT FINDS NOTHING SAYS SO (the 2026-10 review's T-060 b). It
+    // used to leave the two New cards standing over an empty grid, which
+    // reads as an empty library rather than as a query with no answer. One
+    // plain line under the header, shown by relayoutCards() only while a
+    // query is typed and no card of either kind matches it.
+    myNoMatch = new QLabel(this);
+    myNoMatch->setWordWrap(true);
+    myNoMatch->hide();
+    outer->addWidget(myNoMatch);
+
     myScroll = new QScrollArea(this);
     myScroll->setWidgetResizable(true);
     myScroll->setFrameShape(QFrame::NoFrame);
@@ -573,6 +742,12 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
         refresh();
         emit sceneChosen(id);
     });
+
+    // The editor's and the scene window's one-toast machinery, over this
+    // window rather than a viewport - a plain host, see ToastHost's ctor.
+    // Notes only, for now: a refusal here still goes to the inline banner
+    // below the header, which every refusal test pins.
+    myToasts = new ToastHost(this, this);
 
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &SelectorWindow::applyTheme);
@@ -651,15 +826,38 @@ QWidget* SelectorWindow::buildCard(const QString& id, const QString& name,
                                       refresh();
                                   });
     };
-    card->onDeleteRequested = [this, id] {
+    card->usedIn = [this, id] {
+        QStringList names;
+        for (const FurnitureStore::SceneInfo& scene : myStore.scenesUsingFurniture(id))
+            names << scene.name;
+        return names;
+    };
+    card->onDeleteRequested = [this, id, name] {
+        // Counted BEFORE the delete - afterwards the question has no subject.
+        const int scenes = static_cast<int>(myStore.scenesUsingFurniture(id).size());
         if (!myStore.deleteFurniture(id)) {
             showFailure(tr("Couldn't delete this furniture — Check that its "
                           "folder still exists and isn't read-only"));
             return;
         }
         refresh();
+        // REPORTED, and with no Undo (the 2026-10 review's F15). Deleting a
+        // furniture removes files - the furniture and every version it holds
+        // - which is file data, final once taken, exactly as a version's
+        // Delete is; the two-click arm above was the "are you sure". What the
+        // Note adds is the consequence the user cannot otherwise see from
+        // here: scenes in another window that now show a broken piece.
+        myToasts->show(deletedNoteText(name, scenes), Toast::Kind::Note, false);
     };
     return card;
+}
+
+QString SelectorWindow::deletedNoteText(const QString& name, int scenes)
+{
+    if (scenes <= 0) return tr("Deleted %1").arg(name);
+    if (scenes == 1) return tr("Deleted %1 — 1 scene now shows it as missing").arg(name);
+    return tr("Deleted %1 — %2 scenes now show it as missing")
+        .arg(name, QString::number(scenes));
 }
 
 void SelectorWindow::refresh()
@@ -844,6 +1042,16 @@ void SelectorWindow::relayoutCards()
         }
     }
 
+    // The no-match line - see the ctor. placedWidgets holds the two New cards
+    // as well, which a search never hides; anything past them is a match.
+    if (myNoMatch) {
+        const int newCards = (myNewButton ? 1 : 0) + (myNewSceneButton ? 1 : 0);
+        const bool nothing =
+            !needle.isEmpty() && static_cast<int>(placedWidgets.size()) <= newCards;
+        if (nothing) myNoMatch->setText(noMatchText(needle));
+        myNoMatch->setVisible(nothing);
+    }
+
     // Park the slack: an empty stretch column past the third and an empty
     // stretch row past the last keep a wider or taller viewport from
     // spreading the fixed-size cells apart instead of leaving the grid
@@ -970,6 +1178,62 @@ void SelectorWindow::beginRenameAt(int index)
     if (card && card->onRenameRequested) card->onRenameRequested();
 }
 
+QString SelectorWindow::noMatchText(const QString& query)
+{
+    return tr("Nothing matches \"%1\"").arg(query);
+}
+
+bool SelectorWindow::noMatchVisible() const
+{
+    return myNoMatch && myNoMatch->isVisible();
+}
+
+QString SelectorWindow::noMatchShown() const
+{
+    return noMatchVisible() ? myNoMatch->text() : QString();
+}
+
+QWidget* SelectorWindow::sceneThumbnailAt(int index) const
+{
+    auto* card = static_cast<SelectorCardWidget*>(sceneCardAt(index));
+    return card ? card->thumb() : nullptr;
+}
+
+qint64 SelectorWindow::thumbnailPlaceholderKey(const QWidget* thumbnail)
+{
+    // Every thumbnail this window hands out is a ThumbCardWidget - thumbnailAt()
+    // and sceneThumbnailAt() are the only two routes to one.
+    const auto* thumb = static_cast<const ThumbCardWidget*>(thumbnail);
+    return thumb ? thumb->placeholderKey() : 0;
+}
+
+QString SelectorWindow::usedInText(const QStringList& names, int width, const QFontMetrics& fm)
+{
+    return SelectorCardWidget::usedInText(names, width, fm);
+}
+
+QString SelectorWindow::usedInTextAt(int index) const
+{
+    auto* card = static_cast<SelectorCardWidget*>(cardAt(index));
+    return card ? card->usedInShown() : QString();
+}
+
+QLabel* SelectorWindow::usedInLabelAt(int index) const
+{
+    auto* card = static_cast<SelectorCardWidget*>(cardAt(index));
+    return card ? card->usedInLabel() : nullptr;
+}
+
+QStringList SelectorWindow::paintedUserTexts() const
+{
+    // The user's own words inside this window's copy - the query echoed in
+    // the no-match line, and the scene names on an armed Delete's strip.
+    QStringList texts;
+    if (mySearch && !mySearch->text().trimmed().isEmpty()) texts << mySearch->text().trimmed();
+    for (const FurnitureStore::SceneInfo& scene : myStore.listScenes()) texts << scene.name;
+    return texts;
+}
+
 QStringList SelectorWindow::paintedTexts() const
 {
     QStringList texts;
@@ -984,6 +1248,23 @@ QStringList SelectorWindow::paintedTexts() const
     // VersionsPanel's own static deleteLabel()/deleteArmedLabel() sweep via.
     texts << SelectorCardWidget::renameLabel() << SelectorCardWidget::deleteLabel()
           << SelectorCardWidget::deleteArmedLabel();
+    // The copy that embeds a user's word - the no-match line, the armed
+    // Delete's strip and the delete Note - with the placeholders taken OUT
+    // rather than filled, UnsavedCloseCard::paintedTexts()'s precedent: the
+    // words around a name are ours, the name is not (see paintedUserTexts()).
+    QStringList templates = SelectorCardWidget::usedInTemplates();
+    templates << noMatchText(QStringLiteral("%1")) << deletedNoteText(QStringLiteral("%1"), 0)
+              << deletedNoteText(QStringLiteral("%1"), 1)
+              << deletedNoteText(QStringLiteral("%1"), 2);
+    for (const QString& t : templates) {
+        QString words = t;
+        words.replace(QStringLiteral("%1"), QStringLiteral("\n"))
+            .replace(QStringLiteral("%2"), QStringLiteral("\n"));
+        for (const QString& fragment : words.split(QLatin1Char('\n'))) {
+            const QString trimmed = fragment.trimmed();
+            if (!trimmed.isEmpty()) texts << trimmed;
+        }
+    }
     texts << myShownFailures;
     return texts;
     // Furniture NAMES are deliberately excluded - see the class comment.
@@ -998,6 +1279,7 @@ void SelectorWindow::applyTheme()
     // The New card paints itself from live tokens in its own paintEvent -
     // only a repaint is owed on a theme edit, never a stylesheet.
     if (myNewButton) myNewButton->update();
+    if (myNoMatch) myNoMatch->setStyleSheet(labelChrome(Theme::textMuted(), Theme::bodyFont()));
     if (mySearch) {
         mySearch->setStyleSheet(
             QStringLiteral("QLineEdit { background-color: %1; color: %2; border: 1px "
@@ -1024,8 +1306,11 @@ void SelectorWindow::applyTheme()
     };
     if (mySortRecent) mySortRecent->setStyleSheet(chipCss(!sortedByName()));
     if (mySortName) mySortName->setStyleSheet(chipCss(sortedByName()));
-    for (const Card& c : myCards) {
-        if (auto* card = static_cast<SelectorCardWidget*>(c.widget)) card->restyle();
+    // Both sections: a scene card's placeholder is drawn from the same tokens.
+    for (const std::vector<Card>* cards : {&myCards, &mySceneCards}) {
+        for (const Card& c : *cards) {
+            if (auto* card = static_cast<SelectorCardWidget*>(c.widget)) card->restyle();
+        }
     }
     update();
 }
@@ -1061,6 +1346,8 @@ void SelectorWindow::resizeEvent(QResizeEvent* event)
     // The name question is a scrim over this whole window - it re-fits
     // itself from its own filter on us, and this is the belt for it.
     if (myNameCard && myNameCard->isAsking()) myNameCard->replace();
+    // A live Note keeps to the bottom centre of the resized window.
+    if (myToasts) myToasts->replace();
 }
 
 void SelectorWindow::closeEvent(QCloseEvent* event)

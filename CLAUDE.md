@@ -330,7 +330,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
 | `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
-| `ui/SelectorWindow.{h,cpp}` | the library, a top-level window of its own — cards, New, rename, delete |
+| `ui/SelectorWindow.{h,cpp}` | the library, a top-level window of its own — cards, New, rename, delete; its own `ToastHost` for the delete Note |
 | `EditorSelectorHandoff.{h,cpp}` | the ONE wiring that swaps editor and selector; `main.cpp` and `gui_smoke` share it |
 | `ui/InlineRename.{h,cpp}` | the one `QLineEdit`-in-place helper: selector cards and drawer rows both use it |
 | `ui/VersionsPanel.{h,cpp}` | versions drawer: thumbnail cards, Compare, Restore, two-click Delete |
@@ -648,7 +648,12 @@ backstop is that a modal would *hang* the suite rather than fail it politely.
 `ToastHost` owns exactly one `Toast`. A second message replaces the first and restarts the
 timer — a stack of toasts is a dialog with extra steps. A `Note` lives 4 seconds and a
 `Failure` 8, because a failure carries a sentence the user has to read and act on; the
-suite asserts both against the armed timer rather than waiting real seconds.
+suite asserts both against the armed timer rather than waiting real seconds. Its host is any
+`QWidget`: over an `OcctViewWidget` it reads that viewport's animation switch and overlay
+obstacles; over a plain host (the hub, since F15) it has neither, and the suite turns its
+fade off with `ToastHost::setAnimationsEnabled(false)` — `settle()` returns on the first
+quiet poll, long before a 160 ms fade has run, so an un-switched hub toast is captured
+invisible.
 
 **The countdown waits for a reader, and a refusal's reason outlives its toast** (the
 2026-10 review's F13). While the pointer rests on the toast or its Undo pill the timer is
@@ -1503,6 +1508,22 @@ never half-loads and never lies about having saved.
   ("Delete — click again to confirm"), final once taken. That taxonomy — document data goes
   through checkpoint+Undo, file data goes through a second click — is the same line "Save is
   never a checkpoint" draws, applied to deletion instead of writing.
+- **Deleting a furniture in the hub says what it breaks, then reports it** (the 2026-10
+  review's F15, the user's "Name scenes + report it"). Still the two-click arm, still no
+  Undo — but arming asks `FurnitureStore::scenesUsingFurniture()` (one JSON parse per scene
+  file, never a furniture opened, asked once per arming and never per paint) and, when any
+  scene uses it, puts **"Used in Kitchen and Dining set"** on a `dangerText` strip across the
+  foot of the thumbnail; the button keeps "Delete — click again". The names live on the
+  strip, not in the button, by measurement: the button-borne sentence needs 295 px of a
+  260 px under-row. They are fitted, never clipped — every name, then "and N more", then
+  "Used in 3 scenes". The delete itself is a **Note with no Undo** from the hub's own
+  `ToastHost` — "Deleted Bench — 2 scenes now show it as missing". Refusals there still use
+  the inline banner.
+- **A thumbnail-less card wears a placeholder, not a grey panel** (F12): the name's first
+  letter in `textMuted()` on a `chip()` disc, rasterised into one cached `QPixmap` when the
+  name, the theme or the display scale changes — never in `paintEvent()`. Scene cards share
+  the widget and the placeholder. A search with no match shows `Nothing matches "<query>"`
+  under the header, the query swept as user data (`SelectorWindow::paintedUserTexts()`).
 - **Compare is a second, read-only `OcctViewWidget`** (`myViewerOnly`, no gizmos, no
   selection, no hover, no picking channels attached at all — skipped structurally in the
   constructor rather than left wired and merely unused) beside the live one in a `QSplitter`,
@@ -1760,7 +1781,10 @@ always starts in modeling) strips the viewport down to the furniture and nothing
 `SelectorWindow` replaced the in-editor init screen; `EditorSelectorHandoff::wire()` is
 the ONE implementation of the swap, called by both `main.cpp` and `gui_smoke` — a suite
 driving its own copy of the handoff proves nothing about the app, and the first review
-round caught exactly that drift. Two belts, both required: every leg shows the **target
+round caught exactly that drift. **The hub has worn `WindowChrome`'s custom title strip since
+Milestone 5** — a 2026-10 reviewer read its Flat window buttons as the OS caption, which they
+are not; `gui_smoke` pins it off the real HWND (`nativeCaptionRows()`: client origin against
+`GetWindowRect`, 0 with the chrome, 45 at 1.5× without it). Two belts, both required: every leg shows the **target
 first** and hides the source second, so at least one window is always visible; and
 `setQuitOnLastWindowClosed(false)`, because Qt fires the last-window-closed check on a
 mere `hide()` and a posted `QEvent::Quit` cannot be taken back later in the same call
@@ -2074,7 +2098,8 @@ this section as claiming a piece can be snapped to another piece today.
   row that reads like an ordinary piece and draws nothing is a row the user believes; and a
   save that wrote only the pieces it could draw would delete the reference permanently, on the
   next autosave, silently. Joinery's "it breaks loudly, and with no numbers" rule, applied to a
-  file reference.
+  file reference. The hub warns before it happens: arming a furniture's Delete names the
+  scenes that use it (see "Files, versions and the library").
 - **The library is the hub, and the handoff has three legs.** `EditorSelectorHandoff::wire()`
   took a third window; choosing a scene card shows the scene window **first** and hides the
   selector **second**, `File → Close scene` reverses it, and the scene window's X quits through
