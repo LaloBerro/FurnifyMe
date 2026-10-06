@@ -119,6 +119,7 @@
 #include <QPointer>
 #include <QTimer>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSet>
 #include <QSettings>
 #include <QSlider>
@@ -980,6 +981,8 @@ constexpr BlockInfo kBlocks[] = {
     { "pressing-a-control-never-drops-the-selection", false, true },
     { "booleans-roles-on-the-wood-and-the-region-drawn", false, true },
     { "every-chip-writes-enter-and-esc-one-way", false, true },
+    { "words-in-a-hue-read-and-a-failure-is-a-shape", false, true },
+    { "the-status-bar-gives-each-channel-one-job", false, true },
     { "the-rail-and-the-drawer-start-on-one-line", false, true },
 };
 
@@ -2211,6 +2214,64 @@ double colorDistance(const QColor& a, const QColor& b)
     const double dg = a.green() - b.green();
     const double db = a.blue() - b.blue();
     return std::sqrt(dr * dr + dg * dg + db * db);
+}
+
+// WCAG 2's contrast ratio, from its own definitions: sRGB channels linearised,
+// relative luminance weighted 0.2126/0.7152/0.0722, and (L1 + 0.05) / (L2 +
+// 0.05) with the lighter on top. The 2026-10 review measured its findings with
+// exactly this, so the suite pins against the same arithmetic.
+double relativeLuminance(const QColor& c)
+{
+    const auto channel = [](double v) {
+        return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * channel(c.redF()) + 0.7152 * channel(c.greenF()) +
+           0.0722 * channel(c.blueF());
+}
+
+double contrastRatio(const QColor& a, const QColor& b)
+{
+    const double la = relativeLuminance(a);
+    const double lb = relativeLuminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+// `ink` laid over an opaque `ground` at the ink's own alpha - what a painted
+// pixel of a render taken onto transparency looks like where it really sits.
+QColor overGround(const QColor& ink, const QColor& ground)
+{
+    const double a = ink.alphaF();
+    return QColor::fromRgbF(ink.redF() * a + ground.redF() * (1.0 - a),
+                            ink.greenF() * a + ground.greenF() * (1.0 - a),
+                            ink.blueF() * a + ground.blueF() * (1.0 - a));
+}
+
+// The most CHROMATIC pixel inside `area`, laid over `ground` - which, in a
+// region holding words in a hue (the accent's, the failure red's) beside
+// words in a grey, is a glyph's fully covered core in that hue: antialiasing
+// only ever mixes the ink toward the ground, so coverage and chroma rise
+// together. Asking for it, rather than for the token, is what makes a check
+// built on it a measurement of what was PAINTED - a site still drawing in the
+// fill token reads as that token here, whatever the text token says.
+QColor mostChromaticInk(const QImage& image, const QRect& area, const QColor& ground,
+                        int* chromaOut = nullptr)
+{
+    QColor best = ground;
+    int bestChroma = -1;
+    const QRect clipped = area.intersected(image.rect());
+    for (int y = clipped.top(); y <= clipped.bottom(); ++y) {
+        for (int x = clipped.left(); x <= clipped.right(); ++x) {
+            const QColor seen = overGround(image.pixelColor(x, y), ground);
+            const int chroma = std::max({seen.red(), seen.green(), seen.blue()}) -
+                               std::min({seen.red(), seen.green(), seen.blue()});
+            if (chroma > bestChroma) {
+                bestChroma = chroma;
+                best = seen;
+            }
+        }
+    }
+    if (chromaOut) *chromaOut = bestChroma;
+    return best;
 }
 
 // Mean of R+G+B/3 over a rectangular region - used where the signal is
@@ -7065,14 +7126,21 @@ int main(int argc, char* argv[])
 
     // --- the app reports dimensions, not volume -------------------------------
     if (blockEnabled("the-app-reports-dimensions-not-volume")) {
-        const QString status = window.statusBar()->currentMessage();
+        // The report is the extrude's Note TOAST. It used to be read off the
+        // status bar too, which repeated it word for word - the 2026-10
+        // review's F9 - and the bar now goes back to the selection instead.
+        ToastHost* reportToasts = window.findChild<ToastHost*>();
+        const QString status = reportToasts ? reportToasts->currentText() : QString();
         check(status.contains(QStringLiteral("Body 0")),
-              QStringLiteral("the status line names the body (\"%1\")").arg(status));
+              QStringLiteral("the report names the body (\"%1\")").arg(status));
         check(status.contains(QString::fromUtf8("\xC3\x97")),
-              "the status line reports dimensions with a multiplication sign");
+              "the report gives dimensions with a multiplication sign");
         check(!status.contains(QStringLiteral("volume")) &&
               !status.contains(QStringLiteral("mm3")),
-              "the status line no longer mentions volume");
+              "the report no longer mentions volume");
+        check(window.statusBar()->currentMessage() != status,
+              QStringLiteral("and the status bar does not say it a second time (\"%1\")")
+                  .arg(window.statusBar()->currentMessage()));
     }
 
     // --- items panel ----------------------------------------------------------
@@ -10684,7 +10752,7 @@ int main(int argc, char* argv[])
               "one flat face selected raises it");
         check(view->hasPullArrow(),
               "and the arrow itself is drawn in the 3D scene, not painted over it");
-        check(stateLabelText(window).contains(QStringLiteral("drag the arrow to pull")),
+        check(stateLabelText(window).contains(QStringLiteral("Drag the arrow to pull")),
               QStringLiteral("the state label teaches the gesture (\"%1\")")
                   .arg(stateLabelText(window)));
 
@@ -11702,7 +11770,7 @@ int main(int argc, char* argv[])
         // The table's words, not "round or flatten": one operation, one name,
         // across the chip, the tooltips, this label and both refusals.
         check(stateLabelText(window).contains(
-                  QStringLiteral("drag in for a Fillet, out for a Chamfer")),
+                  QStringLiteral("Drag in for a Fillet, out for a Chamfer")),
               QStringLiteral("the state label teaches the gesture in the operations' "
                              "own names (\"%1\")")
                   .arg(stateLabelText(window)));
@@ -12324,11 +12392,18 @@ int main(int argc, char* argv[])
             check(!view->dimension().isShowing(),
                   "with the edge-length annotation still cleared - two edges is no more "
                   "measurable by one label than one edge under a chip was");
-            check(stateLabelText(window) ==
-                      QStringLiteral("2 edges selected — drag in for a Fillet, out for a "
-                                     "Chamfer, or type a size"),
-                  QStringLiteral("and the state label says how many, with the plural "
-                                 "written out (\"%1\")")
+            // HOW MANY is the left channel's since the 2026-10 review's F9 -
+            // the state label is the mode and the next step only, so the
+            // count is said once, with the plural written out.
+            check(window.statusBar()->currentMessage() == QStringLiteral("2 edges selected"),
+                  QStringLiteral("and the status bar's left channel says how many, with the "
+                                 "plural written out (\"%1\")")
+                      .arg(window.statusBar()->currentMessage()));
+            check(stateLabelText(window).endsWith(
+                      QStringLiteral("Drag in for a Fillet, out for a Chamfer, or type a size")) &&
+                      !stateLabelText(window).contains(QStringLiteral("2 edges")),
+                  QStringLiteral("while the state label teaches the gesture and names no count "
+                                 "(\"%1\")")
                       .arg(stateLabelText(window)));
 
             // Pinned before it guards anything, exactly as the pull arrow's
@@ -15005,9 +15080,16 @@ int main(int argc, char* argv[])
                   QStringLiteral("a contact the kernel threw on reads as advice, never as "
                                  "the exception (\"%1\")")
                       .arg(thrownContact));
+            // Joinery's own reason is kept word for word, and since the
+            // 2026-10 review's F24 it no longer stops there: a broken joint
+            // that says only what is wrong leaves the user with no move, so
+            // every reason ends with a step after an em dash.
             check(JointsPanel::reasonText("these two pieces don't meet") ==
-                      QStringLiteral("these two pieces don't meet"),
-                  "while Joinery's own reasons, written for the user, pass through as they are");
+                      QStringLiteral("these two pieces don't meet — move the pieces so "
+                                     "they meet"),
+                  QStringLiteral("while Joinery's own reasons keep their words and gain a "
+                                 "next step (\"%1\")")
+                      .arg(JointsPanel::reasonText("these two pieces don't meet")));
             copyHost->show(thrownContact, Toast::Kind::Failure, false, kCopyStamp);
             settle(60);
 
@@ -16793,6 +16875,12 @@ int main(int argc, char* argv[])
                 // as for what they are.
                 {QStringLiteral("booleanOut"), QStringLiteral("#ff5a4a")},
                 {QStringLiteral("booleanStay"), QStringLiteral("#2ad4b0")},
+                // The 2026-10 review's F5 and F24: the two TEXT inks. Light
+                // siblings of the shipped violet and the failure red, chosen
+                // to clear 4.5:1 on every surface their words are painted on
+                // - the ratios themselves are pinned in the contrast block.
+                {QStringLiteral("accentText"), QStringLiteral("#bb9cff")},
+                {QStringLiteral("dangerText"), QStringLiteral("#ff8f82")},
             };
             const Theme::Spec shippedSpec = Theme::defaultSpec();
             QStringList drifted;
@@ -16820,7 +16908,7 @@ int main(int argc, char* argv[])
                       .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
             check(drifted.isEmpty(),
                   QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
-                      .arg(drifted.isEmpty() ? QStringLiteral("all 31 exact")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 33 exact")
                                              : drifted.join(QStringLiteral(", "))));
             check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
                   QStringLiteral("and the shipped base size is still 10pt (%1)")
@@ -34462,7 +34550,8 @@ int main(int argc, char* argv[])
                 check(joints.size() == beforeRefusal,
                       "placement: two pieces that don't meet create no joint");
                 check(toastText() ==
-                          QStringLiteral("These pieces can't take a joint — these two pieces don't meet"),
+                          QStringLiteral("These pieces can't take a joint — these two pieces "
+                                         "don't meet — move the pieces so they meet"),
                       QStringLiteral("placement: and the refusal says they don't meet (\"%1\")")
                           .arg(toastText()));
                 check(toasts != nullptr && toasts->remainingMs() > 5000,
@@ -34481,8 +34570,10 @@ int main(int argc, char* argv[])
                 settle(250);
                 check(joints.size() == beforeRefusal,
                       "placement: pieces that meet but take no joint create nothing");
+                // With its next step since the 2026-10 review's F24.
                 check(toastText() == QStringLiteral(
-                                         "These pieces can't take a joint — the contact is too small for a joint"),
+                                         "These pieces can't take a joint — the contact is too small for a joint "
+                                         "— move them so more of the two faces touch"),
                       QStringLiteral("placement: and the refusal gives the contact's own reason, not "
                                      "\"don't meet\" (\"%1\")")
                           .arg(toastText()));
@@ -35829,7 +35920,9 @@ int main(int argc, char* argv[])
                           QStringLiteral("drawer: not one digit in anything the broken row paints (%1)")
                               .arg(digits.isEmpty() ? QStringLiteral("none") : digits));
 
-                    // Its name in danger ink - measured, not asserted.
+                    // Its name in the failure hue's TEXT ink - measured, not
+                    // asserted. dangerText() since the 2026-10 review's F24:
+                    // danger() itself read about 3.1:1 on this tinted row.
                     const auto dangerInk = [&](int r) {
                         QWidget* w = panel->rowWidgetAt(r);
                         if (w == nullptr) return -1;
@@ -35839,7 +35932,7 @@ int main(int argc, char* argv[])
                         for (int yy = area.top(); yy <= area.bottom(); ++yy)
                             for (int xx = area.left(); xx <= area.right(); ++xx) {
                                 const QColor c = shot.pixelColor(xx, yy);
-                                if (c.alpha() > 150 && colorDistance(c, Theme::danger()) < 60.0) ++count;
+                                if (c.alpha() > 150 && colorDistance(c, Theme::dangerText()) < 60.0) ++count;
                             }
                         return count;
                     };
@@ -38144,8 +38237,11 @@ int main(int argc, char* argv[])
             check(pickFaceOf(mw, board, faceAt, face), "sizes: a face of the board is picked");
             check(sv->selectionKind() == OcctViewWidget::PickKind::Face && !sv->selectionSizesShown(),
                   "sizes: a face selection draws no selection sizes");
-            check(status() == QStringLiteral("1 body selected"),
-                  QStringLiteral("sizes: and the status bar carries no size for it (%1)").arg(status()));
+            // Named in its own kind - "1 face selected" - since the 2026-10
+            // review's F9 made this the ONE place a selection is counted.
+            check(status() == QStringLiteral("1 face selected"),
+                  QStringLiteral("sizes: and the status bar names the face, with no size for "
+                                 "it (%1)").arg(status()));
             QPoint edgeAt;
             TopoDS_Edge edge;
             check(pickEdgeOf(mw, board, edgeAt, edge), "sizes: an edge of the board is picked");
@@ -38242,9 +38338,10 @@ int main(int argc, char* argv[])
             check(sv->selectionSizesShown() &&
                       labels() == QStringLiteral("900 mm | 450 mm | 27 mm"),
                   QStringLiteral("sizes: the numbers follow the edit live (%1)").arg(labels()));
-            // The commit's own Note owns the bar now ("Body 01 scaled - ..."),
-            // and the live refresh rightly leaves somebody else's sentence
-            // alone - so this asks only that the NEW size is what it reads.
+            // The commit's own Note is the TOAST's ("Body 01 scaled - ..."),
+            // and since the 2026-10 review's F9 the bar goes back to the
+            // selection sentence rather than repeating it - which therefore
+            // has to read the NEW size.
             check(status().contains(QStringLiteral("900 %1 450 %1 27 mm").arg(times)),
                   QStringLiteral("sizes: and the status bar reads the new size (%1)").arg(status()));
             trigger(mw, QStringLiteral("Undo"));
@@ -38428,6 +38525,591 @@ int main(int argc, char* argv[])
     // The panel is far bigger than either peg, so "the biggest body survives"
     // has an unambiguous answer, and the two pegs are identical so a check
     // that confused them would still have to explain the panel.
+    // --- words in a hue read at 4.5:1, and a Failure is a shape -----------------
+    // The 2026-10 review's F5, F24, F6 and F13, in one window. The violet
+    // accent and the failure red are FILL colours and were being used to write
+    // words: the toast's Undo measured 1.80:1 on its pill, "got it", the hub's
+    // New cards, the joint chip's More and the Fillet chip's value about 2.3 to
+    // 2.5, a broken joint's reason and "Close without saving" about 3.1. Two
+    // text tokens answer that, and every site is pinned twice - once from the
+    // tokens, so the arithmetic is on record, and once from the PIXELS at the
+    // sites that can be put on screen here, so a site still painting the fill
+    // token cannot hide behind a token that is right. Then the toast itself: a
+    // Failure carries a warning mark and a danger border, not only a stripe,
+    // and its countdown waits while the pointer rests on it.
+    if (blockEnabled("words-in-a-hue-read-and-a-failure-is-a-shape")) {
+        RequiredTempDir inkDir;
+        QString inkId;
+        {
+            FurnitureStore seedStore(inkDir.path());
+            inkId = seedStore.createFurniture(QStringLiteral("Ink bench"));
+            DocumentModel seedDoc;
+            // A base and an upright standing on it end-on - a contact a joint
+            // can be placed on - and a third board well away from both, the
+            // one every harmless edit below moves.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 600.0, 300.0, 18.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 18.0), 18.0, 300.0, 400.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 900.0, 0.0), 400.0, 200.0, 18.0));
+            check(!inkId.isEmpty() && seedStore.saveFurniture(inkId, seedDoc, QImage()),
+                  "ink: a base, an upright and a spare board are seeded");
+        }
+        MainWindow iw(nullptr, /*persistProgress=*/false, inkDir.path());
+        iw.setAttribute(Qt::WA_ShowWithoutActivating);
+        iw.resize(1100, 800);
+        iw.show();
+        waitFully(300);
+        iw.view()->setAnimationsEnabled(false);
+        check(iw.openFurniture(inkId), "ink: the seeded furniture opens");
+        settle(300);
+        // Off, so the edits below stay UNSAVED and closing asks - the one way
+        // to put "Close without saving" on screen.
+        iw.setAutosaveMode(MainWindow::AutosaveMode::Off);
+        const std::vector<DocumentModel::Solid> inkSolids = iw.document().solids();
+        check(inkSolids.size() == 3, "ink: three bodies are open");
+        const int baseId = inkSolids.size() == 3 ? inkSolids[0].id : 0;
+        const int uprightId = inkSolids.size() == 3 ? inkSolids[1].id : 0;
+        const int spareId = inkSolids.size() == 3 ? inkSolids[2].id : 0;
+
+        // --- the tokens, against every surface their words sit on ------------
+        QColor brokenTint = Theme::danger();
+        brokenTint.setAlphaF(0.13);   // JointsPanel's broken row ground
+        const QColor brokenGround = overGround(brokenTint, Theme::panel());
+        struct InkSite {
+            const char* what;
+            QColor ink;
+            QColor ground;
+        };
+        const InkSite inkSites[] = {
+            {"the toast's Undo on its pill", Theme::accentText(), Theme::chipHover()},
+            {"the hint balloon's \"got it\"", Theme::accentText(), Theme::panel()},
+            {"the hub's New cards at rest", Theme::accentText(), Theme::chrome()},
+            {"the hub's New cards hovered", Theme::accentText(), Theme::chipHover()},
+            {"the joint chip's More", Theme::accentText(), Theme::panel()},
+            {"the joint kind menu's tick", Theme::accentText(), Theme::chipActive()},
+            {"the Fillet chip's value", Theme::accentText(), Theme::panel()},
+            {"the Move and Mirror chips' values", Theme::accentText(), Theme::panel()},
+            {"the shortcut sheet's group titles", Theme::accentText(), Theme::panel()},
+            {"the guide's finished steps", Theme::accentText(), Theme::panel()},
+            {"the magnet's readout over the viewport", Theme::accentText(), Theme::viewport()},
+            {"a broken joint's reason on its tinted row", Theme::dangerText(), brokenGround},
+            {"Close without saving at rest", Theme::dangerText(), Theme::chip()},
+            {"Close without saving hovered", Theme::dangerText(), Theme::chipHover()},
+            {"Close without saving pressed", Theme::dangerText(), Theme::chipActive()},
+            {"a chip's reason row", Theme::dangerText(), Theme::panel()},
+            {"the library's failure banner", Theme::dangerText(), Theme::chip()},
+            {"a broken scene piece's name", Theme::dangerText(), Theme::panel()},
+        };
+        for (const InkSite& site : inkSites) {
+            const double ratio = contrastRatio(site.ink, site.ground);
+            check(ratio >= 4.5, QStringLiteral("ink: %1 reads at %2:1 (%3 on %4)")
+                                    .arg(QString::fromUtf8(site.what))
+                                    .arg(ratio, 0, 'f', 2)
+                                    .arg(site.ink.name(), site.ground.name()));
+        }
+        // Non-vacuity, and the finding itself on record: the fill tokens those
+        // words used to wear do not clear the bar, which is the whole reason
+        // two text tokens exist.
+        check(contrastRatio(Theme::accent(), Theme::chipHover()) < 4.5 &&
+                  contrastRatio(Theme::danger(), Theme::panel()) < 4.5,
+              QStringLiteral("ink: and the fill tokens did not - accent %1:1 on chipHover, "
+                             "danger %2:1 on panel")
+                  .arg(contrastRatio(Theme::accent(), Theme::chipHover()), 0, 'f', 2)
+                  .arg(contrastRatio(Theme::danger(), Theme::panel()), 0, 'f', 2));
+
+        // A spec saved before these two tokens existed still loads, and takes
+        // them at their defaults - deserializeSpec() starts from defaultSpec()
+        // and overwrites only what the string names.
+        {
+            Theme::Spec older;
+            const bool loaded = Theme::deserializeSpec(
+                QStringLiteral("accent=#6a00ff;danger=#e0564a;panel=#232326"), older);
+            check(loaded && older.accentText == Theme::defaultSpec().accentText &&
+                      older.dangerText == Theme::defaultSpec().dangerText,
+                  "ink: a colour file with neither text token loads, and both take their "
+                  "defaults");
+        }
+
+        // A harmless, undoable edit - the spare board steps 10 mm - so the
+        // toast's Undo below is LIVE and painted in its live ink rather than in
+        // textDisabled().
+        {
+            gp_Trsf step;
+            step.SetTranslation(gp_Vec(10.0, 0.0, 0.0));
+            check(iw.transformBody(spareId, step), "ink: the spare board steps 10 mm");
+            settle(150);
+        }
+
+        // --- the sites, as painted -------------------------------------------
+        ToastHost* inkHost = iw.findChild<ToastHost*>();
+        Toast* inkToast = inkHost ? inkHost->toast() : nullptr;
+        check(inkHost != nullptr && inkToast != nullptr, "ink: the window has its toast host");
+        if (inkHost && inkToast) {
+            inkHost->show(QStringLiteral("Ink probe"), Toast::Kind::Note, true);
+            settle(80);
+            QWidget* pill = inkHost->undoControl();
+            check(pill != nullptr && pill->isVisible() && inkToast->undoEnabled(),
+                  "ink: a Note with a live Undo is up");
+            if (pill) {
+                const QRect pillRect = pill->geometry().translated(-inkToast->pos());
+                const QColor ink =
+                    mostChromaticInk(renderExact(inkToast), pillRect, Theme::chipHover());
+                check(contrastRatio(ink, Theme::chipHover()) >= 4.5,
+                      QStringLiteral("ink: the toast's Undo AS PAINTED reads at %1:1 on its pill "
+                                     "(%2) - it measured 1.80:1 in the accent")
+                          .arg(contrastRatio(ink, Theme::chipHover()), 0, 'f', 2)
+                          .arg(ink.name()));
+            }
+        }
+
+        HintBalloon* inkBalloon = iw.findChild<HintBalloon*>();
+        check(inkBalloon != nullptr && inkBalloon->isVisible(),
+              "ink: a hint balloon is up on a fresh window with bodies in it");
+        if (inkBalloon && inkBalloon->isVisible()) {
+            const QImage shot = renderExact(inkBalloon);
+            const QRect gotIt(0, shot.height() - 34, shot.width(), 30);
+            const QColor ink = mostChromaticInk(shot, gotIt, Theme::panel());
+            check(contrastRatio(ink, Theme::panel()) >= 4.5,
+                  QStringLiteral("ink: the balloon's \"got it\" AS PAINTED reads at %1:1 (%2)")
+                      .arg(contrastRatio(ink, Theme::panel()), 0, 'f', 2)
+                      .arg(ink.name()));
+        }
+
+        {
+            FurnitureStore hubStore(inkDir.path());
+            SelectorWindow hub(hubStore);
+            hub.setAttribute(Qt::WA_ShowWithoutActivating);
+            hub.resize(1000, 700);
+            hub.show();
+            settle(300);
+            for (QPushButton* card : {hub.newFurnitureButton(), hub.newSceneControl()}) {
+                check(card != nullptr && card->isVisible(), "ink: a hub New card is up");
+                if (!card || !card->isVisible()) continue;
+                const QColor ink =
+                    mostChromaticInk(renderExact(card), card->rect(), Theme::chrome());
+                check(contrastRatio(ink, Theme::chrome()) >= 4.5,
+                      QStringLiteral("ink: the hub's \"%1\" AS PAINTED reads at %2:1 (%3)")
+                          .arg(card->text())
+                          .arg(contrastRatio(ink, Theme::chrome()), 0, 'f', 2)
+                          .arg(ink.name()));
+            }
+            hub.hide();
+        }
+
+        iw.view()->setSelectedSolids({baseId, uprightId});
+        settle(150);
+        check(iw.placeJointBetweenSelected() && iw.jointChip() != nullptr &&
+                  iw.jointChip()->isVisible(),
+              "ink: a joint between the base and the upright puts its chip up");
+        settle(150);
+        if (iw.jointChip() && iw.jointChip()->moreButton() &&
+            iw.jointChip()->moreButton()->isVisible()) {
+            QPushButton* more = iw.jointChip()->moreButton();
+            const QColor ink = mostChromaticInk(renderExact(more), more->rect(), Theme::panel());
+            check(contrastRatio(ink, Theme::panel()) >= 4.5,
+                  QStringLiteral("ink: the joint chip's \"%1\" AS PAINTED reads at %2:1 (%3)")
+                      .arg(more->text())
+                      .arg(contrastRatio(ink, Theme::panel()), 0, 'f', 2)
+                      .arg(ink.name()));
+        } else {
+            check(false, "ink: the joint chip shows its More control");
+        }
+
+        // A BROKEN joint, the honest way: its upright walks off the base.
+        iw.setSelectedJoint(0);
+        settle(150);
+        QAction* jointsDrawer = action(iw, QStringLiteral("Joints"));
+        if (jointsDrawer && !jointsDrawer->isChecked()) jointsDrawer->trigger();
+        settle(200);
+        {
+            gp_Trsf away;
+            away.SetTranslation(gp_Vec(2000.0, 0.0, 0.0));
+            check(iw.transformBody(uprightId, away), "ink: the upright moves well off the base");
+            settle(250);
+        }
+        JointsPanel* inkJoints = iw.jointsPanel();
+        check(inkJoints != nullptr && inkJoints->isVisible() && inkJoints->rowCount() == 1 &&
+                  inkJoints->isBrokenAt(0),
+              "ink: the drawer lists the joint, broken");
+        if (inkJoints && inkJoints->rowCount() == 1 && inkJoints->isBrokenAt(0)) {
+            const QString row = inkJoints->rowTextAt(0);
+            check(row.contains(QStringLiteral("Broken — these two pieces don't meet — move the "
+                                              "pieces so they meet")),
+                  QStringLiteral("ink: its reason ends with what to do about it (\"%1\")")
+                      .arg(row));
+            QWidget* rowWidget = inkJoints->rowWidgetAt(0);
+            if (rowWidget) {
+                // Past the 3px danger bar at the row's left edge, which is a
+                // fill and would out-shout any word.
+                const QColor ink = mostChromaticInk(
+                    renderExact(rowWidget), rowWidget->rect().adjusted(8, 0, 0, 0), brokenGround);
+                check(contrastRatio(ink, brokenGround) >= 4.5,
+                      QStringLiteral("ink: the broken reason AS PAINTED reads at %1:1 on its "
+                                     "tinted row (%2) - it was about 3.1:1 in danger()")
+                          .arg(contrastRatio(ink, brokenGround), 0, 'f', 2)
+                          .arg(ink.name()));
+            }
+        }
+        // Every reason Joinery can refuse a contact with ends in a step.
+        for (const char* reason :
+             {"one of the pieces is missing", "these two pieces don't meet",
+              "these two pieces meet on a curved region - only a straight-edged contact can "
+              "be measured",
+              "the pieces aren't crossing", "the pieces overlap rather than meet",
+              "the contact is too small for a joint", "the contact is too narrow for fasteners",
+              "the contact is too narrow to house a piece",
+              "the contact is too narrow for an interlock"}) {
+            const QString said = JointsPanel::reasonText(reason);
+            check(said.startsWith(QString::fromUtf8(reason) + QStringLiteral(" — ")) &&
+                      said.length() > static_cast<int>(std::strlen(reason)) + 6 &&
+                      !said.endsWith(QLatin1Char('.')),
+                  QStringLiteral("ink: \"%1\" keeps its words and adds a next step (\"%2\")")
+                      .arg(QString::fromUtf8(reason), said));
+        }
+
+        // "Close without saving", on the close question the edits above earned.
+        iw.closeCurrentFurniture();
+        settle(200);
+        UnsavedCloseCard* question = iw.closeQuestion();
+        check(iw.isAskingBeforeClose() && question != nullptr && question->discardButton(),
+              "ink: closing with unsaved changes asks");
+        if (question && question->discardButton() && iw.isAskingBeforeClose()) {
+            QAbstractButton* discard = question->discardButton();
+            const QColor ink = mostChromaticInk(renderExact(discard),
+                                                discard->rect().adjusted(3, 3, -3, -3),
+                                                Theme::chip());
+            check(contrastRatio(ink, Theme::chip()) >= 4.5,
+                  QStringLiteral("ink: \"%1\" AS PAINTED reads at %2:1 (%3)")
+                      .arg(discard->text())
+                      .arg(contrastRatio(ink, Theme::chip()), 0, 'f', 2)
+                      .arg(ink.name()));
+            if (question->keepButton()) question->keepButton()->click();
+            settle(150);
+            check(!iw.isAskingBeforeClose(), "ink: Keep editing puts the question away");
+        }
+
+        // --- a Failure is a SHAPE, not only a colour (F6) ---------------------
+        if (inkHost && inkToast) {
+            inkHost->show(QStringLiteral("Shape probe - a report"), Toast::Kind::Note, false);
+            settle(60);
+            const QImage noteShot = renderExact(inkToast);
+            const QRect mark = inkToast->glyphRect();
+            inkHost->show(QStringLiteral("Shape probe - a refusal"), Toast::Kind::Failure, false);
+            settle(60);
+            const QImage failureShot = renderExact(inkToast);
+            const auto dangerInk = [&](const QImage& shot) {
+                int count = 0;
+                for (int y = mark.top(); y <= mark.bottom(); ++y)
+                    for (int x = mark.left(); x <= mark.right(); ++x)
+                        if (colorDistance(overGround(shot.pixelColor(x, y), Theme::panel()),
+                                          Theme::danger()) < 60.0)
+                            ++count;
+                return count;
+            };
+            const int failureMark = dangerInk(failureShot);
+            const int noteMark = dangerInk(noteShot);
+            check(failureMark >= 12 && noteMark == 0,
+                  QStringLiteral("toast: a Failure paints a warning mark where a Note paints "
+                                 "nothing (%1 danger pixels against %2)")
+                      .arg(failureMark).arg(noteMark));
+            const QPoint topEdge(failureShot.width() / 2, 0);
+            const QColor failureEdge = overGround(failureShot.pixelColor(topEdge), Theme::panel());
+            const QColor noteEdge = overGround(noteShot.pixelColor(topEdge), Theme::panel());
+            check(colorDistance(failureEdge, Theme::danger()) <
+                          colorDistance(failureEdge, Theme::border()) &&
+                      colorDistance(noteEdge, Theme::border()) <
+                          colorDistance(noteEdge, Theme::danger()),
+                  QStringLiteral("toast: and its border is danger() where a Note's is border() "
+                                 "(%1 against %2)")
+                      .arg(failureEdge.name(), noteEdge.name()));
+
+            // It still sizes itself from what it paints: a sentence that fits
+            // one line beside a Note's stripe needs two beside the mark.
+            const QFontMetrics body(Theme::bodyFont());
+            const int failureColumn = Toast::textColumnWidth(Toast::Kind::Failure, false);
+            const int noteColumn = Toast::textColumnWidth(Toast::Kind::Note, false);
+            QString between = QStringLiteral("a");
+            while (body.horizontalAdvance(between) <= failureColumn)
+                between += QStringLiteral(" a");
+            check(failureColumn < noteColumn && body.horizontalAdvance(between) <= noteColumn,
+                  QStringLiteral("toast: a probe sentence fits a Note's column and not a "
+                                 "Failure's (%1 px; columns %2 and %3)")
+                      .arg(body.horizontalAdvance(between)).arg(failureColumn).arg(noteColumn));
+            inkHost->show(between, Toast::Kind::Note, false);
+            settle(60);
+            const int noteHeight = inkToast->height();
+            inkHost->show(between, Toast::Kind::Failure, false);
+            settle(60);
+            const int failureHeight = inkToast->height();
+            check(failureHeight > noteHeight,
+                  QStringLiteral("toast: so the Failure grows to hold it (%1 px against a "
+                                 "Note's %2)")
+                      .arg(failureHeight).arg(noteHeight));
+        }
+
+        // --- the countdown waits for a reader (F13) ---------------------------
+        if (inkHost && inkToast) {
+            OcctViewWidget* iv = iw.view();
+            inkHost->show(QStringLiteral("Hover probe - a refusal to read"),
+                          Toast::Kind::Failure, false);
+            settle(60);
+            moveTo(iv, QPointF(6.0, 6.0));
+            check(!inkHost->countdownPaused(), "hover: a pointer elsewhere leaves it counting");
+            moveTo(iv, QRectF(inkToast->geometry()).center());
+            check(inkHost->countdownPaused(),
+                  "hover: the pointer resting on a Failure stops its countdown");
+            const int frozen = inkHost->remainingMs();
+            waitFully(700);
+            check(inkHost->isShowing() && inkHost->remainingMs() == frozen,
+                  QStringLiteral("hover: and 700 ms later it has not moved (%1 ms, then %2)")
+                      .arg(frozen).arg(inkHost->remainingMs()));
+            moveTo(iv, QPointF(6.0, 6.0));
+            check(!inkHost->countdownPaused(), "hover: leaving starts it again");
+            waitFully(300);
+            const int resumed = inkHost->remainingMs();
+            check(resumed < frozen && resumed > frozen - 1500,
+                  QStringLiteral("hover: from where it stopped, not from the start or from "
+                                 "nothing (%1 ms after %2)")
+                      .arg(resumed).arg(frozen));
+
+            // The Undo pill is a widget of its own, and resting on it holds
+            // the message it would undo.
+            inkHost->show(QStringLiteral("Hover probe - a report with Undo"),
+                          Toast::Kind::Note, true);
+            settle(60);
+            QWidget* pill = inkHost->undoControl();
+            check(pill != nullptr && pill->isVisible(), "hover: a Note with Undo is up");
+            if (pill && pill->isVisible()) {
+                QEnterEvent enter(QPointF(4.0, 4.0), QPointF(4.0, 4.0),
+                                  pill->mapToGlobal(QPointF(4.0, 4.0)));
+                QCoreApplication::sendEvent(pill, &enter);
+                check(inkHost->countdownPaused(), "hover: resting on Undo holds the Note");
+                const int held = inkHost->remainingMs();
+                waitFully(400);
+                check(inkHost->remainingMs() == held,
+                      QStringLiteral("hover: and it is not dismissed early (%1 ms, then %2)")
+                          .arg(held).arg(inkHost->remainingMs()));
+                QEvent leave(QEvent::Leave);
+                QCoreApplication::sendEvent(pill, &leave);
+                check(!inkHost->countdownPaused(), "hover: leaving Undo lets it go on");
+            }
+        }
+        iw.hide();
+    }
+
+    // --- the status bar gives each channel one job -----------------------------
+    // The 2026-10 review's F9, F13 and F20. The left channel and the state
+    // label both said "2 bodies selected", the left repeated every Note under
+    // the toast saying it, and with a group selected the two once showed two
+    // different counts side by side. Ruled by the user: the LEFT is the
+    // selection (with its size) and the outcome of the last thing done, the
+    // RIGHT is the mode and the next step, and the name mark in between is
+    // the identity. A refusal's reason now stays on the left after its toast
+    // goes, and the left is elided with an ellipsis rather than cut into the
+    // name.
+    if (blockEnabled("the-status-bar-gives-each-channel-one-job")) {
+        RequiredTempDir barDir;
+        QString barId;
+        {
+            FurnitureStore seedStore(barDir.path());
+            barId = seedStore.createFurniture(QStringLiteral("Bar bench"));
+            DocumentModel seedDoc;
+            // Three boards that never touch, so Intersect has nothing to keep.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 600.0, 300.0, 18.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 500.0, 0.0), 600.0, 300.0, 18.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 1000.0, 0.0), 400.0, 200.0, 18.0));
+            check(!barId.isEmpty() && seedStore.saveFurniture(barId, seedDoc, QImage()),
+                  "bar: three boards are seeded");
+        }
+        MainWindow bw(nullptr, /*persistProgress=*/false, barDir.path());
+        bw.setAttribute(Qt::WA_ShowWithoutActivating);
+        bw.resize(1100, 800);
+        bw.show();
+        waitFully(300);
+        bw.view()->setAnimationsEnabled(false);
+        check(bw.openFurniture(barId), "bar: the seeded furniture opens");
+        settle(300);
+        const std::vector<DocumentModel::Solid> barSolids = bw.document().solids();
+        check(barSolids.size() == 3, "bar: three bodies are open");
+        const int b1 = barSolids.size() == 3 ? barSolids[0].id : 0;
+        const int b2 = barSolids.size() == 3 ? barSolids[1].id : 0;
+        const int b3 = barSolids.size() == 3 ? barSolids[2].id : 0;
+        QStatusBar* bar = bw.statusBar();
+        ToastHost* barHost = bw.findChild<ToastHost*>();
+        check(barHost != nullptr, "bar: the window has its toast host");
+        const QRegularExpression counted(
+            QStringLiteral("\\b\\d+ (bodies|body|faces|face|edges|edge) selected\\b"));
+
+        // --- one count, said once ---------------------------------------------
+        bw.view()->setSelectedSolids({b1, b2});
+        settle(150);
+        {
+            const QString left = bar->currentMessage();
+            const QString right = stateLabelText(bw);
+            check(left.startsWith(QStringLiteral("2 bodies selected — overall ")),
+                  QStringLiteral("bar: the left channel names the selection and its size "
+                                 "(\"%1\")").arg(left));
+            check(counted.match(left).hasMatch() && !counted.match(right).hasMatch() &&
+                      !right.contains(QStringLiteral("2 bodies")),
+                  QStringLiteral("bar: with two bodies selected exactly ONE channel names the "
+                                 "count (left \"%1\", right \"%2\")")
+                      .arg(left, right));
+            check(right.contains(QStringLiteral("Union, Subtract and Intersect")),
+                  QStringLiteral("bar: and the right channel says what can be done next "
+                                 "(\"%1\")").arg(right));
+        }
+        bw.view()->setSelectedSolids({b1});
+        settle(150);
+        check(!counted.match(stateLabelText(bw)).hasMatch() &&
+                  bar->currentMessage().startsWith(QStringLiteral("1 body selected — ")),
+              QStringLiteral("bar: one body - the count on the left only (left \"%1\", "
+                             "right \"%2\")")
+                  .arg(bar->currentMessage(), stateLabelText(bw)));
+        bw.view()->clearSelection();
+        settle(150);
+        check(!stateLabelText(bw).contains(QRegularExpression(QStringLiteral("\\d+ bod"))),
+              QStringLiteral("bar: and nothing selected - the right channel counts no bodies "
+                             "either (\"%1\")")
+                  .arg(stateLabelText(bw)));
+
+        // --- a Note is the toast's, not the bar's -----------------------------
+        bw.view()->setSelectedSolids({b1, b2});
+        settle(150);
+        {
+            gp_Trsf step;
+            step.SetTranslation(gp_Vec(10.0, 0.0, 0.0));
+            check(bw.transformBody(b3, step), "bar: the third board steps 10 mm");
+            settle(150);
+            const QString note = barHost ? barHost->currentText() : QString();
+            check(!note.isEmpty() && barHost->toast()->kind() == Toast::Kind::Note,
+                  QStringLiteral("bar: a Note reports it (\"%1\")").arg(note));
+            check(bar->currentMessage() != note,
+                  QStringLiteral("bar: and the left channel does NOT say it again (\"%1\")")
+                      .arg(bar->currentMessage()));
+            check(bar->currentMessage() == bw.selectionStatusText(),
+                  QStringLiteral("bar: it is the selection's sentence instead (\"%1\")")
+                      .arg(bar->currentMessage()));
+        }
+        // With notifications off there is no toast, and the bar is the one
+        // quiet record of what happened.
+        QAction* notes = action(bw, QStringLiteral("Show notifications"));
+        if (notes && notes->isChecked()) notes->trigger();
+        settle(100);
+        {
+            gp_Trsf step;
+            step.SetTranslation(gp_Vec(10.0, 0.0, 0.0));
+            check(bw.transformBody(b3, step), "bar: the third board steps again, notes off");
+            settle(150);
+            const QString name = QString::fromStdString(bw.document().nameOf(b3));
+            check(bar->currentMessage().contains(name) &&
+                      bar->currentMessage() != bw.selectionStatusText(),
+                  QStringLiteral("bar: with notifications off the report is written on the "
+                                 "left, its only record (\"%1\")")
+                      .arg(bar->currentMessage()));
+        }
+        if (notes && !notes->isChecked()) notes->trigger();
+        settle(100);
+
+        // --- a refusal's reason outlives its toast (F13) ----------------------
+        bw.view()->setSelectedSolids({b1, b2});
+        settle(150);
+        check(!bw.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Common)),
+              "bar: Intersect on two boards that never meet is refused");
+        settle(150);
+        const QString refusal = barHost ? barHost->currentText() : QString();
+        check(barHost && barHost->toast()->kind() == Toast::Kind::Failure && !refusal.isEmpty(),
+              QStringLiteral("bar: as a Failure toast (\"%1\")").arg(refusal));
+        check(bar->currentMessage() == MainWindow::statusLineFor(refusal) &&
+                  !bar->currentMessage().endsWith(QLatin1Char('.')) &&
+                  bar->currentMessage().contains(QStringLiteral("overlap")),
+              QStringLiteral("bar: and the left channel carries its REASON, not \"refused\" "
+                             "(\"%1\")")
+                  .arg(bar->currentMessage()));
+        if (barHost && barHost->toast()) barHost->toast()->hide();
+        settle(100);
+        check(!barHost->isShowing() &&
+                  bar->currentMessage() == MainWindow::statusLineFor(refusal),
+              "bar: the toast gone, the reason is still there to read");
+        QAction* cmAction = action(bw, QStringLiteral("Centimetres"));
+        QAction* mmAction = action(bw, QStringLiteral("Millimetres"));
+        if (cmAction) cmAction->trigger();
+        settle(150);
+        check(bar->currentMessage() == MainWindow::statusLineFor(refusal),
+              QStringLiteral("bar: a unit switch refreshes the sizes but leaves the reason "
+                             "alone (\"%1\")")
+                  .arg(bar->currentMessage()));
+        if (mmAction) mmAction->trigger();
+        settle(150);
+        bw.cancelBoolean();
+        settle(100);
+        bw.view()->setSelectedSolids({b3});
+        settle(150);
+        check(bar->currentMessage() == bw.selectionStatusText() &&
+                  bar->currentMessage().startsWith(QStringLiteral("1 body selected")),
+              QStringLiteral("bar: and the next selection replaces it (\"%1\")")
+                  .arg(bar->currentMessage()));
+
+        // --- the left channel is elided, never cut into the name (F20) --------
+        StatusMessageLine* line = bw.statusMessageLine();
+        FurnitureNameMark* nameMark = bw.furnitureNameMark();
+        check(line != nullptr && nameMark != nullptr && nameMark->isVisible(),
+              "bar: the left line and the name mark are both there");
+        bw.view()->setSelectedSolids({b1, b2});
+        settle(150);
+        check(line && !line->isElided() && line->toolTip().isEmpty(),
+              QStringLiteral("bar: at 1100 px the sentence fits whole, with no tooltip (\"%1\")")
+                  .arg(line ? line->shownText() : QString()));
+        bw.resize(540, 800);
+        waitFully(250);
+        settle(150);
+        if (line && nameMark) {
+            const QString whole = bar->currentMessage();
+            check(line->fullText() == whole && whole.startsWith(QStringLiteral("2 bodies")) &&
+                      !whole.contains(QChar(0x2026)),
+                  QStringLiteral("bar: the bar's message is still the whole sentence (\"%1\")")
+                      .arg(whole));
+            check(line->isElided() && line->shownText().endsWith(QChar(0x2026)) &&
+                      line->toolTip() == whole,
+                  QStringLiteral("bar: at 540 px the left channel elides with an ellipsis, the "
+                                 "whole sentence in its tooltip (\"%1\")")
+                      .arg(line->shownText()));
+            check(line->geometry().right() < nameMark->geometry().left() &&
+                      line->x() + line->paintedRight() <= nameMark->x(),
+                  QStringLiteral("bar: and stops short of the name mark (text ends at %1, the "
+                                 "name starts at %2)")
+                      .arg(line->x() + line->paintedRight()).arg(nameMark->x()));
+            // In PIXELS, because Qt still owns a paint of its own for this
+            // message: between where the elided text ends and where the name
+            // begins there must be nothing but the bar's ground.
+            const QImage shot = bar->grab().toImage();
+            const double dpr = shot.devicePixelRatio();
+            int stray = 0;
+            int inked = 0;
+            const int textTop = static_cast<int>(line->y() * dpr);
+            const int textBottom = static_cast<int>((line->y() + line->height()) * dpr) - 1;
+            for (int y = std::max(0, textTop); y <= std::min(shot.height() - 1, textBottom); ++y) {
+                for (int x = 0; x < shot.width(); ++x) {
+                    const double logicalX = x / dpr;
+                    const bool ink = colorDistance(shot.pixelColor(x, y), Theme::chrome()) > 40.0;
+                    if (!ink) continue;
+                    if (logicalX >= line->x() + line->paintedRight() + 2 &&
+                        logicalX < nameMark->x() - 1)
+                        ++stray;
+                    else if (logicalX >= line->x() && logicalX < line->x() + line->paintedRight())
+                        ++inked;
+                }
+            }
+            check(inked > 0 && stray == 0,
+                  QStringLiteral("bar: the elided text is painted (%1 ink pixels) and nothing "
+                                 "else reaches toward the name (%2 stray)")
+                      .arg(inked).arg(stray));
+            shot.save(outDir + QStringLiteral("/status_narrow.png"));
+        }
+        bw.resize(1100, 800);
+        waitFully(250);
+        settle(150);
+        bw.hide();
+    }
+
     // --- the rail and the items drawer start on one line ---------------------
     //
     // Reported by the user against a build where they did not: "the gap
@@ -39202,7 +39884,10 @@ int main(int argc, char* argv[])
                              "(x %1, expected 300)")
                   .arg(centreAlongX(mw.document().shapeOf(b1))));
         {
-            const QString message = mw.statusBar()->currentMessage();
+            // The commit's Note - read off the toast, which is the one place
+            // it is said since the 2026-10 review's F9.
+            ToastHost* reportToasts = mw.findChild<ToastHost*>();
+            const QString message = reportToasts ? reportToasts->currentText() : QString();
             check(message.contains(QStringLiteral("600 mm")) &&
                       message.contains(QStringLiteral("450 mm")),
                   QStringLiteral("re-measure: the report names the old size and the new one "

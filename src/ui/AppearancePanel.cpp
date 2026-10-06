@@ -307,10 +307,17 @@ QString AppearancePanel::nameForToken(const QString& id)
         {QStringLiteral("textMuted"), QObject::tr("Quieter text")},
         {QStringLiteral("textDisabled"), QObject::tr("Unavailable text")},
         {QStringLiteral("accent"), QObject::tr("Accent")},
+        // The accent's own ink for words: what a link-like "got it", a
+        // value on a chip and the toast's Undo are written in. Its own row
+        // because accent() fills a chip and this has to stay readable ON one.
+        {QStringLiteral("accentText"), QObject::tr("Accent text")},
         // Failures, not warnings: this token marks a refusal that already
         // happened - a Failure toast's stripe and an unparseable field's
         // outline - and the app has nothing it would call a warning.
         {QStringLiteral("danger"), QObject::tr("Failures")},
+        // The failure hue as words - a broken joint's reason, a refused
+        // size's reason row, "Close without saving".
+        {QStringLiteral("dangerText"), QObject::tr("Failure text")},
         // A caution is not a failure: a fact worth seeing beside a joint - its
         // contact is not a plain rectangle - that refuses nothing.
         {QStringLiteral("caution"), QObject::tr("Caution")},

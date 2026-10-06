@@ -478,7 +478,7 @@ void MitreTool::paintEvent(QPaintEvent* /*event*/)
     painter.drawText(hintRect(), Qt::AlignVCenter | Qt::AlignLeft, hintText());
 
     if (!myReason.isEmpty()) {
-        painter.setPen(Theme::danger());
+        painter.setPen(Theme::dangerText());
         painter.drawText(reasonRect(), Qt::AlignVCenter | Qt::AlignLeft, myReason);
     }
 }

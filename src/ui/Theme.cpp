@@ -90,6 +90,14 @@ Spec graphite()
     // OCCT constant it replaces, so nothing on screen moves until edited.
     s.outlineLineColour = QColor("#ffff00");
     s.danger            = QColor("#e0564a");   // invalid input, failures
+    // The two text inks - see Theme.h. Graphite's own blue accent is not what
+    // ships (defaultSpec() replaces it with the user's violet), so the accent
+    // text is the SHIPPED violet's light sibling; it reads 4.77:1 on
+    // chipActive, the lightest surface any of its words sit on, and 7.63:1
+    // on the hub's chrome. The danger text is the failure red lifted the same
+    // way: 4.87:1 on chipActive, 6.10:1 on a broken joint's tinted row.
+    s.accentText        = QColor("#bb9cff");
+    s.dangerText        = QColor("#ff8f82");
     s.caution           = QColor("#ffca4a");   // a caution - the amber it used to borrow
     s.focusRing         = QColor("#ffca4a");   // amber - distinct from
                                                // accent(), which already marks
@@ -286,7 +294,9 @@ const QVector<ColourToken>& colourTokens()
         {QStringLiteral("textMuted"), &Spec::textMuted},
         {QStringLiteral("textDisabled"), &Spec::textDisabled},
         {QStringLiteral("accent"), &Spec::accent},
+        {QStringLiteral("accentText"), &Spec::accentText},
         {QStringLiteral("danger"), &Spec::danger},
+        {QStringLiteral("dangerText"), &Spec::dangerText},
         {QStringLiteral("caution"), &Spec::caution},
         {QStringLiteral("focusRing"), &Spec::focusRing},
         {QStringLiteral("focusRingMuted"), &Spec::focusRingMuted},
@@ -479,6 +489,8 @@ QColor gizmoAxisZ()   { return spec().gizmoAxisZ; }
 QColor sketchPointMarker() { return spec().sketchPointMarker; }
 QColor outlineLineColour() { return spec().outlineLineColour; }
 QColor danger()       { return spec().danger; }
+QColor accentText()   { return spec().accentText; }
+QColor dangerText()   { return spec().dangerText; }
 QColor caution()      { return spec().caution; }
 QColor focusRing()    { return spec().focusRing; }
 QColor focusRingMuted() { return spec().focusRingMuted; }

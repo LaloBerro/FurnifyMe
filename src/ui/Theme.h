@@ -56,6 +56,19 @@ struct Spec {
     // already follow for their own former OCCT constants).
     QColor outlineLineColour;
     QColor danger;
+    // THE TWO TEXT INKS (the 2026-10 review's F5 and F24). accent and danger
+    // are FILL and STROKE colours - a checked chip's ring, a toast's stripe, a
+    // focused field's outline - and both were also being used to paint words,
+    // where they fail: the shipped violet measured 1.80:1 as the toast's Undo
+    // on chipHover and about 2.3:1 on a panel, the failure red about 3.1:1.
+    // Each gets a lighter sibling that is only ever a pen for text, chosen to
+    // clear WCAG's 4.5:1 against every surface it is painted on (chrome,
+    // panel, chip, chipHover, chipActive and the viewport) - gui_smoke
+    // computes the ratios from the tokens rather than trusting this comment.
+    // Two tokens rather than a lighter() at each call site, because a user
+    // who themes the accent must be able to see and set what its text reads.
+    QColor accentText;
+    QColor dangerText;
     // A caution: something true about a joint the user should know, and not a
     // failure - the joints drawer's region-shortfall glyph. Its own token, so
     // editing the focus ring (the amber it was borrowed from) cannot recolour
@@ -302,6 +315,9 @@ QColor sketchPointMarker(); // in-progress sketch: the dot at each placed
 QColor outlineLineColour(); // the outline's own line - the in-progress
                         // polyline and a closed outline item's line aspect,
                         // both - see Spec::outlineLineColour
+QColor accentText();    // words in the accent's hue - see Spec::accentText;
+                        // accent() itself is for fills and strokes only
+QColor dangerText();    // words in the failure hue - see Spec::accentText
 QColor danger();        // invalid input, failure accents - NOT the same
                         // concept as axisX(), which is a grid-axis tint that
                         // happens to be red; this is the semantic "something

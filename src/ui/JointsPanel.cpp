@@ -150,12 +150,41 @@ QString layoutKey(int cardWidth)
 // never shows one - it gets the plain sentence instead, and the sentence says
 // what to do: the throw is OCCT's near-tangent weak spot, which a piece moved
 // to meet the other squarely steps out of.
+//
+// EVERY REASON ENDS WITH A NEXT STEP (the 2026-10 review's F24). A broken row
+// said what was wrong - "these two pieces don't meet" - and stopped, so the
+// user knew the joint was broken and not what would mend it. Joinery's own
+// sentences stay Joinery's (the headless suite pins them, and the geometry
+// library has no business writing UI copy); the step is added here, after an
+// em dash, worded so it reads the same under a broken row and in a placement
+// refusal.
 QString JointsPanel::reasonText(const std::string& error)
 {
     if (error.rfind("contact:", 0) == 0)
         return tr("these two pieces can't be measured where they meet — move one so "
                   "they meet squarely");
-    return QString::fromStdString(error);
+
+    const QString reason = QString::fromStdString(error);
+    QString step;
+    if (error == "one of the pieces is missing")
+        step = tr("undo to bring it back, or delete the joint");
+    else if (error == "these two pieces don't meet")
+        step = tr("move the pieces so they meet");
+    else if (error == "the pieces aren't crossing")
+        step = tr("move one so it crosses the other");
+    else if (error == "the pieces overlap rather than meet")
+        step = tr("move one so they touch without overlapping");
+    else if (error == "the contact is too small for a joint")
+        step = tr("move them so more of the two faces touch");
+    else if (error.rfind("the contact is too narrow", 0) == 0)
+        step = tr("choose another kind, or move them so more of the two faces touch");
+    else if (error.find("curved region") != std::string::npos)
+        step = tr("move them so they meet on flat faces");
+    else
+        // A reason this mapping has not met yet still gets a way forward
+        // rather than a dead end - the step every contact refusal shares.
+        step = tr("move the pieces so they meet squarely");
+    return tr("%1 — %2").arg(reason, step);
 }
 
 // Everything one row paints, decided in refresh() and never changed after:
@@ -653,7 +682,7 @@ QColor inkColour(RowModel::Ink ink)
     switch (ink) {
         case RowModel::InkText: return Theme::text();
         case RowModel::InkMuted: return Theme::textMuted();
-        case RowModel::InkDanger: return Theme::danger();
+        case RowModel::InkDanger: return Theme::dangerText();
     }
     return Theme::text();
 }

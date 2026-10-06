@@ -1,6 +1,7 @@
 #include "Toast.h"
 
 #include "HintBalloon.h"
+#include "IconSet.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 #include "ViewportOverlay.h"
@@ -36,6 +37,18 @@ constexpr int kRisePx = 6;
 
 constexpr int kNoteMs = 4000;
 constexpr int kFailureMs = 8000;
+// What a paused countdown resumes with at the least, once the pointer leaves.
+// A Failure read for six seconds and left with 40 ms on the clock would
+// otherwise vanish the instant the hand moved off it - which is the toast
+// being dismissed early by the very hover that was meant to keep it.
+constexpr int kResumeFloorMs = 1500;
+
+// A Failure's leading warning mark (the 2026-10 review's F6): its side and the
+// gap between it and the message. The message column narrows by both, and
+// sizeHint() measures against that narrower column - the toast sizes itself
+// from what it paints.
+constexpr int kGlyphSize = 16;
+constexpr int kGlyphGap = 8;
 
 // The one interactive spot on an otherwise click-through toast. Follows
 // WalkthroughPanel's SkipControl exactly (see WalkthroughPanel.cpp for the
@@ -137,9 +150,25 @@ void Toast::setUndoEnabled(bool enabled)
     update();   // the pill is painted dimmed while the route is closed
 }
 
+int Toast::textColumnWidth(Kind kind, bool undo)
+{
+    return kWidth - kPad * 2 - (undo ? kUndoWidth + kPad : 0) -
+           (kind == Kind::Failure ? kGlyphSize + kGlyphGap : 0);
+}
+
+QRect Toast::glyphRect() const
+{
+    // Kind-independent on purpose: gui_smoke reads the SAME rectangle out of a
+    // Note and a Failure, and only one of them may carry ink there.
+    const int margin = Theme::surfaceShadowMargin();
+    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+    return QRect(body.left() + kPad, body.center().y() - kGlyphSize / 2, kGlyphSize,
+                 kGlyphSize);
+}
+
 QSize Toast::sizeHint() const
 {
-    const int textWidth = kWidth - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
+    const int textWidth = textColumnWidth(myKind, myHasUndo);
     // Measured with the same font paintEvent() draws the message in.
     const QFontMetrics metrics(Theme::bodyFont());
     const QRect bounds = metrics.boundingRect(QRect(0, 0, std::max(textWidth, 1), 1000),
@@ -279,10 +308,37 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
         painter.restore();
     }
 
-    const int textWidth = body.width() - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
+    // A FAILURE IS NOT TOLD APART BY COLOUR ALONE (the 2026-10 review's F6).
+    // The stripe above was the only difference between the two kinds, and a
+    // user who cannot separate that red from that violet - or who simply
+    // does not look at the left edge - could not tell a refusal from a
+    // report. So a Failure carries two more channels: a leading warning mark,
+    // which is a SHAPE, and its whole border in danger(), which is an
+    // outline the eye meets wherever it lands on the card. A Note is
+    // exactly what it was.
+    const bool failure = myKind == Kind::Failure;
+    if (failure) {
+        Theme::drawCrispBorder(painter, QRectF(body), Theme::danger(), 8);
+
+        const QRect mark = glyphRect();
+        constexpr double kGrid = 24.0;   // IconSet's design grid
+        painter.save();
+        painter.translate(mark.topLeft());
+        painter.scale(mark.width() / kGrid, mark.height() / kGrid);
+        QPen pen(Theme::danger(), 2.0 * kGrid / mark.width());
+        pen.setCapStyle(Qt::RoundCap);
+        pen.setJoinStyle(Qt::RoundJoin);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        IconSet::paintGlyph(painter, IconSet::Glyph::Warning);
+        painter.restore();
+    }
+
+    const int textLeft = body.left() + kPad + (failure ? kGlyphSize + kGlyphGap : 0);
+    const int textWidth = textColumnWidth(myKind, myHasUndo) - (kWidth - body.width());
     painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::text());
-    painter.drawText(QRect(body.left() + kPad, body.top(), textWidth, body.height()),
+    painter.drawText(QRect(textLeft, body.top(), textWidth, body.height()),
                      Qt::TextWordWrap | Qt::AlignVCenter | Qt::AlignLeft, myText);
 
     // Painted here rather than by the sibling UndoControl - see that class's
@@ -298,7 +354,9 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
         // the control is hidden from hit-testing by syncUndoGeometry(), and
         // this is what stops the pill from still looking clickable. The
         // message keeps saying what it said - only the offer is withdrawn.
-        painter.setPen(myUndoEnabled ? Theme::accent() : Theme::textDisabled());
+        // accentText(), not accent(): the violet is a fill colour, and as
+        // words on chipHover it measured 1.80:1 (the 2026-10 review's F5).
+        painter.setPen(myUndoEnabled ? Theme::accentText() : Theme::textDisabled());
         painter.drawText(r, Qt::AlignCenter, undoLabel());
     }
 }
@@ -332,6 +390,12 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
         emit undoRequested();
         dismiss();
     });
+
+    // The hover pause's three inputs - see countdownPaused() in the header.
+    // Filters only observe; every event still reaches its widget.
+    if (myViewport) myViewport->installEventFilter(this);
+    myToast->installEventFilter(this);
+    if (myToast->undoControl()) myToast->undoControl()->installEventFilter(this);
 
     myTimer = new QTimer(this);
     myTimer->setSingleShot(true);
@@ -379,8 +443,9 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int docum
     // a law rather than a preference: a Note is the app telling the user
     // something went right, which they are entitled to switch off, while a
     // FAILURE IS A REFUSAL AND A REFUSAL THAT REPORTS NOWHERE IS A SILENT
-    // FAILURE. This app has no modal dialogs, no error log and no status line
-    // that persists - a toast is the only surface a refusal has - so a
+    // FAILURE. This app has no modal dialogs and no error log - a toast is
+    // where a refusal is SEEN, and the status line that keeps its reason
+    // afterwards is written from this toast (failureShown()) - so a
     // preference that could reach one would turn every kernel refusal into an
     // operation that simply did nothing, which is exactly what CLAUDE.md's
     // "never surface a failed boolean as a success" forbids one layer down.
@@ -425,7 +490,58 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int docum
     // or its callback. A fade must not change when the dismiss countdown
     // starts, since remainingMs() and the Note/Failure duration contract
     // both read this timer directly.
+    myPaused = false;
     myTimer->start(kind == Toast::Kind::Failure ? kFailureMs : kNoteMs);
+    if (kind == Toast::Kind::Failure) emit failureShown(text);
+    // A message arriving under a pointer that is already resting on the
+    // toast's place is being read from its first frame.
+    syncHoverPause();
+}
+
+bool ToastHost::eventFilter(QObject* watched, QEvent* event)
+{
+    const QEvent::Type type = event->type();
+    if (watched == myViewport) {
+        if (type == QEvent::MouseMove) {
+            myPointer = static_cast<QMouseEvent*>(event)->position().toPoint();
+            myPointerInViewport = true;
+            syncHoverPause();
+        } else if (type == QEvent::Leave) {
+            myPointerInViewport = false;
+            syncHoverPause();
+        }
+    } else if (myToast && watched == myToast) {
+        if (type == QEvent::Enter || type == QEvent::HoverEnter) {
+            myOverToast = true;
+            syncHoverPause();
+        } else if (type == QEvent::Leave || type == QEvent::HoverLeave) {
+            myOverToast = false;
+            syncHoverPause();
+        }
+    } else if (myToast && watched == myToast->undoControl()) {
+        if (type == QEvent::Enter || type == QEvent::HoverEnter) {
+            myOverUndo = true;
+            syncHoverPause();
+        } else if (type == QEvent::Leave || type == QEvent::HoverLeave) {
+            myOverUndo = false;
+            syncHoverPause();
+        }
+    }
+    return QObject::eventFilter(watched, event);
+}
+
+void ToastHost::syncHoverPause()
+{
+    const bool overCard = myPointerInViewport && myToast && myToast->geometry().contains(myPointer);
+    const bool hovered = isShowing() && (overCard || myOverToast || myOverUndo);
+    if (hovered && !myPaused && myTimer->isActive()) {
+        myPausedRemainingMs = myTimer->remainingTime();
+        myTimer->stop();
+        myPaused = true;
+    } else if (!hovered && myPaused) {
+        myPaused = false;
+        myTimer->start(std::max(myPausedRemainingMs, kResumeFloorMs));
+    }
 }
 
 void ToastHost::documentMovedTo(int documentStamp)
@@ -481,12 +597,21 @@ QWidget* ToastHost::undoControl() const
 
 int ToastHost::remainingMs() const
 {
+    // Frozen while a reader holds it - the countdown is the number left when
+    // the pointer arrived, not a timer that is no longer running.
+    if (myPaused) return myPausedRemainingMs;
     return myTimer ? myTimer->remainingTime() : -1;
 }
 
 void ToastHost::dismiss()
 {
     myTimer->stop();
+    // A dismissal from anywhere - Undo, the document moving on - ends the
+    // pause with the message. The two Enter flags go too: the toast and its
+    // pill are about to hide, and a hidden widget gets no Leave.
+    myPaused = false;
+    myOverToast = false;
+    myOverUndo = false;
     if (!myToast) return;
 
     // Folded into the DERIVED visibility syncUndoGeometry() computes, not a
@@ -626,6 +751,9 @@ void ToastHost::reposition()
     // the card is one move away from correct either way.
     if (myRise) myRise->stop();
     myToast->move(x, y);
+    // The card moved under a pointer that may not have: whether it is being
+    // read is a question about the NEW rectangle.
+    syncHoverPause();
 
     // A hint balloon may already be up and have no way to know this toast
     // just appeared (or just moved) underneath it - reconsider() is what

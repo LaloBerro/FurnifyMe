@@ -476,14 +476,14 @@ void SlatsTool::paintEvent(QPaintEvent* /*event*/)
         painter.drawText(labelRect(i), Qt::AlignVCenter | Qt::AlignLeft, labelFor(i));
 
     painter.setFont(Theme::badgeFont());
-    painter.setPen(myCount > 0 ? Theme::textMuted() : Theme::danger());
+    painter.setPen(myCount > 0 ? Theme::textMuted() : Theme::dangerText());
     painter.drawText(countRect(), Qt::AlignVCenter | Qt::AlignLeft, countText());
 
     painter.setPen(Theme::textMuted());
     painter.drawText(hintRect(), Qt::AlignVCenter | Qt::AlignRight, hintText());
 
     if (!myReason.isEmpty()) {
-        painter.setPen(Theme::danger());
+        painter.setPen(Theme::dangerText());
         painter.drawText(reasonRect(), Qt::AlignVCenter | Qt::AlignLeft, myReason);
     }
 }

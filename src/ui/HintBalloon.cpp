@@ -428,7 +428,8 @@ void HintBalloon::paintEvent(QPaintEvent* /*event*/)
                      Qt::TextWordWrap | Qt::AlignTop | Qt::AlignLeft, myText);
 
     painter.setFont(Theme::labelFont());
-    painter.setPen(Theme::accent());
+    // Words, so the accent's TEXT ink - accent() itself read 2.3:1 here.
+    painter.setPen(Theme::accentText());
     painter.drawText(QRect(body.left() + kPad, height() - margin - 26, body.width() - kPad * 2, 20),
                      Qt::AlignRight | Qt::AlignVCenter, tr("got it"));
 }

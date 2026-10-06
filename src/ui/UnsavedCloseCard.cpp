@@ -9,7 +9,9 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QResizeEvent>
 #include <QShowEvent>
+#include <QStatusBar>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -362,7 +364,7 @@ void CloseCardButton::paintEvent(QPaintEvent* /*event*/)
         case Look::Plain:
             fill = isDown() ? Theme::chipActive() : (myHovered ? Theme::chipHover() : Theme::chip());
             stroke = Theme::border();
-            ink = myLook == Look::Danger ? Theme::danger() : Theme::text();
+            ink = myLook == Look::Danger ? Theme::dangerText() : Theme::text();
             hint = Theme::textMuted();
             break;
     }
@@ -461,4 +463,88 @@ void FurnitureNameMark::paintEvent(QPaintEvent* /*event*/)
     painter.setPen(Theme::text());
     painter.drawText(QRect(x, 0, width() - x, height()), Qt::AlignLeft | Qt::AlignVCenter,
                      composedText(myName, myUnsaved, unsavedText()));
+}
+
+// --- StatusMessageLine --------------------------------------------------------
+
+namespace {
+// QStatusBar's own message inset from the bar's left edge (QStatusBarPrivate::
+// messageRect() starts its rectangle at 6), kept so the text sits where Qt
+// used to put it rather than jumping when this widget took the strip over.
+constexpr int kMessageInset = 6;
+}  // namespace
+
+StatusMessageLine::StatusMessageLine(QStatusBar* bar)
+    : QWidget(bar)
+    , myBar(bar)
+{
+    // Ignored horizontally: the strip is whatever the bar has left, and a long
+    // sentence must never widen the window to make room for itself.
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    if (myBar) {
+        connect(myBar, &QStatusBar::messageChanged, this, [this] {
+            syncToolTip();
+            update();
+        });
+    }
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
+        updateGeometry();
+        syncToolTip();
+        update();
+    });
+}
+
+QString StatusMessageLine::fullText() const
+{
+    return myBar ? myBar->currentMessage() : QString();
+}
+
+QString StatusMessageLine::shownText() const
+{
+    const QFontMetrics metrics(Theme::labelFont());
+    return metrics.elidedText(fullText(), Qt::ElideRight,
+                              std::max(0, width() - kMessageInset));
+}
+
+int StatusMessageLine::paintedRight() const
+{
+    const QString shown = shownText();
+    if (shown.isEmpty()) return 0;
+    return kMessageInset + QFontMetrics(Theme::labelFont()).horizontalAdvance(shown);
+}
+
+QSize StatusMessageLine::sizeHint() const
+{
+    return QSize(kMessageInset, QFontMetrics(Theme::labelFont()).height());
+}
+
+QSize StatusMessageLine::minimumSizeHint() const
+{
+    return QSize(0, QFontMetrics(Theme::labelFont()).height());
+}
+
+void StatusMessageLine::syncToolTip()
+{
+    // The whole sentence one hover away, but only when some of it is hidden -
+    // a tooltip that repeats what is plainly on screen is noise.
+    setToolTip(isElided() ? fullText() : QString());
+}
+
+void StatusMessageLine::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    syncToolTip();
+}
+
+void StatusMessageLine::paintEvent(QPaintEvent* /*event*/)
+{
+    const QString shown = shownText();
+    if (shown.isEmpty()) return;
+    QPainter painter(this);
+    painter.setFont(Theme::labelFont());
+    // The colour the stylesheet gives the bar's own message (Theme.cpp's
+    // `QStatusBar { color: @textMuted }`), read live rather than cached.
+    painter.setPen(Theme::textMuted());
+    painter.drawText(QRect(kMessageInset, 0, width() - kMessageInset, height()),
+                     Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, shown);
 }

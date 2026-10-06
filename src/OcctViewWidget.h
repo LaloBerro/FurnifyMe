@@ -1156,6 +1156,9 @@ public:
     // all of at once. Shift-click accumulates them through the same
     // AIS_SelectionScheme_XOR the additive body pick uses.
     std::vector<TopoDS_Edge> selectedEdges() const;
+    // How many faces are selected - Shift accumulates them as it does edges.
+    // For the status bar's selection sentence, which names the count.
+    int selectedFaceCount() const;
 
     // The one the bevel arrow stands on: the edge the user picked LAST, so a
     // multi-edge gesture is measured where the hand last was rather than

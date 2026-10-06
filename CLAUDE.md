@@ -334,7 +334,7 @@ Source files under `src/`, plus `tests/`:
 | `EditorSelectorHandoff.{h,cpp}` | the ONE wiring that swaps editor and selector; `main.cpp` and `gui_smoke` share it |
 | `ui/InlineRename.{h,cpp}` | the one `QLineEdit`-in-place helper: selector cards and drawer rows both use it |
 | `ui/VersionsPanel.{h,cpp}` | versions drawer: thumbnail cards, Compare, Restore, two-click Delete |
-| `ui/UnsavedCloseCard.{h,cpp}` | the close question over a dimmed viewport, and the status bar's unsaved dot (`FurnitureNameMark`) |
+| `ui/UnsavedCloseCard.{h,cpp}` | the close question over a dimmed viewport, the status bar's unsaved dot (`FurnitureNameMark`) and its elided left channel (`StatusMessageLine`) |
 | `ui/RenderSettingsPanel.{h,cpp}` | the render-mode settings card and its shutter (`RenderShutterButton`, same file) |
 | `ui/CardSlide.{h,cpp}` | slide-in/out for an overlay card; only the rail uses it. `setShown()` is idempotent against what was ASKED for, `settle()` re-aims a live flight at relayout's new home rather than stopping it |
 | `ui/NameFurnitureCard.{h,cpp}` | the "what should this be called" question; creates nothing until it is answered |
@@ -650,6 +650,41 @@ timer — a stack of toasts is a dialog with extra steps. A `Note` lives 4 secon
 `Failure` 8, because a failure carries a sentence the user has to read and act on; the
 suite asserts both against the armed timer rather than waiting real seconds.
 
+**The countdown waits for a reader, and a refusal's reason outlives its toast** (the
+2026-10 review's F13). While the pointer rests on the toast or its Undo pill the timer is
+stopped, and leaving restarts it from what was left — never under 1.5 s, so the hand that
+was reading it does not make it vanish. The toast body is transparent for mouse events, so
+Qt never sends it an Enter: `ToastHost` reads the viewport's own mouse moves against the
+card's rectangle, plus the pill's Enter/Leave. And every Failure emits
+`ToastHost::failureShown()`, which `MainWindow` writes into the status bar's left channel
+(trailing period dropped, `statusLineFor()`), where it stays until the next selection or
+outcome replaces it — the bar used to keep only "Pull refused — nothing was changed", and
+those twelve sentences are deleted rather than kept beside the reason.
+
+**A Failure is a shape, not only a colour** (F6). The 6 px stripe was the only difference
+between the kinds, which a user who cannot tell that red from that violet cannot read; a
+Failure also paints `IconSet::Glyph::Warning` before its message and its whole border in
+`danger()`. The message column narrows by the mark (`Toast::textColumnWidth()`), and
+`sizeHint()` measures against that column, so the toast still sizes itself from what it
+paints. A Note is exactly what it was. `gui_smoke` reads the mark as pixels in
+`glyphRect()` — present on a Failure, absent from a Note.
+
+**The status bar has two channels, one job each** (F9, the user's ruling). The LEFT
+(`showMessage()`) is the selection — `selectionStatusText()`, which now counts in the
+selection's own kind: `1 face selected`, `2 edges selected` — and the outcome of the last
+thing done. The RIGHT (`myStateLabel`) is the mode and the next step, and never a count of
+anything: it used to say "2 bodies selected" beside the left's, and once showed a different
+count from it. The name mark between them is the identity. **A Note is the toast's**:
+`MainWindow::reportNote()` shows it and puts the left channel back to the selection rather
+than repeating it word for word — except with notifications off, when the bar is its only
+record. **The left channel is elided** (F20): `StatusMessageLine` is the bar's first
+permanent widget, stretched, so `QStatusBar`'s own unelided paint is left a zero-width
+rectangle and this widget paints the same `currentMessage()` elided to what fits, never
+reaching the name. `showMessage()`/`currentMessage()` stay the API and hold the full
+sentence; the full text is the tooltip while it is elided. A side effect worth knowing: the
+style draws its item separator after the new widget too, so a thin rule now stands between
+the left channel and the name, as one already stood between the name and the state label.
+
 **A toast that reports a change to the document offers Undo**, and that control is a
 sibling parented to `OcctViewWidget` for the reason recorded above. Two things about it
 were each found by a review after passing a green suite:
@@ -714,7 +749,9 @@ at 160 with `motionCurve()`. `gui_smoke` walks every visible widget and fails on
 outside the scale, so the sizes are set through the stylesheet `Theme::apply` installs and
 inherit into Qt's own children. Note that Qt 6's `QStatusBar` has **no** internal `QLabel`:
 `showMessage()` stores a string and `paintEvent` draws it with the status bar's own font,
-so `statusBar()->setFont(...)` is what covers it.
+so `statusBar()->setFont(...)` is what covers it — and since that paint cannot be elided
+from outside, the editor's message is painted by `StatusMessageLine` instead (see
+"Reporting outcomes").
 
 `OcctViewWidget`'s camera animation deliberately keeps its own 250 ms and does not read
 `motionMs()`. A camera move is not a UI transition; reading well at the same speed as a
@@ -1175,10 +1212,17 @@ they generalize.
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
 `Theme::Spec`; `defaultSpec()` is **the user's own look** — Graphite plus six baked deltas
 from `assets/defaultcolors.furnifytheme` (near-black viewport and grids, `#6a00ff` accent,
-tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 29 colour defaults are
+tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 33 colour defaults are
 pinned to hex in the suite (three of them, `gizmoAxisX/Y/Z`, added in Milestone 3 — see
-"Direct modeling"'s gizmo restyle note; the last two, `sizesOneBody`/`sizesGroup`, by the
-selection sizes — see "Sizes around the selection"). `graphite()` stays as the readable base the deltas
+"Direct modeling"'s gizmo restyle note; `sizesOneBody`/`sizesGroup` by the selection sizes —
+see "Sizes around the selection"; the last two, `accentText`/`dangerText`, by the 2026-10
+review). **`accent()` and `danger()` are fills and strokes; words take `accentText()` and
+`dangerText()`** (F5, F24): the violet measured 1.80:1 as the toast's Undo on `chipHover`,
+the red about 3.1:1 under a broken joint. The text inks ship at `#bb9cff` (4.77:1 on
+`chipActive`, the lightest surface any of its words sit on; 7.63:1 on the hub's `chrome`) and
+`#ff8f82` (4.87:1 on `chipActive`, 6.10:1 on a broken joint's tinted row), and `gui_smoke`
+pins every site's ratio from the tokens and, where the site can be put on screen, from the
+painted pixels. A colour file saved before them loads and takes them at their defaults. `graphite()` stays as the readable base the deltas
 diff against. Edits apply live through one `themeChanged` broadcast — no
 widget may cache a colour across it — and persist **debounced** (400 ms, flushed on close),
 because a colour-wheel drag fires per mouse-move. The picker opens with `show()`, never
@@ -1360,7 +1404,9 @@ on by default, persisted as `showSizes`, no shortcut.
 - **Live status, never somebody else's sentence.** `selectionStatusText()` is the one author;
   `refreshSelectionSizes()` rewrites the bar only while it still shows the sentence this
   window last painted (`myLastSelectionStatus`), the refusal-withdrawal rule — so a
-  commit's own Note (`Body 01 scaled — …`) or a kind-lock refusal stands. The size rides only
+  refusal's reason or a kind-lock refusal stands. A commit's own Note (`Body 01 scaled — …`)
+  is the toast's alone since the 2026-10 review, and the bar goes back to this sentence
+  under it (`reportNote()`, see "Reporting outcomes"). The size rides only
   on a Body selection, and it stays in the status bar with Show sizes off: the preference
   governs the drawing, and a line of status text covers nothing.
 - **The Items drawer stopped showing a size once this existed.** A row is name and eye button
@@ -1835,7 +1881,11 @@ as numbers to mark with a pencil and a square.
   with a reason and empty items, the drawer floats the broken joints to the top and prints the
   reason where the mark-out numbers go. A joint that kept its last good numbers after the
   pieces moved apart would be worse than no joint at all: those numbers still look
-  transferable to wood.
+  transferable to wood. **And the reason ends with what to do** (the 2026-10 review's F24):
+  `JointsPanel::reasonText()` keeps Joinery's own words — the headless suite pins them, and
+  the geometry library writes no UI copy — and adds a step after an em dash ("these two
+  pieces don't meet — move the pieces so they meet"), worded to read the same under a
+  broken row and in a placement refusal.
 - **One derivation, cached on `revision()`, dropped by `resyncView()`.**
   `MainWindow::cachedJointDerivations()` is THE place this window derives a joint — the
   viewport and the drawer read the same answer, so a number on screen and a number in the list
@@ -2420,7 +2470,7 @@ size — with a tab bar under the title and a `QStackedWidget` below it.
 
 | Tab | Rows |
 |---|---|
-| Colours | 27 colour swatches (scrolled; 29 tokens less the two retired) · Save/Load colours · Reset colours and sizes |
+| Colours | 31 colour swatches (scrolled; 33 tokens less the two retired) · Save/Load colours · Reset colours and sizes |
 | Text & lines | Text size · Font · Edge lines · Outline lines · Button border |
 | Viewport | Show the grid · **Grid detail** · Show sizes around a selection · Projection · **Gizmo size** · Show notifications |
 | Units | Sizes in (Millimetres/Centimetres) · Snap to Grid · Magnet |

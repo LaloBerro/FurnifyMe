@@ -236,6 +236,17 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(5, 5, 19, 19);
             p.drawLine(5, 19, 19, 5);
             break;
+        case Glyph::Warning: {                    // a triangle with an exclamation mark
+            QPainterPath triangle;
+            triangle.moveTo(12.0, 3.5);
+            triangle.lineTo(21.5, 20.0);
+            triangle.lineTo(2.5, 20.0);
+            triangle.closeSubpath();
+            p.drawPath(triangle);
+            p.drawLine(QPointF(12.0, 9.5), QPointF(12.0, 14.0));
+            p.drawPoint(QPointF(12.0, 17.0));
+            break;
+        }
     }
 }
 

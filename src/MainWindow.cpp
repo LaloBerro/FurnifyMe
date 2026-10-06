@@ -453,7 +453,7 @@ protected:
             Qt::AlignVCenter | Qt::AlignLeft, labelText());
 
         painter.setFont(Theme::bodyFont());
-        painter.setPen(Theme::accent());
+        painter.setPen(Theme::accentText());
         painter.drawText(QRect(body.left() + kPad, body.top() + kLabelHeight,
                                body.width() - kPad * 2, kValueHeight),
                          Qt::AlignVCenter | Qt::AlignLeft, valueText());
@@ -1290,6 +1290,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // no matching stylesheet rule would still be correct.
     statusBar()->setFont(Theme::labelFont());
 
+    // THE LEFT CHANNEL, ELIDED - see StatusMessageLine. Added FIRST, and with
+    // a stretch, so it owns the strip up to the name mark: Qt's own message
+    // paint is left a zero-width rectangle and this paints the same
+    // currentMessage() elided to what fits, never reaching the name.
+    myMessageLine = new StatusMessageLine(statusBar());
+    statusBar()->addPermanentWidget(myMessageLine, 1);
+
     // The furniture's name, and a caution dot beside it while there are
     // unsaved changes (improvements item 3) - left of the state label, so the
     // question closing asks is never a surprise. Pushed from appStateChanged
@@ -1302,8 +1309,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         myNameMark->setState(open ? myFurnitureName : QString(), isFurnitureDirty());
         myNameMark->setVisible(open);
     });
-    // Permanent widget so it survives transient showMessage() calls: the left
-    // side reports what just happened, the right side always says where you are.
+    // Permanent widget so it survives transient showMessage() calls. ONE JOB
+    // PER CHANNEL (the 2026-10 review's F9): the left says what is selected
+    // and what just happened, the right says what mode you are in and what
+    // to do next - and never how many things are selected, which is the
+    // left's. They used to both say "2 bodies selected", and with a group
+    // selected they once said two different counts side by side.
     myStateLabel = new QLabel(this);
     statusBar()->addPermanentWidget(myStateLabel);
     updateStateLabel();
@@ -2510,8 +2521,7 @@ void MainWindow::buildOverlay()
         // so). A Note carries no Undo for the same reason: there is nothing on
         // the undo stack for one to pop, and the row's own x is how a shot is
         // taken back.
-        statusBar()->showMessage(tr("%1 saved").arg(name));
-        myToasts->show(tr("%1 saved").arg(name), Toast::Kind::Note, false);
+        reportNote(tr("%1 saved").arg(name));
         updateActions();
     });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::shotApplied, this, [this](int index) {
@@ -2653,6 +2663,16 @@ void MainWindow::buildOverlay()
         // delivered straight at it.
         if (mySketching) return;
         if (myUndoAction->isEnabled()) myUndoAction->trigger();
+    });
+    // A REFUSAL'S REASON OUTLIVES ITS TOAST (the 2026-10 review's F13). A
+    // Failure is up for eight seconds and the bar used to keep only "Pull
+    // refused — nothing was changed", so the one sentence that said WHY was
+    // gone the moment the toast went. Every Failure lands here, whoever
+    // raised it, and its reason stays on the left until the next selection
+    // change or the next outcome replaces it - refreshSelectionSizes() never
+    // will, since it only rewrites the sentence it painted itself.
+    connect(myToasts, &ToastHost::failureShown, this, [this](const QString& reason) {
+        statusBar()->showMessage(statusLineFor(reason));
     });
     // The Appearance card's two file outcomes. The card owns a look, not the
     // way this app reports things, so it announces and the copy lives here
@@ -4276,12 +4296,10 @@ bool MainWindow::performSave(bool announce, bool reportFailure)
     myAutosaveFailedAtRevision = -1;
     updateActions();   // the dirty star and the Save action both follow this
     if (announce) {
-        const QString message = tr("Saved %1").arg(myFurnitureName);
-        statusBar()->showMessage(message);
         // Not a document change - no Undo, and no document-revision stamp:
         // a save does not touch the undo stack (see DocumentModel.h), so
         // there is nothing for the pill to take back.
-        myToasts->show(message, Toast::Kind::Note, false);
+        reportNote(tr("Saved %1").arg(myFurnitureName));
     }
     return true;
 }
@@ -4654,11 +4672,9 @@ bool MainWindow::saveVersion(const QString& name)
     }
 
     updateActions();   // refreshes the drawer through VersionsPanel::refresh
-    const QString message = tr("Version \"%1\" saved").arg(name);
-    statusBar()->showMessage(message);
     // No Undo - versions are file data, not a document edit; there is
     // nothing on the undo stack for a pill to take back.
-    myToasts->show(message, Toast::Kind::Note, false);
+    reportNote(tr("Version \"%1\" saved").arg(name));
     return true;
 }
 
@@ -4693,8 +4709,7 @@ bool MainWindow::restoreVersion(const QString& name)
     updateActions();
     emit documentChanged();
     const QString message = tr("Restored version \"%1\"").arg(name);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -4713,12 +4728,10 @@ bool MainWindow::deleteVersionByName(const QString& name)
     if (myCompareView && myCompareVersionName == name) closeCompare();
 
     updateActions();   // refreshes the drawer
-    const QString message = tr("Deleted version \"%1\"").arg(name);
-    statusBar()->showMessage(message);
     // No Undo - final. Versions are file data, and "Ctrl+Z brings back a
     // deleted file" is not a promise this app makes anywhere else either;
     // the two-click confirmation on the row itself is what stands in for it.
-    myToasts->show(message, Toast::Kind::Note, false);
+    reportNote(tr("Deleted version \"%1\"").arg(name));
     return true;
 }
 
@@ -5061,7 +5074,11 @@ void MainWindow::updateStateLabel()
         // an arrow with no words is a guess. Reads the same predicate the
         // arrow itself does, so the label cannot describe a gizmo that is not
         // there (or stay quiet about one that is).
-        state = tr("Face selected — drag the arrow to pull, or type a distance");
+        //
+        // No "Face selected" in front of it any more: what is selected is the
+        // left channel's to say (see selectionStatusText()), and this label is
+        // the mode and the next step only.
+        state = tr("Drag the arrow to pull, or type a distance");
     } else if (canBevelSelectedEdge()) {
         // Same rule as the line above: the gizmo is on screen, one axis does
         // two different things, and an arrow cannot say that by itself. Reads
@@ -5070,20 +5087,20 @@ void MainWindow::updateStateLabel()
         // refusals use. Saying "round or flatten" here and "Fillet"/"Chamfer"
         // everywhere else is two vocabularies for one pair of operations.
         //
-        // The plural is written out, not parenthesised - the label has to be
-        // able to say that a Shift-click added a second edge, and "Edge(s)"
-        // is the exact spelling the vocabulary rules forbid.
-        const std::size_t picked = myView->selectedEdges().size();
-        state = (picked > 1 ? tr("%1 edges selected — drag in for a Fillet, out for a "
-                                 "Chamfer, or type a size")
-                                  .arg(QString::number(static_cast<int>(picked)))
-                            : tr("Edge selected — drag in for a Fillet, out for a "
-                                 "Chamfer, or type a size"));
+        // HOW MANY edges is the left channel's now ("2 edges selected", with
+        // the plural written out - see selectionStatusText()). Saying the
+        // count here too put it in both halves of the bar at once.
+        state = tr("Drag in for a Fillet, out for a Chamfer, or type a size");
     } else {
+        // NO COUNTS on this side (the 2026-10 review's F9): neither of the
+        // selection - the left channel's "2 bodies selected — overall …" -
+        // nor of the document, which read "3 bodies" beside "2 bodies
+        // selected" in the group capture and looked like the two halves of
+        // the bar disagreeing. What is left is the mode and the next step.
         const std::size_t selected = myView->selectedSolidIds().size();
         const std::size_t bodies = myDocument.count();
         if (selected == 2) {
-            state = tr("2 bodies selected — Union, Subtract and Intersect available");
+            state = tr("Union, Subtract and Intersect available");
         } else if (selected == 1) {
             // The transform gizmo is on screen whenever this holds, and a
             // handful of arrows and rings with no words is a guess. Reads the
@@ -5104,17 +5121,14 @@ void MainWindow::updateStateLabel()
             // face's own lead clause makes two branches down. Read from
             // bodyToolName(), the one place those three words are spelled.
             state = canTransformSelectedBody()
-                        ? tr("1 body selected — %1 — drag a handle, Space for the next "
-                             "tool — Shift+double-click another to combine them")
+                        ? tr("%1 — drag a handle, Space for the next tool — "
+                             "Shift+double-click another body to combine them")
                               .arg(bodyToolName(myBodyTool))
-                        : tr("1 body selected — Shift+double-click another to combine them");
+                        : tr("Shift+double-click another body to combine them");
         } else if (bodies == 0) {
             state = tr("Nothing yet — press Ctrl+K to draw an outline");
-        } else if (bodies == 1) {
-            state = tr("1 body — hover picks a face or an edge, double-click takes the body");
         } else {
-            state = tr("%1 bodies — hover picks a face or an edge, double-click takes "
-                       "the body").arg(bodies);
+            state = tr("Hover picks a face or an edge — double-click takes the body");
         }
     }
     // A lock is a mode, and a mode with no persistent cue is a trap: the
@@ -5418,8 +5432,7 @@ void MainWindow::onDeleteSelected()
             ? tr("Deleted %1 and %2").arg(QString::fromStdString(twinNameA),
                                           QString::fromStdString(twinNameB))
             : tr("Deleted %1 bodies").arg(toDelete.size());
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
 }
 
 bool MainWindow::deletePendingOutline()
@@ -5453,8 +5466,7 @@ bool MainWindow::deletePendingOutline()
     // "Deleted Outline 01" are one message with one subject, not two messages
     // the user has to learn separately.
     const QString message = tr("Deleted %1").arg(name);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -5692,8 +5704,7 @@ void MainWindow::slatsApply(const ModelingOps::SlatPlan& plan)
                                 .arg(made.size())
                                 .arg(QString::fromStdString(Measure::formatLength(plan.width)))
                                 .arg(QString::fromStdString(Measure::formatLength(plan.gap)));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
 }
 
 int MainWindow::folderOfSelection() const
@@ -5742,8 +5753,7 @@ void MainWindow::onGroupSelection()
                                 : (ids.size() == 1
                                        ? tr("1 body put in a folder")
                                        : tr("%1 bodies put in a folder").arg(ids.size()));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     // Straight into the rename, over the row that was just made: a folder
     // called "Folder" is a folder nobody named, and the one moment the user
     // knows what it holds is right now. Folders START FOLDED now, but the one
@@ -5772,8 +5782,7 @@ void MainWindow::onUngroupSelection()
     updateActions();
     emit documentChanged();
     const QString message = tr("Folder dissolved");
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
 }
 
 QString MainWindow::activeMaterialName() const
@@ -5884,8 +5893,7 @@ void MainWindow::onDeleteGroup(int groupId)
                                        ? tr("Folder deleted — 1 body with it")
                                        : tr("Folder deleted — %1 bodies with it")
                                              .arg(bodies.size()));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onGroupActivated(int groupId)
@@ -5906,8 +5914,7 @@ void MainWindow::onGroupRenameCommitted(int groupId, QString newName)
     updateActions();
     emit documentChanged();
     const QString message = tr("Renamed to \"%1\"").arg(newName.trimmed());
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onItemsDropped(const std::vector<int>& ids, int targetGroupId)
@@ -5964,8 +5971,7 @@ void MainWindow::onItemRenameCommitted(int id, bool isOutline, QString newName)
     updateActions();
     emit documentChanged();
     const QString message = tr("Renamed to \"%1\"").arg(newName.trimmed());
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onUndo()
@@ -6357,8 +6363,7 @@ void MainWindow::onFinishSketch()
         tr("%1 created — %2")
             .arg(QString::fromStdString(myDocument.outlineNameOf(id)),
                  QString::fromStdString(Measure::formatFaceExtents(face, mySketch.plane())));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::addPrimitiveShape(ModelingOps::PrimitiveKind kind)
@@ -6414,8 +6419,7 @@ void MainWindow::addPrimitiveShape(ModelingOps::PrimitiveKind kind)
                    : tr("%1 created — %2")
                          .arg(QString::fromStdString(myDocument.nameOf(id)),
                               QString::fromStdString(Measure::formatDimensions(shape)));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onExtrude()
@@ -6507,8 +6511,7 @@ bool MainWindow::extrudePendingFace(double height)
             : tr("%1 created — %2")
                   .arg(QString::fromStdString(myDocument.nameOf(id)),
                        QString::fromStdString(Measure::formatDimensions(solid)));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -6689,7 +6692,6 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
                           "take out. Try a smaller distance, or drag the "
                           "arrow the other way"),
                       Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("Pull refused — nothing was changed"));
         return false;
     }
 
@@ -6714,8 +6716,7 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -6873,7 +6874,6 @@ bool MainWindow::mitreEndBy(double angleDeg, ModelingOps::MitreSide side)
         QString why = mitreRefusalFor(angleDeg, side);
         if (why.isEmpty()) why = mitreKernelRefusalText();
         myToasts->show(why, Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("Mitre refused — nothing was changed"));
         return false;
     }
 
@@ -6901,8 +6901,7 @@ bool MainWindow::mitreEndBy(double angleDeg, ModelingOps::MitreSide side)
                                QString::fromStdString(Measure::formatAngle(angleDeg)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -7101,7 +7100,6 @@ bool MainWindow::reMeasureTo(double newSizeMm)
         // kernel's own string: it is written for ModelingOps, not the user.
         qWarning("Re-measure failed: %s", result.error.c_str());
         myToasts->show(reMeasureRefusalFor(newSizeMm), Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("Re-measure refused — nothing was changed"));
         return false;
     }
 
@@ -7130,8 +7128,7 @@ bool MainWindow::reMeasureTo(double newSizeMm)
                                QString::fromStdString(Measure::formatLength(newSizeMm)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -7476,8 +7473,6 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
                               : bevelRefusalText(fillet),
                           Toast::Kind::Failure, false);
         }
-        statusBar()->showMessage(fillet ? tr("Fillet refused — nothing was changed")
-                                        : tr("Chamfer refused — nothing was changed"));
         return false;
     }
 
@@ -7549,8 +7544,7 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
     }
     if (anyTwinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -7719,7 +7713,6 @@ bool MainWindow::transformBodies(const std::vector<int>& ids, const gp_Trsf& del
                           "can't see or can't fit on screen. Drag the handle back "
                           "toward the body and scale it in smaller steps"),
                       Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operation));
         return false;
     }
 
@@ -7739,7 +7732,6 @@ bool MainWindow::transformBodies(const std::vector<int>& ids, const gp_Trsf& del
             // user.
             qWarning("Transform failed: %s", result.error.c_str());
             myToasts->show(transformRefusalText(delta), Toast::Kind::Failure, false);
-            statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operation));
             return false;
         }
         results.emplace_back(bodyId, result.shape);
@@ -7791,8 +7783,7 @@ bool MainWindow::transformBodies(const std::vector<int>& ids, const gp_Trsf& del
             : tr("%1 bodies %2").arg(results.size()).arg(transformPastVerb(delta));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -8109,7 +8100,6 @@ bool MainWindow::booleanApply()
                           "Unlink one first, then try again")
                            .arg(operationName),
                        Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("%1 didn't run — nothing was changed").arg(operationName));
         return false;
     }
 
@@ -8122,7 +8112,6 @@ bool MainWindow::booleanApply()
         // same sentence the chip is already showing.
         qWarning("%s failed: %s", qPrintable(operationName), result.error.c_str());
         myToasts->show(booleanRefusalFor(), Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("%1 didn't run — nothing was changed").arg(operationName));
         // The gesture stays LIVE, the mitre's own rule: the user's next move
         // is to pick a different body to keep or to Escape, and both need the
         // badges still on screen.
@@ -8210,8 +8199,7 @@ bool MainWindow::booleanApply()
                                          Measure::formatDimensions(result.shape)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -8568,10 +8556,11 @@ bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
     emit documentChanged();
     const QString message = hadPairings ? tr("Mirror plane moved — bodies unpaired")
                                         : tr("Mirror plane set to this face");
-    statusBar()->showMessage(message);
     // No checkpoint behind this (a plane change is a mode switch, not an
     // edit - the same rule turning symmetry off follows), so no Undo either.
-    if (hadPairings) myToasts->show(message, Toast::Kind::Note, false);
+    // Only an unpairing is worth a toast; a plane simply set is the bar's.
+    if (hadPairings) reportNote(message);
+    else statusBar()->showMessage(message);
     return true;
 }
 
@@ -8737,7 +8726,6 @@ void MainWindow::onSymmetryActionTriggered()
     // mySymmetryOffAction's job alone (see buildActions()).
     if (!canBeginMirrorPlacement()) {
         const QString reason = mirrorPlacementRefusalText();
-        statusBar()->showMessage(reason);
         if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
         // Reverts the action's own optimistic checked-flash: nothing about
         // document().symmetryOn() changed, so the resync inside
@@ -8801,7 +8789,6 @@ bool MainWindow::confirmMirrorPlacement()
         const QString reason =
             tr("Nothing to mirror — every body picked sits on the plane, is "
               "already paired, is already linked, or couldn't be mirrored");
-        statusBar()->showMessage(reason);
         if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
         updateActions();
         // Fix round 1 (Task 3.2 review, Finding 4): NO documentChanged()
@@ -8866,8 +8853,7 @@ bool MainWindow::confirmMirrorPlacement()
     // to exactly the state it held before this call - "one undo removes
     // everything" (this task's own requirement), because the checkpoint
     // covers every twin the call built in one commit.
-    if (myToasts) myToasts->show(message, Toast::Kind::Note, true);
-    statusBar()->showMessage(message);
+    reportNote(message, true);
     return true;
 }
 
@@ -8968,10 +8954,9 @@ bool MainWindow::duplicateSelectedBody()
             ModelingOps::transformShape(sourceShape, gp_Trsf());
         if (!transformed.ok) {
             qWarning("Duplicate failed: %s", transformed.error.c_str());
-            myToasts->show(tr("Couldn't duplicate that body — the copy came back empty. "
-                              "the copy down. Try a different body"),
+            myToasts->show(tr("Couldn't duplicate that body — the copy came back empty — "
+                              "Try a different body"),
                           Toast::Kind::Failure, false);
-            statusBar()->showMessage(tr("Duplicate refused — nothing was changed"));
             return false;
         }
         copies.emplace_back(sourceId, transformed.shape);
@@ -9104,8 +9089,7 @@ bool MainWindow::duplicateSelectedBody()
                                   .arg(twins)
                             : tr("%1 bodies duplicated").arg(made.size());
     }
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9134,7 +9118,6 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
 
     // Every refusal is a Failure toast - never a modal, never silent.
     const auto refuse = [this](const QString& message) {
-        statusBar()->showMessage(message);
         myToasts->show(message, Toast::Kind::Failure, false);
         return false;
     };
@@ -9237,8 +9220,7 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
     // or nowhere.
     const std::string caveat = Joinery::caveatsFor(kind, found.contact);
     if (!caveat.empty()) message += tr(" — %1").arg(QString::fromStdString(caveat));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9475,8 +9457,7 @@ bool MainWindow::deleteJoint(int jointId)
     updateActions();
     emit documentChanged();
     const QString message = tr("Deleted the %1 between %2 and %3").arg(kind, nameA, nameB);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9578,7 +9559,6 @@ bool MainWindow::jointContact(int jointId, Joinery::ContactResult& out) const
 
 void MainWindow::refuseJointEdit(const QString& why)
 {
-    statusBar()->showMessage(why);
     myToasts->show(why, Toast::Kind::Failure, false);
 }
 
@@ -9621,8 +9601,7 @@ bool MainWindow::setJointKind(int jointId, Joinery::Kind kind)
             .arg(QString::fromStdString(myDocument.nameOf(joint.bodyA)),
                  QString::fromStdString(myDocument.nameOf(joint.bodyB)),
                  QString::fromStdString(Joinery::kindName(kind)).toLower());
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9673,8 +9652,7 @@ bool MainWindow::setJointHost(int jointId, int hostBodyId)
         tr("The %1 is now cut into %2")
             .arg(QString::fromStdString(Joinery::kindName(joint.kind)).toLower(),
                  QString::fromStdString(myDocument.nameOf(hostBodyId)));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9751,8 +9729,7 @@ bool MainWindow::editJointParameters(int jointId, const Joinery::Parameters& par
             .arg(QString::fromStdString(Joinery::kindName(joint.kind)).toLower(),
                  QString::fromStdString(myDocument.nameOf(joint.bodyA)),
                  QString::fromStdString(myDocument.nameOf(joint.bodyB)));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9845,7 +9822,6 @@ bool MainWindow::duplicateLinkedCopy()
                               "body can't be both at once. Turn mirroring off first, or "
                               "duplicate its twin instead"),
                           Toast::Kind::Failure, false);
-            statusBar()->showMessage(tr("Duplicate linked refused — nothing was changed"));
         }
         return false;
     }
@@ -9871,10 +9847,9 @@ bool MainWindow::duplicateLinkedCopy()
         // "unreachable in practice, kept defensive" idiom
         // commitReplaceBody()'s own twin-mirror comment follows.
         qWarning("Duplicate linked failed: %s", result.error.c_str());
-        myToasts->show(tr("Couldn't duplicate that body — the copy came back empty. "
-                          "the copy down. Try a different body"),
+        myToasts->show(tr("Couldn't duplicate that body — the copy came back empty — "
+                          "Try a different body"),
                       Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("Duplicate linked refused — nothing was changed"));
         return false;
     }
 
@@ -9897,8 +9872,7 @@ bool MainWindow::duplicateLinkedCopy()
     const QString message = tr("%1 duplicated — %2 bodies now linked")
                                  .arg(QString::fromStdString(myDocument.nameOf(result.id)))
                                  .arg(memberCount);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9920,10 +9894,9 @@ bool MainWindow::linkSelectedBodies()
         // kernel's own error string is logged, never shown - it is written
         // for this file, not for the user.
         qWarning("Link selected failed: %s", result.error.c_str());
-        myToasts->show(tr("Couldn't link those bodies — the copy came back empty. "
-                          "the snap down. Try moving them closer together first"),
+        myToasts->show(tr("Couldn't link those bodies — the copy came back empty — "
+                          "Try moving them closer together first"),
                       Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("Link selected refused — nothing was changed"));
         return false;
     }
 
@@ -9944,8 +9917,7 @@ bool MainWindow::linkSelectedBodies()
         tr("%1 bodies linked — every copy now matches %2")
             .arg(static_cast<int>(ids.size()))
             .arg(QString::fromStdString(myDocument.nameOf(result.id)));
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9978,8 +9950,7 @@ bool MainWindow::unlinkSelectedBody()
         groupSizeBefore > 2
             ? tr("%1 unlinked — %2 bodies remain linked").arg(name).arg(groupSizeBefore - 1)
             : tr("%1 unlinked — no bodies remain linked").arg(name);
-    statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -10030,8 +10001,34 @@ void MainWindow::onSelectionChanged()
 
     updateActions();
 
+    showSelectionStatus();
+}
+
+void MainWindow::showSelectionStatus()
+{
     myLastSelectionStatus = selectionStatusText();
     statusBar()->showMessage(myLastSelectionStatus);
+}
+
+void MainWindow::reportNote(const QString& text, bool undo, int documentStamp)
+{
+    myToasts->show(text, Toast::Kind::Note, undo, documentStamp);
+    // NOT ALSO ON THE LEFT (the 2026-10 review's F9): the bar repeated every
+    // Note word for word under the toast saying it. While the toast carries
+    // the report, the left channel goes back to the selection. With
+    // notifications off the toast was dropped, and the bar is then the quiet
+    // record of what happened - the only place it is written at all.
+    if (myToasts->isShowing() && myToasts->currentText() == text) showSelectionStatus();
+    else statusBar()->showMessage(statusLineFor(text));
+}
+
+QString MainWindow::statusLineFor(const QString& sentence)
+{
+    // Status-bar copy takes no trailing period; a toast's sentence may end in
+    // one, and the bar is where the same words have to read as a status line.
+    QString line = sentence.trimmed();
+    while (line.endsWith(QLatin1Char('.'))) line.chop(1);
+    return line;
 }
 
 bool MainWindow::selectionSizesVisible() const
@@ -10070,6 +10067,20 @@ ModelingOps::MeasuredBox MainWindow::selectionBox() const
 
 QString MainWindow::selectionStatusText() const
 {
+    // WHAT is selected, in the selection's own kind. A face or an edge used to
+    // read "1 body selected" here (the count of their owning bodies) while the
+    // state label said "Face selected" or "2 edges selected" - and since the
+    // right-hand label stopped naming the selection (the 2026-10 review's F9)
+    // this is the only place a count is said, so it has to be the right one.
+    const OcctViewWidget::PickKind kind = myView->selectionKind();
+    if (kind == OcctViewWidget::PickKind::Face) {
+        const int faces = myView->selectedFaceCount();
+        return faces == 1 ? tr("1 face selected") : tr("%1 faces selected").arg(faces);
+    }
+    if (kind == OcctViewWidget::PickKind::Edge) {
+        const int edges = static_cast<int>(myView->selectedEdges().size());
+        return edges == 1 ? tr("1 edge selected") : tr("%1 edges selected").arg(edges);
+    }
     const std::size_t count = myView->selectedSolidIds().size();
     if (count == 0) return tr("Nothing selected");
     QString text = count == 1 ? tr("1 body selected") : tr("%1 bodies selected").arg(count);

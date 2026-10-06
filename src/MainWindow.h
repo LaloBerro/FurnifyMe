@@ -1077,9 +1077,17 @@ public:
     ModelingOps::MeasuredBox selectionBox() const;
     // The status bar's selection sentence: "Nothing selected", "1 body
     // selected — 600 × 300 × 18 mm", "3 bodies selected — overall 636 × 300 ×
-    // 718 mm". The size rides only on a BODY selection; a face or an edge
-    // reports its body count as it always did.
+    // 718 mm". The size rides only on a BODY selection; a face or an edge is
+    // counted in its own kind ("1 face selected", "2 edges selected"), since
+    // this is the ONE place a selection is counted - the state label beside
+    // it is the mode and the next step only.
     QString selectionStatusText() const;
+    // The status bar's left channel, elided - see StatusMessageLine. Its
+    // fullText() is statusBar()->currentMessage(); its shownText() is what
+    // fits on screen.
+    class StatusMessageLine* statusMessageLine() const { return myMessageLine; }
+    // A toast's sentence as a status line: the trailing period dropped.
+    static QString statusLineFor(const QString& sentence);
     QString currentFurnitureId() const { return myFurnitureId; }
     QString currentFurnitureName() const { return myFurnitureName; }
     // Dirty = the live document's revision differs from the revision as of
@@ -1956,6 +1964,7 @@ private:
     void askNewFurnitureName();
     void createAndOpenFurniture(const QString& name);
     class FurnitureNameMark* myNameMark = nullptr;
+    class StatusMessageLine* myMessageLine = nullptr;
     CloseRoute myCloseRoute = CloseRoute::Library;
     // The revision "Close without saving" threw away, or -1. Both autosave
     // paths (the debounce's flushAutosave() and the timed tick) refuse to
@@ -2106,6 +2115,14 @@ private:
     // a refusal or a report somebody else is showing.
     QString myLastSelectionStatus;
     void refreshSelectionSizes();
+    // Writes selectionStatusText() to the left channel and remembers it as
+    // this window's own sentence - the one writer of myLastSelectionStatus.
+    void showSelectionStatus();
+    // A success report: the Note toast, and the left channel back to the
+    // selection rather than a second copy of the toast's words - unless
+    // notifications are off, when the bar is the only record. See its
+    // definition.
+    void reportNote(const QString& text, bool undo = false, int documentStamp = -1);
     // Checkable, and the single source of the bottom bar's own visibility,
     // exactly as myItemsPanelAction is for the drawer - statusBar()'s shown
     // state is DERIVED from this action's checked state, both directions, in

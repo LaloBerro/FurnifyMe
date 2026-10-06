@@ -462,7 +462,7 @@ void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)
     int y = body.top() + kTitle;
     for (int i = 0; i < 4; ++i) {
         const QRect line(body.left() + kPad, y, body.width() - kPad * 2, kStep);
-        painter.setPen(done[i] ? Theme::accent() : Theme::textMuted());
+        painter.setPen(done[i] ? Theme::accentText() : Theme::textMuted());
         painter.drawText(line, Qt::AlignVCenter | Qt::AlignLeft,
                          (done[i] ? QStringLiteral("✓  ") : QStringLiteral("•  ")) +
                              texts[2 + i]);

@@ -903,7 +903,7 @@ void MoveTool::paintEvent(QPaintEvent* /*event*/)
     GestureChip::paintLabel(painter, body, labelText());
 
     painter.setFont(Theme::bodyFont());
-    painter.setPen(Theme::accent());
+    painter.setPen(Theme::accentText());
     painter.drawText(QRect(body.left() + kPad, body.top() + kLabelHeight,
                            body.width() - kPad * 2, kValueHeight),
                      Qt::AlignVCenter | Qt::AlignLeft, valueText());

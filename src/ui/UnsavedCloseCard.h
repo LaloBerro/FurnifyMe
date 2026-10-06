@@ -31,6 +31,8 @@
 #include <QStringList>
 #include <QWidget>
 
+class QStatusBar;
+
 class CloseCardButton;
 
 class UnsavedCloseCard : public QWidget {
@@ -172,4 +174,47 @@ protected:
 private:
     QString myName;
     bool myUnsaved = false;
+};
+
+// THE STATUS BAR'S LEFT CHANNEL, ELIDED (the 2026-10 review's F20).
+//
+// Qt 6's QStatusBar paints a showMessage() string itself, with no eliding, into
+// the strip left of its first permanent widget - so at a narrow window a size
+// came out as "1,6" against the furniture's name. Nothing about that paint can
+// be changed from outside, so this widget takes the strip instead: it is added
+// as the FIRST permanent widget with a stretch, which puts QStatusBar's own
+// message rectangle at zero width (nothing of Qt's draw survives its clip),
+// and paints the same currentMessage() itself, elided with "…" to the width the
+// layout gave it - which ends where the name mark begins, so the two can never
+// overlap. showMessage()/currentMessage() stay the API: every writer and every
+// reader still talks to the bar, and the bar's message is the full sentence.
+//
+// Painted rather than a QLabel for FurnitureNameMark's reason. The full text
+// is the tooltip only while it is elided.
+class StatusMessageLine : public QWidget {
+    Q_OBJECT
+
+public:
+    explicit StatusMessageLine(QStatusBar* bar);
+
+    // The bar's message, whole, and what this widget paints of it at its
+    // current width. One function decides the second, and paintEvent() uses it.
+    QString fullText() const;
+    QString shownText() const;
+    bool isElided() const { return shownText() != fullText(); }
+    // The x one past the last painted glyph, in this widget's coordinates -
+    // for a probe asking whether anything reaches the name mark.
+    int paintedRight() const;
+
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+
+private:
+    void syncToolTip();
+
+    QStatusBar* myBar = nullptr;
 };

@@ -77,7 +77,18 @@ public:
     bool undoEnabled() const { return myUndoEnabled; }
 
     QString text() const { return myText; }
+    Kind kind() const { return myKind; }
     bool hasUndo() const { return myHasUndo; }
+
+    // The width the message wraps in. A Failure's is narrower by its warning
+    // mark and the gap after it, and sizeHint() measures against exactly this
+    // column - so a sentence that fits one line as a Note may take two as a
+    // Failure, and the card grows to hold them.
+    static int textColumnWidth(Kind kind, bool undo);
+    // Where a Failure's warning mark is painted, in this widget's own
+    // coordinates. Answered for either kind, so a probe can read the same
+    // pixels out of a Note and find nothing there.
+    QRect glyphRect() const;
 
     // The sibling Undo control, or nullptr - never null in practice (it is
     // constructed once, alongside this widget, and only hidden), but callers
@@ -175,6 +186,18 @@ class ToastHost : public QObject {
 public:
     explicit ToastHost(OcctViewWidget* viewport, QWidget* parent = nullptr);
 
+    // THE COUNTDOWN WAITS FOR A READER (the 2026-10 review's F13). While the
+    // pointer is over the toast or its Undo pill the dismiss timer is
+    // stopped, and leaving starts it again from what was left - never less
+    // than kResumeFloorMs, so moving the hand off a toast does not make it
+    // vanish under the hand that was reading it. The toast body is
+    // transparent for mouse events (a click must reach the model behind it),
+    // so Qt never sends it an Enter: the body's half is the viewport's own
+    // mouse moves, tested against the card's rectangle, and the pill's half
+    // is its Enter/Leave. An Enter or a Leave delivered to the toast itself
+    // is honoured too, for anything that synthesizes one.
+    bool countdownPaused() const { return myPaused; }
+
     // Kind decides the timeout - Note 4000 ms, Failure 8000 ms, long enough
     // for a sentence the user must actually read before it goes away.
     // Calling this while a toast is already up replaces its content and
@@ -234,8 +257,21 @@ public:
 
 signals:
     void undoRequested();
+    // A Failure was put on screen. MainWindow writes its reason into the
+    // status bar's left channel, where it outlives the toast (the 2026-10
+    // review's F13) - every refusal reaches the bar through this one signal
+    // rather than through a second showMessage() at each of forty call sites.
+    void failureShown(const QString& text);
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    // Re-derives whether the pointer is over the live toast and stops or
+    // restarts the countdown to match. Called from every input it reads and
+    // from show()/reposition(), because a card can move under a still pointer.
+    void syncHoverPause();
+
     // Places the toast centred along the bottom edge, then steps it clear of
     // whatever else is anchored in that strip - the walkthrough guide on the
     // right, the Snap/Select chip cluster on the left. Both are z-above it
@@ -293,4 +329,14 @@ private:
     // and cleared by the one permanent `finished` connection made in the
     // constructor. fadeTo() itself sets this, never a second connection.
     std::function<void()> myFadeFinished;
+
+    // The hover pause - see countdownPaused(). The pointer's last position in
+    // the viewport (and whether it is in the viewport at all), the two
+    // Enter/Leave flags, and the countdown frozen while paused.
+    QPoint myPointer;
+    bool myPointerInViewport = false;
+    bool myOverToast = false;
+    bool myOverUndo = false;
+    bool myPaused = false;
+    int myPausedRemainingMs = 0;
 };

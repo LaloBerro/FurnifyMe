@@ -93,6 +93,11 @@ enum class Glyph {
     ChevronRight,   // a folder that is collapsed
     ChevronDown,    // a folder that is open
     Folder,         // a tabbed folder outline
+    // A Failure toast's leading mark (the 2026-10 review's F6): a Failure
+    // differed from a Note only by the colour of a 6px stripe, which a user
+    // who cannot tell that red from that violet cannot read at all. A shape
+    // is the channel colour is not.
+    Warning,        // a triangle with an exclamation mark
 };
 
 // Returns an icon with Normal and Disabled modes already filled in.

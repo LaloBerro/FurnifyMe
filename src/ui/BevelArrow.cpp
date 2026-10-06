@@ -584,7 +584,7 @@ void BevelArrow::paintEvent(QPaintEvent* /*event*/)
     painter.setFont(Theme::labelFont());
     painter.setPen(Theme::text());
     painter.drawText(titleRow, Qt::AlignVCenter | Qt::AlignLeft, kindText());
-    painter.setPen(Theme::accent());
+    painter.setPen(Theme::accentText());
     painter.drawText(titleRow, Qt::AlignVCenter | Qt::AlignRight, valueText());
 
     painter.setFont(Theme::badgeFont());

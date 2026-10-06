@@ -282,7 +282,7 @@ void ScenePiecesPanel::applyTheme()
         // that cannot be read, and the product principle is that it breaks
         // LOUDLY. A row that looks merely dimmed is a row they believe.
         const QColor nameColour = !row.data.reason.isEmpty()
-                                      ? Theme::danger()
+                                      ? Theme::dangerText()
                                       : (!row.data.visible ? Theme::textMuted() : Theme::text());
         row.name->setStyleSheet(
             QStringLiteral("background: transparent; color: %1;").arg(nameColour.name()));

@@ -268,7 +268,7 @@ void ShortcutSheet::paintEvent(QPaintEvent* /*event*/)
     int y = body.top() + kTitleHeight;
     for (const Group& group : myGroups) {
         painter.setFont(groupFont());
-        painter.setPen(Theme::accent());
+        painter.setPen(Theme::accentText());
         painter.drawText(QRect(body.left() + kPadding, y, body.width() - kPadding * 2, kGroupHeight),
                          Qt::AlignBottom | Qt::AlignLeft, group.title);
         y += kGroupHeight;

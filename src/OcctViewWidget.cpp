@@ -2790,7 +2790,7 @@ void OcctViewWidget::showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b, const QSt
         label->SetText(TCollection_ExtendedString(readout.toUtf8().constData(), Standard_True));
         label->SetPosition(gp_Pnt(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
                                   0.5 * (a.Z() + b.Z())));
-        label->SetColor(toOcctColor(Theme::accent()));
+        label->SetColor(toOcctColor(Theme::accentText()));
         label->SetHeight(14.0);
         label->SetZLayer(gizmoZLayer());
         label->SetTransformPersistence(
@@ -4536,6 +4536,18 @@ std::vector<TopoDS_Edge> OcctViewWidget::selectedEdges() const
         edges.push_back(TopoDS::Edge(shape));
     }
     return edges;
+}
+
+int OcctViewWidget::selectedFaceCount() const
+{
+    int faces = 0;
+    if (myContext.IsNull()) return faces;
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+        if (!myContext->HasSelectedShape()) continue;
+        const TopoDS_Shape shape = myContext->SelectedShape();
+        if (!shape.IsNull() && shape.ShapeType() == TopAbs_FACE) ++faces;
+    }
+    return faces;
 }
 
 TopoDS_Edge OcctViewWidget::lastSelectedEdge() const

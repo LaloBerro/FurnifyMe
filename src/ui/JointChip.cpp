@@ -138,7 +138,7 @@ protected:
         painter.setPen(isEnabled() ? Theme::text() : Theme::textDisabled());
         painter.drawText(text, Qt::AlignVCenter | Qt::AlignLeft, QAbstractButton::text());
         if (myCurrent) {
-            painter.setPen(Theme::accent().lighter(150));
+            painter.setPen(Theme::accentText());
             painter.drawText(text, Qt::AlignVCenter | Qt::AlignRight, QStringLiteral("✓"));
         }
     }
@@ -440,7 +440,7 @@ void JointChip::applyTheme()
         myMoreButton->setStyleSheet(
             QStringLiteral("QPushButton { background: transparent; border: none; color: %1; "
                            "text-align: left; padding: 0px; }")
-                .arg(Theme::accent().lighter(150).name()));
+                .arg(Theme::accentText().name()));
     }
     const QString segmentStyle =
         QStringLiteral("QPushButton { background-color: %1; color: %2; border: 1px solid %3; "

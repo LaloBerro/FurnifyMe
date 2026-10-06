@@ -372,7 +372,9 @@ protected:
         Theme::drawCrispBorder(painter, QRectF(rect()),
                                underMouse() ? Theme::accent() : Theme::border(),
                                kCardRadius, 1.0, Qt::DashLine);
-        painter.setPen(Theme::accent());
+        // The label is words, so it wears the accent's text ink; the dashed
+        // outline above stays accent(), which is a stroke.
+        painter.setPen(Theme::accentText());
         painter.setFont(Theme::bodyFont());
         painter.drawText(rect(), Qt::AlignCenter, text());
     }
@@ -883,7 +885,7 @@ void SelectorWindow::showFailure(const QString& text)
     myFailureBanner->setStyleSheet(
         QStringLiteral("background-color: %1; color: %2; border: 1px solid %2; "
                       "border-radius: 6px; padding: 8px 12px; font-size: %3pt;")
-            .arg(Theme::chip().name(), Theme::danger().name())
+            .arg(Theme::chip().name(), Theme::dangerText().name())
             .arg(Theme::bodyFont().pointSizeF()));
     myFailureBanner->show();
     myFailureTimer->start();
