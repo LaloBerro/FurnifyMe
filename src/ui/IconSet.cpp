@@ -247,6 +247,35 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawPoint(QPointF(12.0, 17.0));
             break;
         }
+        case Glyph::Add:                          // a plus
+            p.drawLine(12, 5, 12, 19);
+            p.drawLine(5, 12, 19, 12);
+            break;
+        case Glyph::Move:                         // four arrows out of one point
+            p.drawLine(12, 3, 12, 21);
+            p.drawLine(3, 12, 21, 12);
+            p.drawLine(12, 3, 9, 6);   p.drawLine(12, 3, 15, 6);
+            p.drawLine(12, 21, 9, 18); p.drawLine(12, 21, 15, 18);
+            p.drawLine(3, 12, 6, 9);   p.drawLine(3, 12, 6, 15);
+            p.drawLine(21, 12, 18, 9); p.drawLine(21, 12, 18, 15);
+            break;
+        case Glyph::Rotate:                       // a circle that turns
+            // Three quarters of a turn from the top round through the left
+            // and the bottom to the right, and the arrowhead pointing up into
+            // the gap it leaves - the way it is travelling.
+            p.drawArc(QRect(5, 5, 14, 14), 90 * 16, 270 * 16);
+            p.drawLine(16, 12, 19, 8);
+            p.drawLine(19, 8, 22, 12);
+            break;
+        case Glyph::Render: {                     // a lit ball standing on a floor
+            p.drawEllipse(QRectF(5.0, 3.0, 14.0, 14.0));
+            const QColor ink = p.pen().color();
+            p.setBrush(ink);
+            p.drawEllipse(QPointF(9.5, 7.5), 1.6, 1.6);
+            p.setBrush(Qt::NoBrush);
+            p.drawLine(3, 20, 21, 20);
+            break;
+        }
     }
 }
 

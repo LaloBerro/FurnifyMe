@@ -80,4 +80,13 @@ inline QString hintText()
     return QCoreApplication::translate("KeyClaim", "Enter applies — Esc cancels");
 }
 
+// The same spelling for a card that claims ESCAPE ALONE - a question with a
+// list of answers and nothing to apply, such as the scene's Add piece card.
+// Written here beside hintText() so "Esc" is spelled one way across the app,
+// and painted in the same muted label type the chips paint hintText() in.
+inline QString closeHintText()
+{
+    return QCoreApplication::translate("KeyClaim", "Esc closes");
+}
+
 }  // namespace KeyClaim

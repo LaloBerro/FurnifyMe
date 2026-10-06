@@ -9,6 +9,8 @@
 #include "ModelingOps.h"
 #include "ScenePiecesPanel.h"
 #include "Theme.h"
+#include "ToolChip.h"
+#include "ToolCluster.h"
 #include "WindowChrome.h"
 #include "Toast.h"
 #include "UnsavedCloseCard.h"
@@ -21,6 +23,8 @@
 #include <QCloseEvent>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QLabel>
 #include <QStandardPaths>
 #include <QMenu>
 #include <QMenuBar>
@@ -176,9 +180,14 @@ void SceneWindow::buildMenus()
         if (askBeforeClosing(CloseRoute::Library)) return;
         emit closeRequested();
     });
-    myNewPieceAction = new QAction(tr("New piece"), this);
-    myNewPieceAction->setToolTip(tr("Put a furniture from the library into this scene"));
-    connect(myNewPieceAction, &QAction::triggered, this, [this] {
+    // ONE VERB (the 2026-10 review's F2). This was "New piece" under File
+    // while the empty card said "Add a furniture" - two verbs for one gesture,
+    // and the entry filed with saving and closing rather than with arranging.
+    // It is "Add piece" in the Arrange menu, on the Pieces card's own row and
+    // in the card's empty line.
+    myAddPieceAction = new QAction(tr("Add piece"), this);
+    myAddPieceAction->setToolTip(tr("Put a furniture from the library into this scene"));
+    connect(myAddPieceAction, &QAction::triggered, this, [this] {
         if (!myAddPiece || !myStore) return;
         // NOT WHILE THE STUDIO IS LIVE. Adding a piece displays bodies into a
         // viewport whose floor was built under the old contents and whose
@@ -199,7 +208,6 @@ void SceneWindow::buildMenus()
         // clipped off the top-left corner.
         refreshSurfaces();
     });
-    file->addAction(myNewPieceAction);
 
     // AN EXPORT ROUTE. A scene could be rendered and not saved as a picture by
     // any gesture at all - the suite reached saveSnapshot() directly, which is
@@ -208,6 +216,14 @@ void SceneWindow::buildMenus()
     myScreenshotAction = new QAction(tr("Save Screenshot"), this);
     myScreenshotAction->setToolTip(tr("Write the picture to a file"));
     connect(myScreenshotAction, &QAction::triggered, this, [this] {
+        // REFUSED BEFORE THE FILE IS ASKED FOR. Asking where to put a picture
+        // and then declining to take it wastes the one question this gesture
+        // asks - see screenshotRefusal().
+        const QString refusal = screenshotRefusal();
+        if (!refusal.isEmpty()) {
+            if (myToasts) myToasts->show(refusal, Toast::Kind::Failure, false);
+            return;
+        }
         const QString suggested =
             (mySceneName.isEmpty() ? tr("Screenshot") : mySceneName) + QStringLiteral(".png");
         const QString path = QFileDialog::getSaveFileName(
@@ -216,12 +232,7 @@ void SceneWindow::buildMenus()
                 .filePath(suggested),
             tr("PNG image (*.png)"));
         if (path.isEmpty()) return;
-        if (!myView->saveSnapshot(path) && myToasts) {
-            myToasts->show(tr("Screenshot failed — Couldn't save the image to %1 — "
-                              "Check that the folder exists and isn't read-only")
-                               .arg(path),
-                           Toast::Kind::Failure, false);
-        }
+        saveScreenshotTo(path);
     });
     file->addAction(myScreenshotAction);
 
@@ -278,6 +289,9 @@ void SceneWindow::buildMenus()
     edit->addAction(myRedoAction);
 
     auto* arrange = menuBar()->addMenu(tr("&Arrange"));
+    // Putting furniture in is arranging, so it leads the menu that arranges.
+    arrange->addAction(myAddPieceAction);
+    arrange->addSeparator();
     auto* tools = new QActionGroup(this);
     tools->setExclusive(true);
 
@@ -351,8 +365,33 @@ void SceneWindow::buildOverlay()
     myWindowButtons = new WindowButtons(WindowButtons::Look::Card, myView);
     myOverlay->addWidget(myWindowButtons, ViewportOverlay::Anchor::TopRight);
 
+    // THE WINDOW'S TWO OTHER JOBS, ON SCREEN (the 2026-10 review's F16).
+    // Arranging and rendering were menu-only. Three icon-only chips mirroring
+    // the actions the Arrange and View menus already own - built exactly as
+    // the editor builds its view controls, and anchored where that cluster is:
+    // TopRight, so relayout() stacks it one gap under the window buttons. Not
+    // in the left column: that is the pill and the Pieces card, and a cluster
+    // stacked under a list that grows would move every time a piece arrived.
+    // TopRight also keeps the "a header is only a header when something
+    // follows it" rule out of play - nothing here is a LeftEdge entry.
+    // HIDDEN IN RENDER MODE (refreshSurfaces()), unlike the editor's view
+    // controls: those three still mean something in a shot - projection,
+    // wireframe, framing - while Move and Rotate do nothing with the gizmos
+    // gone, and the studio's own Back chip is already the way out. A shot is
+    // the furniture alone.
+    myArrangeTools = new ToolCluster(myView);
+    myArrangeTools->addChip(
+        new ToolChip(myMoveAction, IconSet::Glyph::Move, ToolChip::ChipMode::IconOnly));
+    myArrangeTools->addChip(
+        new ToolChip(myRotateAction, IconSet::Glyph::Rotate, ToolChip::ChipMode::IconOnly));
+    myArrangeTools->addChip(
+        new ToolChip(myRenderModeAction, IconSet::Glyph::Render, ToolChip::ChipMode::IconOnly));
+    myOverlay->addWidget(myArrangeTools, ViewportOverlay::Anchor::TopRight);
+
     // Added after the pill, so it stacks below it in the same TopLeft column.
     myPieces = new ScenePiecesPanel(myView);
+    // The card's own Add piece row - the action's mirror, see setAddAction().
+    myPieces->setAddAction(myAddPieceAction);
     myOverlay->addWidget(myPieces, ViewportOverlay::Anchor::TopLeft);
 
     // THE RENDER LAYER, the same class the furniture editor drives. Built
@@ -376,7 +415,7 @@ void SceneWindow::buildOverlay()
         addShotToScene(currentShot(name));
         // A Note with no Undo: a shot is presentation, there is no checkpoint
         // for an undo to pop, and the row's own x is how one is taken back.
-        if (myToasts) myToasts->show(tr("%1 saved").arg(name), Toast::Kind::Note, false);
+        reportNote(tr("%1 saved").arg(name), false);
     });
     connect(myStudio, &RenderStudio::shotApplied, this, [this](int index) {
         const std::vector<DocumentModel::Shot>& shots = myScene.shots();
@@ -399,12 +438,27 @@ void SceneWindow::buildOverlay()
     // nobody reads. A status bar carried the first version of openScene()'s
     // refusal and that was the weaker surface.
     myToasts = new ToastHost(myView, this);
+    // THE EDITOR'S UNDO PILL, on the scene's own stack (the 2026-10 review's
+    // F10). A piece added, taken out, moved or renamed reports a Note with
+    // Undo now, and the pill triggers the Edit menu's own Undo - gated on its
+    // enabled state here as well as dimmed by refreshSurfaces(), because an
+    // event delivered straight at the pill does not consult either.
+    connect(myToasts, &ToastHost::undoRequested, this, [this] {
+        if (myUndoAction && myUndoAction->isEnabled()) myUndoAction->trigger();
+    });
+    // A refusal's reason stays on the left of the status bar after its toast
+    // goes, the editor's own rule from the same review.
+    connect(myToasts, &ToastHost::failureShown, this,
+            [this](const QString& reason) { statusBar()->showMessage(reason); });
 
     // Not anchored by the overlay: the card is one question in the middle of
     // the viewport, not a rail or a drawer, so it is placed by the window.
     myAddPiece = new AddPieceCard(myView);
     connect(myAddPiece, &AddPieceCard::chosen, this,
             [this](const QString& id) { addPiece(id); });
+    // An empty library's way back to the hub is THE way back to the hub -
+    // File -> Close scene, with its close question - not a second route.
+    myAddPiece->setLibraryAction(myCloseSceneAction);
 
     // The EDITOR'S OWN question and the editor's own dot. Nothing about either
     // is about furniture rather than scenes, and a second pair that looked
@@ -433,8 +487,17 @@ void SceneWindow::buildOverlay()
         refreshSurfaces();
     });
 
+    // THE EDITOR'S TWO CHANNELS. The left - elided, so a long piece name never
+    // runs into the scene's name - says what is selected and what just
+    // happened; the right says what to do next (the review's F16: the window
+    // had no hint at all). Same widgets, same order as MainWindow's bar.
+    statusBar()->setFont(Theme::labelFont());
+    myMessageLine = new StatusMessageLine(statusBar());
+    statusBar()->addPermanentWidget(myMessageLine, 1);
     myNameMark = new FurnitureNameMark(statusBar());
     statusBar()->addPermanentWidget(myNameMark);
+    myHintLabel = new QLabel(statusBar());
+    statusBar()->addPermanentWidget(myHintLabel);
 
     // Clicking a row selects that piece. The selection itself still lives in
     // the viewport and mySelectedPiece is still DERIVED from it through
@@ -793,6 +856,9 @@ bool SceneWindow::addPiece(const QString& furnitureId)
     // only way to find the one you mean is to click every row. The first of a
     // kind keeps the plain name - a scene with one table should say "Table" -
     // and each later one takes the next free number.
+    // "Piece" is only ever STORED, for a furniture id the library cannot
+    // name; such a piece is broken, and its row prints its reason where the
+    // name goes, so this word never reaches the screen.
     const QString baseName = name.isEmpty() ? tr("Piece") : name;
     QString pieceName = baseName;
     auto nameTaken = [this](const QString& candidate) {
@@ -812,11 +878,16 @@ bool SceneWindow::addPiece(const QString& furnitureId)
         myPieceShapes[pieceId] = {};
         myBrokenPieces[pieceId] = brokenPieceReason(error);
         if (myToasts) {
-            // The store's own clause straight after the dash - the row's
-            // standalone sentence would put a second subject in the middle.
-            myToasts->show(tr("Couldn't put %1 in this scene — %2")
-                               .arg(pieceName,
-                                    error.isEmpty() ? tr("it could not be read") : error),
+            // THE FURNITURE'S OWN NAME, or none at all (the review's F25e).
+            // This used to name the piece - which for a furniture the library
+            // could not name was the placeholder "Piece" - so the user read
+            // "Couldn't put Piece in this scene". Named where the library
+            // knows the furniture; otherwise the broken row's own sentence,
+            // so the toast and the row say the same thing.
+            const QString reason = error.isEmpty() ? tr("it could not be read") : error;
+            myToasts->show(name.isEmpty()
+                               ? brokenPieceReason(error)
+                               : tr("Couldn't add %1 to this scene — %2").arg(name, reason),
                            Toast::Kind::Failure, false);
         }
         refreshSurfaces();
@@ -837,6 +908,9 @@ bool SceneWindow::addPiece(const QString& furnitureId)
     // re-framing under them would be the window overriding a choice.
     if (wasEmpty && myView) myView->fitAll();
     refreshSurfaces();
+    // REPORTED, with Undo - the editor's taxonomy: every change to the
+    // document is a Note that offers to take it back.
+    reportNote(tr("Added %1").arg(pieceName), true);
     return true;
 }
 
@@ -845,6 +919,9 @@ bool SceneWindow::removePiece(int pieceId)
     // Taking a piece out is the change this window's undo stack was built
     // for: before it existed, removal was final and needed a two-click
     // confirm to be safe at all.
+    const SceneModel::Piece* going = myScene.piece(pieceId);
+    if (!going) return false;
+    const QString goingName = QString::fromStdString(going->name);
     myScene.checkpoint();
     // The viewport first, the model second: the bodies are this window's own
     // ids and nothing else knows them, so they have to go here or they stay on
@@ -873,6 +950,7 @@ bool SceneWindow::removePiece(int pieceId)
     if (!myScene.removePiece(pieceId)) return false;
     showToolGizmo();
     refreshSurfaces();
+    reportNote(tr("Removed %1").arg(goingName), true);
     return true;
 }
 
@@ -888,8 +966,20 @@ bool SceneWindow::setPiecePlacement(int pieceId, const gp_Trsf& placement)
 
 bool SceneWindow::renamePiece(int pieceId, const QString& name)
 {
+    const SceneModel::Piece* piece = myScene.piece(pieceId);
+    if (!piece) return false;
+    // The same name again is not a change: no checkpoint, nothing to report.
+    if (piece->name == name.toStdString()) return true;
+    // A CHECKPOINT, which renaming never took - so the one change in this
+    // window that could not be undone was the one most likely to be a typo.
+    // Taken before the change, the editor's rule, and only once the name is
+    // known to differ.
+    myScene.checkpoint();
     if (!myScene.setPieceName(pieceId, name.toStdString())) return false;
     refreshSurfaces();
+    // The NEW name in the Note, as the editor's own rename does; the old one
+    // is the row the user just typed over.
+    reportNote(tr("Renamed to \"%1\"").arg(name), true);
     return true;
 }
 
@@ -1040,6 +1130,23 @@ void SceneWindow::commitDrag(bool dragged)
         applyPlacement(mySelectedPiece, settledOnFloor(mySelectedPiece, piece->placement));
     showToolGizmo();
     refreshSurfaces();
+
+    // REPORTED, with Undo - but only when the piece really stands somewhere
+    // else. A drag that snapped back to where it began took a checkpoint and
+    // changed nothing, and "Moved Table" over an unmoved table is a Note that
+    // lies.
+    const SceneModel::Piece* landed = myScene.piece(mySelectedPiece);
+    if (!landed) return;
+    double moved = 0.0;
+    for (int r = 1; r <= 3; ++r) {
+        for (int c = 1; c <= 4; ++c)
+            moved = std::max(moved, std::fabs(landed->placement.Value(r, c) -
+                                              myDragBase.Value(r, c)));
+    }
+    if (moved < 1.0e-9) return;
+    const QString name = QString::fromStdString(landed->name);
+    reportNote(myTool == Tool::Rotate ? tr("Rotated %1").arg(name) : tr("Moved %1").arg(name),
+               true);
 }
 
 void SceneWindow::refreshSelection()
@@ -1070,7 +1177,95 @@ void SceneWindow::refreshSelection()
 
     showToolGizmo();
     if (myPieces) myPieces->setSelected(piece);
+    // The left channel's first job: what is selected now.
+    statusBar()->showMessage(selectionStatusText());
     refreshSurfaces();
+}
+
+QString SceneWindow::selectionStatusText() const
+{
+    const SceneModel::Piece* piece = mySelectedPiece ? myScene.piece(mySelectedPiece) : nullptr;
+    return piece ? tr("%1 selected").arg(QString::fromStdString(piece->name)) : QString();
+}
+
+QString SceneWindow::statusHintText() const
+{
+    // THE NEXT STEP, from live state - the right channel's one job. The keys
+    // are read off the actions, so a rebound shortcut cannot leave this line
+    // naming the old one.
+    const auto key = [](const QAction* action) {
+        return action ? action->shortcut().toString(QKeySequence::NativeText) : QString();
+    };
+    if (myStudio && myStudio->isEnabled())
+        return tr("Frame the picture — Save Screenshot writes it to a file");
+    if (myScene.pieces().empty())
+        return tr("Add piece puts a furniture from the library in this scene");
+    if (mySelectedPiece == 0)
+        return tr("Select a piece — then Move it (%1) or Rotate it (%2), or take a picture "
+                  "in Render mode")
+            .arg(key(myMoveAction), key(myRotateAction));
+    if (myTool == Tool::Rotate)
+        return tr("Drag a ring to turn the piece — %1 moves it instead").arg(key(myMoveAction));
+    return tr("Drag an arrow to move the piece — %1 rotates it instead").arg(key(myRotateAction));
+}
+
+void SceneWindow::reportNote(const QString& text, bool undo)
+{
+    if (!myToasts) return;
+    // Stamped with the scene's revision when it offers Undo, so the toast
+    // goes the moment the scene moves on and its pill can never pop a
+    // different change from the one it names (ToastHost::documentMovedTo()).
+    myToasts->show(text, Toast::Kind::Note, undo,
+                   undo ? static_cast<int>(myScene.revision()) : -1);
+    // NOT ALSO ON THE LEFT - the editor's rule (the review's F9). While the
+    // toast carries the report the left goes back to the selection; a toast
+    // that was not shown leaves the bar as the only record of it.
+    if (myToasts->isShowing() && myToasts->currentText() == text)
+        statusBar()->showMessage(selectionStatusText());
+    else
+        statusBar()->showMessage(text);
+}
+
+QString SceneWindow::screenshotRefusal() const
+{
+    // AN EMPTY PICTURE IS REFUSED (the review's F25c). It used to export a
+    // featureless backdrop and say nothing, which is a file that looks like a
+    // failure and is reported as nothing at all. Refused with the reason and
+    // the step that fixes it - and the same for a scene whose every piece is
+    // hidden or unreadable, which would write exactly the same empty frame.
+    if (myScene.pieces().empty()) return tr("The scene is empty — add a piece first");
+    bool anyShown = false;
+    for (const auto& entry : myBodyPiece) {
+        if (myView && myView->isSolidVisible(entry.first)) {
+            anyShown = true;
+            break;
+        }
+    }
+    if (!anyShown) return tr("Nothing in this scene is showing — show a piece or add one first");
+    return QString();
+}
+
+bool SceneWindow::saveScreenshotTo(const QString& path)
+{
+    const QString refusal = screenshotRefusal();
+    if (!refusal.isEmpty()) {
+        if (myToasts) myToasts->show(refusal, Toast::Kind::Failure, false);
+        return false;
+    }
+    if (!myView || !myView->saveSnapshot(path)) {
+        if (myToasts) {
+            myToasts->show(tr("Screenshot failed — Couldn't save the image to %1 — "
+                              "Check that the folder exists and isn't read-only")
+                               .arg(path),
+                           Toast::Kind::Failure, false);
+        }
+        return false;
+    }
+    // A SUCCESS SAYS WHERE IT WENT. Nothing was reported before, so the only
+    // way to know the picture existed was to go and look for it. No Undo: a
+    // file on disk is not a change to the scene.
+    reportNote(tr("Picture saved as %1").arg(QFileInfo(path).fileName()), false);
+    return true;
 }
 
 void SceneWindow::showToolGizmo()
@@ -1227,6 +1422,26 @@ void SceneWindow::refreshSurfaces()
     if (myView) myView->setMagnetGroups(myBodyPiece);
     if (myMoveAction) myMoveAction->setChecked(myTool == Tool::Move);
     if (myRotateAction) myRotateAction->setChecked(myTool == Tool::Rotate);
+    const bool renderMode = myStudio && myStudio->isEnabled();
+    // The arranging chips step out of a shot - see buildOverlay().
+    if (myArrangeTools) myArrangeTools->setVisible(!renderMode);
+    // WHAT UNDO CAN DO, DECIDED HERE: the menu entries, Ctrl+Z and the toast's
+    // pill all read the same answer, so the pill cannot offer a step the
+    // stack does not have.
+    if (myUndoAction) myUndoAction->setEnabled(myScene.canUndo());
+    if (myRedoAction) myRedoAction->setEnabled(myScene.canRedo());
+    if (myToasts) {
+        myToasts->setUndoEnabled(myUndoAction && myUndoAction->isEnabled());
+        // A toast naming one change must not outlive it - an undo, another
+        // change, anything that moves the scene takes it away.
+        myToasts->documentMovedTo(static_cast<int>(myScene.revision()));
+    }
+    if (myHintLabel) {
+        myHintLabel->setFont(Theme::labelFont());
+        myHintLabel->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
+                                       .arg(Theme::textMuted().name()));
+        myHintLabel->setText(statusHintText());
+    }
     if (myNameMark) {
         myNameMark->setState(mySceneName, isSceneDirty());
     }

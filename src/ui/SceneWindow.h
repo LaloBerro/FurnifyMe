@@ -37,10 +37,13 @@ class AddPieceCard;
 class AppBar;
 class FurnitureStore;
 class OcctViewWidget;
+class QLabel;
 class RenderStudio;
 class FurnitureNameMark;
 class ScenePiecesPanel;
+class StatusMessageLine;
 class ToastHost;
+class ToolCluster;
 class UnsavedCloseCard;
 class ViewportOverlay;
 
@@ -72,10 +75,11 @@ public:
     // is worse than one that says so.
     bool addPiece(const QString& furnitureId);
     // A piece's name is its own, never the furniture's - two pieces may point
-    // at one furniture and must rename apart.
+    // at one furniture and must rename apart. One checkpoint, and a Note with
+    // Undo, like every other change to a scene.
     bool renamePiece(int pieceId, const QString& name);
-    // Takes a piece out of the scene, bodies and all. A scene has no undo, so
-    // the gesture that reaches this asks twice.
+    // Takes a piece out of the scene, bodies and all - one checkpoint, and a
+    // Note with Undo. The row's control still asks twice.
     bool removePiece(int pieceId);
     // Places a piece outright. Refuses a placement SceneModel would not store
     // - rigid only - so the screen and the document cannot disagree, which is
@@ -112,10 +116,29 @@ public:
     // keep in step. Clicking ANY body of a piece selects the whole piece.
     int selectedPieceId() const { return mySelectedPiece; }
 
+    // Why a picture of this scene would be empty, or an empty string when it
+    // would not be. Asked BEFORE the file is chosen, so an empty scene is
+    // refused rather than exported as a blank backdrop.
+    QString screenshotRefusal() const;
+    // Save Screenshot's work once a path is known: refuses an empty scene
+    // with a Failure, writes the picture, and reports a Note naming the file.
+    // The menu entry asks for the path first; the suite calls this directly,
+    // because the file question is the one modal this app still borrows from
+    // the platform.
+    bool saveScreenshotTo(const QString& path);
+
+    // The status bar's right channel: what to do next, derived from live
+    // state on every refresh.
+    QString statusHintText() const;
+
     OcctViewWidget* view() const { return myView; }
     RenderStudio* studio() const { return myStudio; }
     ScenePiecesPanel* piecesPanel() const { return myPieces; }
     AddPieceCard* addPieceCard() const { return myAddPiece; }
+    ToolCluster* arrangeTools() const { return myArrangeTools; }
+    QAction* addPieceAction() const { return myAddPieceAction; }
+    QLabel* statusHintLabel() const { return myHintLabel; }
+    ToastHost* toasts() const { return myToasts; }
 
 signals:
     // File -> Close scene: the way back to the hub. REPORTED, never acted on -
@@ -191,6 +214,12 @@ private:
     // Pushes live state onto every surface that follows it. This window's own
     // appStateChanged, under a plainer name because there is far less of it.
     void refreshSurfaces();
+    // A change reported the editor's way: a Note, with Undo when it is a
+    // change to the scene, and the status bar's left channel back on the
+    // selection rather than repeating it (MainWindow::reportNote()'s rule).
+    void reportNote(const QString& text, bool undo);
+    // The left channel's selection sentence: "Table 2 selected", or nothing.
+    QString selectionStatusText() const;
 
     FurnitureStore* myStore = nullptr;
     SceneModel myScene;
@@ -209,7 +238,12 @@ private:
     RenderStudio* myStudio = nullptr;
     QAction* myRenderModeAction = nullptr;
     QAction* myCloseSceneAction = nullptr;
-    QAction* myNewPieceAction = nullptr;
+    QAction* myAddPieceAction = nullptr;
+    // Move, Rotate and Render mode as icon-only chips - see buildOverlay().
+    ToolCluster* myArrangeTools = nullptr;
+    // The status bar's two channels - see buildOverlay().
+    StatusMessageLine* myMessageLine = nullptr;
+    QLabel* myHintLabel = nullptr;
     QAction* mySnapAction = nullptr;
     QAction* myMoveAction = nullptr;
     QAction* myRotateAction = nullptr;

@@ -2,15 +2,19 @@
 
 #include "IconSet.h"
 #include "InlineRename.h"
+#include "ToolChip.h"
 
 #include <algorithm>
 #include "Theme.h"
 
+#include <QEvent>
 #include <QLabel>
+#include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QVBoxLayout>
 
 namespace {
@@ -19,10 +23,49 @@ constexpr int kRadius = Theme::Space::Snug;
 constexpr int kPad = 10;
 constexpr int kRowInset = 6;
 constexpr int kRowButtonPx = 24;
+// The armed remove control's own side padding around "Remove?".
+constexpr int kArmedPadPx = 6;
 // The tallest the list of rows may grow. Past this it scrolls - with both
 // bars OFF, so nothing is drawn and the wheel is the whole interaction, the
 // Items drawer's own answer to the same problem (improvements item 12).
 constexpr int kRowsMaxHeight = 420;
+// How deep each scroll fade reaches into the list: one row's full pitch. It
+// was two thirds of a row first, and the capture showed why that is not
+// enough - the list's cap happens to land in the GAP below a row, so a
+// shallow fade dimmed empty card and the last row read as the last row. A
+// fade a row deep always reaches into a row's own text, which is the cue.
+constexpr int kFadePx = 32;
+
+// One edge of the list fading into the card. Painted, not a stylesheet: a
+// gradient from the card's own panel() fill at the edge to nothing, over the
+// rows, and transparent for the mouse so a click on a half-faded row still
+// reaches that row. Read panel() at paint time, so a theme edit recolours it.
+class ListEdgeFade : public QWidget {
+public:
+    ListEdgeFade(bool atTop, QWidget* parent) : QWidget(parent), myAtTop(atTop)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+        Theme::makeSurfaceTransparent(this);
+        hide();
+    }
+
+protected:
+    void paintEvent(QPaintEvent* /*event*/) override
+    {
+        QPainter painter(this);
+        QColor solid = Theme::panel();
+        QColor clear = solid;
+        clear.setAlpha(0);
+        QLinearGradient ramp(0.0, 0.0, 0.0, height());
+        ramp.setColorAt(0.0, myAtTop ? solid : clear);
+        ramp.setColorAt(1.0, myAtTop ? clear : solid);
+        painter.fillRect(rect(), ramp);
+    }
+
+private:
+    bool myAtTop = false;
+};
 }  // namespace
 
 // ONE AUTHOR. This sentence was written out three times in this file - the
@@ -32,6 +75,24 @@ constexpr int kRowsMaxHeight = 420;
 QString ScenePiecesPanel::removeTipText()
 {
     return tr("Take this piece out of the scene");
+}
+
+QString ScenePiecesPanel::armedRemoveText()
+{
+    return tr("Remove?");
+}
+
+QString ScenePiecesPanel::armedRemoveTipText()
+{
+    return tr("Click again to take it out of the scene");
+}
+
+QString ScenePiecesPanel::emptyText()
+{
+    // The VERB is the action's own - "Add piece" on the row below this line,
+    // in the Arrange menu and here - so the card, the row and the menu read as
+    // one gesture rather than three.
+    return tr("No pieces yet — add a piece from the library");
 }
 
 ScenePiecesPanel::ScenePiecesPanel(QWidget* parent)
@@ -54,8 +115,9 @@ ScenePiecesPanel::ScenePiecesPanel(QWidget* parent)
     myColumn->addWidget(myTitle);
 
     // The empty state says what the window is for rather than leaving a
-    // heading over nothing.
-    myEmpty = new QLabel(tr("Add a furniture to put it in this scene"), this);
+    // heading over nothing - and the Add piece row under it is the thing to
+    // click (see setAddAction()).
+    myEmpty = new QLabel(emptyText(), this);
     myEmpty->setWordWrap(true);
     myColumn->addWidget(myEmpty);
 
@@ -74,11 +136,76 @@ ScenePiecesPanel::ScenePiecesPanel(QWidget* parent)
     myScroll->setWidget(myRowsHost);
     myColumn->addWidget(myScroll);
 
+    // The two scroll fades, children of the CARD laid over the scroll area's
+    // edges rather than children of the scroll area: anything inside it
+    // scrolls with the rows. Every input that can move an edge or the scroll
+    // position re-derives them.
+    myTopFade = new ListEdgeFade(true, this);
+    myBottomFade = new ListEdgeFade(false, this);
+    myScroll->installEventFilter(this);
+    connect(myScroll->verticalScrollBar(), &QScrollBar::valueChanged, this,
+            [this] { syncFades(); });
+    connect(myScroll->verticalScrollBar(), &QScrollBar::rangeChanged, this,
+            [this] { syncFades(); });
+
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
         applyTheme();
         update();
     });
+}
+
+void ScenePiecesPanel::setAddAction(QAction* action)
+{
+    if (myAddChip || !action) return;
+    // LABELLED, at the card's full width: in a list of rows it reads as one
+    // more row - the one that makes the next - rather than as a toolbar
+    // button that wandered in. Last in the column, under the scroll area, so
+    // it stays on screen however long the list grows.
+    myAddChip = new ToolChip(action, IconSet::Glyph::Add, ToolChip::ChipMode::Labelled, this);
+    myAddChip->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    myColumn->addWidget(myAddChip);
+    myColumn->invalidate();
+    myColumn->activate();
+    updateGeometry();
+    adjustSize();
+}
+
+bool ScenePiecesPanel::topFadeShown() const
+{
+    return myTopFade && myTopFade->isVisible();
+}
+
+bool ScenePiecesPanel::bottomFadeShown() const
+{
+    return myBottomFade && myBottomFade->isVisible();
+}
+
+void ScenePiecesPanel::syncFades()
+{
+    if (!myTopFade || !myBottomFade || !myScroll) return;
+    const QRect area = myScroll->geometry();
+    const int depth = std::min(kFadePx, area.height() / 2);
+    myTopFade->setGeometry(area.left(), area.top(), area.width(), depth);
+    myBottomFade->setGeometry(area.left(), area.bottom() - depth + 1, area.width(), depth);
+    // ONLY WHILE THERE IS SOMETHING PAST THAT EDGE. A fade over a list that
+    // fits would read as a scroll cue with nothing to scroll to.
+    const QScrollBar* bar = myScroll->verticalScrollBar();
+    const bool listShown = !myScroll->isHidden();
+    myTopFade->setVisible(listShown && bar->value() > bar->minimum());
+    myBottomFade->setVisible(listShown && bar->value() < bar->maximum());
+    myTopFade->raise();
+    myBottomFade->raise();
+}
+
+bool ScenePiecesPanel::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == myScroll &&
+        (event->type() == QEvent::Resize || event->type() == QEvent::Move ||
+         event->type() == QEvent::Show || event->type() == QEvent::Hide)) {
+        syncFades();
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void ScenePiecesPanel::setRows(const QVector<Row>& rows)
@@ -113,8 +240,17 @@ void ScenePiecesPanel::setSelected(int pieceId)
 void ScenePiecesPanel::rebuild()
 {
     myBuilt = true;
+    // OUT OF THE LAYOUT NOW, deleted later. deleteLater() alone left every old
+    // row in the column - visible and counted - until control next reached an
+    // event loop, and the measuring just below runs before that: the card was
+    // sized for the old rows AND the new ones, and the list held a scroll
+    // range for rows that were already gone. Found by the scroll fade, which
+    // stood over a three-row list with 373 px to scroll.
     for (const BuiltRow& row : myRows) {
-        if (row.widget) row.widget->deleteLater();
+        if (!row.widget) continue;
+        row.widget->hide();
+        myRowsColumn->removeWidget(row.widget);
+        row.widget->deleteLater();
     }
     myRows.clear();
 
@@ -130,6 +266,16 @@ void ScenePiecesPanel::rebuild()
         const bool broken = !wanted.reason.isEmpty();
         auto* name = new QLabel(broken ? wanted.reason : wanted.name, row);
         name->setAttribute(Qt::WA_TransparentForMouseEvents);
+        // THE NAME GIVES WAY, NEVER THE CONTROLS. A label's minimum width is
+        // its whole text, so one broken row - whose reason is a sentence -
+        // made the rows' host wider than the card, and with the horizontal bar
+        // off every row's eye and remove control was pushed past the clip: the
+        // whole list lost its controls to one long line. Ignored horizontally,
+        // the label takes what is left and clips; the whole text stays one
+        // hover away - on the ROW, since the label itself is transparent to
+        // the mouse and so would never be asked for a tooltip.
+        name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        row->setToolTip(broken ? wanted.reason : wanted.name);
         line->addWidget(name, 1);
 
         auto* eye = new QPushButton(row);
@@ -202,6 +348,7 @@ void ScenePiecesPanel::rebuild()
     myColumn->activate();
     updateGeometry();
     adjustSize();
+    syncFades();
 }
 
 int ScenePiecesPanel::rowIdAt(int index) const
@@ -237,10 +384,12 @@ QStringList ScenePiecesPanel::paintedTexts() const
     // sweeping it would fail a scene holding a furniture called "Fuse My
     // Table" - the exemption every surface that paints user text already
     // keeps, applied at the surface that knows which string is whose.
-    QStringList texts{tr("Pieces"), tr("Add a furniture to put it in this scene"),
+    QStringList texts{tr("Pieces"), emptyText(),
                       tr("Show or hide this piece"),
                       removeTipText(),
-                      tr("Click again to take it out")};
+                      armedRemoveText(),
+                      armedRemoveTipText()};
+    if (myAddChip) texts << myAddChip->text() << myAddChip->toolTip();
     for (const BuiltRow& row : myRows) {
         // A refusal sentence is this app's copy, so it IS swept.
         if (!row.data.reason.isEmpty()) texts << row.data.reason;
@@ -264,14 +413,32 @@ void ScenePiecesPanel::applyTheme()
     }
     for (const BuiltRow& row : myRows) {
         if (row.remove) {
+            // A PAINTED GLYPH AT REST, A WORD WHEN ARMED. It used to be a
+            // typed "x" that became a caution "!", and the "!" explained
+            // itself only in a tooltip - so the one moment the control needed
+            // to say what the next click does, it said nothing. Armed, it reads
+            // "Remove?" in the failure ink and widens to hold the word; it
+            // grows LEFTWARD, the row's right edge staying put, so the pixel
+            // the first click landed on is still inside it for the second.
             const bool armed = row.data.pieceId == myArmedRemove;
-            row.remove->setText(armed ? QStringLiteral("!") : QStringLiteral("x"));
-            row.remove->setToolTip(armed ? tr("Click again to take it out")
-                                         : removeTipText());
+            if (armed) {
+                row.remove->setIcon(QIcon());
+                row.remove->setText(armedRemoveText());
+                row.remove->setFont(Theme::labelFont());
+                const int wide = QFontMetrics(Theme::labelFont())
+                                     .horizontalAdvance(armedRemoveText()) + 2 * kArmedPadPx;
+                row.remove->setFixedSize(std::max(kRowButtonPx, wide), kRowButtonPx);
+            } else {
+                row.remove->setText(QString());
+                row.remove->setIcon(IconSet::icon(IconSet::Glyph::Delete));
+                row.remove->setIconSize(QSize(16, 16));
+                row.remove->setFixedSize(kRowButtonPx, kRowButtonPx);
+            }
+            row.remove->setToolTip(armed ? armedRemoveTipText() : removeTipText());
             row.remove->setStyleSheet(
                 QStringLiteral("QPushButton { background: transparent; border: none;"
-                               " color: %1; }")
-                    .arg((armed ? Theme::caution() : Theme::textMuted()).name()));
+                               " color: %1; padding: 0px; }")
+                    .arg((armed ? Theme::dangerText() : Theme::textMuted()).name()));
         }
         if (!row.name) continue;
         row.name->setFont(Theme::bodyFont());
@@ -354,6 +521,8 @@ QSize ScenePiecesPanel::sizeHint() const
         height += myColumn->spacing() + std::min(kRowsMaxHeight,
                                                  myRowsHost->sizeHint().height());
     }
+    // The Add piece row, at the foot in every state.
+    if (myAddChip) height += myColumn->spacing() + myAddChip->sizeHint().height();
     return QSize(width(), height);
 }
 

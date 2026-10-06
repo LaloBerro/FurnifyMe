@@ -1,7 +1,9 @@
 #include "AddPieceCard.h"
 
+#include "KeyClaim.h"
 #include "Theme.h"
 
+#include <QAction>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPainter>
@@ -28,6 +30,11 @@ constexpr int kListMaxHeight = 280;
 QString AddPieceCard::emptyLibraryText()
 {
     return tr("The library is empty — make a furniture first");
+}
+
+QString AddPieceCard::libraryButtonText()
+{
+    return tr("Go to the library");
 }
 
 AddPieceCard::AddPieceCard(QWidget* parent)
@@ -67,6 +74,28 @@ AddPieceCard::AddPieceCard(QWidget* parent)
     myScroll->setWidget(myList);
     myColumn->addWidget(myScroll);
 
+    // The empty library's way out. Built here, hidden until a library with
+    // nothing in it is shown, and inert until the window hands it an action.
+    myLibraryButton = new QPushButton(libraryButtonText(), this);
+    myLibraryButton->setCursor(Qt::PointingHandCursor);
+    myLibraryButton->setFocusPolicy(Qt::NoFocus);
+    myLibraryButton->hide();
+    connect(myLibraryButton, &QPushButton::clicked, this, [this] {
+        if (!myLibraryAction || !myLibraryAction->isEnabled()) return;
+        // Hidden BEFORE the action runs, so a close question it raises stands
+        // over a clear viewport - the answer-after-hiding rule this card
+        // already keeps for a chosen furniture.
+        hide();
+        myLibraryAction->trigger();
+    });
+    myColumn->addWidget(myLibraryButton);
+
+    // THE KEY THIS CARD CLAIMS, SAID ON THE CARD. Escape closed it and nothing
+    // on screen said so; every chip that claims a key paints it, in the one
+    // spelling KeyClaim keeps.
+    myKeyHint = new QLabel(KeyClaim::closeHintText(), this);
+    myColumn->addWidget(myKeyHint);
+
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
         applyTheme();
@@ -96,8 +125,14 @@ void AddPieceCard::showFor(const QVector<FurnitureStore::FurnitureInfo>& furnitu
 
 void AddPieceCard::rebuild(const QVector<FurnitureStore::FurnitureInfo>& furniture)
 {
+    // Out of the layout NOW, deleted later - ScenePiecesPanel::rebuild()'s
+    // finding: a row left in the column until the event loop came round was
+    // measured into the card's height by showFor(), which runs straight after.
     for (const Row& row : myRows) {
-        if (row.button) row.button->deleteLater();
+        if (!row.button) continue;
+        row.button->hide();
+        myListColumn->removeWidget(row.button);
+        row.button->deleteLater();
     }
     myRows.clear();
 
@@ -117,7 +152,24 @@ void AddPieceCard::rebuild(const QVector<FurnitureStore::FurnitureInfo>& furnitu
 
     myEmpty->setVisible(furniture.isEmpty());
     myScroll->setVisible(!furniture.isEmpty());
+    // Only an empty library offers the way back, and only when there is an
+    // action behind it - a control that does nothing is not offered at all.
+    myLibraryButton->setVisible(furniture.isEmpty() && myLibraryAction != nullptr);
     applyTheme();
+}
+
+void AddPieceCard::setLibraryAction(QAction* action)
+{
+    myLibraryAction = action;
+    if (!action) return;
+    // MIRRORED, never stored: the button is enabled exactly while the action
+    // is, and the window's own availability rule decides that.
+    auto sync = [this] {
+        if (myLibraryAction && myLibraryButton)
+            myLibraryButton->setEnabled(myLibraryAction->isEnabled());
+    };
+    connect(action, &QAction::changed, this, sync);
+    sync();
 }
 
 QString AddPieceCard::entryIdAt(int index) const
@@ -132,7 +184,8 @@ QPushButton* AddPieceCard::entryButtonAt(int index) const
 
 QStringList AddPieceCard::paintedTexts() const
 {
-    return { tr("Which furniture?"), emptyLibraryText() };
+    return { tr("Which furniture?"), emptyLibraryText(), libraryButtonText(),
+             KeyClaim::closeHintText() };
 }
 
 void AddPieceCard::applyTheme()
@@ -148,6 +201,24 @@ void AddPieceCard::applyTheme()
         myEmpty->setFont(Theme::labelFont());
         myEmpty->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
                                    .arg(Theme::textMuted().name()));
+    }
+    if (myKeyHint) {
+        // The chips' own hint type: label size, muted ink.
+        myKeyHint->setFont(Theme::labelFont());
+        myKeyHint->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
+                                     .arg(Theme::textMuted().name()));
+    }
+    if (myLibraryButton) {
+        myLibraryButton->setFont(Theme::bodyFont());
+        // The card's one forward step when it has nothing to list, so it wears
+        // the accent's TEXT ink - accent() itself is for fills and strokes.
+        myLibraryButton->setStyleSheet(
+            QStringLiteral("QPushButton { background: %1; color: %2; border: 1px solid %3;"
+                           " border-radius: 8px; padding: 6px 10px; text-align: left; }"
+                           "QPushButton:hover { border-color: %4; }"
+                           "QPushButton:disabled { color: %5; }")
+                .arg(Theme::panel().name(), Theme::accentText().name(), Theme::border().name(),
+                     Theme::accent().name(), Theme::textDisabled().name()));
     }
     if (myList) myList->setStyleSheet(QStringLiteral("background: transparent;"));
     if (myScroll) myScroll->setStyleSheet(QStringLiteral("background: transparent;"));

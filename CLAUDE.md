@@ -347,7 +347,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/RenderStudio.{h,cpp}` | the render layer, lifted out of `MainWindow` so a second window can have it; also the ONE place the list of what a shot carries is written |
 | `ui/SceneWindow.{h,cpp}` | the scene editor - a third top-level window; arranges furniture, cannot make it |
 | `ui/ScenePiecesPanel.{h,cpp}` | the pieces in a scene, listed; `ItemsPanel`'s shape at a fraction of its size |
-| `ui/AddPieceCard.{h,cpp}` | which furniture goes into this scene - a card over the viewport, never a dialog |
+| `ui/AddPieceCard.{h,cpp}` | which furniture goes into this scene - a card over the viewport, never a dialog; an empty library's way back to the hub |
 
 ### The vocabulary — enforced by test
 
@@ -2094,9 +2094,36 @@ this section as claiming a piece can be snapped to another piece today.
   disabled, because an action that exists and refuses reads as broken. The suite asserts that
   by NAME over every `QAction` the window owns, and a mutation adding one `Union` entry reddens
   it.
-- **An empty scene is a real state.** The studio floor is built from the lowest *displayed*
-  body, so with no pieces it is legitimately absent — absent rather than wrong — and the export
-  still writes a real PNG.
+- **An empty scene is a real state, and a picture of it is REFUSED.** The studio floor is built
+  from the lowest *displayed* body, so with no pieces it is legitimately absent, and render mode
+  still turns on over nothing. The export is another matter (the 2026-10 review's F25c,
+  replacing "the export still writes a real PNG"): a featureless backdrop is a file that looks
+  like a failure and was reported as nothing. `SceneWindow::screenshotRefusal()` answers before
+  the file question is asked ("The scene is empty — add a piece first", and its twin for a scene
+  whose every piece is hidden or broken), as a Failure; a picture that is written reports a Note
+  naming the file. `saveScreenshotTo()` is the work after the path is known, so the suite drives
+  it without the platform's file dialog.
+- **Every job is on screen, and every change reports (review F2, F10, F16).** The action is
+  **Add piece** in the Arrange menu — one verb on the menu, on the Pieces card's always-present
+  Add piece row (a full-width Labelled `ToolChip` mirroring the action) and in the card's empty
+  line. Move, Rotate and Render mode are a three-chip icon-only `ToolCluster` anchored
+  `TopRight` under the window buttons — never the left column, which is the pill and a list that
+  grows — and **hidden in render mode**, unlike the editor's view controls: those still mean
+  something in a shot, Move and Rotate do not, and the studio's Back chip is the way out. Add,
+  remove, a finished move or turn, and rename each report a Note with Undo through the editor's
+  `ToastHost`; the pill triggers the Edit menu's Undo and is dimmed with it, both from
+  `refreshSurfaces()`. **Rename takes a checkpoint now** — it was the one scene change that could
+  not be undone. A drag that lands where it began reports nothing. The status bar has the
+  editor's two channels: the left (`StatusMessageLine`) says what is selected and never echoes a
+  live Note, the right says what to do next with the keys read off the actions. A piece of a
+  furniture already in the scene arrives numbered (Chair, Chair 2, the next FREE number after
+  that); renaming stays free. Remove is a painted bin that reads **"Remove?"** in `dangerText`
+  when armed — still two clicks — widening leftward so the second click lands where the first
+  did. A list past its cap fades at the edge that has more rows beyond it, a row's pitch deep,
+  and nowhere else. The add card paints KeyClaim's "Esc closes", and over an empty library offers
+  **Go to the library**, which triggers File → Close scene: the existing handoff, close question
+  and all, not a second route. A furniture that cannot be read is named in its refusal where the
+  library knows it, and "This furniture" where it does not — never the stored placeholder.
 - **Out of scope by the spec, and not gestured at anywhere:** no scale, no per-body materials
   inside one furniture, no lighting rig beyond the studio's, no scene-level joinery, no export
   of a scene as geometry, and no nesting a scene inside a scene.
@@ -2139,8 +2166,18 @@ measures in** (`mapTo()` the widget it is making a claim about), and a check tha
 distinguish "fits" from "crushed" is not measuring fit.
 
 The standing repair: **the scene block writes composited `printWindowCapture()` images on
-every run** - the empty window, the window with pieces, and the add card open - so this
-window's chrome is looked at rather than only asserted about. Behavioural checks cannot see a
+every run** - the empty window, the window with pieces, and the add card open; since the review
+batch also `empty-scene.png` (it was a viewport Dump of render mode over nothing, one uniform
+grey) and the `the-scene-puts-its-jobs-on-screen-and-reports-them` block's armed remove, long
+list, chip cluster and empty-library card - so this
+window's chrome is looked at rather than only asserted about.
+
+**Looking found two more that driving had not.** A rebuilt list left every old row in its
+column until an event loop deleted it, and measured the card in between: a three-row list held
+373 px of scroll range (found by the fade standing over it; old rows now leave the layout
+before `deleteLater()`, in `AddPieceCard` too). And one broken piece's reason, a whole
+sentence, set the rows' minimum width past the card, so **every** row's eye and remove control
+sat past the clip (seen in the add-card capture; the name label is horizontally `Ignored` now). Behavioural checks cannot see a
 layout, and this project already knew that ("Verify appearance with measured pixels, never by
 eyeballing a crop"); what it did not have written down is the converse, which is that
 **driving a window is not looking at it**.

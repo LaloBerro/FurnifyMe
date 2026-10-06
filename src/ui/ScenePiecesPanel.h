@@ -20,6 +20,7 @@
 #include <QVector>
 #include <QWidget>
 
+class QAction;
 class QLabel;
 class QMouseEvent;
 class QScrollArea;
@@ -44,8 +45,37 @@ public:
 
     // The remove control's tooltip, written once - see the .cpp for why.
     static QString removeTipText();
+    // What the ARMED remove control reads, on the control itself, and its
+    // tooltip. The armed state used to be a typed "!" that explained itself
+    // only on hover; it says what the next click does now.
+    static QString armedRemoveText();
+    static QString armedRemoveTipText();
+    // The line an empty card shows above its Add piece row. One author, for
+    // the paint and the banned-word sweep alike.
+    static QString emptyText();
 
     explicit ScenePiecesPanel(QWidget* parent = nullptr);
+
+    // THE ON-SCREEN WAY TO ADD A PIECE (the 2026-10 review's F2). The empty
+    // card used to say "add a furniture" over nothing to click, and the only
+    // route was a menu entry under File with a different verb. This builds a
+    // full-width labelled ToolChip from the window's own Add piece action, at
+    // the foot of the card, present whether the list is empty or not - and,
+    // being a ToolChip, it triggers that action, follows its enabled state and
+    // holds no state of its own. Called once, by the window.
+    void setAddAction(QAction* action);
+    class ToolChip* addChip() const { return myAddChip; }
+
+    // THE SCROLL CUE (F10). The list scrolls by wheel with no bar drawn, so a
+    // long one used to cut its last row in half and say nothing. A fade at the
+    // list's bottom edge stands while rows are below, and one at the top while
+    // rows are above - derived from the scroll position on every move, never
+    // remembered.
+    bool topFadeShown() const;
+    bool bottomFadeShown() const;
+    QWidget* topFade() const { return myTopFade; }
+    QWidget* bottomFade() const { return myBottomFade; }
+    QScrollArea* rowsScrollArea() const { return myScroll; }
 
     // Rebuilt only when the rows would actually LOOK different. This is driven
     // from the host's appStateChanged, which fires on every selection click,
@@ -89,10 +119,15 @@ protected:
     // exactly backwards for a list whose rows are the handles.
     void mousePressEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
+    // Re-places the two fades whenever the scroll area moves or resizes.
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void rebuild();
     void applyTheme();
+    // Places both fades over the scroll area's edges and shows each one only
+    // while there are rows past that edge.
+    void syncFades();
 
     struct BuiltRow {
         Row data;
@@ -115,9 +150,14 @@ private:
     QVBoxLayout* myRowsColumn = nullptr;
     QLabel* myTitle = nullptr;
     QLabel* myEmpty = nullptr;
+    class ToolChip* myAddChip = nullptr;
+    QWidget* myTopFade = nullptr;
+    QWidget* myBottomFade = nullptr;
     int mySelected = 0;
-    // Which row's remove control is ARMED. A scene has no undo at all, so a
-    // deletion asks once first - VersionsPanel's own two-click confirm, which
-    // is this app's answer wherever a change cannot be taken back.
+    // Which row's remove control is ARMED. The deletion asks once first -
+    // VersionsPanel's own two-click confirm. It was written when a scene had
+    // no undo at all; it has one now, and a removal reports a Note with Undo,
+    // but the second click stays: a piece is a whole furniture, and the
+    // control sits one row's width from the eye.
     int myArmedRemove = 0;
 };

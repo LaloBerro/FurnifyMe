@@ -120,6 +120,8 @@
 #include <QTimer>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSet>
 #include <QSettings>
 #include <QSlider>
@@ -955,6 +957,7 @@ constexpr BlockInfo kBlocks[] = {
     { "two-bodies-can-wear-two-different-woods", false, true },
     { "the-hub-lists-scenes-in-their-own-section", false, true },
     { "a-scene-window-opens-a-scene", false, true },
+    { "the-scene-puts-its-jobs-on-screen-and-reports-them", false, true },
     { "each-piece-renders-in-its-own-furnitures-wood", false, true },
     { "pieces-snap-to-each-other-and-stack", false, true },
     { "the-real-librarys-own-scene-renders", false, true },
@@ -13463,6 +13466,9 @@ int main(int argc, char* argv[])
             // chips (auto-selection spec, Phase 2); SelectSolid survives as
             // Body, still drawn by every ItemsPanel visibility button.
             IconSet::Glyph::Body,
+            // The scene editor's own (the 2026-10 review's F2 and F16).
+            IconSet::Glyph::Add,         IconSet::Glyph::Move,
+            IconSet::Glyph::Rotate,      IconSet::Glyph::Render,
         };
         bool allDrawn = true;
         for (IconSet::Glyph glyph : all) {
@@ -29622,8 +29628,10 @@ int main(int argc, char* argv[])
             QPushButton* x = rp ? rp->rowRemoveAt(rowIndex) : nullptr;
             check(x != nullptr, "...with a remove control on it");
             if (x) {
-                // TWO CLICKS, the pattern this app uses wherever a deletion has
-                // no undo behind it - and a scene has no undo at all.
+                // TWO CLICKS, the pattern this app uses for a deletion that
+                // takes a whole thing away. It was written when a scene had no
+                // undo at all; it has one now (below), and the second click
+                // stayed by the review's own ruling.
                 clickAt(x, QPointF(x->width() / 2.0, x->height() / 2.0));
                 settle(150);
                 check(static_cast<int>(scene.scene().pieces().size()) == before,
@@ -29692,6 +29700,29 @@ int main(int argc, char* argv[])
                   scene.piecesPanel()->rowTextAt(lastRow) != QStringLiteral("Table"),
               QStringLiteral("...and its row prints a reason where the name goes (\"%1\")")
                   .arg(lastRow >= 0 ? scene.piecesPanel()->rowTextAt(lastRow) : QString()));
+        // ONE LONG REASON MUST NOT TAKE EVERY ROW'S CONTROLS WITH IT. A label's
+        // minimum width is its whole text, so the broken row's sentence made
+        // the rows' host wider than the card and pushed every eye and remove
+        // control past the clip - seen in the add-card capture, where no row
+        // had a control at all. Measured in the CARD's space: each remove
+        // control's right edge inside the card, and the viewport's own hit test
+        // landing on it.
+        {
+            ScenePiecesPanel* rp = scene.piecesPanel();
+            QStringList cut;
+            for (int i = 0; rp && i < rp->rowCount(); ++i) {
+                QPushButton* rm = rp->rowRemoveAt(i);
+                const int right = rm ? rm->mapTo(rp, QPoint(rm->width(), 0)).x() : 99999;
+                QWidget* hit = rm ? scene.view()->childAt(
+                                        rm->mapTo(scene.view(), rm->rect().center()))
+                                  : nullptr;
+                if (right > rp->width() || hit != rm) cut << QString::number(i);
+            }
+            check(rp && rp->rowCount() > 0 && cut.isEmpty(),
+                  QStringLiteral("...and every row keeps its controls inside the card, the "
+                                 "broken one's long reason included (rows cut: %1)")
+                      .arg(cut.isEmpty() ? QStringLiteral("none") : cut.join(", ")));
+        }
         // A Failure, told from a Note the way this suite always tells them
         // apart - by the ARMED TIMER, 8000 ms against a Note's 4000.
         check(sceneToasts && sceneToasts->isShowing() && sceneToasts->remainingMs() > 5000,
@@ -29701,13 +29732,15 @@ int main(int argc, char* argv[])
                   .arg(sceneToasts ? sceneToasts->currentText() : QString()));
 
         // --- the card that offers the library --------------------------------
+        // "Add piece" since the 2026-10 review's F2: ONE verb on the menu, the
+        // card's row and its empty line. It was "New piece" under File.
         QAction* newPiece = nullptr;
         for (QAction* candidate : scene.findChildren<QAction*>()) {
-            if (candidate->text().remove(QLatin1Char('&')) == QStringLiteral("New piece"))
+            if (candidate->text().remove(QLatin1Char('&')) == QStringLiteral("Add piece"))
                 newPiece = candidate;
         }
         check(newPiece != nullptr,
-              "File offers New piece now that there is something behind it");
+              "the scene offers Add piece now that there is something behind it");
         if (newPiece) newPiece->trigger();
         settle(200);
         AddPieceCard* pieceCard = scene.findChild<AddPieceCard*>();
@@ -30390,10 +30423,13 @@ int main(int argc, char* argv[])
         scene.close();
     }
 
-    // AN EMPTY SCENE still takes a picture. The studio floor is built from the
-    // lowest DISPLAYED body and there is none, so this is the one path where
-    // the floor is legitimately absent - it must be absent rather than wrong,
-    // and the export must still produce a file.
+    // AN EMPTY SCENE REFUSES A PICTURE (the 2026-10 review's F25c). It used
+    // to export one - a featureless backdrop, reported as nothing at all - and
+    // this block pinned that as "the export still writes a file". The ruling
+    // changed: a file that looks like a failure is worse than a refusal that
+    // says why. The studio floor is still legitimately ABSENT here (it is
+    // built from the lowest displayed body, and there is none), and render
+    // mode still turns on over nothing; what is refused is the export.
     if (blockEnabled("a-scene-window-opens-a-scene")) {
         RequiredTempDir emptyLib;
         FurnitureStore emptyStore(emptyLib.path());
@@ -30405,14 +30441,684 @@ int main(int argc, char* argv[])
         settle(300);
         check(empty.openScene(emptyId), "an empty scene opens");
         check(empty.scene().pieces().empty(), "and it really is empty");
+
+        // A LOOK AT THE EMPTY WINDOW, composited (the review's F27). This was
+        // a viewport Dump of render mode over nothing - one uniform grey, which
+        // could show nothing about the window at all. The whole window now:
+        // the pill, the Pieces card with its empty line and its Add piece row,
+        // the Move/Rotate/Render chips and the status bar.
+        settle(200);
+        const QImage emptyShot =
+            printWindowCapture(&empty, outDir + QStringLiteral("/empty-scene.png"));
+        check(!emptyShot.isNull(), "the empty scene's whole window is captured");
+        {
+            // NOT ONE FLAT COLOUR - the property the old capture failed. Counted
+            // over a coarse grid, so it is cheap and cannot be satisfied by a
+            // single stray pixel.
+            QSet<QRgb> colours;
+            for (int y = 0; !emptyShot.isNull() && y < emptyShot.height(); y += 6)
+                for (int x = 0; x < emptyShot.width(); x += 6)
+                    colours.insert(emptyShot.pixel(x, y) & 0xffffff);
+            check(colours.size() > 20,
+                  QStringLiteral("...and it shows the window's chrome, not one uniform frame "
+                                 "(%1 distinct colours)").arg(colours.size()));
+        }
+
         empty.studio()->setEnabled(true);
         waitFully(400);
         check(empty.studio()->isEnabled(), "render mode turns on over nothing at all");
-        const QString emptyPath = outDir + QStringLiteral("/empty-scene.png");
-        check(empty.view()->saveSnapshot(emptyPath),
-              "and an export still writes a file rather than failing");
-        check(!QImage(emptyPath).isNull(), "which loads back as an image");
+        const QString refusedPath = outDir + QStringLiteral("/empty-scene-export.png");
+        QFile::remove(refusedPath);
+        const QString wantRefusal = QStringLiteral("The scene is empty — add a piece first");
+        check(empty.screenshotRefusal() == wantRefusal,
+              QStringLiteral("Save Screenshot knows the picture would be empty before it asks "
+                             "for a file (\"%1\")").arg(empty.screenshotRefusal()));
+        check(!empty.saveScreenshotTo(refusedPath),
+              "...and a picture of nothing is REFUSED rather than exported as a blank backdrop");
+        check(!QFile::exists(refusedPath), "...so no file is written");
+        ToastHost* emptyToasts = empty.toasts();
+        check(emptyToasts && emptyToasts->isShowing() &&
+                  emptyToasts->currentText() == wantRefusal &&
+                  emptyToasts->remainingMs() > 5000,
+              QStringLiteral("...and the refusal is a Failure that says why and what to do "
+                             "(\"%1\", %2 ms armed)")
+                  .arg(emptyToasts ? emptyToasts->currentText() : QString())
+                  .arg(emptyToasts ? emptyToasts->remainingMs() : -1));
         empty.close();
+    }
+
+    // --- the scene puts its jobs on screen, and says what each one did -------
+    // The 2026-10 review's F2, F10, F16, F25 (c-e) and F27, as one window
+    // driven from empty. Before it: the empty Pieces card was a sentence over
+    // nothing to click, Move, Rotate and Render mode were menu-only, adding,
+    // removing, moving and renaming a piece reported nothing, the remove
+    // control was a typed "x" turning into "!", a long list cut its last row
+    // in half with no cue, a picture of nothing exported a blank frame, and the
+    // add card had no dismiss hint and no way out of an empty library.
+    if (blockEnabled("the-scene-puts-its-jobs-on-screen-and-reports-them")) {
+        RequiredTempDir jobsLib;
+        FurnitureStore jobsStore(jobsLib.path());
+        const QString jobsSceneId = jobsStore.createScene(QStringLiteral("Living room"));
+        check(!jobsSceneId.isEmpty(), "jobs: a scene exists to open");
+
+        SceneWindow sw(&jobsStore);
+        sw.setAttribute(Qt::WA_ShowWithoutActivating);
+        sw.resize(1100, 800);
+        sw.show();
+        settle(300);
+        check(sw.openScene(jobsSceneId), "jobs: the scene opens");
+        settle(200);
+        OcctViewWidget* jv = sw.view();
+        ScenePiecesPanel* jp = sw.piecesPanel();
+        ToastHost* jt = sw.toasts();
+        check(jv && jp && jt, "jobs: the window has a viewport, a pieces card and a toast host");
+        // Animations off, as the suite runs the editor: a toast's dismiss is a
+        // 160 ms fade otherwise, and "the Note goes with the change it named"
+        // would be a race against it rather than a statement about it.
+        if (jv) jv->setAnimationsEnabled(false);
+        if (!jv || !jp || !jt) {
+            sw.close();
+        } else {
+        auto actionNamed = [&sw](const QString& text) -> QAction* {
+            for (QAction* a : sw.findChildren<QAction*>())
+                if (a->text().remove(QLatin1Char('&')) == text) return a;
+            return nullptr;
+        };
+        // REACHABLE means the viewport's own hit test lands on the control (or
+        // inside it) at the control's centre - never an attribute flag.
+        auto reachable = [jv](QWidget* w) {
+            if (!w || !w->isVisible()) return false;
+            QWidget* hit = jv->childAt(w->mapTo(jv, w->rect().center()));
+            return hit == w || (hit && w->isAncestorOf(hit));
+        };
+        auto rowNames = [jp] {
+            QStringList names;
+            for (int i = 0; i < jp->rowCount(); ++i) names << jp->rowTextAt(i);
+            return names;
+        };
+        auto rowIndexNamed = [jp](const QString& name) {
+            for (int i = 0; i < jp->rowCount(); ++i)
+                if (jp->rowTextAt(i) == name) return i;
+            return -1;
+        };
+        auto pieceIdNamed = [&sw](const QString& name) {
+            for (const SceneModel::Piece& p : sw.scene().pieces())
+                if (QString::fromStdString(p.name) == name) return p.id;
+            return 0;
+        };
+        // How many pixels of `image` sit within `tol` of `ink` on every channel.
+        auto inkCount = [](const QImage& image, const QColor& ink, int tol) {
+            int n = 0;
+            for (int y = 0; y < image.height(); ++y)
+                for (int x = 0; x < image.width(); ++x) {
+                    const QRgb p = image.pixel(x, y);
+                    if (qAlpha(p) < 128) continue;
+                    if (std::abs(qRed(p) - ink.red()) <= tol &&
+                        std::abs(qGreen(p) - ink.green()) <= tol &&
+                        std::abs(qBlue(p) - ink.blue()) <= tol)
+                        ++n;
+                }
+            return n;
+        };
+
+        // === F2: ONE VERB, AND A ROW TO CLICK =============================
+        QAction* addAct = sw.addPieceAction();
+        check(addAct && addAct == actionNamed(QStringLiteral("Add piece")),
+              "jobs: the window's add action reads \"Add piece\"");
+        check(actionNamed(QStringLiteral("New piece")) == nullptr,
+              "jobs: ...and nothing still says \"New piece\" - one verb, not two");
+        {
+            // Asked of the ACTION, which knows every menu it sits in - the
+            // window's menuBar() is reparented into the pill, and asking the
+            // window for it again would build a fresh empty one.
+            QStringList menus;
+            if (addAct)
+                for (QObject* owner : addAct->associatedObjects())
+                    if (auto* menu = qobject_cast<QMenu*>(owner))
+                        menus << menu->title().remove(QLatin1Char('&'));
+            check(menus.contains(QStringLiteral("Arrange")),
+                  QStringLiteral("jobs: Add piece lives in the Arrange menu, with the rest of "
+                                 "arranging (%1)").arg(menus.join(QStringLiteral(", "))));
+            check(!menus.contains(QStringLiteral("File")),
+                  "jobs: ...and no longer under File, with saving and closing");
+        }
+        check(jp->paintedTexts().contains(ScenePiecesPanel::emptyText()) &&
+                  ScenePiecesPanel::emptyText().contains(QStringLiteral("add a piece")),
+              QStringLiteral("jobs: the empty card's line uses the same verb (\"%1\")")
+                  .arg(ScenePiecesPanel::emptyText()));
+
+        ToolChip* addRow = jp->addChip();
+        check(addRow != nullptr && addRow->action() == addAct,
+              "jobs: the empty Pieces card carries an Add piece row built from that action");
+        check(addRow && addRow->isVisible() && addRow->text() == QStringLiteral("Add piece"),
+              QStringLiteral("jobs: ...visible, and labelled with the action's own words (\"%1\")")
+                  .arg(addRow ? addRow->text() : QString()));
+        check(reachable(addRow),
+              "jobs: ...and a real click reaches it - the viewport's hit test lands on the row");
+        if (addRow) {
+            // FITS, not crushed: the card is as tall as it asks, and the row
+            // sits wholly inside it, below the empty line - measured in the
+            // CARD's own space.
+            const int rowTop = addRow->mapTo(jp, QPoint(0, 0)).y();
+            const int rowBottom = addRow->mapTo(jp, QPoint(0, addRow->height())).y();
+            QLabel* emptyLine = nullptr;
+            for (QLabel* l : jp->findChildren<QLabel*>())
+                if (l->text() == ScenePiecesPanel::emptyText()) emptyLine = l;
+            const int lineBottom =
+                emptyLine ? emptyLine->mapTo(jp, QPoint(0, emptyLine->height())).y() : -1;
+            check(jp->height() >= jp->sizeHint().height() &&
+                      addRow->height() >= addRow->sizeHint().height(),
+                  QStringLiteral("jobs: the card and its row are as tall as they ask to be "
+                                 "(card %1 of %2, row %3 of %4)")
+                      .arg(jp->height()).arg(jp->sizeHint().height())
+                      .arg(addRow->height()).arg(addRow->sizeHint().height()));
+            check(emptyLine && emptyLine->isVisible() && rowTop >= lineBottom &&
+                      rowBottom <= jp->height(),
+                  QStringLiteral("jobs: ...with the row under the empty line and inside the "
+                                 "card (line ends %1, row %2..%3, card %4)")
+                      .arg(lineBottom).arg(rowTop).arg(rowBottom).arg(jp->height()));
+            // MIRRORS, holds nothing: the action's enabled state is the row's.
+            addAct->setEnabled(false);
+            settle(60);
+            const bool followedOff = !addRow->isEnabled();
+            addAct->setEnabled(true);
+            settle(60);
+            check(followedOff && addRow->isEnabled(),
+                  "jobs: ...and it follows the action's enabled state both ways");
+        }
+        printWindowCapture(&sw, outDir + QStringLiteral("/scene-jobs-empty.png"));
+
+        // --- the add card, over an EMPTY library (F25d) ---------------------
+        bool wentToLibrary = false;
+        QObject::connect(&sw, &SceneWindow::closeRequested, &sw,
+                         [&wentToLibrary] { wentToLibrary = true; });
+        if (addRow) clickAt(addRow, QPointF(addRow->width() / 2.0, addRow->height() / 2.0));
+        settle(200);
+        AddPieceCard* card = sw.addPieceCard();
+        check(card && card->isVisible(),
+              "jobs: clicking the Add piece row opens the add-a-piece card");
+        if (card) {
+            check(card->entryCount() == 0, "jobs: ...over a library with nothing in it");
+            QLabel* hint = card->keyHintLabel();
+            check(hint && hint->isVisible() && hint->text() == KeyClaim::closeHintText() &&
+                      hint->text() == QStringLiteral("Esc closes"),
+                  QStringLiteral("jobs: the card SAYS that Escape closes it, in KeyClaim's "
+                                 "spelling (\"%1\")").arg(hint ? hint->text() : QString()));
+            check(hint && hint->mapTo(card, QPoint(0, hint->height())).y() <= card->height() &&
+                      card->height() >= card->sizeHint().height(),
+                  "jobs: ...and the hint fits inside the card, which is as tall as it asks");
+            QPushButton* lib = card->libraryButton();
+            check(lib && lib->isVisible() && lib->text() == AddPieceCard::libraryButtonText(),
+                  QStringLiteral("jobs: an empty library offers a way to the library (\"%1\")")
+                      .arg(lib ? lib->text() : QString()));
+            check(reachable(lib), "jobs: ...which a real click reaches");
+            printWindowCapture(&sw, outDir + QStringLiteral("/scene-add-card-empty-library.png"));
+            if (lib) clickAt(lib, QPointF(lib->width() / 2.0, lib->height() / 2.0));
+            settle(200);
+            check(wentToLibrary,
+                  "jobs: ...and clicking it takes File -> Close scene's own route to the hub");
+            check(!card->isVisible(), "jobs: ...with the card out of the way first");
+        }
+
+        // A furniture now exists, so the card lists it and the way out goes.
+        auto makeBox = [&jobsStore](const QString& name, double w, double d, double h) {
+            const QString id = jobsStore.createFurniture(name);
+            if (id.isEmpty()) return QString();
+            DocumentModel doc;
+            doc.addSolid(BRepPrimAPI_MakeBox(w, d, h).Shape());
+            return jobsStore.saveFurniture(id, doc, QImage()) ? id : QString();
+        };
+        const QString chairId = makeBox(QStringLiteral("Chair"), 450.0, 450.0, 800.0);
+        check(!chairId.isEmpty(), "jobs: a Chair furniture is saved");
+        if (addRow) clickAt(addRow, QPointF(addRow->width() / 2.0, addRow->height() / 2.0));
+        settle(200);
+        if (card) {
+            check(card->isVisible() && card->entryCount() == 1,
+                  QStringLiteral("jobs: the card lists the library's one furniture (%1)")
+                      .arg(card->entryCount()));
+            check(card->libraryButton() && !card->libraryButton()->isVisible(),
+                  "jobs: ...and offers no way out once there is something to add");
+            check(card->keyHintLabel() && card->keyHintLabel()->isVisible(),
+                  "jobs: ...while still saying Escape closes it");
+            if (QPushButton* entry = card->entryButtonAt(0))
+                clickAt(entry, QPointF(entry->width() / 2.0, entry->height() / 2.0));
+            settle(250);
+        }
+
+        // === F10: A NOTE WITH UNDO FOR EVERY CHANGE ======================
+        check(sw.scene().pieces().size() == 1, "jobs: picking it puts one piece in the scene");
+        {
+            const QString shown = jt->currentText();
+            const bool showing = jt->isShowing();
+            const bool undoable = jt->toast() && jt->toast()->hasUndo();
+            const int armed = jt->remainingMs();
+            check(showing && shown == QStringLiteral("Added Chair") && undoable,
+                  QStringLiteral("jobs: adding a piece reports a Note with Undo (\"%1\", undo %2)")
+                      .arg(shown).arg(undoable ? 1 : 0));
+            check(armed > 0 && armed <= 4000,
+                  QStringLiteral("jobs: ...a Note, not a Failure (%1 ms armed)").arg(armed));
+            const QString left = sw.statusBar()->currentMessage();
+            check(left != shown,
+                  QStringLiteral("jobs: ...and the status bar does not echo the live Note "
+                                 "(\"%1\")").arg(left));
+        }
+
+        // Numbered on arrival: the next of a kind takes the next free number.
+        check(sw.addPiece(chairId) && sw.addPiece(chairId), "jobs: two more chairs go in");
+        settle(200);
+        check(rowNames() == QStringList({QStringLiteral("Chair"), QStringLiteral("Chair 2"),
+                                         QStringLiteral("Chair 3")}),
+              QStringLiteral("jobs: three of one furniture read Chair, Chair 2, Chair 3 (%1)")
+                  .arg(rowNames().join(QStringLiteral(", "))));
+        check(jt->currentText() == QStringLiteral("Added Chair 3"),
+              QStringLiteral("jobs: ...and the Note names the numbered piece (\"%1\")")
+                  .arg(jt->currentText()));
+
+        // THE PILL UNDOES IT, on the scene's own stack.
+        {
+            QWidget* pill = jt->undoControl();
+            check(reachable(pill), "jobs: the Note's Undo pill is reachable by a real click");
+            if (pill) clickAt(pill, QPointF(pill->width() / 2.0, pill->height() / 2.0));
+            settle(250);
+            const int count = static_cast<int>(sw.scene().pieces().size());
+            check(count == 2 && rowIndexNamed(QStringLiteral("Chair 3")) < 0,
+                  QStringLiteral("jobs: ...and clicking it takes Chair 3 back out (%1 pieces)")
+                      .arg(count));
+            check(!jt->isShowing(),
+                  "jobs: ...and the Note goes with the change it named");
+        }
+        check(sw.addPiece(chairId), "jobs: a chair goes back in");
+        settle(150);
+        check(rowIndexNamed(QStringLiteral("Chair 3")) >= 0,
+              QStringLiteral("jobs: ...taking the next FREE number, Chair 3 again (%1)")
+                  .arg(rowNames().join(QStringLiteral(", "))));
+
+        // THE PILL OBEYS UNDO'S ENABLED STATE - an empty stack offers nothing.
+        {
+            QAction* undoAct = actionNamed(QStringLiteral("Undo"));
+            check(undoAct && undoAct->isEnabled() && jt->toast() &&
+                      jt->toast()->undoEnabled(),
+                  "jobs: with a step to take back, Undo and the pill are both live");
+        }
+
+        // --- remove: a painted glyph, and "Remove?" when armed ----------------
+        {
+            const int idx = rowIndexNamed(QStringLiteral("Chair 2"));
+            QPushButton* rm = idx >= 0 ? jp->rowRemoveAt(idx) : nullptr;
+            check(rm != nullptr, "jobs: Chair 2's row has a remove control");
+            if (rm) {
+                const QImage rest = renderExact(rm);
+                const int restInk = inkCount(rest, Theme::text(), 40);
+                check(rm->text().isEmpty() && !rm->icon().isNull() && restInk > 8,
+                      QStringLiteral("jobs: at rest it is a PAINTED glyph, not a typed letter "
+                                     "(text \"%1\", %2 ink pixels)")
+                          .arg(rm->text()).arg(restInk));
+                check(reachable(rm), "jobs: ...which a real click reaches");
+                const int rightEdge = rm->mapTo(jp, QPoint(rm->width(), 0)).x();
+                clickAt(rm, QPointF(rm->width() / 2.0, rm->height() / 2.0));
+                settle(150);
+                check(static_cast<int>(sw.scene().pieces().size()) == 3,
+                      "jobs: one click arms it and takes nothing out");
+                const QImage armedPx = renderExact(rm);
+                const int dangerInk = inkCount(armedPx, Theme::dangerText(), 40);
+                check(rm->text() == ScenePiecesPanel::armedRemoveText() &&
+                          rm->text() == QStringLiteral("Remove?") && dangerInk > 8,
+                      QStringLiteral("jobs: ...and ARMED it reads \"Remove?\" in the failure ink "
+                                     "(\"%1\", %2 danger-ink pixels)")
+                          .arg(rm->text()).arg(dangerInk));
+                check(rm->toolTip() == ScenePiecesPanel::armedRemoveTipText(),
+                      "jobs: ...with a tooltip that says the next click takes it out");
+                settle(80);
+                const int armedRight = rm->mapTo(jp, QPoint(rm->width(), 0)).x();
+                check(rm->width() > 24 && std::abs(armedRight - rightEdge) <= 1,
+                      QStringLiteral("jobs: ...widening LEFTWARD to hold the word, its right edge "
+                                     "where it was (width %1, right %2 against %3)")
+                          .arg(rm->width()).arg(armedRight).arg(rightEdge));
+                printWindowCapture(&sw, outDir + QStringLiteral("/scene-remove-armed.png"));
+                clickAt(rm, QPointF(rm->width() / 2.0, rm->height() / 2.0));
+                settle(250);
+            }
+            check(static_cast<int>(sw.scene().pieces().size()) == 2 &&
+                      rowIndexNamed(QStringLiteral("Chair 2")) < 0,
+                  "jobs: ...and the second click takes Chair 2 out");
+            const QString shown = jt->currentText();
+            check(jt->isShowing() && shown == QStringLiteral("Removed Chair 2") &&
+                      jt->toast()->hasUndo(),
+                  QStringLiteral("jobs: removing reports a Note with Undo (\"%1\")").arg(shown));
+            if (QAction* undoAct = actionNamed(QStringLiteral("Undo"))) undoAct->trigger();
+            settle(250);
+            check(rowIndexNamed(QStringLiteral("Chair 2")) >= 0,
+                  "jobs: ...and Edit -> Undo puts Chair 2 back");
+        }
+
+        // --- rename: a checkpoint now, and a Note ------------------------------
+        {
+            const int id = pieceIdNamed(QStringLiteral("Chair 3"));
+            check(id != 0 && sw.renamePiece(id, QStringLiteral("Armchair")),
+                  "jobs: Chair 3 is renamed Armchair");
+            settle(150);
+            const QString shown = jt->currentText();
+            check(jt->isShowing() && shown == QStringLiteral("Renamed to \"Armchair\"") &&
+                      jt->toast()->hasUndo(),
+                  QStringLiteral("jobs: renaming reports a Note with Undo (\"%1\")").arg(shown));
+            if (QWidget* pill = jt->undoControl())
+                clickAt(pill, QPointF(pill->width() / 2.0, pill->height() / 2.0));
+            settle(250);
+            check(rowIndexNamed(QStringLiteral("Chair 3")) >= 0 &&
+                      rowIndexNamed(QStringLiteral("Armchair")) < 0,
+                  QStringLiteral("jobs: ...and its Undo puts the old name back - renaming takes a "
+                                 "checkpoint now (%1)").arg(rowNames().join(QStringLiteral(", "))));
+        }
+
+        // --- move and rotate: the gizmo's own signals, the window's own answer
+        // The drag maths are pinned in the opening block; what is asked here
+        // is what the WINDOW does with a finished gesture.
+        {
+            const int id = pieceIdNamed(QStringLiteral("Chair"));
+            const std::vector<int> bodies = sw.bodyIdsForPiece(id);
+            check(!bodies.empty(), "jobs: the chair has a body to select");
+            if (!bodies.empty()) jv->setSelectedSolids({bodies.front()});
+            settle(200);
+            check(id != 0 && sw.selectedPieceId() == id,
+                  "jobs: ...and selecting it selects the piece");
+            auto pieceX = [&sw](int pieceId) {
+                const SceneModel::Piece* p = sw.scene().piece(pieceId);
+                return p ? p->placement.TranslationPart().X() : -1.0e9;
+            };
+            const double xBefore = pieceX(id);
+            emit jv->moveDragged(0, 40.0);
+            emit jv->moveReleased(true);
+            settle(200);
+            const double xAfter = pieceX(id);
+            check(std::fabs(xAfter - xBefore - 40.0) < 1.0e-6,
+                  QStringLiteral("jobs: a finished Move drag moves the piece (%1 mm)")
+                      .arg(xAfter - xBefore, 0, 'f', 2));
+            const QString moved = jt->currentText();
+            check(jt->isShowing() && moved == QStringLiteral("Moved Chair") &&
+                      jt->toast()->hasUndo(),
+                  QStringLiteral("jobs: ...and reports a Note with Undo (\"%1\")").arg(moved));
+            if (QWidget* pill = jt->undoControl())
+                clickAt(pill, QPointF(pill->width() / 2.0, pill->height() / 2.0));
+            settle(250);
+            check(sw.scene().piece(id) && std::fabs(pieceX(id) - xBefore) < 1.0e-6,
+                  "jobs: ...and its Undo puts the piece back where it stood");
+
+            // A drag that lands where it began changed nothing and says nothing.
+            const std::vector<int> again = sw.bodyIdsForPiece(id);
+            if (!again.empty()) jv->setSelectedSolids({again.front()});
+            settle(150);
+            emit jv->moveDragged(0, 0.0);
+            emit jv->moveReleased(true);
+            settle(150);
+            check(!(jt->isShowing() && jt->currentText().startsWith(QStringLiteral("Moved"))),
+                  QStringLiteral("jobs: a drag that put the piece back where it was reports "
+                                 "nothing (\"%1\")")
+                      .arg(jt->isShowing() ? jt->currentText() : QString()));
+
+            sw.setTool(SceneWindow::Tool::Rotate);
+            settle(150);
+            emit jv->rotateDragged(2, 30.0);
+            emit jv->rotateReleased(true);
+            settle(200);
+            const QString turned = jt->currentText();
+            check(jt->isShowing() && turned == QStringLiteral("Rotated Chair") &&
+                      jt->toast()->hasUndo(),
+                  QStringLiteral("jobs: a finished Rotate drag reports a Note with Undo "
+                                 "(\"%1\")").arg(turned));
+            sw.setTool(SceneWindow::Tool::Move);
+            settle(150);
+        }
+
+        // === F16: MOVE, ROTATE AND RENDER ON SCREEN =======================
+        ToolCluster* tools = sw.arrangeTools();
+        QAction* moveAct = actionNamed(QStringLiteral("Move"));
+        QAction* rotateAct = actionNamed(QStringLiteral("Rotate"));
+        QAction* renderAct = actionNamed(QStringLiteral("Render mode"));
+        check(tools && tools->isVisible() && tools->chips().size() == 3,
+              QStringLiteral("jobs: the viewport carries a cluster of three chips (%1)")
+                  .arg(tools ? tools->chips().size() : -1));
+        if (tools && tools->chips().size() == 3) {
+            ToolChip* mc = tools->chips()[0];
+            ToolChip* rc = tools->chips()[1];
+            ToolChip* vc = tools->chips()[2];
+            check(mc->action() == moveAct && rc->action() == rotateAct &&
+                      vc->action() == renderAct && moveAct && rotateAct && renderAct,
+                  "jobs: ...mirroring the Move, Rotate and Render mode actions, in that order");
+            check(mc->mode() == ToolChip::ChipMode::IconOnly &&
+                      rc->mode() == ToolChip::ChipMode::IconOnly &&
+                      vc->mode() == ToolChip::ChipMode::IconOnly,
+                  "jobs: ...icon-only, the editor's own cluster form");
+            check(reachable(mc) && reachable(rc) && reachable(vc),
+                  "jobs: ...each one reachable by a real click");
+            // NO COLLISIONS, in the VIEWPORT's space.
+            auto inView = [jv](QWidget* w) {
+                return w ? QRect(w->mapTo(jv, QPoint(0, 0)), w->size()) : QRect();
+            };
+            const QRect clusterRect = inView(tools);
+            QStringList hits;
+            if (AppBar* bar = sw.findChild<AppBar*>())
+                if (clusterRect.intersects(inView(bar))) hits << QStringLiteral("the pill");
+            if (clusterRect.intersects(inView(jp))) hits << QStringLiteral("the Pieces card");
+            for (QWidget* w : sw.findChildren<QWidget*>())
+                if (w->inherits("WindowButtons") && w->isVisible() &&
+                    clusterRect.intersects(inView(w)))
+                    hits << QStringLiteral("the window buttons");
+            check(!clusterRect.isEmpty() && hits.isEmpty() &&
+                      jv->rect().contains(clusterRect),
+                  QStringLiteral("jobs: ...standing inside the viewport and clear of everything "
+                                 "else anchored there (%1)")
+                      .arg(hits.isEmpty() ? QStringLiteral("clear") : hits.join(", ")));
+
+            // Each chip triggers its action; each mirrors checked and enabled.
+            clickAt(rc, QPointF(rc->width() / 2.0, rc->height() / 2.0));
+            settle(150);
+            check(sw.tool() == SceneWindow::Tool::Rotate && rotateAct->isChecked() &&
+                      rc->isChecked() && !mc->isChecked(),
+                  "jobs: clicking Rotate's chip switches the tool, and both chips mirror it");
+            clickAt(mc, QPointF(mc->width() / 2.0, mc->height() / 2.0));
+            settle(150);
+            check(sw.tool() == SceneWindow::Tool::Move && moveAct->isChecked() &&
+                      mc->isChecked() && !rc->isChecked(),
+                  "jobs: ...and Move's chip switches it back");
+            moveAct->setEnabled(false);
+            settle(60);
+            const bool chipOff = !mc->isEnabled();
+            moveAct->setEnabled(true);
+            settle(60);
+            check(chipOff && mc->isEnabled(),
+                  "jobs: ...and a chip follows its action's enabled state both ways");
+
+            jv->setSelectedSolids({});
+            settle(150);
+            printWindowCapture(&sw, outDir + QStringLiteral("/scene-jobs-tools.png"));
+            clickAt(vc, QPointF(vc->width() / 2.0, vc->height() / 2.0));
+            waitFully(500);
+            check(sw.studio()->isEnabled() && renderAct->isChecked() && vc->isChecked(),
+                  "jobs: clicking Render's chip turns render mode on, and the chip mirrors it");
+            check(!tools->isVisible(),
+                  "jobs: ...and the arranging chips step out of the shot with the rest of the "
+                  "chrome");
+            const QString renderHint = sw.statusHintLabel() ? sw.statusHintLabel()->text()
+                                                            : QString();
+            check(renderHint.startsWith(QStringLiteral("Frame the picture")),
+                  QStringLiteral("jobs: the status hint in render mode says what to do there "
+                                 "(\"%1\")").arg(renderHint));
+            renderAct->trigger();
+            waitFully(400);
+            check(!sw.studio()->isEnabled() && tools->isVisible() && !vc->isChecked(),
+                  "jobs: ...and leaving render mode brings them back, unchecked");
+        }
+
+        // --- the next-step hint, in the status bar's right channel ----------
+        {
+            QLabel* hint = sw.statusHintLabel();
+            check(hint && hint->isVisible(), "jobs: the status bar carries a next-step hint");
+            const QString none = hint ? hint->text() : QString();
+            check(none.startsWith(QStringLiteral("Select a piece — then Move it (G) or Rotate "
+                                                 "it (R)")) &&
+                      !none.endsWith(QLatin1Char('.')),
+                  QStringLiteral("jobs: ...which, with nothing selected, names the two tools "
+                                 "by their real keys (\"%1\")").arg(none));
+            const int id = pieceIdNamed(QStringLiteral("Chair"));
+            const std::vector<int> chairBodies = sw.bodyIdsForPiece(id);
+            if (!chairBodies.empty()) jv->setSelectedSolids({chairBodies.front()});
+            settle(150);
+            const QString moving = hint ? hint->text() : QString();
+            check(moving.startsWith(QStringLiteral("Drag an arrow")),
+                  QStringLiteral("jobs: ...with a piece selected under Move, says how to move it "
+                                 "(\"%1\")").arg(moving));
+            const QString left = sw.statusBar()->currentMessage();
+            check(left == QStringLiteral("Chair selected"),
+                  QStringLiteral("jobs: ...while the left says what is selected (\"%1\")")
+                      .arg(left));
+            if (rotateAct) rotateAct->trigger();
+            settle(150);
+            const QString turning = hint ? hint->text() : QString();
+            check(turning.startsWith(QStringLiteral("Drag a ring")),
+                  QStringLiteral("jobs: ...and under Rotate, how to turn it (\"%1\")")
+                      .arg(turning));
+            if (moveAct) moveAct->trigger();
+            jv->setSelectedSolids({});
+            settle(150);
+        }
+
+        // --- a picture that says where it went (F25c) ---------------------
+        {
+            const QString shotPath = outDir + QStringLiteral("/scene-jobs-picture.png");
+            QFile::remove(shotPath);
+            check(sw.screenshotRefusal().isEmpty(),
+                  "jobs: a scene with pieces on screen has nothing to refuse");
+            check(sw.saveScreenshotTo(shotPath) && QFile::exists(shotPath),
+                  "jobs: Save Screenshot's work writes the picture");
+            const QString shown = jt->currentText();
+            check(jt->isShowing() &&
+                      shown == QStringLiteral("Picture saved as scene-jobs-picture.png") &&
+                      !jt->toast()->hasUndo(),
+                  QStringLiteral("jobs: ...and reports a Note naming the file, with no Undo "
+                                 "(\"%1\")").arg(shown));
+        }
+
+        // --- the scroll cue: a fade only where there are more rows (F10) ----
+        {
+            const QScrollBar* fitBar =
+                jp->rowsScrollArea() ? jp->rowsScrollArea()->verticalScrollBar() : nullptr;
+            const int fitRange = fitBar ? fitBar->maximum() - fitBar->minimum() : -1;
+            const int fitValue = fitBar ? fitBar->value() : -1;
+            const bool topOn = jp->topFadeShown();
+            const bool bottomOn = jp->bottomFadeShown();
+            // NOT A STALE ROW IN THE COLUMN. rebuild() used to leave every old
+            // row in the list's layout until an event loop deleted it, so the
+            // card was measured with old rows and new - this list of three held
+            // 373 px of scroll range and the fade stood over it. Counted as
+            // the rows the column still SHOWS.
+            int shownInColumn = 0;
+            if (QScrollArea* fitArea = jp->rowsScrollArea())
+                for (QWidget* w : fitArea->widget()->findChildren<QWidget*>(
+                         Qt::FindDirectChildrenOnly))
+                    if (!w->isHidden()) ++shownInColumn;
+            check(shownInColumn == jp->rowCount(),
+                  QStringLiteral("jobs: the list's column shows exactly its rows, none left over "
+                                 "from an earlier rebuild (%1 shown for %2 rows)")
+                      .arg(shownInColumn).arg(jp->rowCount()));
+            check(!topOn && !bottomOn && fitRange == 0,
+                  QStringLiteral("jobs: a list that fits shows no fade at either edge (%1 rows, "
+                                 "range %2, at %3, top %4, bottom %5)")
+                      .arg(jp->rowCount()).arg(fitRange).arg(fitValue)
+                      .arg(topOn ? 1 : 0).arg(bottomOn ? 1 : 0));
+            const QString stoolId = makeBox(QStringLiteral("Stool"), 300.0, 300.0, 450.0);
+            for (int i = 0; i < 18; ++i) sw.addPiece(stoolId);
+            settle(300);
+            QScrollArea* area = jp->rowsScrollArea();
+            QScrollBar* bar = area ? area->verticalScrollBar() : nullptr;
+            const int range = bar ? bar->maximum() - bar->minimum() : 0;
+            check(jp->rowCount() == 21 && range > 0,
+                  QStringLiteral("jobs: twenty-one rows overflow the list (%1 rows, %2 px to "
+                                 "scroll)").arg(jp->rowCount()).arg(range));
+            if (bar) bar->setValue(bar->minimum());
+            settle(100);
+            check(jp->bottomFadeShown() && !jp->topFadeShown(),
+                  "jobs: ...at the top, the BOTTOM edge fades and the top does not");
+            if (QWidget* fade = jp->bottomFade()) {
+                // OVER THE LIST'S OWN BOTTOM EDGE, in the card's space, and a
+                // real ramp: solid at the edge, clear where it meets the rows.
+                const QRect listRect(area->mapTo(jp, QPoint(0, 0)), area->size());
+                const QRect fadeRect(fade->mapTo(jp, QPoint(0, 0)), fade->size());
+                const QImage ramp = renderExact(fade);
+                const int edgeAlpha = qAlpha(ramp.pixel(ramp.width() / 2, ramp.height() - 1));
+                const int innerAlpha = qAlpha(ramp.pixel(ramp.width() / 2, 0));
+                check(fadeRect.bottom() == listRect.bottom() && fadeRect.left() == listRect.left() &&
+                          fadeRect.width() == listRect.width(),
+                      QStringLiteral("jobs: ...laid exactly over the list's bottom edge (fade %1..%2, "
+                                     "list ends %3)")
+                          .arg(fadeRect.top()).arg(fadeRect.bottom()).arg(listRect.bottom()));
+                check(edgeAlpha > 200 && innerAlpha < 60,
+                      QStringLiteral("jobs: ...solid at the edge and clear toward the rows "
+                                     "(alpha %1 against %2)").arg(edgeAlpha).arg(innerAlpha));
+            }
+            printWindowCapture(&sw, outDir + QStringLiteral("/scene-long-list.png"));
+            if (bar) bar->setValue((bar->minimum() + bar->maximum()) / 2);
+            settle(100);
+            check(jp->bottomFadeShown() && jp->topFadeShown(),
+                  "jobs: ...in the middle, both edges fade");
+            if (bar) bar->setValue(bar->maximum());
+            settle(100);
+            check(jp->topFadeShown() && !jp->bottomFadeShown(),
+                  "jobs: ...and at the bottom only the TOP does");
+            check(jp->addChip() && jp->addChip()->isVisible() &&
+                      jp->addChip()->mapTo(jp, QPoint(0, jp->addChip()->height())).y() <=
+                          jp->height() &&
+                      reachable(jp->addChip()),
+                  "jobs: ...with the Add piece row still on screen under a list that scrolls");
+        }
+
+        // --- a furniture that cannot be read names itself, never "Piece" (F25e)
+        {
+            const QString benchId = makeBox(QStringLiteral("Bench"), 1200.0, 350.0, 450.0);
+            QString benchShapes;
+            for (const FurnitureStore::FurnitureInfo& info : jobsStore.listFurniture())
+                if (info.id == benchId) benchShapes = info.filePath + QStringLiteral("/shapes.bin");
+            {
+                QFile f(benchShapes);
+                check(!benchShapes.isEmpty() && f.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                      "jobs: the Bench's bodies are hand-damaged on disk");
+                f.write("bad");
+            }
+            check(!sw.addPiece(benchId), "jobs: a damaged furniture refuses");
+            settle(150);
+            const QString named = jt->currentText();
+            check(named.startsWith(QStringLiteral("Couldn't add Bench to this scene — ")) &&
+                      !named.contains(QStringLiteral("Piece")) && jt->remainingMs() > 5000,
+                  QStringLiteral("jobs: ...as a Failure that NAMES the furniture (\"%1\")")
+                      .arg(named));
+            check(!sw.addPiece(QStringLiteral("no-such-furniture")),
+                  "jobs: a furniture the library cannot name refuses too");
+            settle(150);
+            const QString unnamed = jt->currentText();
+            check(unnamed.startsWith(QStringLiteral("This furniture can't be opened — ")) &&
+                      !unnamed.contains(QStringLiteral("Piece")),
+                  QStringLiteral("jobs: ...saying \"This furniture\", never a placeholder name "
+                                 "(\"%1\")").arg(unnamed));
+        }
+
+        // --- the vocabulary sweep over everything this block made appear ------
+        {
+            QStringList texts = jp->paintedTexts();
+            if (card) texts += card->paintedTexts();
+            if (jt->toast()) texts += jt->toast()->paintedTexts();
+            if (sw.statusHintLabel()) texts << sw.statusHintLabel()->text();
+            if (tools)
+                for (ToolChip* c : tools->chips()) texts << c->toolTip();
+            QStringList flagged;
+            for (const QString& text : texts)
+                for (const QString& word : bannedWords())
+                    if (usesBannedWord(text, word)) flagged << text;
+            check(flagged.isEmpty(),
+                  QStringLiteral("jobs: every new line of copy avoids the banned words (%1)")
+                      .arg(flagged.isEmpty() ? QStringLiteral("all clean")
+                                             : flagged.join(QStringLiteral(" | "))));
+        }
+        sw.close();
+        }
     }
 
     // --- a piece snaps to another, and stacks on it -------------------------

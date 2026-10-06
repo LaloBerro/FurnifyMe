@@ -98,6 +98,13 @@ enum class Glyph {
     // who cannot tell that red from that violet cannot read at all. A shape
     // is the channel colour is not.
     Warning,        // a triangle with an exclamation mark
+    // The scene editor's own controls (the 2026-10 review's F2 and F16): its
+    // jobs were menu-only, so the Pieces card grew an Add piece row and the
+    // viewport a three-chip cluster for Move, Rotate and Render mode.
+    Add,            // a plus - "put one more in"
+    Move,           // four arrows out of one point
+    Rotate,         // a circle that turns, with its arrowhead
+    Render,         // a lit ball standing on a floor
 };
 
 // Returns an icon with Normal and Disabled modes already filled in.
