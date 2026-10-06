@@ -116,6 +116,14 @@ void RenderStudio::wireViewportControls()
                 view->setRenderBackgroundOverride(colour);
                 emit settingsChanged();
             });
+    connect(myPanel, &RenderSettingsPanel::backgroundResetRequested, this, [this, view] {
+        view->clearRenderBackgroundOverride();
+        // The swatch follows the EFFECTIVE backdrop, which is the studio tone
+        // once the override is gone - so the control shows what is actually
+        // on screen rather than the colour the user just abandoned.
+        if (myPanel) myPanel->setBackgroundSilently(view->renderBackdropColour());
+        emit settingsChanged();
+    });
     connect(myPanel, &RenderSettingsPanel::aspectChanged, this,
             [this, view](RenderSettingsPanel::Aspect aspect) {
                 view->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(aspect));
@@ -220,6 +228,35 @@ void RenderStudio::setEnabled(bool on)
     // rendering one modeling frame at the new width first.
     setDockOpen(on);
     emit enabledChanged(on);
+}
+
+void RenderStudio::syncPanelFromView()
+{
+    if (!myPanel || !myView) return;
+
+    // THE FOUR ANALOG ROWS, silently - setValuesSilently() exists for exactly
+    // this and does not emit, so syncing the card cannot look like a user
+    // edit and write the values straight back. The glossiness inversion is
+    // the host's own convention (the card says glossiness, the viewport
+    // stores roughness) and it is performed here, at the one site that
+    // crosses the boundary.
+    myPanel->setValuesSilently(1.0 - myView->renderSurfaceRoughness(), myView->renderMetal(),
+                               myView->renderLightAngleDeg(), myView->renderLightStrength(),
+                               myView->renderBackgroundOverride(), myView->renderFov());
+
+    // And the discrete ones. Each of these setters is already silent on a
+    // value that has not changed; what matters is that they are all HERE, so
+    // a caller cannot sync six of the seven and leave the seventh lying.
+    myPanel->setAspect(static_cast<RenderSettingsPanel::Aspect>(myView->renderAspect()));
+    myPanel->setGuides(static_cast<RenderSettingsPanel::Guides>(myView->renderGuides()));
+    myPanel->setExportSize(
+        static_cast<RenderSettingsPanel::ExportSize>(myView->renderExportSize()));
+    myPanel->setCutout(myView->renderCutout());
+    myPanel->setQuality(myView->renderQuality() == OcctViewWidget::RenderQuality::Simple
+                            ? RenderSettingsPanel::Quality::Simple
+                            : (myView->renderQuality() == OcctViewWidget::RenderQuality::Balanced
+                                   ? RenderSettingsPanel::Quality::Balanced
+                                   : RenderSettingsPanel::Quality::Deep));
 }
 
 void RenderStudio::refresh()

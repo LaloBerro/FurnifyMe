@@ -17,6 +17,8 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+
+#include "PanelCloseButton.h"
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -817,7 +819,12 @@ JointsPanel::JointsPanel(MainWindow* window, OcctViewWidget* view, QWidget* pare
     auto* header = new QWidget(this);
     header->setStyleSheet(QStringLiteral("background: transparent;"));
     auto* headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(kHeaderSide, 0, kHeaderSide, 8);
+    // THE CORNER IS SPOKEN FOR - VersionsPanel's own clash, one panel along.
+    // MainWindow parents a PanelCloseButton here too, and it places itself at
+    // the top right, where this header right-aligns its joint count - so the
+    // hover-only x drew straight over the number.
+    headerLayout->setContentsMargins(kHeaderSide, 0,
+                                     kHeaderSide + PanelCloseButton::buttonSize(), 8);
     headerLayout->setSpacing(8);
     myTitle = new QLabel(tr("Joints"), header);
     myTitle->setStyleSheet(titleCss());

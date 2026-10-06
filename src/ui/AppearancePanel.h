@@ -374,6 +374,9 @@ private:
     // Every label this drawer paints that is not already a member below -
     // the mirrored rows' names and the tab buttons' words. Collected as they
     // are built so paintedTexts() cannot fall behind a row somebody adds.
+    // The Colours tab's group headings - kept so applyTheme() can restyle
+    // them with everything else when the type scale or the muted token moves.
+    std::vector<class QLabel*> myGroupHeadings;
     QStringList myExtraTexts;
     QStackedWidget* myPages = nullptr;
     OptionChip* myTabButtons[kTabCount] = {};

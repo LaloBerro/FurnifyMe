@@ -286,9 +286,15 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
         // the rule.
         setFixedSize(Theme::wholeDevicePixels(
             QSize(kWidth + margin * 2,
-                  kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
+                  // kHintGap + kHintHeight go with the painted hint: keeping
+                  // them would leave an empty band exactly as tall as the
+                  // sentence that used to be there.
+                  kPad * 2 + kLabelHeight + kFieldHeight +
                       margin * 2)));
     }
+    // The verbs moved here when they stopped being painted. Set once rather
+    // than on every refresh: the sentence does not change with the value.
+    setToolTip(hintText());
 
     myField = new QLineEdit(view);
     myField->setAttribute(Qt::WA_NoMousePropagation);
@@ -553,9 +559,13 @@ QString PullArrow::labelText() const
 
 QString PullArrow::hintText() const
 {
-    // A modeless panel with invisible verbs is how the keyboard commit and
-    // cancel went unnoticed for a whole branch on ExtrudePreview. This chip
-    // has no buttons either, so both keys are on it in words.
+    // NOT PAINTED ANY MORE - the user's own call: "just display the numbers
+    // and not display any text". It is the chip's TOOLTIP now rather than a
+    // deleted string, which keeps the one thing the old comment here was
+    // right about: a modeless panel with invisible verbs is how the keyboard
+    // commit and cancel went unnoticed for a whole branch on ExtrudePreview.
+    // Drawn, it cost a third of the chip's height on every pull; on hover it
+    // costs nothing and still answers "how do I apply this".
     return tr("Drag the arrow — Enter applies, Esc cancels");
 }
 
@@ -651,7 +661,9 @@ void PullArrow::paintEvent(QPaintEvent* /*event*/)
 
     painter.setFont(Theme::badgeFont());
     painter.setPen(Theme::textMuted());
-    painter.drawText(hintRect(), Qt::AlignVCenter | Qt::AlignLeft, hintText());
+    // The hint line is deliberately NOT drawn - see hintText(). It is this
+    // widget's tooltip, and the space it used to take is gone from the chip's
+    // fixed height rather than left as a blank band.
 }
 
 void PullArrow::showEvent(QShowEvent* event)

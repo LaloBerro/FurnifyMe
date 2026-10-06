@@ -11,7 +11,7 @@
 
 namespace {
 constexpr int kWidth = 260;
-constexpr int kRadius = 12;
+constexpr int kRadius = Theme::Space::Snug;
 constexpr int kPad = 14;
 // The scroll area is capped so a library of forty furniture does not grow a
 // card taller than the viewport. The height below it is added up FROM THE
@@ -19,6 +19,16 @@ constexpr int kPad = 14;
 // project has now paid for twice (see CLAUDE.md).
 constexpr int kListMaxHeight = 280;
 }  // namespace
+
+// ONE AUTHOR for this sentence. It was written out twice in this file - once
+// where it is painted and once where the banned-word sweep reads it - which is
+// the app's own generate-documentation-never-write-it-twice rule broken in the
+// copy layer, and the worse half of it: the sweep could have gone on passing a
+// string the user never sees.
+QString AddPieceCard::emptyLibraryText()
+{
+    return tr("The library is empty — make a furniture first");
+}
 
 AddPieceCard::AddPieceCard(QWidget* parent)
     : QWidget(parent)
@@ -36,7 +46,7 @@ AddPieceCard::AddPieceCard(QWidget* parent)
     myTitle = new QLabel(tr("Which furniture?"), this);
     myColumn->addWidget(myTitle);
 
-    myEmpty = new QLabel(tr("The library is empty — make a furniture first"), this);
+    myEmpty = new QLabel(emptyLibraryText(), this);
     myEmpty->setWordWrap(true);
     myColumn->addWidget(myEmpty);
 
@@ -122,7 +132,7 @@ QPushButton* AddPieceCard::entryButtonAt(int index) const
 
 QStringList AddPieceCard::paintedTexts() const
 {
-    return { tr("Which furniture?"), tr("The library is empty — make a furniture first") };
+    return { tr("Which furniture?"), emptyLibraryText() };
 }
 
 void AddPieceCard::applyTheme()

@@ -309,6 +309,15 @@ public:
     // The size the gesture began at, in millimetres - what the chip seeds its
     // field with and what the success message names as the old value.
     double reMeasureCurrentSize() const { return myResizeCurrentSize; }
+    // THE GHOST'S OWN BOX, pushed by ReMeasureTool each time it rebuilds the
+    // preview. The selection sizes are measured from the DOCUMENT and cached
+    // on revision(), and a live preview deliberately takes no checkpoint - so
+    // while you typed 450 the dimension line on the very edge being changed
+    // went on reading 600, as did the status bar. The gesture is "right-click
+    // a size number and type a new one"; the number you clicked has to move.
+    // A null shape clears it, and the box is only consulted while the gesture
+    // is live.
+    void setReMeasurePreviewShape(const TopoDS_Shape& shape);
     ModelingOps::ResizeAnchor reMeasureAnchor() const { return myResizeAnchor; }
     // The pin moved: `mark` is 0 low, 1 centre, 2 high, on the dimension
     // line's own ends. The viewport's resizePinPicked() route, and the only
@@ -2079,6 +2088,15 @@ private:
     mutable std::vector<int> mySizesCacheIds;
     mutable int mySizesCacheRevision = -1;
     mutable ModelingOps::MeasuredBox mySizesCacheBox;
+    // The live re-measure ghost's box, or ok == false when there is none.
+    // Measured once per preview rebuild by the tool rather than per event: a
+    // MeasuredBox is an OBB over the exact B-rep, which is not something to
+    // run on every appStateChanged.
+    ModelingOps::MeasuredBox myResizePreviewBox;
+    // The box the ANNOTATION should describe: the ghost while one is up, the
+    // document's own otherwise. One derivation, so the lines, the numbers and
+    // the status sentence cannot disagree about which shape they are about.
+    ModelingOps::MeasuredBox shownSelectionBox() const;
     // The selection sentence this window last put on the status bar, so a
     // live update (a pull, an undo) replaces only its OWN sentence and never
     // a refusal or a report somebody else is showing.

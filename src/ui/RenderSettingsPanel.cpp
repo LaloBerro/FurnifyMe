@@ -54,7 +54,7 @@ constexpr int kWidth = 296;
 // second, nameless shot beside the one it belongs to.
 constexpr int kShotDropWidth = 26;
 constexpr int kRadius = 10;
-constexpr int kPad = 12;
+constexpr int kPad = Theme::Space::Snug;
 constexpr int kRowSpacing = 10;
 constexpr int kSectionGap = 12;
 
@@ -776,6 +776,18 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         connect(myBackgroundSwatch, &QAbstractButton::clicked, this,
                 &RenderSettingsPanel::openBackgroundDialog);
         line->addWidget(myBackgroundSwatch);
+
+        // AND A WAY BACK. The picked colour drives the backdrop AND the
+        // shadow-catcher floor - which is what makes their seam invisible -
+        // so a saturated choice turns the studio into a chroma-key field with
+        // the floor following it, and there was no control that undid it. The
+        // viewport could always clear the override; nothing could ask it to.
+        auto* reset = new SegChip(tr("Studio"), row);
+        reset->setToolTip(tr("Put the backdrop back to the studio tone this render mode is "
+                             "calibrated for"));
+        connect(reset, &QAbstractButton::clicked, this,
+                [this] { emit backgroundResetRequested(); });
+        line->addWidget(reset);
         outer->addWidget(row);
     }
 
@@ -892,14 +904,33 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         // stay left-aligned under their neighbours above rather than
         // stretching to fill.
         line->setColumnStretch(3, 1);
-        outer->addWidget(row);
+        // PINNED WITH THE BUTTON, not scrolled away from it. Save Screenshot
+        // is fixed to the bottom of the card while this lived in the scrolling
+        // section above it - so the primary action was reachable without the
+        // control that decides what it produces ever being on screen, and a
+        // user could press it having never seen the size it was about to
+        // write. A setting the pinned action governs belongs in the pinned
+        // part of the card.
+        //
+        // With a heading of its own, because the group it used to sit under
+        // stayed behind in the scroll: pinned and headless, the sizes read as
+        // if they belonged to Camera, which is the row immediately above them.
+        {
+            auto* head = new QLabel(tr("Export"), this);
+            makeTransparent(head, QStringLiteral("renderSettingsSection_export"));
+            mySectionLabels.push_back(head);
+            shell->addWidget(head);
+        }
+        shell->addWidget(row);
 
         // What those chips actually produce, in pixels, pushed in by
         // MainWindow - and what the live tier can honour.
         myExportNote = new QLabel(this);
         myExportNote->setWordWrap(true);
         makeTransparent(myExportNote, QStringLiteral("renderSettingsExportNote"));
-        outer->addWidget(myExportNote);
+        // With the chips, for the same reason - it is the line that says what
+        // those chips will actually produce in pixels.
+        shell->addWidget(myExportNote);
     }
     setExportSize(ExportSize::Viewport);
 
@@ -956,6 +987,13 @@ void RenderSettingsPanel::setBackground(const QColor& colour)
     myBackground = colour;
     if (myBackgroundSwatch) myBackgroundSwatch->setColour(colour);
     emit backgroundChanged(colour);
+}
+
+void RenderSettingsPanel::setBackgroundSilently(const QColor& colour)
+{
+    if (!colour.isValid()) return;
+    myBackground = colour;
+    if (myBackgroundSwatch) myBackgroundSwatch->setColour(colour);
 }
 
 void RenderSettingsPanel::setFov(double fovyDeg)

@@ -513,6 +513,24 @@ void MoveTool::refresh()
     // on now) and repaint - the chip's value follows the display unit, so a
     // unit switch has to reach it.
     showGizmo();
+
+    // AND PUT THE GHOST BACK, if a drag is live. The modeling-preview channel
+    // is shared, and every other gizmo's refresh() CLEARS it on the way past
+    // (each one's end() does, unconditionally) - so an appStateChanged
+    // arriving mid-drag left this chip's own flag true over an empty channel
+    // and the ghost simply vanished while the user was still dragging.
+    //
+    // ReMeasureTool and MitreTool already re-show for exactly this reason;
+    // this one did not, and the suite caught it as an intermittent failure
+    // that passed on one full run and failed on the next. It only reported
+    // which half had gone once the check was made to name both - "chip yes,
+    // view no" - which is the whole argument for printing both sides of an
+    // ANDed assertion.
+    //
+    // Cheap in practice: appStateChanged does not fire per mouse-move, so
+    // this re-derives on a state change rather than on every step of a drag.
+    if (myAxis >= 0) updatePreview();
+
     update();
 }
 

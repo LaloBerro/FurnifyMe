@@ -478,6 +478,26 @@ QColor inkOn(const QColor& ground);
 int wholeDevicePixels(int logical);
 QSize wholeDevicePixels(const QSize& logical);
 
+// --- the spacing scale ------------------------------------------------------
+//
+// ONE SET OF STEPS, so a card's padding is a choice from a scale rather than a
+// number somebody typed. Before this there were 162 spacing constants declared
+// per file, and the shared NAMES disagreed: kPad was 10, 12, 14 and 20 in
+// different files, kRadius 6, 10 and 12, kCardRadius 8, 10, 12 and 14, kGap 8,
+// 10, 12 and 14. Each was named and local, which is better than a literal -
+// but four values behind one name across files is a scale that does not exist.
+//
+// The steps are a geometric-ish run, which is what makes a scale readable: a
+// reader can tell Tight from Snug at a glance, where 12 against 14 is a
+// coin toss. Use the NAME at a call site, never the number.
+namespace Space {
+constexpr int Hair = 4;    // between a label and the thing it labels
+constexpr int Tight = 8;   // inside a row, between a control and its value
+constexpr int Snug = 12;   // a card's own padding, a list's row gap
+constexpr int Room = 16;   // between groups inside a card
+constexpr int Wide = 24;   // between cards, and a card's bottom margin
+}  // namespace Space
+
 // The other half of the same rule: a card's POSITION.
 //
 // wholeDevicePixels() above makes a card's extent whole, which puts its far

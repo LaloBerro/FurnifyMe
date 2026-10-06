@@ -21,7 +21,7 @@ namespace {
 constexpr int kMarkSize = 20;
 // The one breathing-room gap used twice: between the mark and the wordmark,
 // and between the wordmark and the menu bar that follows it.
-constexpr int kGap = 8;
+constexpr int kGap = Theme::Space::Tight;
 
 constexpr int kPadY = 6;        // the pill's own top/bottom padding
 constexpr int kMinRadius = 12;  // a floor under updatePillMargins()'s derived value,

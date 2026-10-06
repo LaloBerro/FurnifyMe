@@ -94,6 +94,79 @@ int main()
           "and the other one survives it");
     check(!scene.removePiece(a), "removing it twice refuses");
 
+    // --- the undo stack -----------------------------------------------------
+    // A scene had none at all: taking a piece out was final, which is why
+    // removal needed a two-click confirm to be safe. Checkpoints are
+    // DocumentModel's shape - taken BEFORE a change, one undo takes the whole
+    // change back however many pieces it touched.
+    {
+        SceneModel u;
+        check(!u.canUndo() && !u.canRedo(), "undo: a fresh scene has nothing to undo or redo");
+        check(!u.undo() && !u.redo(), "undo: and both refuse rather than doing something");
+
+        u.checkpoint();
+        const int t1 = u.addPiece("table", "Table");
+        check(t1 > 0 && u.pieces().size() == 1, "undo: a piece is added over a checkpoint");
+        check(u.canUndo(), "undo: which is now undoable");
+
+        check(u.undo() && u.pieces().empty(), "undo: and one undo takes the piece back out");
+        check(u.canRedo(), "undo: with a redo waiting");
+        check(u.redo() && u.pieces().size() == 1, "undo: which puts it back");
+
+        // THE ID COUNTER COMES BACK WITH THE STATE. Without that, undoing an
+        // addition would leave the counter past the id the piece had, and the
+        // next piece would skip a number - the window hands out body ids
+        // against these, so they are not cosmetic.
+        u.undo();
+        const int t2 = u.addPiece("table", "Table again");
+        check(t2 == t1,
+              "undo: the next piece reuses the id the undone one gave back - the counter is "
+              "part of the state, not beside it");
+
+        // REMOVAL, the case this whole stack exists for.
+        u.checkpoint();
+        check(u.removePiece(t2) && u.pieces().empty(), "undo: a piece is taken out");
+        check(u.undo() && u.pieces().size() == 1 && u.pieces()[0].name == "Table again",
+              "undo: and one undo puts it back, with its own name");
+
+        // ONE CHECKPOINT COVERS A WHOLE GESTURE, however many pieces it moves.
+        u.addPiece("chair", "Chair");
+        u.checkpoint();
+        for (const SceneModel::Piece& piece : u.pieces()) {
+            gp_Trsf step;
+            step.SetTranslation(gp_Vec(100.0, 0.0, 0.0));
+            u.setPlacement(piece.id, step);
+        }
+        check(u.pieces().size() == 2, "undo: two pieces to move together");
+        const double movedX = u.pieces()[0].placement.TranslationPart().X();
+        check(std::fabs(movedX - 100.0) < 1e-9, "undo: both moved");
+        check(u.undo(), "undo: one undo for the whole gesture");
+        check(std::fabs(u.pieces()[0].placement.TranslationPart().X()) < 1e-9 &&
+                  std::fabs(u.pieces()[1].placement.TranslationPart().X()) < 1e-9,
+              "undo: and BOTH came back, not just the last one touched");
+
+        // A NEW BRANCH DISCARDS THE OLD FUTURE.
+        check(u.canRedo(), "undo: a redo is waiting before the next change");
+        u.checkpoint();
+        u.addPiece("stool", "Stool");
+        check(!u.canRedo(),
+              "undo: and doing something else discards it - there is no forward that means "
+              "anything any more");
+
+        // REVISION IS MONOTONIC ACROSS AN UNDO. Autosave and the unsaved dot
+        // read it, and a scene that has been undone has genuinely changed
+        // since it was written.
+        const std::size_t before = u.revision();
+        u.undo();
+        check(u.revision() > before,
+              "undo: revision moves FORWARD on an undo - it is a move, not a return");
+
+        // A CLEARED SCENE CANNOT BE UNDONE INTO THE ONE BEFORE IT.
+        u.clear();
+        check(!u.canUndo() && !u.canRedo(),
+              "undo: clearing the scene drops the history with it");
+    }
+
     std::printf(g_failures == 0 ? "\nPASS (%d checks)\n" : "\nFAIL (%d failures of %d)\n",
                 g_failures == 0 ? g_checks : g_failures, g_checks);
     return g_failures == 0 ? 0 : 1;

@@ -83,6 +83,12 @@ public:
     // band.
     void setLightStrength(double multiplier);
     void setBackground(const QColor& colour);
+    // The swatch alone, with no backgroundChanged emission. setBackground()
+    // emits, which is right for a user edit and wrong for a RETURN path: the
+    // reset would have set a fresh override equal to the studio tone - the
+    // same pixels, but no longer "no override", so a later theme edit could
+    // not move it.
+    void setBackgroundSilently(const QColor& colour);
     void setFov(double fovyDeg);
 
     // Re-reads every control WITHOUT emitting a signal - see the header's
@@ -287,6 +293,13 @@ signals:
     void lightAngleChanged(double azimuthDeg);
     void lightStrengthChanged(double multiplier);
     void backgroundChanged(const QColor& colour);
+    // THE WAY BACK TO THE CALIBRATED STUDIO. A picked background applies to
+    // the backdrop AND to the shadow-catcher floor, which is what makes the
+    // seam between them invisible - so a saturated colour turns the whole
+    // studio into a chroma-key field, and until now there was no control
+    // anywhere on this card that undid it. The viewport has always been able
+    // to (clearRenderBackgroundOverride); nothing could ask.
+    void backgroundResetRequested();
     void fovChanged(double fovyDeg);
 
 protected:

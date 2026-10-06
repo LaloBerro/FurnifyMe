@@ -123,5 +123,68 @@ void SceneModel::clear()
     // The id counter restarts with the scene: a cleared scene is a new scene,
     // and nothing outside it holds a piece id across the clear.
     myNextPieceId = 1;
+    // AND SO DOES THE HISTORY. A cleared scene cannot be undone into the one
+    // before it - the pieces that history names do not exist any more, and
+    // their ids have just been handed back to the counter.
+    clearHistory();
     ++myRevision;
+}
+
+SceneModel::State SceneModel::snapshot() const
+{
+    State out;
+    out.pieces = myPieces;
+    out.shots = myShots;
+    out.nextPieceId = myNextPieceId;
+    return out;
+}
+
+void SceneModel::restore(const State& state)
+{
+    myPieces = state.pieces;
+    myShots = state.shots;
+    // THE COUNTER COMES BACK TOO. Without it, undoing the addition of a piece
+    // would leave the counter past the id that piece had, and the next piece
+    // added would skip a number - harmless on its own, but the ids are this
+    // scene's own and the window hands out body ids against them.
+    myNextPieceId = state.nextPieceId;
+    // Monotonic, never rolled back - an undo is a MOVE, not a return. Autosave
+    // and the unsaved dot both read this, and a scene that has been undone has
+    // genuinely changed since it was written.
+    ++myRevision;
+}
+
+void SceneModel::checkpoint()
+{
+    myUndo.push_back(snapshot());
+    // A NEW BRANCH DISCARDS THE OLD FUTURE, which is what every undo stack
+    // does and what the user expects: having gone back and then done something
+    // else, there is no longer a "forward" that means anything.
+    myRedo.clear();
+}
+
+bool SceneModel::undo()
+{
+    if (myUndo.empty()) return false;
+    myRedo.push_back(snapshot());
+    const State back = myUndo.back();
+    myUndo.pop_back();
+    restore(back);
+    return true;
+}
+
+bool SceneModel::redo()
+{
+    if (myRedo.empty()) return false;
+    myUndo.push_back(snapshot());
+    const State forward = myRedo.back();
+    myRedo.pop_back();
+    restore(forward);
+    return true;
+}
+
+void SceneModel::clearHistory()
+{
+    myUndo.clear();
+    myRedo.clear();
 }

@@ -15,7 +15,7 @@
 
 namespace {
 constexpr int kWidth = 200;
-constexpr int kRadius = 12;
+constexpr int kRadius = Theme::Space::Snug;
 constexpr int kPad = 10;
 constexpr int kRowInset = 6;
 constexpr int kRowButtonPx = 24;
@@ -24,6 +24,15 @@ constexpr int kRowButtonPx = 24;
 // Items drawer's own answer to the same problem (improvements item 12).
 constexpr int kRowsMaxHeight = 420;
 }  // namespace
+
+// ONE AUTHOR. This sentence was written out three times in this file - the
+// tooltip itself, the banned-word sweep's list, and the restyle that puts it
+// back when a row disarms - so a reworded tooltip could have left the sweep
+// policing a string nobody paints.
+QString ScenePiecesPanel::removeTipText()
+{
+    return tr("Take this piece out of the scene");
+}
 
 ScenePiecesPanel::ScenePiecesPanel(QWidget* parent)
     : QWidget(parent)
@@ -136,7 +145,7 @@ void ScenePiecesPanel::rebuild()
 
         auto* remove = new QPushButton(row);
         remove->setFixedSize(kRowButtonPx, kRowButtonPx);
-        remove->setToolTip(tr("Take this piece out of the scene"));
+        remove->setToolTip(removeTipText());
         remove->setCursor(Qt::PointingHandCursor);
         connect(remove, &QPushButton::clicked, this, [this, id] {
             if (myArmedRemove != id) {
@@ -230,7 +239,7 @@ QStringList ScenePiecesPanel::paintedTexts() const
     // keeps, applied at the surface that knows which string is whose.
     QStringList texts{tr("Pieces"), tr("Add a furniture to put it in this scene"),
                       tr("Show or hide this piece"),
-                      tr("Take this piece out of the scene"),
+                      removeTipText(),
                       tr("Click again to take it out")};
     for (const BuiltRow& row : myRows) {
         // A refusal sentence is this app's copy, so it IS swept.
@@ -258,7 +267,7 @@ void ScenePiecesPanel::applyTheme()
             const bool armed = row.data.pieceId == myArmedRemove;
             row.remove->setText(armed ? QStringLiteral("!") : QStringLiteral("x"));
             row.remove->setToolTip(armed ? tr("Click again to take it out")
-                                         : tr("Take this piece out of the scene"));
+                                         : removeTipText());
             row.remove->setStyleSheet(
                 QStringLiteral("QPushButton { background: transparent; border: none;"
                                " color: %1; }")
@@ -266,12 +275,39 @@ void ScenePiecesPanel::applyTheme()
         }
         if (!row.name) continue;
         row.name->setFont(Theme::bodyFont());
-        // A broken piece and a hidden one both read MUTED, for the same
-        // reason: neither is on screen.
-        const bool dim = !row.data.reason.isEmpty() || !row.data.visible;
-        row.name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
-                                    .arg((dim ? Theme::textMuted() : Theme::text()).name()));
+        // A BROKEN PIECE AND A HIDDEN ONE ARE NOT THE SAME THING, and they
+        // used to read identically muted on the grounds that neither is on
+        // screen. That is true and it is not what the user needs to know: a
+        // hidden piece is a choice they made, a broken one is a reference
+        // that cannot be read, and the product principle is that it breaks
+        // LOUDLY. A row that looks merely dimmed is a row they believe.
+        const QColor nameColour = !row.data.reason.isEmpty()
+                                      ? Theme::danger()
+                                      : (!row.data.visible ? Theme::textMuted() : Theme::text());
+        row.name->setStyleSheet(
+            QStringLiteral("background: transparent; color: %1;").arg(nameColour.name()));
     }
+}
+
+void ScenePiecesPanel::mousePressEvent(QMouseEvent* event)
+{
+    // SAME HIT TEST AS THE RENAME BELOW, same mapping, for the same reason: a
+    // row's geometry() is relative to the rows' host inside the scroll area,
+    // not to this card, so an unmapped rect selects a neighbouring piece.
+    //
+    // The eye and the remove button are CHILD widgets, so a press on either is
+    // delivered to them and never reaches here - there is no need to exclude
+    // their rectangles, and excluding them by geometry is what would rot the
+    // day a row grows a third control.
+    for (const BuiltRow& row : myRows) {
+        if (!row.widget) continue;
+        const QRect inPanel(row.widget->mapTo(this, QPoint(0, 0)), row.widget->size());
+        if (!inPanel.contains(event->pos())) continue;
+        emit selectionRequested(row.data.pieceId);
+        event->accept();
+        return;
+    }
+    QWidget::mousePressEvent(event);
 }
 
 void ScenePiecesPanel::mouseDoubleClickEvent(QMouseEvent* event)

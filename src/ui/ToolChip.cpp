@@ -17,7 +17,7 @@ namespace {
 constexpr int kIcon = 16;
 constexpr int kPadX = 12;
 constexpr int kPadY = 8;
-constexpr int kGap = 8;
+constexpr int kGap = Theme::Space::Tight;
 constexpr int kRadius = 6;
 constexpr double kFocusRingWidth = 2.0;
 // The press dip: how far the card gives way under a press, and how long it

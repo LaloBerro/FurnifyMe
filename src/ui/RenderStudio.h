@@ -75,6 +75,22 @@ public:
     // one-shot at the control that moved.
     void refresh();
 
+    // PUSHES THE VIEWPORT'S LIVE VALUES ONTO THE CARD'S OWN CONTROLS, which
+    // is the one direction refresh() does not cover: refresh() re-derives
+    // what the studio DRAWS, while these are the rows the user reads.
+    //
+    // It exists because a reopened scene rendered with its saved aspect,
+    // guides, light, FOV, export size, quality and cutout while every one of
+    // the card's rows showed its default until touched - the settings were
+    // applied to the view and nothing told the card. There was no single
+    // entry point to call: the host set rows one setter at a time, so a
+    // caller had to know all eight and would silently miss the ninth.
+    //
+    // Silent by contract: it must not emit the panel's own change signals, or
+    // syncing the card would write the values straight back and look like a
+    // user edit.
+    void syncPanelFromView();
+
     RenderSettingsPanel* panel() const { return myPanel; }
     RenderFrameGuides* frame() const { return myFrame; }
     ToolChip* exitChip() const { return myExitChip; }

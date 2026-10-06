@@ -2146,12 +2146,23 @@ void MainWindow::buildOverlay()
     tool(myUnionAction,       IconSet::Glyph::Fuse);
     tool(mySubtractAction,    IconSet::Glyph::Cut);
     tool(myIntersectAction,   IconSet::Glyph::Intersect);
+    // DESTROY IS ITS OWN GROUP. Delete used to sit inside the combine run, so
+    // the rail said that removing a body and intersecting two were the same
+    // kind of thing - and the chip that destroys work was the one with no
+    // visual separation from the three beside it.
+    rail->addSeparator();
     tool(myDeleteAction,      IconSet::Glyph::Delete);
     // Snap to Grid is View-menu-only now, by the user's call - it is a setting
     // you flip rarely, not a tool you reach for, and it was the rail's last
     // checkable chip. The rail's derived minimum height below follows for free:
     // it reads rail->sizeHint(), never a count.
-    rail->addStretch();
+    // UNDO AND REDO JOIN THE COLUMN (the user's pick from the rail mockups,
+    // option C). They used to be pushed to the viewport's bottom edge by a
+    // stretch, which put the two most-used controls in any CAD tool roughly
+    // 350 px of travel from everything else and made the rail read as a
+    // broken column with a hole in it. A separator, not a stretch: they are
+    // still their own group, just a reachable one.
+    rail->addSeparator();
     tool(myUndoAction,        IconSet::Glyph::Undo);
     tool(myRedoAction,        IconSet::Glyph::Redo);
 
@@ -2412,8 +2423,13 @@ void MainWindow::buildOverlay()
     myAppearancePanel->addChoiceRow(SettingsTab::Units, tr("Sizes in"),
                                     {myUnitsMillimetresAction, myUnitsCentimetresAction},
                                     {tr("Millimetres"), tr("Centimetres")});
-    myAppearancePanel->addToggleRow(SettingsTab::Units, tr("Snap to Grid"), mySnapAction);
-    myAppearancePanel->addToggleRow(SettingsTab::Units, tr("Magnet"), myMagnetAction);
+    // SNAP AND MAGNET ARE NOT UNITS. They are drawing aids - what a dragged
+    // body does when it nears a grid line or another body - and they sat
+    // under Units because the display unit was the only other thing on that
+    // tab. A user looking for them looked at Viewport, which is where the
+    // grid switch already is, and Units was left holding one row.
+    myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Snap to Grid"), mySnapAction);
+    myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Magnet"), myMagnetAction);
 
     // Autosave's five modes stacked rather than segmented: five chips in a
     // 272-pixel row would be five unreadable chips.
@@ -5140,7 +5156,26 @@ void MainWindow::updateStateLabel()
     // in.
     if (myDocument.symmetryOn()) state = tr("Mirror on — %1").arg(state);
 
-    myStateLabel->setText(state);
+    // ELIDED, NOT TRUNCATED. This line is the only place several interactions
+    // are explained ("Shift adds bodies...", "...Esc to cancel"), and it ran
+    // off the window's right edge in every screenshot with no ellipsis at
+    // all - so the user could not tell a sentence that had ended from one
+    // that had been cut, and clipping it is clipping documentation.
+    //
+    // The full sentence goes to the tooltip, so nothing is lost: the label is
+    // narrowed to what fits and the rest is one hover away.
+    myStateLabel->setToolTip(state);
+    // Elided against a cap derived from the WINDOW, never against the label's
+    // own width: the label is sized from its sizeHint, which is sized from
+    // its text, so eliding to its current width would shrink it a little
+    // further on every update until nothing was left.
+    //
+    // Half the window, because the bar carries two other things - the last
+    // outcome on the left and the furniture's name in the middle - and this
+    // hint is the one that grows without bound.
+    const int room = std::max(160, width() / 2);
+    myStateLabel->setMaximumWidth(room);
+    myStateLabel->setText(myStateLabel->fontMetrics().elidedText(state, Qt::ElideRight, room));
 }
 
 QString MainWindow::faceOnDirectionLabel(const gp_Dir& normal) const
@@ -6641,8 +6676,8 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
         // show its error text: it is written for this file, not for the user.
         qWarning("Pull failed: %s", result.error.c_str());
         myToasts->show(tr("This face can't be pulled that far — a carve deeper than the "
-                          "body removes the whole thing, and the geometry engine has "
-                          "nothing left to build. Try a smaller distance, or drag the "
+                          "body removes the whole thing, so there is no wood left to "
+                          "take out. Try a smaller distance, or drag the "
                           "arrow the other way"),
                       Toast::Kind::Failure, false);
         statusBar()->showMessage(tr("Pull refused — nothing was changed"));
@@ -6703,7 +6738,7 @@ QString MainWindow::mitreTooLongRefusalText()
 
 QString MainWindow::mitreKernelRefusalText()
 {
-    return tr("This end can't be mitred at that angle — the geometry engine could not build "
+    return tr("This end can't be mitred at that angle — the cut couldn't be made. Try a "
               "the shape. Try a different angle");
 }
 
@@ -6890,8 +6925,8 @@ QString MainWindow::reMeasureStraightRefusalText()
 
 QString MainWindow::reMeasureKernelRefusalText()
 {
-    return tr("This body can't be made that size — the geometry engine could not build the "
-              "shape. Try a different size");
+    return tr("This body can't be made that size — the shape couldn't be built. Try a "
+              "different size");
 }
 
 QString MainWindow::reMeasureGroupRefusalText()
@@ -6970,6 +7005,8 @@ bool MainWindow::beginReMeasure(int index)
     // gesture would silently decide the next one.
     myResizeAnchor = ModelingOps::ResizeAnchor::Centre;
     myResizeRevision = myDocument.revision();
+    // A fresh gesture annotates the BODY until its first preview arrives.
+    myResizePreviewBox = ModelingOps::MeasuredBox();
     myResizeActive = true;
     myView->showResizePin(index, 1);
     // The transform gizmo stands down and ReMeasureTool begins off this one
@@ -7295,7 +7332,7 @@ QString MainWindow::transformRefusalText(const gp_Trsf& delta)
     // sentence this replaced said "the geometry engine refused the change" and
     // sailed through every run only because nothing ever triggered it - which
     // is exactly why the suite now shows this copy through a probe.
-    return tr("This body couldn't be %1 — the geometry engine turned that "
+    return tr("This body couldn't be %1 — that left nothing to keep. Try a "
               "change down. Try a smaller drag, or a different handle")
         .arg(transformPastVerb(delta));
 }
@@ -8024,7 +8061,7 @@ QString MainWindow::booleanRefusalFor() const
             .arg(booleanOperationName());
     }
     return tr("%1 couldn't combine these bodies — this usually means they only touch at a "
-              "single edge or corner, which the geometry engine can't resolve. Move one so "
+              "single edge or corner, which is too little to cut against. Move one so "
               "they overlap properly, then try again")
         .arg(booleanOperationName());
 }
@@ -8919,7 +8956,7 @@ bool MainWindow::duplicateSelectedBody()
             ModelingOps::transformShape(sourceShape, gp_Trsf());
         if (!transformed.ok) {
             qWarning("Duplicate failed: %s", transformed.error.c_str());
-            myToasts->show(tr("Couldn't duplicate that body — the geometry engine turned "
+            myToasts->show(tr("Couldn't duplicate that body — the copy came back empty. "
                               "the copy down. Try a different body"),
                           Toast::Kind::Failure, false);
             statusBar()->showMessage(tr("Duplicate refused — nothing was changed"));
@@ -9820,7 +9857,7 @@ bool MainWindow::duplicateLinkedCopy()
         // "unreachable in practice, kept defensive" idiom
         // commitReplaceBody()'s own twin-mirror comment follows.
         qWarning("Duplicate linked failed: %s", result.error.c_str());
-        myToasts->show(tr("Couldn't duplicate that body — the geometry engine turned "
+        myToasts->show(tr("Couldn't duplicate that body — the copy came back empty. "
                           "the copy down. Try a different body"),
                       Toast::Kind::Failure, false);
         statusBar()->showMessage(tr("Duplicate linked refused — nothing was changed"));
@@ -9869,7 +9906,7 @@ bool MainWindow::linkSelectedBodies()
         // kernel's own error string is logged, never shown - it is written
         // for this file, not for the user.
         qWarning("Link selected failed: %s", result.error.c_str());
-        myToasts->show(tr("Couldn't link those bodies — the geometry engine turned "
+        myToasts->show(tr("Couldn't link those bodies — the copy came back empty. "
                           "the snap down. Try moving them closer together first"),
                       Toast::Kind::Failure, false);
         statusBar()->showMessage(tr("Link selected refused — nothing was changed"));
@@ -10023,7 +10060,10 @@ QString MainWindow::selectionStatusText() const
     if (count == 0) return tr("Nothing selected");
     QString text = count == 1 ? tr("1 body selected") : tr("%1 bodies selected").arg(count);
     if (myView->selectionKind() == OcctViewWidget::PickKind::Body) {
-        const ModelingOps::MeasuredBox box = selectionBox();
+        // THE SAME BOX THE LINES ARE DRAWN FROM. The bar read 600 x 300 x 18
+        // beside a dimension line that had just been corrected to 450, which
+        // is two numbers for one edge.
+        const ModelingOps::MeasuredBox box = shownSelectionBox();
         if (box.ok) {
             const QString size =
                 QString::fromStdString(Measure::formatSize(box.width, box.depth, box.height));
@@ -10034,10 +10074,29 @@ QString MainWindow::selectionStatusText() const
     return text;
 }
 
+void MainWindow::setReMeasurePreviewShape(const TopoDS_Shape& shape)
+{
+    myResizePreviewBox =
+        shape.IsNull() ? ModelingOps::MeasuredBox()
+                       : ModelingOps::measuredBox(std::vector<TopoDS_Shape>{shape});
+    // Straight to the annotation, not through updateActions(): this runs from
+    // the tool's own preview rebuild, and updateActions() emits
+    // appStateChanged, which is what drives that rebuild.
+    refreshSelectionSizes();
+}
+
+ModelingOps::MeasuredBox MainWindow::shownSelectionBox() const
+{
+    // Only while the gesture is live, so a box left over from a cancelled or
+    // committed re-measure is inert without anything having to clear it.
+    if (myResizeActive && myResizePreviewBox.ok) return myResizePreviewBox;
+    return selectionBox();
+}
+
 void MainWindow::refreshSelectionSizes()
 {
     if (selectionSizesVisible()) {
-        const ModelingOps::MeasuredBox box = selectionBox();
+        const ModelingOps::MeasuredBox box = shownSelectionBox();
         if (box.ok) {
             myView->showSelectionSizes(box, myView->selectedSolidIds().size() > 1
                                                 ? SelectionSizesRenderer::Kind::Group

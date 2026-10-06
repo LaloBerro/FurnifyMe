@@ -49,7 +49,7 @@ constexpr double kHitRadius = 11.0;   // click tolerance around a tip - this
 // that default (see Theme.h). Named apart from kRadius above, which is the
 // arm length in pixels and an unrelated number that happens to share the
 // family default's old value.
-constexpr int kCardRadius = 8;
+constexpr int kCardRadius = Theme::Space::Tight;
 
 // The widget's own centre. It used to be the centre of the area ABOVE the
 // label chip, which needed the chip's height repeated here; with the chip gone
@@ -269,6 +269,31 @@ void AxisGizmo::mousePressEvent(QMouseEvent* event)
         }
     }
     if (best) snapToAxis(best->axis, best->positive);
+    // CLAIMED EITHER WAY, and this is the whole of the user's report: "if i
+    // have a piece selected and press any ui the selection is gone." A left
+    // press that hit no tip used to fall out of here unclaimed, propagate to
+    // the viewport underneath, and be picked on - so clicking the gizmo's
+    // empty corner deselected whatever the user was working on.
+    //
+    // WA_NoMousePropagation is the usual answer for a control over the
+    // viewport and is the WRONG one here: it would stop the right- and
+    // middle-button ignore() above as well, and orbit and pan over the gizmo
+    // are deliberate. Claiming only the left button keeps both.
+    event->accept();
+}
+
+void AxisGizmo::mouseReleaseEvent(QMouseEvent* event)
+{
+    // THE VIEWPORT PICKS ON THE RELEASE, so accepting only the press is half
+    // a fix: Qt delivers the release to whichever widget took the press, and
+    // QWidget's default handler ignores it straight back down to the
+    // viewport. Every drag in OcctViewWidget keeps this same rule - the
+    // gesture that started owns the release that ends it.
+    if (event->button() != Qt::LeftButton) {
+        event->ignore();
+        return;
+    }
+    event->accept();
 }
 
 void AxisGizmo::mouseMoveEvent(QMouseEvent* event)

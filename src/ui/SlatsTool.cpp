@@ -25,7 +25,7 @@
 namespace {
 
 constexpr int kPad = GestureChip::kPad;
-constexpr int kGap = 8;
+constexpr int kGap = Theme::Space::Tight;
 constexpr int kRowHeight = 26;
 constexpr int kFieldWidth = 62;
 constexpr int kFlipWidth = 56;
@@ -36,7 +36,7 @@ constexpr int kReasonHeight = 16;
 // margin, so the two read as one band rather than two arbitrary heights - and
 // a toast raised during the gesture lands over this card rather than beside
 // it, which is the right way round: a refusal is the thing to read.
-constexpr int kBottomMargin = 24;
+constexpr int kBottomMargin = Theme::Space::Wide;
 // Width, Gap, Depth - the three numbers, in the order the chip paints them.
 constexpr int kFieldCount = 3;
 

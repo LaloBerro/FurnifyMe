@@ -19,12 +19,12 @@ namespace {
 constexpr int kPad = 14;
 constexpr int kGap = 14;
 constexpr int kRowHeight = 22;
-constexpr int kCardRadius = 12;
+constexpr int kCardRadius = Theme::Space::Snug;
 // The same fixed spot SlatsTool uses, for the same reason: a boolean covers
 // two or more whole bodies, so a chip anchored to one of them would sit ON
 // the work it is showing you - and the region is the thing that has to stay
 // visible.
-constexpr int kBottomMargin = 24;
+constexpr int kBottomMargin = Theme::Space::Wide;
 
 QFont titleFontBold()
 {

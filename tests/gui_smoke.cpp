@@ -77,6 +77,7 @@
 #include "ToolCluster.h"
 #include "TransformGizmo.h"
 #include "UserProgress.h"
+#include "PanelCloseButton.h"
 #include "VersionsPanel.h"
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
@@ -741,6 +742,26 @@ void skipByEnvironment(int checks, const QString& why)
 // that edits global state needs a window nobody else is using, and nothing
 // else in the suite would have said so.
 //
+// RE-RATCHETED (2026-10-06, the board sweep): every card on the project board
+// worked to a close - the scene window's row selection and context-loss
+// rebuild, re-measure annotating its own ghost, the axis gizmo claiming its
+// clicks, the items drawer noticing a folder move, the rail regrouped, the
+// scene window gone frameless, a real undo stack for a scene, and the preview
+// drawing what an edit CHANGES instead of flooding the body yellow. TWO
+// consecutive unfiltered runs measured 5374 checks + 1 environment skip,
+// agreeing to the digit, against the binary this carries.
+//
+// Three INTERMITTENT failures were fixed on the way, and all three were the
+// suite rather than the app - the same cause, which is worth stating once.
+// Making settle() exit as soon as Qt goes idle (T-007, 774 s -> 546 s) also
+// exposed every check that had been relying on ELAPSED TIME to stand in for a
+// thing having happened: a close that asked because an autosave debounce was
+// still in flight; remainingMs() > 7500, which asserted that under half a
+// second of work had passed when the claim is "a Failure, not a Note"; and a
+// right-click sent to a size label before the annotation had been laid out.
+// Each now waits for the CONDITION rather than for a duration, which is what
+// a fast settle() demands and what makes them honest on any machine.
+//
 // RE-RATCHETED (2026-10-05, the scene-editor branch): the scene window and its
 // pieces list, per-furniture wood, the piece/eye/Fit All repairs, the frame
 // audit, snapping pieces to each other, and the suite-speed pass's own one
@@ -755,7 +776,7 @@ void skipByEnvironment(int checks, const QString& why)
 // added, 5278 after, measured at every stage rather than reasoned about. A
 // speed pass is exactly the change this floor exists to police, because every
 // wait it shortens is a chance for a check to stop being reached.
-constexpr int kCheckFloor = 5278;
+constexpr int kCheckFloor = 5374;
 
 void check(bool condition, const QString& what)
 {
@@ -954,6 +975,7 @@ constexpr BlockInfo kBlocks[] = {
     { "selection-sizes-around-the-selection", false, true },
     { "and-the-show-sizes-preference-persists", false, true },
     { "re-measure-right-click-a-size-and-type-a-new-one", false, true },
+    { "pressing-a-control-never-drops-the-selection", false, true },
     { "booleans-roles-on-the-wood-and-the-region-drawn", false, true },
     { "the-rail-and-the-drawer-start-on-one-line", false, true },
 };
@@ -3168,6 +3190,15 @@ int main(int argc, char* argv[])
         sweepSelector.resize(900, 600);
         sweepSelector.show();
         settle(300);
+
+        // THE HUB IS LOOKED AT, not only swept. This block already grabs the
+        // window for the black-line sweep below, and a grab that is measured
+        // and then thrown away leaves the app's own front door the one surface
+        // nobody ever sees a picture of - which is the scene window's lesson
+        // (driving a window is not looking at it) applied to the window the
+        // user meets first. Written at rest, before the hover below, because
+        // resting is the state this window is in when it is read.
+        printWindowCapture(&sweepSelector, outDir + QStringLiteral("/selector-hub.png"));
 
         QSet<double> scale;
         for (const QFont& f :
@@ -5767,15 +5798,26 @@ int main(int argc, char* argv[])
             const int expectedRailTop = pillForRail
                 ? pillForRail->y() + pillForRail->height() + ViewportOverlay::kStackGap
                 : -1;
+            // IT NO LONGER SPANS TO THE BOTTOM. The rail used to be stretched
+            // to the viewport's bottom edge, which is what pushed Undo and
+            // Redo roughly 350 px below every other tool; the user picked
+            // option C from the rail mockups, so they sit in the column and
+            // the rail keeps its NATURAL height. What is still asserted is
+            // the part that did not change - it starts one stacking gap below
+            // the pill, derived from the pill's own live geometry so a pill
+            // that grows a row moves this with it - plus the new rule: the
+            // rail ends well clear of the viewport's bottom, because a
+            // stretched card would be a tall empty panel under the last chip.
             const int bottomGap = view->height() - (rail->y() + rail->height());
-            check(pillForRail != nullptr && std::abs(rail->y() - expectedRailTop) <= 1 &&
-                      bottomGap >= -1 && bottomGap <= 20,
-                  QStringLiteral("and starts one stacking gap below the pill, spanning "
-                                 "down to the viewport's bottom edge (rail y=%1, expected "
-                                 "%2, %3px of viewport left below it, viewport %4px tall, "
-                                 "rail %5px)")
-                      .arg(rail->y()).arg(expectedRailTop).arg(bottomGap)
-                      .arg(view->height()).arg(rail->height()));
+            check(pillForRail != nullptr && std::abs(rail->y() - expectedRailTop) <= 1,
+                  QStringLiteral("and starts one stacking gap below the pill (rail y=%1, "
+                                 "expected %2)")
+                      .arg(rail->y()).arg(expectedRailTop));
+            check(bottomGap > 40,
+                  QStringLiteral("and keeps its natural height rather than spanning to the "
+                                 "bottom edge (%1px of viewport left below it, viewport "
+                                 "%2px tall, rail %3px)")
+                      .arg(bottomGap).arg(view->height()).arg(rail->height()));
 
             // The exact order, by QAction POINTER. Comparing visible text
             // would pass against the right buttons in the wrong order as
@@ -5905,9 +5947,20 @@ int main(int argc, char* argv[])
                  rail->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
                 if (!qobject_cast<ToolChip*>(child)) separators << child;
             }
-            check(separators.size() == 2,
-                  QStringLiteral("two separators divide the rail's three groups "
-                                 "before the stretch (found %1)").arg(separators.size()));
+            // FOUR NOW, not two, and the stretch is gone (rail mockups,
+            // option C). The groups are: Items | make (sketch, extrude, add
+            // shape) | combine (union, subtract, intersect) | destroy
+            // (delete) | history (undo, redo). Delete used to sit inside the
+            // combine run - so the rail said removing a body and intersecting
+            // two were the same kind of thing - and history used to be pushed
+            // to the viewport's bottom edge by a layout stretch, which is a
+            // stretch item rather than a child widget and so was invisible to
+            // this sweep by construction. It is a real separator now, which
+            // is why the count moved by two rather than by one.
+            check(separators.size() == 4,
+                  QStringLiteral("four separators divide the rail's five groups - items, "
+                                 "make, combine, destroy, history (found %1)")
+                      .arg(separators.size()));
             if (!separators.isEmpty()) {
                 // The rule is really painted, in border(), on the middle row.
                 // "A separator widget exists" would pass against one that
@@ -5937,10 +5990,19 @@ int main(int argc, char* argv[])
                 // needing to know.
                 ToolChip* lastBeforeStretch = chips[chips.size() - 3];
                 ToolChip* undo = chips[chips.size() - 2];
-                const int slackY =
-                    (lastBeforeStretch->y() + lastBeforeStretch->height() + undo->y()) / 2;
+                // SAMPLED BESIDE A CHIP, not between the groups. This used to
+                // probe the slack the rail's stretch opened before Undo, which
+                // was the one region that was nothing but card - option C
+                // removed that stretch, so the same point now lands on the
+                // separator rule that took its place and reads the stroke
+                // colour instead of the card's fill. A chip's own row is the
+                // region that is still pure card: the cluster centres a 34 px
+                // chip in a wider card, so the column to its left is padding.
+                const int slackY = undo->y() + undo->height() / 2;
                 const QImage railImg = renderExact(rail);
-                const QColor back = railImg.pixelColor(rail->width() / 2, slackY);
+                // Left of the chip, inside the card's own padding.
+                const int cardX = std::max(2, undo->x() / 2);
+                const QColor back = railImg.pixelColor(cardX, slackY);
                 check(colorDistance(back, Theme::panel()) < 12.0,
                       QStringLiteral("the rail paints panel() behind its buttons rather "
                                      "than leaving the GL surface showing through "
@@ -5967,30 +6029,41 @@ int main(int argc, char* argv[])
                 // sample is deliberately the slack region the stretch
                 // opens between the last tool and Undo: the one part of this
                 // card that is nothing but card.
-                const QRect slack(4, lastBeforeStretch->y() + lastBeforeStretch->height() + 4,
-                                  rail->width() - 8,
-                                  std::max(4, undo->y() - 4 -
-                                                  (lastBeforeStretch->y() +
-                                                   lastBeforeStretch->height() + 4)));
+                // The interior region is the padding column beside the
+                // history chips - card and nothing else, now that the stretch
+                // that used to supply such a region is gone.
+                const QRect slack(2, undo->y() + 3, std::max(2, undo->x() - 4),
+                                  std::max(4, undo->height() - 6));
                 checkFamilySurface(rail, QPoint(0, slackY), slack, Theme::border(),
                                    QStringLiteral("ToolCluster (the rail)"), /*radius=*/10);
                 checkCardCorners(rail, QStringLiteral("ToolCluster (the rail)"));
             }
 
-            // Undo and Redo are pushed to the BOTTOM by the rail's stretch,
-            // not left sitting under the last tool. Asserted against the
-            // rail's own height so it holds at any viewport size.
-            if (chips.size() >= 2) {
+            // UNDO AND REDO ARE IN REACH, which is the whole of what option C
+            // changed. They used to be pushed to the rail's bottom by a
+            // layout stretch - roughly 350 px of travel from every other tool,
+            // and a column that read as broken because of the hole in it.
+            // They now follow Delete across one separator, so the distance is
+            // a chip and a rule rather than a window height.
+            //
+            // Asserted as a BOUND on the gap rather than an exact offset: the
+            // separator's own height and the cluster's spacing are the
+            // cluster's business, and pinning their sum here would make this
+            // check fail the day either is retuned without anything being
+            // wrong.
+            if (chips.size() >= 3) {
                 ToolChip* redo = chips.last();
+                ToolChip* lastTool = chips[chips.size() - 3];
+                const int gap = redo->y() - lastTool->y();
+                check(gap > 0 && gap < 120,
+                      QStringLiteral("Undo and Redo follow the last tool across one "
+                                     "separator rather than a window height (%1px)")
+                          .arg(gap));
                 const int fromBottom = rail->height() - (redo->y() + redo->height());
-                check(fromBottom >= 0 && fromBottom <= 14,
-                      QStringLiteral("the stretch puts Redo at the rail's bottom, one "
-                                     "card padding up (%1px below it, rail %2px tall)")
-                          .arg(fromBottom).arg(rail->height()));
-                ToolChip* lastBeforeStretch = chips[chips.size() - 3];
-                check(redo->y() - lastBeforeStretch->y() > 100,
-                      QStringLiteral("with real slack between the last tool and "
-                                     "history (%1px)").arg(redo->y() - lastBeforeStretch->y()));
+                check(fromBottom >= 0 && fromBottom <= 20,
+                      QStringLiteral("and Redo is the last chip in the column, one card "
+                                     "padding from its bottom (%1px below it, rail %2px "
+                                     "tall)").arg(fromBottom).arg(rail->height()));
             }
 
             // Every button is a real hit-test target, compared against the
@@ -20856,6 +20929,28 @@ int main(int argc, char* argv[])
 
         QPushButton* addBtn = panel ? panel->addButton() : nullptr;
         check(addBtn != nullptr, "the header's + control exists");
+        // AND IT DOES NOT SIT UNDER THE CLOSE BUTTON. The user's report was
+        // "version close button is overlapping the add button": MainWindow
+        // parents a PanelCloseButton to this drawer and it places itself at
+        // the top right, which is where the header put its "+". Measured in
+        // the PANEL's own space on both sides - a rect taken from one
+        // widget's parent and compared against another's is the scene
+        // window's own lesson, and it passed for no reason there.
+        if (panel && addBtn) {
+            PanelCloseButton* closeBtn = panel->findChild<PanelCloseButton*>();
+            check(closeBtn != nullptr, "the versions drawer has a close control");
+            if (closeBtn) {
+                const QRect addRect(addBtn->mapTo(panel, QPoint(0, 0)), addBtn->size());
+                const QRect closeRect(closeBtn->mapTo(panel, QPoint(0, 0)), closeBtn->size());
+                check(!addRect.intersects(closeRect),
+                      QStringLiteral("the close control does not overlap the + (add %1,%2 "
+                                     "%3x%4 against close %5,%6 %7x%8)")
+                          .arg(addRect.x()).arg(addRect.y())
+                          .arg(addRect.width()).arg(addRect.height())
+                          .arg(closeRect.x()).arg(closeRect.y())
+                          .arg(closeRect.width()).arg(closeRect.height()));
+            }
+        }
         check(addBtn != nullptr && addBtn->isEnabled(),
               "...and is enabled: a furniture is open, nothing else claims the keys");
         // childAt() from the VIEWPORT, per this task's own brief - the +
@@ -24319,6 +24414,44 @@ int main(int argc, char* argv[])
               "a snapshot is taken while render mode is on");
         const QImage afterShot(afterPath);
         check(!afterShot.isNull(), "and it loads back");
+
+        // AND A PICTURE OF WHAT THE APP ACTUALLY SHIPS. Every capture above
+        // is taken with wood OFF, because gui_smoke builds MainWindow with
+        // persistProgress=false and myStartRenderWood's member default is
+        // false - while the real app runs the persistence branch, which sets
+        // it to true unconditionally ("wood is always on now that Matte,
+        // Satin and Metal are gone"). So the suite's render screenshots show
+        // a grey body that no user has ever seen, and a UI review reading
+        // them concluded the product renders grey.
+        //
+        // The calibration checks around this deliberately keep the plain
+        // material - floor blend and shadow ratio are measured against it -
+        // so this takes its own shot and puts the flag straight back.
+        {
+            const bool woodBefore = rview->renderWood();
+            rview->setRenderWood(true);
+            const QString woodPath = outDir + QStringLiteral("/render-mode-wood.png");
+            check(rview->saveSnapshot(woodPath),
+                  "a second shot is taken with wood on - what the shipping app renders");
+            const QImage woodShot(woodPath);
+            check(!woodShot.isNull(), "and the wood shot loads back");
+            // NON-VACUOUS: if wood changed nothing, the two files would be
+            // the same picture and this capture would be proving nothing.
+            if (!woodShot.isNull() && !afterShot.isNull() &&
+                woodShot.size() == afterShot.size()) {
+                long long moved = 0;
+                for (int y = 0; y < woodShot.height(); y += 4) {
+                    for (int x = 0; x < woodShot.width(); x += 4) {
+                        if (woodShot.pixel(x, y) != afterShot.pixel(x, y)) ++moved;
+                    }
+                }
+                check(moved > 0,
+                      QStringLiteral("and wood genuinely changes the render (%1 sampled "
+                                     "pixels moved)")
+                          .arg(moved));
+            }
+            rview->setRenderWood(woodBefore);
+        }
         // 2x on every tier but the path-traced one, which exports at 1x for
         // a measured reason the round's addendum forced into the open: the
         // 2x path is an OFFSCREEN ToPixMap() render, and for a path-traced
@@ -25957,7 +26090,7 @@ int main(int argc, char* argv[])
               "...and no checkpoint was taken - a genuine no-op, not a silent partial one");
         check(probe.document().isLinked(idM1) && probe.document().isLinked(idM2),
               "...both bodies are exactly as linked as they were");
-        check(linkToasts != nullptr && linkToasts->remainingMs() > 7500,
+        check(linkToasts != nullptr && linkToasts->remainingMs() > 5000,
               QStringLiteral("the refusal is a real Failure toast, timed for 8000 ms "
                              "(%1 ms left)")
                   .arg(linkToasts ? linkToasts->remainingMs() : -1));
@@ -26096,7 +26229,7 @@ int main(int argc, char* argv[])
             check(mirrorProbe.document().count() == bodiesBeforeMirrorRefusal,
                   "...and nothing was added");
             ToastHost* mirrorToasts = mirrorProbe.findChild<ToastHost*>();
-            check(mirrorToasts != nullptr && mirrorToasts->remainingMs() > 7500,
+            check(mirrorToasts != nullptr && mirrorToasts->remainingMs() > 5000,
                   "a real Failure toast reports it, timed for 8000 ms");
 
             mirrorView->setSelectedSolids({idP, idQ});
@@ -27677,6 +27810,89 @@ int main(int argc, char* argv[])
         check(folder > 0 && probe.document().groupOf(idB) == folder,
               QStringLiteral("both bodies are in the one new folder (%1)").arg(folder));
 
+        // --- dragging a body into that folder UPDATES THE DRAWER -------------
+        // The user's report: "the item list is not being updated correctly
+        // when i move something." ItemsPanel::refresh() early-outs on a
+        // signature of everything a row shows, and that signature carried the
+        // folder TREE but not which folder each ITEM hangs in - the one field
+        // this gesture moves. So the drop landed in the document and the
+        // drawer kept the pre-drag list on screen.
+        //
+        // Driven as the REAL gesture (press, travel past the threshold,
+        // release over the folder row) rather than by calling the slot: the
+        // defect is in what the panel does AFTER the document changes, and a
+        // probe that skips the panel's own path would not have seen it.
+        {
+            QAction* itemsAct = action(probe, QStringLiteral("Items"));
+            if (itemsAct && !itemsAct->isChecked()) itemsAct->trigger();
+            settle(200);
+            ItemsPanel* drawer = probe.findChild<ItemsPanel*>();
+            check(drawer != nullptr && drawer->isVisible(),
+                  "the items drawer is open for the drag");
+
+            int cRow = -1, folderRow = -1;
+            for (int i = 0; drawer && i < drawer->rowCount(); ++i) {
+                if (drawer->rowIdAt(i) == idC) cRow = i;
+                if (drawer->rowIdAt(i) == folder) folderRow = i;
+            }
+            check(cRow >= 0 && folderRow >= 0,
+                  QStringLiteral("the loose body and the folder both have rows (%1, %2)")
+                      .arg(cRow).arg(folderRow));
+
+            QWidget* cWidget = (drawer && cRow >= 0) ? drawer->rowWidgetAt(cRow) : nullptr;
+            QWidget* fWidget = (drawer && folderRow >= 0) ? drawer->rowWidgetAt(folderRow)
+                                                          : nullptr;
+            const int rowsBefore = drawer ? drawer->rowCount() : -1;
+            if (drawer && cWidget && fWidget) {
+                const QPoint target = fWidget->mapTo(
+                    drawer, QPoint(fWidget->width() / 2, fWidget->height() / 2));
+                const QPoint from(cWidget->width() / 2, cWidget->height() / 2);
+                const QPoint to = cWidget->mapFrom(drawer, target);
+
+                QMouseEvent down(QEvent::MouseButtonPress, QPointF(from),
+                                 cWidget->mapToGlobal(from), Qt::LeftButton, Qt::LeftButton,
+                                 Qt::NoModifier);
+                QCoreApplication::sendEvent(cWidget, &down);
+                // Several moves, so the threshold is genuinely crossed rather
+                // than jumped - the panel starts dragging only past it.
+                for (int step = 1; step <= 5; ++step) {
+                    const QPoint at = from + (to - from) * step / 5;
+                    QMouseEvent move(QEvent::MouseMove, QPointF(at), cWidget->mapToGlobal(at),
+                                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(cWidget, &move);
+                }
+                QMouseEvent up(QEvent::MouseButtonRelease, QPointF(to),
+                               cWidget->mapToGlobal(to), Qt::LeftButton, Qt::NoButton,
+                               Qt::NoModifier);
+                QCoreApplication::sendEvent(cWidget, &up);
+                settle(250);
+
+                check(probe.document().groupOf(idC) == folder,
+                      QStringLiteral("the drag put the third body in the folder (%1, wanted "
+                                     "%2)")
+                          .arg(probe.document().groupOf(idC)).arg(folder));
+                // AND THE LIST SAYS SO. Folders start folded, so a body that
+                // has just moved inside one has no row any more - which is
+                // exactly the row count the drawer refused to recompute.
+                check(drawer->rowCount() != rowsBefore,
+                      QStringLiteral("and the drawer rebuilt its rows (%1 -> %2)")
+                          .arg(rowsBefore).arg(drawer->rowCount()));
+
+                // PUT THE FIXTURE BACK. The drop is one checkpoint, so one
+                // Undo returns it - and everything after this point in the
+                // block is written against a third body that is NOT in the
+                // folder. Leaving it moved turned six later checks red, which
+                // is the shared-fixture hazard this file already documents.
+                trigger(probe, QStringLiteral("Undo"));
+                settle(200);
+                check(probe.document().groupOf(idC) != folder,
+                      "one Undo puts the third body back outside the folder");
+                check(drawer->rowCount() == rowsBefore,
+                      QStringLiteral("and the drawer follows the undo too (%1)")
+                          .arg(drawer->rowCount()));
+            }
+        }
+
         // --- the derivation, in both directions -----------------------------
         // Selecting a folder row IS selecting its bodies, which is why this
         // can be derived from the selection at all rather than asking the
@@ -29037,7 +29253,16 @@ int main(int argc, char* argv[])
                     // IT HAS TO BE EDITING THE ROW THAT WAS CLICKED. The old
                     // hit test, read in the wrong space, opened the editor on
                     // a neighbour - or on nothing with a single row.
-                    check(editor->text() == QStringLiteral("Table"),
+                    // AGAINST THE ROW'S OWN NAME, not a literal. This used to
+                    // compare with "Table" and passed for the wrong reason:
+                    // every piece of one furniture was called "Table", so a
+                    // hit test that opened on a NEIGHBOUR still read "Table"
+                    // and the check could not see it. Pieces are numbered on
+                    // arrival now ("Table 2", "Table 3"), so comparing with
+                    // the clicked row's own text is what the check always
+                    // meant - and it can finally tell the rows apart.
+                    const QString ownName = rp->rowTextAt(rowIndex);
+                    check(editor->text() == ownName,
                           QStringLiteral("...seeded with THAT row's own name (\"%1\")")
                               .arg(editor->text()));
                     editor->setText(QStringLiteral("Side table"));
@@ -29060,6 +29285,63 @@ int main(int argc, char* argv[])
                       firstText == QStringLiteral("Table"),
                   QStringLiteral("renaming one of them leaves the other alone (\"%1\" / "
                                  "\"%2\")").arg(firstText, renamedText));
+        }
+
+        // --- clicking a row selects that piece --------------------------------
+        // selectionRequested was declared from the first commit and never
+        // emitted, so this list could SHOW the selection and not SET it: the
+        // viewport was the only way to pick a piece, which is backwards for a
+        // list whose rows are the handles.
+        {
+            ScenePiecesPanel* rp = scene.piecesPanel();
+            int rowIndex = -1;
+            for (int i = 0; rp && i < rp->rowCount(); ++i) {
+                if (rp->rowIdAt(i) == firstTable) rowIndex = i;
+            }
+            check(rowIndex >= 0, "the piece to click has a row of its own");
+            // Select something ELSE first, so a pass cannot mean "it was
+            // already selected" - the vacuity this branch has now been caught
+            // by three times.
+            scene.view()->setSelectedSolids({});
+            settle(80);
+            check(scene.selectedPieceId() == 0, "...and nothing is selected before the click");
+
+            QWidget* rowWidget = (rp && rowIndex >= 0) ? rp->rowWidgetAt(rowIndex) : nullptr;
+            if (rp && rowWidget) {
+                const QPoint at = rowWidget->mapTo(
+                    rp, QPoint(rowWidget->width() / 2, rowWidget->height() / 2));
+                QMouseEvent press(QEvent::MouseButtonPress, QPointF(at), rp->mapToGlobal(at),
+                                  Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(rp, &press);
+                settle(120);
+                check(scene.selectedPieceId() == firstTable,
+                      QStringLiteral("clicking a row selects that piece (%1, wanted %2)")
+                          .arg(scene.selectedPieceId())
+                          .arg(firstTable));
+                // DERIVED, not stored: the viewport's own selection is what
+                // moved, which is what makes a row click and a viewport click
+                // land in the same state.
+                check(!scene.view()->selectedSolidIds().empty(),
+                      "...by setting the viewport's selection, not a second copy of it");
+            }
+        }
+
+        // --- pieces of one furniture are told apart ---------------------------
+        // Six chairs round a table all name ONE furniture. Without a number
+        // the list reads Chair / Chair / Chair and the only way to find the
+        // one you mean is to click every row.
+        {
+            std::set<std::string> names;
+            int pieces = 0;
+            for (const SceneModel::Piece& piece : scene.scene().pieces()) {
+                names.insert(piece.name);
+                ++pieces;
+            }
+            check(static_cast<int>(names.size()) == pieces,
+                  QStringLiteral("every piece in the scene has a name of its own (%1 names "
+                                 "for %2 pieces)")
+                      .arg(static_cast<int>(names.size()))
+                      .arg(pieces));
         }
 
         // --- a piece can be taken out again -----------------------------------
@@ -29099,6 +29381,35 @@ int main(int argc, char* argv[])
             for (int bodyId : victimBodies)
                 if (scene.view()->isSolidVisible(bodyId)) stillShown = true;
             check(!stillShown, "...and nothing of it left on screen");
+
+            // --- AND ONE UNDO PUTS IT BACK ----------------------------------
+            // A scene had no undo stack at all, which is the only reason
+            // removal needed a two-click confirm to be safe. SceneModel now
+            // carries one (headless-tested in tests/scene_model.cpp), and the
+            // window's Edit menu reaches it.
+            QAction* sceneUndo = nullptr;
+            for (QAction* a : scene.findChildren<QAction*>())
+                if (a->text() == QStringLiteral("Undo")) sceneUndo = a;
+            check(sceneUndo != nullptr, "the scene window has an Undo action");
+            if (sceneUndo) {
+                sceneUndo->trigger();
+                settle(300);
+                check(static_cast<int>(scene.scene().pieces().size()) == before,
+                      QStringLiteral("one Undo puts the removed piece back (%1 of %2)")
+                          .arg(static_cast<int>(scene.scene().pieces().size()))
+                          .arg(before));
+                // AND IT IS ON SCREEN AGAIN, not merely back in the model.
+                // The bodies are re-displayed from the store at the live
+                // scene's placement, so the ids are NEW - asking for the old
+                // ones would assert the wrong thing.
+                bool drawnAgain = false;
+                for (int bodyId : scene.bodyIdsForPiece(
+                         scene.scene().pieces().empty() ? 0
+                                                        : scene.scene().pieces().back().id)) {
+                    if (scene.view()->isSolidVisible(bodyId)) drawnAgain = true;
+                }
+                check(drawnAgain, "...and its bodies are on screen again, not just in the model");
+            }
         }
 
         // --- a furniture that cannot be read ---------------------------------
@@ -29613,6 +29924,26 @@ int main(int argc, char* argv[])
         // rows that did nothing. Driven through the REAL control here.
         scene.studio()->setEnabled(true);
         settle(300);
+
+        // A LEFT CLICK IN THE VIEWPORT LEAVES RENDER MODE, as it does in the
+        // editor. OcctViewWidget emits renderModeExitRequested for both
+        // windows and only MainWindow answered it, so the identical gesture
+        // exited there and did nothing here.
+        {
+            check(scene.studio()->isEnabled(), "the scene is in render mode to click out of");
+            const QPoint mid(scene.view()->width() / 2, scene.view()->height() / 2);
+            QMouseEvent down(QEvent::MouseButtonPress, QPointF(mid),
+                             scene.view()->mapToGlobal(mid), Qt::LeftButton, Qt::LeftButton,
+                             Qt::NoModifier);
+            QCoreApplication::sendEvent(scene.view(), &down);
+            settle(250);
+            check(!scene.studio()->isEnabled(),
+                  "clicking the render viewport leaves render mode, as it does in the editor");
+            // Back in, so everything after this runs in the state it expects.
+            scene.studio()->setEnabled(true);
+            settle(300);
+        }
+
         RenderSettingsPanel* shotPanel = scene.studio()->panel();
         check(shotPanel != nullptr, "the scene's render panel is reachable");
         check(scene.scene().shots().empty(), "...with no shots kept yet");
@@ -29638,6 +29969,12 @@ int main(int argc, char* argv[])
 
         scene.addShotToScene(shot);
         check(scene.scene().shots().size() == 1, "a shot is kept in the scene");
+        // NON-DEFAULT RENDER SETTINGS before the save, so the reopen check
+        // below cannot pass by everything happening to be at its default.
+        scene.view()->setRenderAspect(OcctViewWidget::RenderAspect::FourFive);
+        scene.view()->setRenderQuality(OcctViewWidget::RenderQuality::Simple);
+        scene.view()->setRenderExportSize(OcctViewWidget::ExportSize::Height1440);
+        settle(120);
         check(scene.save(), "the scene saves");
         check(!scene.isSceneDirty(), "...and reads clean afterwards");
 
@@ -29671,6 +30008,30 @@ int main(int argc, char* argv[])
             check(reopened.piecesPanel() &&
                       reopened.piecesPanel()->rowCount() == expectedCount,
                   "...and the list is rebuilt from the file, not from memory");
+
+            // AND THE RENDER CARD READS WHAT THE SCENE RENDERS WITH. The
+            // settings reached the VIEW from the first commit and nothing
+            // reached the CONTROLS: a reopened scene rendered at 4:5, Simple,
+            // 1440 while every row on the card showed its default until
+            // touched. There was no single entry point to call - the host set
+            // rows one setter at a time - so RenderStudio owns one now and
+            // both windows go through it.
+            {
+                RenderSettingsPanel* card = reopened.studio() ? reopened.studio()->panel()
+                                                              : nullptr;
+                check(card != nullptr, "the reopened scene has a render card");
+                if (card) {
+                    check(card->aspect() == RenderSettingsPanel::Aspect::FourFive,
+                          QStringLiteral("...and its aspect row reads the saved 4:5 (%1)")
+                              .arg(static_cast<int>(card->aspect())));
+                    check(card->quality() == RenderSettingsPanel::Quality::Simple,
+                          QStringLiteral("...its quality row reads the saved Simple (%1)")
+                              .arg(static_cast<int>(card->quality())));
+                    check(card->exportSize() == RenderSettingsPanel::ExportSize::Height1440,
+                          QStringLiteral("...and its export size reads the saved 1440 (%1)")
+                              .arg(static_cast<int>(card->exportSize())));
+                }
+            }
             // EXACTLY ONE piece should render nothing - the one deliberately
             // given a furniture id that was never there. Any other empty piece
             // is a furniture that should have loaded and did not.
@@ -29838,6 +30199,29 @@ int main(int argc, char* argv[])
         const int block = snap.scene().pieces()[1].id;
 
         OcctViewWidget* sv = snap.view();
+
+        // --- WHAT 8 SCREEN PIXELS IS WORTH IN A SCENE ------------------------
+        // The phase 2 spec flagged this as a RISK rather than guessing at it:
+        // the magnet's reach is 8 px converted at the dragged body's depth, and
+        // that constant was chosen for editor-scale bodies a few hundred
+        // millimetres across. A scene is metres wide and framed from further
+        // out, so the same 8 px covers more world distance - possibly enough
+        // to feel grabby.
+        //
+        // Measured here rather than argued about, at the framing a scene
+        // actually opens on. The band is wide on purpose: this check exists to
+        // SAY the number and to catch it running away, not to pin a value
+        // nobody has chosen.
+        {
+            sv->fitAll();
+            settle(250);
+            const double reachMm = 8.0 * sv->worldPerPixel();
+            check(reachMm > 0.5 && reachMm < 200.0,
+                  QStringLiteral("the magnet's 8 px reaches %1 mm at a scene's own framing "
+                                 "- inside the band where a furniture snap is useful rather "
+                                 "than grabby")
+                      .arg(reachMm, 0, 'f', 1));
+        }
         auto placedBox = [&snap](int pieceId, double* lo, double* hi) {
             Bnd_Box box;
             for (const TopoDS_Shape& shape : snap.placedShapesForPiece(pieceId)) {
@@ -30126,7 +30510,16 @@ int main(int argc, char* argv[])
             const QString imageA = woodsDir + QStringLiteral("/oak-natural.jpg");
             const QString imageB = woodsDir + QStringLiteral("/oak-veneer.jpg");
             if (!QFile::exists(imageA) || !QFile::exists(imageB)) {
-                check(true, "[skip] the shipped wood images are not beside this binary");
+                // skipByEnvironment(), not check(true, ...). A check that
+                // cannot fail is not a check: it counted toward the floor and
+                // reported PASS for a branch that ran nothing, so the day the
+                // images stopped being copied beside the binary this block
+                // would have gone quietly green with its whole subject
+                // untested. The skip helper counts the missing checks, names
+                // the reason on stdout, and keeps the floor's accounting
+                // honest - which is the exact difference the floor exists for.
+                skipByEnvironment(3, QStringLiteral("the shipped wood images are not beside "
+                                                    "this binary"));
             } else {
                 auto makeTextured = [&](const QString& name, const QString& image) {
                     const QString id = woodStore.createFurniture(name);
@@ -33900,7 +34293,7 @@ int main(int argc, char* argv[])
                           QStringLiteral("These pieces can't take a joint — these two pieces don't meet"),
                       QStringLiteral("placement: and the refusal says they don't meet (\"%1\")")
                           .arg(toastText()));
-                check(toasts != nullptr && toasts->remainingMs() > 7500,
+                check(toasts != nullptr && toasts->remainingMs() > 5000,
                       "placement: as a Failure toast");
             }
 
@@ -33921,7 +34314,7 @@ int main(int argc, char* argv[])
                       QStringLiteral("placement: and the refusal gives the contact's own reason, not "
                                      "\"don't meet\" (\"%1\")")
                           .arg(toastText()));
-                check(toasts != nullptr && toasts->remainingMs() > 7500,
+                check(toasts != nullptr && toasts->remainingMs() > 5000,
                       "placement: again as a Failure toast");
             }
 
@@ -35795,7 +36188,14 @@ int main(int argc, char* argv[])
                 check(toastText().contains(QStringLiteral("can't go below 1")),
                       QStringLiteral("chip: saying why, as a Failure rather than in silence (\"%1\")")
                           .arg(toastText()));
-                check(toasts != nullptr && toasts->remainingMs() > 7500,
+                // 5000, NOT 7500. A Failure is armed at 8000 ms and a Note at
+                // 4000, so anything above 4000 tells the two apart - which is
+                // the whole claim. 7500 additionally asserted that under half
+                // a second of work had happened since the toast appeared,
+                // which is a wall-clock race rather than a property of the
+                // app: it passed on one full run and failed on the very next,
+                // with nothing changed between them.
+                check(toasts != nullptr && toasts->remainingMs() > 5000,
                       "chip: as a Failure toast");
                 sendKeyTo(cv, Qt::Key_Escape);
                 check(!chip->isFieldInvalid(JointChip::Slot::Count),
@@ -38327,8 +38727,26 @@ int main(int argc, char* argv[])
         };
         // Where a size label is on screen, or an off-screen sentinel.
         const auto labelAt = [&](int index) {
+            // THE LABEL HAS TO BE LAID OUT BEFORE IT CAN BE CLICKED. The
+            // selection sizes are placed from applyCameraState(), so straight
+            // after a pick or a camera move the annotation may not exist yet -
+            // and settle() exits as soon as Qt goes idle, which can be BEFORE
+            // the viewport has drawn the frame that places it. The sentinel
+            // this used to return then sent a right-click to (-1000, -1000),
+            // the gesture did not open, and nine checks failed behind it.
+            //
+            // Seen as an intermittent: the same binary passed one full run and
+            // failed the next. A bounded wait rather than a longer settle
+            // everywhere - it costs nothing when the label is already there,
+            // which is almost always.
             QPoint at;
-            return rv->selectionSizeLabelPoint(index, at) ? at : QPoint(-1000, -1000);
+            QElapsedTimer waiting;
+            waiting.start();
+            while (waiting.elapsed() < 2000) {
+                if (rv->selectionSizeLabelPoint(index, at)) return at;
+                waitFully(50);
+            }
+            return QPoint(-1000, -1000);
         };
         // The field, typed into the way a user does - the text is what
         // previews and what commits, one value and one path.
@@ -38434,6 +38852,20 @@ int main(int argc, char* argv[])
             check(!ghost.IsNull() && std::fabs(centreAlongX(ghost) - 300.0) < 0.01,
                   QStringLiteral("re-measure: and it kept its centre (x %1, expected 300)")
                       .arg(ghost.IsNull() ? -1.0 : centreAlongX(ghost)));
+            // AND THE NUMBER THE USER CLICKED HAS MOVED. The sizes are
+            // measured from the DOCUMENT and cached on revision(), and a live
+            // preview deliberately takes no checkpoint - so the dimension
+            // line on the very edge being changed went on reading 600 while
+            // the field said 450, and the status bar said 600 x 300 x 18
+            // beside it. Two numbers for one edge, in the one gesture whose
+            // whole subject is that number.
+            const QString shown = mw.selectionStatusText();
+            check(shown.contains(QStringLiteral("450")),
+                  QStringLiteral("re-measure: the reading follows the ghost (\"%1\")")
+                      .arg(shown));
+            check(!shown.contains(QStringLiteral("600")),
+                  QStringLiteral("re-measure: ...and the old size is gone from it (\"%1\")")
+                      .arg(shown));
             settle(150);
             check(!printWindowCapture(&mw, outDir + QStringLiteral("/remeasure-live.png"))
                        .isNull(),
@@ -38710,6 +39142,179 @@ int main(int argc, char* argv[])
 
         check(mw.findChildren<QDialog*>().isEmpty(),
               "re-measure: the whole gesture raised no modal dialog at any point");
+    }
+
+    // ===================================================================
+    // PRESSING A CONTROL NEVER DROPS THE SELECTION
+    // ===================================================================
+    // The user's report, in full: "if i have a piece selected and press any ui
+    // the selection is gone." Every floating control sits OVER the viewport,
+    // and a press the control does not accept propagates to the viewport,
+    // which picks on it - so a chip that forgets to take its own press
+    // silently deselects whatever the user was working on.
+    //
+    // CLAUDE.md states the rule (every sibling control over the viewport
+    // carries WA_NoMousePropagation) and nothing enforced it. This walks the
+    // real controls and presses them.
+    if (blockEnabled("pressing-a-control-never-drops-the-selection")) {
+        RequiredTempDir keepDir;
+        MainWindow probe(nullptr, /*persistProgress=*/false, keepDir.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1200, 820);
+        probe.show();
+        waitFully(300);
+        OcctViewWidget* kv = probe.view();
+        kv->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+        check(buildBody(probe, 0.3, 0.3, 0.65, 0.65, 40.0),
+              "keep-selection: a body to select");
+        const int keepId =
+            probe.document().solids().empty() ? -1 : probe.document().solids().back().id;
+        kv->fitAll();
+        settle(200);
+
+        kv->setSelectedSolids({keepId});
+        settle(150);
+        check(kv->selectedSolidIds().size() == 1,
+              "keep-selection: and it starts out selected");
+
+        // The bare gesture, with no assertion of its own - reused by the
+        // sketch half below, where what is being counted is outline points
+        // rather than the selection.
+        auto pressAndReleaseRaw = [](QWidget* w) {
+            if (!w || !w->isVisible()) return;
+            const QPointF centre(w->width() / 2.0, w->height() / 2.0);
+            QMouseEvent down(QEvent::MouseButtonPress, centre, w->mapToGlobal(centre.toPoint()),
+                             Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent up(QEvent::MouseButtonRelease, centre, w->mapToGlobal(centre.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(w, &down);
+            QCoreApplication::sendEvent(w, &up);
+        };
+
+        // Each control is pressed AND released, because the viewport picks on
+        // the RELEASE - a press-only probe never reproduces the report.
+        auto pressAndRelease = [&](QWidget* w, const QString& what) {
+            if (!w || !w->isVisible()) return;
+            const QPointF centre(w->width() / 2.0, w->height() / 2.0);
+            QMouseEvent down(QEvent::MouseButtonPress, centre, w->mapToGlobal(centre.toPoint()),
+                             Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent up(QEvent::MouseButtonRelease, centre, w->mapToGlobal(centre.toPoint()),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(w, &down);
+            QCoreApplication::sendEvent(w, &up);
+            settle(120);
+            check(kv->selectedSolidIds().size() == 1,
+                  QStringLiteral("keep-selection: the body survives a press on %1 (%2 "
+                                 "selected)")
+                      .arg(what)
+                      .arg(static_cast<int>(kv->selectedSolidIds().size())));
+            // Put it back if something did take it, so one failure does not
+            // cascade into every check after it.
+            if (kv->selectedSolidIds().size() != 1) {
+                kv->setSelectedSolids({keepId});
+                settle(80);
+            }
+        };
+
+        // The view-control cluster under the axis gizmo: projection,
+        // wireframe, Fit All. None of the three is about the selection.
+        if (ToolCluster* views = probe.viewControls()) {
+            const QList<ToolChip*> chips = views->findChildren<ToolChip*>();
+            check(!chips.isEmpty(), "keep-selection: the view controls have chips to press");
+            for (ToolChip* chip : chips)
+                pressAndRelease(chip, QStringLiteral("a view-control chip"));
+        }
+
+        // The app bar pill - the wordmark and the menu bar live in it, and a
+        // press on its own background is the easiest thing in the window to
+        // hit by accident.
+        if (AppBar* bar = probe.findChild<AppBar*>())
+            pressAndRelease(bar, QStringLiteral("the app bar"));
+
+        // The axis gizmo, pressed AWAY from any axis tip: the one overlay
+        // that handles its own press and sets no WA_NoMousePropagation, so a
+        // left press that hits no tip is the exact shape of this bug.
+        if (AxisGizmo* gizmo = probe.findChild<AxisGizmo*>()) {
+            if (gizmo->isVisible()) {
+                const QPointF corner(6.0, 6.0);
+                QMouseEvent down(QEvent::MouseButtonPress, corner,
+                                 gizmo->mapToGlobal(corner.toPoint()), Qt::LeftButton,
+                                 Qt::LeftButton, Qt::NoModifier);
+                QMouseEvent up(QEvent::MouseButtonRelease, corner,
+                               gizmo->mapToGlobal(corner.toPoint()), Qt::LeftButton,
+                               Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(gizmo, &down);
+                QCoreApplication::sendEvent(gizmo, &up);
+                settle(120);
+                check(kv->selectedSolidIds().size() == 1,
+                      QStringLiteral("keep-selection: the body survives a press on the axis "
+                                     "gizmo's empty corner (%1 selected)")
+                          .arg(static_cast<int>(kv->selectedSolidIds().size())));
+                if (kv->selectedSolidIds().size() != 1) {
+                    kv->setSelectedSolids({keepId});
+                    settle(80);
+                }
+            }
+        }
+
+        // The items drawer, pressed on its own title area. OPENED BY ASKING
+        // THE ACTION, never by triggering it blind: Items is a toggle, the
+        // drawer is open by default, and a blind trigger CLOSED it - which
+        // made the check below skip silently and pass for no reason. A probe
+        // guarded by a condition that can quietly go false is how five checks
+        // went silent instead of red in this file once already.
+        if (QAction* itemsAction = action(probe, QStringLiteral("Items"))) {
+            if (!itemsAction->isChecked()) itemsAction->trigger();
+            settle(200);
+        }
+        ItemsPanel* items = probe.findChild<ItemsPanel*>();
+        check(items != nullptr && items->isVisible(),
+              "keep-selection: the items drawer is open to be pressed");
+        {
+            if (items && items->isVisible()) {
+                const QPointF title(items->width() / 2.0, 10.0);
+                QMouseEvent down(QEvent::MouseButtonPress, title,
+                                 items->mapToGlobal(title.toPoint()), Qt::LeftButton,
+                                 Qt::LeftButton, Qt::NoModifier);
+                QMouseEvent up(QEvent::MouseButtonRelease, title,
+                               items->mapToGlobal(title.toPoint()), Qt::LeftButton,
+                               Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(items, &down);
+                QCoreApplication::sendEvent(items, &up);
+                settle(120);
+                check(kv->selectedSolidIds().size() == 1,
+                      QStringLiteral("keep-selection: the body survives a press on the items "
+                                     "drawer (%1 selected)")
+                          .arg(static_cast<int>(kv->selectedSolidIds().size())));
+            }
+        }
+
+        // --- and a press on a control is not a SKETCH POINT either ----------
+        // The other half of the same report: "when i sketch and press the
+        // face selector the sketch put a point." The face selector itself is
+        // gone (auto selection deleted the three mode actions), but the
+        // mechanism it named is not: a control over the viewport whose press
+        // reaches the viewport while a sketch is running becomes a point in
+        // the outline, metres from where the user clicked.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        settle(200);
+        check(probe.isSketching(), "keep-selection: a sketch is running");
+        const std::size_t pointsBefore = probe.sketch().pointCount();
+        if (ToolCluster* views = probe.viewControls()) {
+            for (ToolChip* chip : views->findChildren<ToolChip*>())
+                pressAndReleaseRaw(chip);
+        }
+        if (AxisGizmo* gizmo = probe.findChild<AxisGizmo*>()) {
+            if (gizmo->isVisible()) pressAndReleaseRaw(gizmo);
+        }
+        if (items && items->isVisible()) pressAndReleaseRaw(items);
+        settle(150);
+        check(probe.sketch().pointCount() == pointsBefore,
+              QStringLiteral("keep-selection: pressing controls mid-sketch adds no outline "
+                             "point (%1 -> %2)")
+                  .arg(static_cast<int>(pointsBefore))
+                  .arg(static_cast<int>(probe.sketch().pointCount())));
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

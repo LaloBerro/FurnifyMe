@@ -253,6 +253,92 @@ int main()
         check(nullTool.shape.IsNull(), "refusal: with a null shape");
     }
 
+    // --- previewDifference: what an edit added and what it took away --------
+    // The geometry behind showing a preview as the CHANGE rather than as the
+    // whole body recoloured. Volume arithmetic throughout, so each case is
+    // checked against a number worked out from the fixture rather than
+    // against whatever the kernel happened to return.
+    {
+        const TopoDS_Shape block = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 100, 100, 100).Shape();
+        const double blockVolume = 100.0 * 100.0 * 100.0;
+
+        // GROWN: a taller block. Nothing is removed, and what is added is
+        // exactly the new slab.
+        {
+            const TopoDS_Shape taller =
+                BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 100, 100, 130).Shape();
+            const ModelingOps::PreviewDifference diff =
+                ModelingOps::previewDifference(block, taller);
+            check(diff.ok, "difference: a grown body answers");
+            check(std::fabs(ModelingOps::volume(diff.added) - 100.0 * 100.0 * 30.0) <
+                      kVolumeTolerance,
+                  "difference: added is exactly the new slab (100 x 100 x 30)");
+            check(ModelingOps::volume(diff.removed) < kVolumeTolerance,
+                  "difference: and a pure grow removes nothing");
+        }
+
+        // CARVED: a corner taken out. Nothing is added, and what is removed is
+        // exactly the corner - which is the case that matters most, because it
+        // is the one a fillet and a chamfer differ by.
+        {
+            const TopoDS_Shape corner =
+                BRepPrimAPI_MakeBox(gp_Pnt(80, 80, 80), 40, 40, 40).Shape();
+            const BooleanResult carved =
+                ModelingOps::applyBooleanMulti(BooleanKind::Cut, block, {corner});
+            check(carved.ok, "difference: the carve itself builds");
+            const ModelingOps::PreviewDifference diff =
+                ModelingOps::previewDifference(block, carved.shape);
+            check(diff.ok, "difference: a carved body answers");
+            check(ModelingOps::volume(diff.added) < kVolumeTolerance,
+                  "difference: a pure carve adds nothing");
+            check(std::fabs(ModelingOps::volume(diff.removed) - 20.0 * 20.0 * 20.0) <
+                      kVolumeTolerance,
+                  "difference: and removed is exactly the corner that went (20 cubed - the "
+                  "part of the tool that was actually inside the body)");
+        }
+
+        // UNCHANGED: both empty, and still ok. An edit that changed nothing is
+        // not a failure, and a preview of it should tint nothing at all.
+        {
+            const ModelingOps::PreviewDifference diff =
+                ModelingOps::previewDifference(block, block);
+            check(diff.ok, "difference: a body against itself answers");
+            check(ModelingOps::volume(diff.added) < kVolumeTolerance &&
+                      ModelingOps::volume(diff.removed) < kVolumeTolerance,
+                  "difference: with nothing added and nothing removed");
+        }
+
+        // BOTH AT ONCE: moved, so there is material on both sides. Each half
+        // is the part of one block outside the other.
+        {
+            const TopoDS_Shape moved =
+                BRepPrimAPI_MakeBox(gp_Pnt(30, 0, 0), 100, 100, 100).Shape();
+            const ModelingOps::PreviewDifference diff =
+                ModelingOps::previewDifference(block, moved);
+            check(diff.ok, "difference: a moved body answers");
+            const double sliver = 30.0 * 100.0 * 100.0;
+            check(std::fabs(ModelingOps::volume(diff.added) - sliver) < kVolumeTolerance &&
+                      std::fabs(ModelingOps::volume(diff.removed) - sliver) < kVolumeTolerance,
+                  "difference: with the same sliver added on one side and removed on the "
+                  "other");
+            check(std::fabs(ModelingOps::volume(diff.added) - blockVolume) > kVolumeTolerance,
+                  "difference: and NOT the whole body - which is the entire point of "
+                  "drawing the change instead of recolouring everything");
+        }
+
+        // REFUSALS, the BooleanResult law: ok false carries null shapes.
+        {
+            const ModelingOps::PreviewDifference nullBefore =
+                ModelingOps::previewDifference(TopoDS_Shape(), block);
+            check(!nullBefore.ok && nullBefore.added.IsNull() && nullBefore.removed.IsNull(),
+                  "difference: a null `before` is refused, with null shapes");
+            const ModelingOps::PreviewDifference nullAfter =
+                ModelingOps::previewDifference(block, TopoDS_Shape());
+            check(!nullAfter.ok && nullAfter.added.IsNull() && nullAfter.removed.IsNull(),
+                  "difference: a null `after` is refused, with null shapes");
+        }
+    }
+
     std::printf("\n%s (%d failure%s, %d checks)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s", g_checks);
     return g_failures == 0 ? 0 : 1;

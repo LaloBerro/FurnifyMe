@@ -42,6 +42,9 @@ public:
         QString reason;
     };
 
+    // The remove control's tooltip, written once - see the .cpp for why.
+    static QString removeTipText();
+
     explicit ScenePiecesPanel(QWidget* parent = nullptr);
 
     // Rebuilt only when the rows would actually LOOK different. This is driven
@@ -80,6 +83,11 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    // A press on a row SELECTS that piece. selectionRequested was declared
+    // from the start and never emitted, so this list could show the selection
+    // and not set it - the viewport was the only way to pick a piece, which is
+    // exactly backwards for a list whose rows are the handles.
+    void mousePressEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:

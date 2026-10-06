@@ -29,6 +29,10 @@ class AddPieceCard : public QWidget {
     Q_OBJECT
 
 public:
+    // The empty-library sentence, written once. Static so paintedTexts()
+    // and the label itself read the same string rather than two copies.
+    static QString emptyLibraryText();
+
     explicit AddPieceCard(QWidget* parent = nullptr);
 
     // Shows the card over whatever the library currently holds. Re-read on

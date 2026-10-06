@@ -20,6 +20,7 @@
 #include <QPushButton>
 #include <QAction>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QVBoxLayout>
@@ -44,7 +45,7 @@ constexpr int kHeight = 380;
 // sits against the same top edge as those two and a different corner between
 // neighbours reads as a mistake.
 constexpr int kRadius = 10;
-constexpr int kPad = 12;
+constexpr int kPad = Theme::Space::Snug;
 
 constexpr int kSwatchWidth = 46;
 // What the colour list keeps between its swatches and the scroll area's right
@@ -387,33 +388,54 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         tr("The unit sizes are written in, and what the cursor snaps to"),
         tr("How often this furniture is written to disk")};
     const int tabContentWidth = kWidth - 2 * kPad;
-    int tabRowWidth = 0;
-    QHBoxLayout* activeTabRow = tabRow1;
+    // MEASURED FIRST, PLACED SECOND. The split has to be decided with every
+    // chip's width already in hand, because a greedy fill cannot know that
+    // the chip it is about to leave behind is the LAST one.
+    OptionChip* tabChips[kTabCount] = {};
+    int tabWidths[kTabCount] = {};
     for (int i = 0; i < kTabCount; ++i) {
         auto* chip = new OptionChip(OptionChip::Style::Tab, tabNames[i], tabRow);
         chip->setFont(Theme::labelFont());
         chip->setToolTip(tabTips[i]);
         const Tab tab = static_cast<Tab>(i);
         connect(chip, &QAbstractButton::clicked, this, [this, tab] { setCurrentTab(tab); });
-
-        const int chipWidth = chip->sizeHint().width();
-        const int spacingBefore = tabRowWidth > 0 ? activeTabRow->spacing() : 0;
-        if (activeTabRow == tabRow1 && tabRowWidth > 0 &&
-            tabRowWidth + spacingBefore + chipWidth > tabContentWidth) {
-            activeTabRow = tabRow2;
-            tabRowWidth = 0;
-        }
-        // NATURAL WIDTH, PACKED LEFT, on both rows. They used to be added
-        // with a stretch factor, which made row one's chips share the width
-        // evenly and left row two's single chip - "Files" - floating in the
-        // middle of an otherwise empty row, where it read as a heading for
-        // the panel rather than as the fifth tab. A tab bar that wraps has to
-        // wrap like text: the next line starts where the first one did.
-        activeTabRow->addWidget(chip);
-        tabRowWidth += (tabRowWidth > 0 ? activeTabRow->spacing() : 0) + chipWidth;
-
+        tabChips[i] = chip;
+        tabWidths[i] = chip->sizeHint().width();
         myTabButtons[i] = chip;
         myExtraTexts << tabNames[i];
+    }
+
+    // How many fit on row one, greedily - the honest maximum.
+    int split = kTabCount;
+    {
+        int used = 0;
+        for (int i = 0; i < kTabCount; ++i) {
+            const int spacingBefore = used > 0 ? tabRow1->spacing() : 0;
+            if (used > 0 && used + spacingBefore + tabWidths[i] > tabContentWidth) {
+                split = i;
+                break;
+            }
+            used += spacingBefore + tabWidths[i];
+        }
+    }
+    // AND THEN BALANCED, when the greedy answer would strand exactly one chip
+    // on row two. Four tabs over one orphan reads as a rendering accident
+    // rather than as a second row - the lone "Files" sat under "Colours"
+    // looking like a heading for the panel. Moving one chip down makes it
+    // 3 + 2, which reads as a wrap. Only ever moves ONE chip, and only when
+    // the two that end up on row two genuinely fit.
+    if (split == kTabCount - 1 && split > 1) {
+        const int pairWidth = tabWidths[split - 1] + tabRow2->spacing() + tabWidths[split];
+        if (pairWidth <= tabContentWidth) --split;
+    }
+
+    for (int i = 0; i < kTabCount; ++i) {
+        // NATURAL WIDTH, PACKED LEFT, on both rows. They used to be added
+        // with a stretch factor, which made row one's chips share the width
+        // evenly and left row two's chips floating in the middle of an
+        // otherwise empty row. A tab bar that wraps has to wrap like text:
+        // the next line starts where the first one did.
+        (i < split ? tabRow1 : tabRow2)->addWidget(tabChips[i]);
     }
     // The slack goes to the END of each row rather than between the chips,
     // which is what keeps the second row left-aligned under the first.
@@ -453,6 +475,16 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     makeTransparent(scroll, QStringLiteral("appearanceScroll"));
     makeTransparent(scroll->viewport(), QStringLiteral("appearanceScrollViewport"));
+    // THE BAR IS THEMED, like everything else on this card. It was the
+    // platform's own widget - a raw light-grey slab pressed against the swatch
+    // column - which made it the most un-designed pixel in the product, inside
+    // the panel whose entire subject is appearance.
+    //
+    // Painted from Theme tokens through a stylesheet rather than a custom
+    // widget: it is a scrollbar, and the only thing wrong with it was that it
+    // did not belong to this app's palette. Re-applied on every theme change
+    // by applyTheme(), like every other styled control here.
+    scroll->verticalScrollBar()->setObjectName(QStringLiteral("appearanceScrollBar"));
 
     auto* content = new QWidget(scroll);
     makeTransparent(content, QStringLiteral("appearanceContent"));
@@ -471,6 +503,24 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     // and a persisted value with no third place to remember. A token with no
     // name in nameForToken() would get a nameless row, which is why gui_smoke
     // asserts every token has one.
+    // WHICH GROUP EACH TOKEN OPENS. Twenty-seven swatches ran as one
+    // undifferentiated list, and the first three - Viewport, Grid lines, Grid
+    // every tenth line - are near-identical darks, so the top of the panel
+    // read as three rows of the same colour with no clue why. A heading above
+    // the token that starts each run says what the run is ABOUT, which is the
+    // thing the colours themselves cannot say when they are nearly equal.
+    //
+    // Keyed on the token id rather than on a position, so adding a token to
+    // Theme::Spec puts it in the run it belongs to instead of silently
+    // shifting a heading onto the wrong row.
+    const QVector<QPair<QString, QString>> groupOpeners = {
+        {QStringLiteral("viewport"), tr("Viewport")},
+        {QStringLiteral("axisX"), tr("Axes and gizmo")},
+        {QStringLiteral("highlightHover"), tr("Selection and state")},
+        {QStringLiteral("dimensionLine"), tr("Annotations")},
+        {QStringLiteral("chrome"), tr("Panels and chips")},
+    };
+
     for (const Theme::ColourToken& token : Theme::colourTokens()) {
         // A RETIRED token gets no row: the app draws no keyboard focus rings
         // any more (the user asked for them gone), so a swatch for one would
@@ -478,6 +528,15 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         // Theme::Spec so a .furnifytheme saved before the removal still loads
         // rather than being refused for an unknown key.
         if (isRetiredToken(token.id)) continue;
+
+        for (const QPair<QString, QString>& opener : groupOpeners) {
+            if (opener.first != token.id) continue;
+            auto* head = new QLabel(opener.second, content);
+            makeTransparent(head, QStringLiteral("appearanceGroup_") + token.id);
+            myGroupHeadings.push_back(head);
+            myExtraTexts << opener.second;
+            list->addWidget(head);
+        }
         auto* row = new QWidget(content);
         makeTransparent(row, QStringLiteral("appearanceRow_") + token.id);
         auto* line = new QHBoxLayout(row);
@@ -531,7 +590,12 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setBaseSize(pt);
     });
     sizeLine->addWidget(mySize);
-    textLines->addWidget(sizeRow);
+    // BEFORE THE TRAILING STRETCH, like every other page. These five rows
+    // used addWidget(), which appends AFTER the stretch the page was built
+    // with - so the stretch sat on top and the whole tab was bottom-aligned,
+    // with ~180 px of void above Text size while Colours, Viewport, Units and
+    // Files all started at the top. It read as broken because it was.
+    textLines->insertWidget(textLines->count() - 1, sizeRow);
 
     auto* familyRow = new QWidget(textLinesPage);
     makeTransparent(familyRow, QStringLiteral("appearanceFamilyRow"));
@@ -577,7 +641,7 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     if (myFamily->view() && myFamily->view()->window())
         myFamily->view()->window()->installEventFilter(this);
     familyLine->addWidget(myFamily, 1);
-    textLines->addWidget(familyRow);
+    textLines->insertWidget(textLines->count() - 1, familyRow);
 
     // Milestone 5, item 6: two more numeric tokens, on the exact same
     // QDoubleSpinBox template Grid detail set - a field + kMin/kMax
@@ -603,7 +667,7 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setEdgeWidth(px);
     });
     edgeWidthLine->addWidget(myEdgeWidth);
-    textLines->addWidget(edgeWidthRow);
+    textLines->insertWidget(textLines->count() - 1, edgeWidthRow);
 
     auto* sketchLineWidthRow = new QWidget(textLinesPage);
     makeTransparent(sketchLineWidthRow, QStringLiteral("appearanceSketchLineWidthRow"));
@@ -625,7 +689,7 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setSketchLineWidth(px);
     });
     sketchLineWidthLine->addWidget(mySketchLineWidth);
-    textLines->addWidget(sketchLineWidthRow);
+    textLines->insertWidget(textLines->count() - 1, sketchLineWidthRow);
 
     auto* strokeRow = new QWidget(textLinesPage);
     makeTransparent(strokeRow, QStringLiteral("appearanceStrokeRow"));
@@ -649,7 +713,7 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setChipStroke(px);
     });
     strokeLine->addWidget(myStroke);
-    textLines->addWidget(strokeRow);
+    textLines->insertWidget(textLines->count() - 1, strokeRow);
 
     // --- the look as a file, back on COLOURS ---------------------------------
     auto* fileRow = new QWidget(coloursPage);
@@ -958,6 +1022,35 @@ void AppearancePanel::applyTheme()
     mySyncing = true;
 
     const Theme::Spec& live = Theme::spec();
+
+    // The Colours tab's group headings - the muted label voice, so they read
+    // as structure rather than as another row with a missing swatch.
+    for (QLabel* head : myGroupHeadings) {
+        if (!head) continue;
+        QFont f = Theme::labelFont();
+        f.setBold(true);
+        head->setFont(f);
+        head->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
+                                .arg(Theme::textMuted().name()));
+    }
+
+    // THE SCROLLBAR, in this app's own palette. Styled here rather than at
+    // construction so a theme edit moves it with everything else - the handle
+    // is the chip colour, brighter under the pointer, on a transparent track
+    // with no arrows, which is as close to the "invisible" bar the Items
+    // drawer uses as a bar that must stay visible can get.
+    if (QWidget* bar = findChild<QWidget*>(QStringLiteral("appearanceScrollBar"))) {
+        bar->setStyleSheet(
+            QStringLiteral(
+                "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }"
+                "QScrollBar::handle:vertical { background: %1; border-radius: 4px;"
+                " min-height: 24px; }"
+                "QScrollBar::handle:vertical:hover { background: %2; }"
+                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+                "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+                " background: transparent; }")
+                .arg(Theme::chipActive().name(), Theme::accent().name()));
+    }
     for (const Theme::ColourToken& token : Theme::colourTokens()) {
         for (Row& row : myRows) {
             if (row.id == token.id && row.swatch) row.swatch->setColour(live.*(token.member));

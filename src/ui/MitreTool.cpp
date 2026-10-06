@@ -27,7 +27,7 @@
 namespace {
 
 constexpr int kPad = GestureChip::kPad;
-constexpr int kGap = 8;
+constexpr int kGap = Theme::Space::Tight;
 constexpr int kRowHeight = 26;
 constexpr int kFieldWidth = 72;
 constexpr int kReasonGap = 4;

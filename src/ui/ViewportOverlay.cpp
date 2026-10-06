@@ -363,8 +363,22 @@ void ViewportOverlay::relayout()
                     // viewport's height is as arbitrary a number as they come
                     // - which is exactly why the rail was the card the
                     // black-run sweep caught.
-                    placed->resize(cw, Theme::wholeDevicePixels(
-                                           std::max(ch, h - leftEdgeY - kEdgeMargin)));
+                    // THE STRETCH IS GONE (rail mockups, option C). The rail
+                    // used to be resized to reach the viewport's bottom edge,
+                    // which is what pushed Undo and Redo a window-height away
+                    // from every other tool. They sit in the column now, so
+                    // the rail wants its NATURAL height - stretching it would
+                    // leave a tall empty panel below the last chip, which is
+                    // worse than the gap it replaced.
+                    //
+                    // The entry is still identified as the spine, because the
+                    // OTHER half of that job is unchanged: it is what reserves
+                    // horizontal room (leftX above) so the drawers anchored
+                    // TopLeft stack beside the rail rather than under it.
+                    // Through wholeDevicePixels() as before - a card's own
+                    // size still has to land on whole device rows, which is
+                    // what the black-run sweep caught this card on.
+                    placed->resize(cw, Theme::wholeDevicePixels(ch));
                 }
                 // Advances the column's cursor by this entry's REAL, final
                 // height - already the stretched one for the spine, since

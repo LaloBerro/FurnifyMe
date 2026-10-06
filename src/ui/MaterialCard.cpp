@@ -24,7 +24,7 @@ constexpr int kGap = 10;
 // The four dials that moved here sit closer together than the colour row and
 // the button do - they are one group, read down rather than across.
 constexpr int kDialGap = 4;
-constexpr int kCardRadius = 12;
+constexpr int kCardRadius = Theme::Space::Snug;
 constexpr int kEdgeMargin = 16;
 constexpr int kSwatchWidth = 56;
 constexpr int kDoneWidth = 58;

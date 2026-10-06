@@ -22,7 +22,7 @@ namespace {
 constexpr int kCardWidth = 380;
 constexpr int kPad = 20;
 constexpr int kBottomPad = 16;
-constexpr int kGap = 12;
+constexpr int kGap = Theme::Space::Snug;
 constexpr int kFieldHeight = 36;
 constexpr int kButtonHeight = 36;
 constexpr int kButtonGap = 8;

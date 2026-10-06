@@ -18,7 +18,7 @@ namespace {
 constexpr int kCardWidth = 380;
 constexpr int kPad = 20;
 constexpr int kMarkPx = 28;
-constexpr int kGap = 12;
+constexpr int kGap = Theme::Space::Snug;
 constexpr int kBarHeight = 6;
 constexpr int kCardRadius = 14;
 constexpr int kViewportGutter = 16;

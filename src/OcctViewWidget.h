@@ -2793,6 +2793,13 @@ private:
     // presentation is restored to the viewport's own display mode when the
     // preview clears - see setModelingPreviews().
     std::vector<Handle(AIS_Shape)> myModelingPreviews;
+    // The tinted difference volumes that ride with a preview - what the edit
+    // ADDS and what it REMOVES. Deliberately NOT in myModelingPreviews:
+    // modelingPreviewShape() answers only when that list holds exactly one
+    // entry (it is "the shape the user is being shown"), and putting the
+    // tints there made it answer with a sliver instead of the body. Separate
+    // list, same lifetime.
+    std::vector<Handle(AIS_Shape)> myModelingPreviewTints;
     std::vector<int> myModelingPreviewSolids;
 
     // The boolean region - see setBooleanRegion().

@@ -180,18 +180,26 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 4914, measured twice on the tree that carries it.** The improvements
-branch re-ratcheted it and **the joinery merge's ~4-check debt is settled with it**: that
-floor sat below its own true total because two commits landed after the run that measured
-it, and this one was taken on the final tree. Two consecutive unfiltered runs measured
-**4781 checks + 1 environment skip = 4782**, agreeing to the digit, and the second ran
-against the binary the branch ships — built minutes before it, after the crash-hunt
-diagnostics came out, and the counts did not move, which is what says those diagnostics were
-inert rather than merely believed to be. (It was 4782 at the improvements merge; the boolean
-rework's own block and repairs took it to a twice-measured **4872 + 1 = 4873**, and the
-UI-review branch's alignment sweep and folder-duplicate block took it to a twice-measured
-**4913 + 1 = 4914**.) The one environment skip is the RayTracing
-floor-blend measurement, which does not apply when PathTracing is the session's tier.
+**`kCheckFloor` is 5374, measured twice on the tree that carries it.** Two consecutive
+unfiltered runs measured **5374 checks + 1 environment skip**, agreeing to the digit, against
+the binary this tree ships. The one environment skip is the RayTracing floor-blend
+measurement, which does not apply when PathTracing is the session's tier.
+
+The history, since each step was itself a measured pair: **4782** at the improvements merge,
+**4873** after the boolean rework's block and repairs, **4914** after the UI-review branch's
+alignment sweep and folder-duplicate block, **5278** after the scene editor and its snapping
+phase, and **5374** after the board sweep that worked every open card to a close. The floor
+has never been computed from a predicted delta at any of those steps, which is the whole
+point of the paragraph below.
+
+**The floor earned its keep twice in one session, and both times a FILTERED run had already
+said green.** The suite-speed work (774 s → 546 s) rested entirely on the count not moving,
+and a full run is what caught the one real regression it introduced — tinted preview volumes
+pushed into `myModelingPreviews`, which broke `modelingPreviewShape()`'s "exactly one entry"
+contract and turned eleven mitre checks and three re-measure checks red by handing them a
+324,000 mm³ sliver where the body belonged. Every filtered block run straight after that
+change passed, because none of them reads that accessor. **A filtered run is not evidence
+about a contract shared across blocks.**
 
 **Measured, never computed** — this project has now chosen measuring over arithmetic three
 times, and the improvements branch is the clearest case for it: fifty checks changed their

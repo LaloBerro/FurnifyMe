@@ -100,9 +100,45 @@ public:
     std::size_t revision() const { return myRevision; }
     void clear();
 
+    // --- undo ---------------------------------------------------------------
+    //
+    // DocumentModel's shape, for the same reasons. Call checkpoint() BEFORE a
+    // change and one undo takes it back whole, however many pieces it touched.
+    //
+    // WHAT IS UNDOABLE IS THE ARRANGEMENT: the pieces (which furniture, what
+    // it is called here, where it stands) and the saved shots. The render
+    // settings and the camera deliberately are NOT - they are presentation,
+    // the same category visibility and the symmetry MODE occupy in the
+    // editor, and a Ctrl+Z aimed at a piece you just moved must not also
+    // reset the light angle you spent a minute on.
+    //
+    // A scene had no undo at all before this: taking a piece out was final,
+    // which is why removal needed a two-click confirm to be safe. That is
+    // what this replaces.
+    void checkpoint();
+    bool canUndo() const { return !myUndo.empty(); }
+    bool canRedo() const { return !myRedo.empty(); }
+    bool undo();
+    bool redo();
+    // Dropped on load: a fresh scene cannot be undone into the one before it.
+    void clearHistory();
+
 private:
+    // Everything a checkpoint captures. Named rather than captured field by
+    // field at each call site, so adding a piece of arrangement state cannot
+    // be half-added to the history.
+    struct State {
+        std::vector<Piece> pieces;
+        std::vector<DocumentModel::Shot> shots;
+        int nextPieceId = 1;
+    };
+    State snapshot() const;
+    void restore(const State& state);
+
     std::vector<Piece> myPieces;
     std::vector<DocumentModel::Shot> myShots;
     int myNextPieceId = 1;
     std::size_t myRevision = 0;
+    std::vector<State> myUndo;
+    std::vector<State> myRedo;
 };

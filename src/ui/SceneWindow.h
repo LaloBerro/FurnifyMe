@@ -138,6 +138,17 @@ private:
 
     void buildMenus();
     void buildOverlay();
+    // Re-displays every piece from the store at the placement the LIVE scene
+    // holds. Two callers, and the name says what it does rather than why one
+    // of them needs it: a graphics context can die under this window - a
+    // driver reset, or Qt
+    // destroying it on a reparent - and that clears every presentation the
+    // viewport held. The editor answers OcctViewWidget::glResourcesReleased
+    // with resyncView(); this is that answer for a scene. It re-reads each
+    // furniture from the store, because the shapes are the store's, and takes
+    // the placements from the LIVE scene rather than from disk, so unsaved
+    // arranging survives a reset the user did not ask for.
+    void resyncPieces();
     // Displays one piece's bodies and pushes that furniture's own wood onto
     // each of them. The ONE place a piece reaches the viewport.
     void displayPiece(int pieceId, const DocumentModel& furniture, const gp_Trsf& placement);
@@ -188,7 +199,12 @@ private:
 
     OcctViewWidget* myView = nullptr;
     ViewportOverlay* myOverlay = nullptr;
+    QAction* myUndoAction = nullptr;
+    QAction* myRedoAction = nullptr;
     AppBar* myAppBar = nullptr;
+    // The three window controls, floating over the viewport - this window is
+    // frameless like the editor, so these ARE its caption buttons.
+    class WindowButtons* myWindowButtons = nullptr;
     ScenePiecesPanel* myPieces = nullptr;
     RenderStudio* myStudio = nullptr;
     QAction* myRenderModeAction = nullptr;

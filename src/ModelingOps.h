@@ -130,6 +130,28 @@ BooleanResult booleanRegion(BooleanKind kind,
                             const std::vector<TopoDS_Shape>& tools,
                             double fuzzyValue = 1.0e-5);
 
+// WHAT AN EDIT CHANGED, as two volumes: the material it ADDS and the material
+// it REMOVES. `added` is after-minus-before, `removed` is before-minus-after,
+// and either may be empty - a pure carve adds nothing, a pure grow removes
+// nothing, and an edit that changed neither returns both empty with ok true.
+//
+// It exists so a preview can show the DIFFERENCE rather than recolouring the
+// whole body: every modeling preview used to paint the entire result in one
+// saturated yellow, which is the loudest thing on screen at exactly the moment
+// the user is judging a shape, and which flattens the shading that tells a
+// fillet from a chamfer. The app already draws this distinction in one place -
+// booleanOut for material coming out, booleanStay for material staying - and
+// this is that idea for every other tool.
+//
+// `ok == false` carries two null shapes, the BooleanResult law.
+struct PreviewDifference {
+    bool ok = false;
+    TopoDS_Shape added;
+    TopoDS_Shape removed;
+};
+PreviewDifference previewDifference(const TopoDS_Shape& before, const TopoDS_Shape& after,
+                                    double fuzzyValue = 1.0e-5);
+
 // Single compound of several shapes, for exporting a whole document at once.
 TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes);
 

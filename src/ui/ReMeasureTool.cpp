@@ -24,7 +24,7 @@
 namespace {
 
 constexpr int kPad = GestureChip::kPad;
-constexpr int kGap = 8;
+constexpr int kGap = Theme::Space::Tight;
 constexpr int kRowHeight = 26;
 constexpr int kFieldWidth = 84;
 constexpr int kReasonGap = 4;
@@ -200,6 +200,13 @@ void ReMeasureTool::updatePreview()
         myPreviewSize = mySize;
         myPreviewAnchor = anchor;
         myPreviewShape = result.ok ? result.shape : TopoDS_Shape();
+        // AND THE ANNOTATION FOLLOWS THE GHOST. Pushed HERE, inside the
+        // uncached branch, so the box is measured once per real change rather
+        // than on every appStateChanged - a MeasuredBox is an OBB over the
+        // exact B-rep. A null shape clears it, which is right: a size the
+        // geometry refuses shows no ghost, so there is nothing to annotate
+        // and the body's own sizes stand.
+        myWindow->setReMeasurePreviewShape(myPreviewShape);
     }
 
     if (myPreviewShape.IsNull()) {

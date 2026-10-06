@@ -9,9 +9,12 @@
 #include "ModelingOps.h"
 #include "ScenePiecesPanel.h"
 #include "Theme.h"
+#include "WindowChrome.h"
 #include "Toast.h"
 #include "UnsavedCloseCard.h"
 #include "ViewportOverlay.h"
+
+#include <algorithm>
 
 #include <QAction>
 #include <QActionGroup>
@@ -53,6 +56,13 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
     buildMenus();
     buildOverlay();
 
+    // The custom title bar, attached AFTER the overlay so the pill and the
+    // buttons it hit-tests against both exist. MainWindow's variant 2: the
+    // native caption is gone and we add no strip of our own either.
+    WindowChrome::attach(this,
+                         WindowChrome::captionHitTest(this, myAppBar, myWindowButtons),
+                         myWindowButtons);
+
     // WHOLE BODIES, never faces or edges. The editor's auto selection exists
     // so a click can take the face or the edge a modelling gesture needs;
     // there is no gesture in a scene that wants either, and leaving it on
@@ -68,6 +78,28 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
 
     connect(myView, &OcctViewWidget::selectionChanged, this, [this] { refreshSelection(); });
 
+    // A LEFT CLICK IN THE RENDER VIEWPORT LEAVES RENDER MODE, exactly as it
+    // does in the editor. The viewport emits this for both windows and only
+    // MainWindow answered it, so the identical gesture exited there and did
+    // nothing here - the scene's own back-arrow chip was the only way out.
+    // Orbit and pan are not gated: framing a shot does not exit.
+    connect(myView, &OcctViewWidget::renderModeExitRequested, this, [this] {
+        if (myStudio && myStudio->isEnabled()) myStudio->setEnabled(false);
+    });
+
+    // THE CONTEXT CAN DIE, and when it does every presentation goes with it.
+    // Without this the scene window came back blank with no recovery but
+    // closing and reopening the scene - the editor has answered this signal
+    // since the QOpenGLWidget migration and this window never did.
+    connect(myView, &OcctViewWidget::glResourcesReleased, this, [this] {
+        resyncPieces();
+        // Render mode is cleared inside the viewport by the release, so a
+        // menu entry left checked would be the single-source-of-truth rule
+        // broken across the one event nobody drives. The editor does exactly
+        // this beside its own resync.
+        if (myStudio && myStudio->isEnabled()) myStudio->setEnabled(false);
+    });
+
     // The gizmos are the viewport's own, and so is their snapping - a distance
     // arrives already rounded when Snap to Grid is on. What this window adds
     // is which piece the delta belongs to.
@@ -77,6 +109,11 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
             const SceneModel::Piece* piece = myScene.piece(mySelectedPiece);
             if (!piece) return;
             myDragBase = piece->placement;
+            // ONE CHECKPOINT PER GESTURE, taken as the drag STARTS. Every step
+            // applies a placement, so a checkpoint at commit time would
+            // capture the state after the move and undo nothing - the editor
+            // takes its checkpoint before the change for the same reason.
+            myScene.checkpoint();
             myDragging = true;
         }
         myDragAxis = axis;
@@ -94,6 +131,11 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
             const SceneModel::Piece* piece = myScene.piece(mySelectedPiece);
             if (!piece) return;
             myDragBase = piece->placement;
+            // ONE CHECKPOINT PER GESTURE, taken as the drag STARTS. Every step
+            // applies a placement, so a checkpoint at commit time would
+            // capture the state after the move and undo nothing - the editor
+            // takes its checkpoint before the change for the same reason.
+            myScene.checkpoint();
             myDragging = true;
         }
         // About the piece's own pivot, never the world origin: a turn about a
@@ -129,6 +171,15 @@ void SceneWindow::buildMenus()
     myNewPieceAction->setToolTip(tr("Put a furniture from the library into this scene"));
     connect(myNewPieceAction, &QAction::triggered, this, [this] {
         if (!myAddPiece || !myStore) return;
+        // NOT WHILE THE STUDIO IS LIVE. Adding a piece displays bodies into a
+        // viewport whose floor was built under the old contents and whose
+        // picking is set up for a shot, so the new piece arrives into a scene
+        // that is not ready for it. Leaving render mode first is what every
+        // document-changing route in the editor already does, and it is also
+        // the honest reading of the gesture: putting furniture in is
+        // arranging, not shooting. QAction::trigger() does not consult
+        // isEnabled(), so the gate lives HERE rather than only on the action.
+        if (myStudio && myStudio->isEnabled()) myStudio->setEnabled(false);
         // Re-read on every open: a furniture made since this window opened is
         // one the user expects to find in the list.
         myAddPiece->showFor(myStore->listFurniture());
@@ -189,6 +240,33 @@ void SceneWindow::buildMenus()
     connect(myFitAllAction, &QAction::triggered, this, [this] {
         if (myView) myView->fitAll();
     });
+
+    // EDIT, before Arrange - a scene has an undo stack now (SceneModel's own,
+    // the editor's shape). Before this, taking a piece out was final, which is
+    // why removal needed a two-click confirm to be safe at all.
+    auto* edit = menuBar()->addMenu(tr("&Edit"));
+    myUndoAction = new QAction(tr("Undo"), this);
+    myUndoAction->setShortcut(QKeySequence::Undo);
+    myUndoAction->setToolTip(tr("Take back the last change to this scene"));
+    connect(myUndoAction, &QAction::triggered, this, [this] {
+        if (!myScene.undo()) return;
+        // The pieces and their placements have changed under the viewport, so
+        // it is re-displayed from the live scene - the same call a lost
+        // graphics context uses, for the same reason.
+        resyncPieces();
+        refreshSurfaces();
+    });
+    edit->addAction(myUndoAction);
+
+    myRedoAction = new QAction(tr("Redo"), this);
+    myRedoAction->setShortcut(QKeySequence::Redo);
+    myRedoAction->setToolTip(tr("Put back the change you just took away"));
+    connect(myRedoAction, &QAction::triggered, this, [this] {
+        if (!myScene.redo()) return;
+        resyncPieces();
+        refreshSurfaces();
+    });
+    edit->addAction(myRedoAction);
 
     auto* arrange = menuBar()->addMenu(tr("&Arrange"));
     auto* tools = new QActionGroup(this);
@@ -252,6 +330,17 @@ void SceneWindow::buildOverlay()
     // the middle of it. A header is only a header when something follows it.
     myAppBar = new AppBar(menuBar(), myView);
     myOverlay->addWidget(myAppBar, ViewportOverlay::Anchor::TopLeft);
+
+    // FRAMELESS, LIKE THE EDITOR. This window wore the native Windows caption
+    // while the editor hid its own, so the same app had two window treatments
+    // side by side - and the scene's name was printed twice, once by the OS
+    // bar and once by the pill. The machinery is WindowChrome's and is used
+    // exactly as MainWindow uses it: the buttons float over the viewport, and
+    // dragging lives on the pill (any point inside it whose deepest child is
+    // nothing answers Caption, which buys native move, double-click-to-
+    // maximize and the system menu in one word).
+    myWindowButtons = new WindowButtons(WindowButtons::Look::Card, myView);
+    myOverlay->addWidget(myWindowButtons, ViewportOverlay::Anchor::TopRight);
 
     // Added after the pill, so it stacks below it in the same TopLeft column.
     myPieces = new ScenePiecesPanel(myView);
@@ -338,6 +427,19 @@ void SceneWindow::buildOverlay()
     myNameMark = new FurnitureNameMark(statusBar());
     statusBar()->addPermanentWidget(myNameMark);
 
+    // Clicking a row selects that piece. The selection itself still lives in
+    // the viewport and mySelectedPiece is still DERIVED from it through
+    // refreshSelection() - this sets the one source of truth rather than
+    // keeping a second copy here, so a row click and a viewport click land in
+    // exactly the same state.
+    connect(myPieces, &ScenePiecesPanel::selectionRequested, this, [this](int pieceId) {
+        if (!myView) return;
+        const std::vector<int> bodies = bodyIdsForPiece(pieceId);
+        // A broken piece has no bodies at all. Clearing is the honest answer:
+        // there is nothing on screen to select, and leaving the previous
+        // piece selected would make the row look like it had done something.
+        myView->setSelectedSolids(bodies);
+    });
     connect(myPieces, &ScenePiecesPanel::removeRequested, this,
             [this](int pieceId) { removePiece(pieceId); });
     // The eye was inert too: every row had one, and toggling it changed
@@ -350,6 +452,50 @@ void SceneWindow::buildOverlay()
             });
     connect(myPieces, &ScenePiecesPanel::renameCommitted, this,
             [this](int pieceId, const QString& name) { renamePiece(pieceId, name); });
+}
+
+void SceneWindow::resyncPieces()
+{
+    if (!myView || !myStore) return;
+
+    // Everything the viewport held is already gone; these clears are about
+    // THIS window's own bookkeeping, which still names bodies that no longer
+    // exist. The ids are scene-local and handed out here, so they can be
+    // handed out again from 1.
+    myView->clearSolids();
+    myView->clearBodyWood();
+    myView->clearBodyWoodTextures();
+    myPieceBodies.clear();
+    myPieceShapes.clear();
+    myBodyPiece.clear();
+    myBrokenPieces.clear();
+    myGrainAcrossBodies.clear();
+    myNextBodyId = 1;
+    mySelectedPiece = 0;
+
+    // PLACEMENTS COME FROM THE LIVE SCENE, shapes from the store. That split
+    // is the whole point: re-opening the scene from disk would be simpler and
+    // would throw away every unsaved move the user had made, which is a
+    // strange thing to do to somebody whose driver just reset.
+    for (const SceneModel::Piece& piece : myScene.pieces()) {
+        QString loadError;
+        DocumentModel furniture;
+        if (myStore->loadFurniture(QString::fromStdString(piece.furnitureId), furniture,
+                                   &loadError)) {
+            displayPiece(piece.id, furniture, piece.placement);
+        } else {
+            myPieceBodies[piece.id] = {};
+            myPieceShapes[piece.id] = {};
+            myBrokenPieces[piece.id] = loadError.isEmpty()
+                                           ? tr("This furniture could not be read")
+                                           : loadError;
+        }
+    }
+
+    // mySavedRevision and mySceneId are deliberately untouched: a rebuild is
+    // not a load, and a scene with unsaved changes still has them afterwards.
+    showToolGizmo();
+    refreshSurfaces();
 }
 
 bool SceneWindow::openScene(const QString& id)
@@ -443,12 +589,24 @@ bool SceneWindow::openScene(const QString& id)
 void SceneWindow::applySceneSettings()
 {
     if (!myView) return;
-    myView->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(myScene.aspect));
-    myView->setRenderGuides(static_cast<OcctViewWidget::RenderGuides>(myScene.guides));
+    // CLAMPED, because these arrive from a FILE. They were cast straight from
+    // the stored int, so a corrupt scene - or one written by a later build
+    // that added a ratio - produced an enum with no enumerator and a viewport
+    // asked to frame a shape that does not exist. The manifest reader's own
+    // law (validate before you mutate) applied to the three ordinals that
+    // were skipping it; quality already had explicit bounds below.
+    auto clampOrdinal = [](int value, int count) {
+        return value >= 0 && value < count ? value : 0;
+    };
+    myView->setRenderAspect(
+        static_cast<OcctViewWidget::RenderAspect>(clampOrdinal(myScene.aspect, 5)));
+    myView->setRenderGuides(
+        static_cast<OcctViewWidget::RenderGuides>(clampOrdinal(myScene.guides, 3)));
     myView->setRenderLightAngleDeg(myScene.lightAngleDeg);
     myView->setRenderLightStrength(myScene.lightStrength);
     myView->setRenderFov(myScene.fovDeg);
-    myView->setRenderExportSize(static_cast<OcctViewWidget::ExportSize>(myScene.exportSize));
+    myView->setRenderExportSize(
+        static_cast<OcctViewWidget::ExportSize>(clampOrdinal(myScene.exportSize, 5)));
     myView->setRenderQuality(myScene.quality == 0 ? OcctViewWidget::RenderQuality::Simple
                                                   : (myScene.quality == 1
                                                          ? OcctViewWidget::RenderQuality::Balanced
@@ -457,11 +615,13 @@ void SceneWindow::applySceneSettings()
     myView->setBaseProjection(myScene.orthographic ? CameraController::Projection::Orthographic
                                                    : CameraController::Projection::Perspective);
     myView->setCameraStateNow(myScene.camera);
-    // NOTE: the card's own controls are not pushed back to these values yet -
-    // the panel has no single sync entry point, and MainWindow sets its rows
-    // one setter at a time. So a reopened scene RENDERS with its saved
-    // settings while the card's sliders read their defaults until touched.
-    // Recorded rather than papered over.
+    // AND THE CARD IS TOLD. Until this existed a reopened scene RENDERED with
+    // its saved aspect, guides, light, FOV, export size, quality and cutout
+    // while every one of the card's own rows showed its default until
+    // touched - the settings reached the view and nothing reached the
+    // controls. RenderStudio owns the one entry point, so this window and the
+    // editor cannot sync different subsets of the same card.
+    if (myStudio) myStudio->syncPanelFromView();
 }
 
 void SceneWindow::captureSceneSettings()
@@ -610,6 +770,11 @@ bool SceneWindow::addPiece(const QString& furnitureId)
         if (info.id == furnitureId) name = info.name;
     }
 
+    // ONE CHECKPOINT, BEFORE the scene is touched - the editor's rule. It is
+    // taken even when the furniture turns out to be unreadable, because the
+    // piece is added either way (a reference the scene drops is one the user
+    // never learns was broken) and that addition has to be undoable too.
+    myScene.checkpoint();
     const bool wasEmpty = myScene.pieces().empty();
     QString error;
     DocumentModel furniture;
@@ -618,7 +783,22 @@ bool SceneWindow::addPiece(const QString& furnitureId)
     // THE PIECE IS ADDED EITHER WAY. A reference the scene drops on a failed
     // read is a reference the user never learns was broken, and saving the
     // scene would then quietly delete it from the file.
-    const QString pieceName = name.isEmpty() ? tr("Piece") : name;
+    // DISTINGUISHABLE ON ARRIVAL. Six chairs round a table all name one
+    // furniture, so without this the list reads Chair / Chair / Chair and the
+    // only way to find the one you mean is to click every row. The first of a
+    // kind keeps the plain name - a scene with one table should say "Table" -
+    // and each later one takes the next free number.
+    const QString baseName = name.isEmpty() ? tr("Piece") : name;
+    QString pieceName = baseName;
+    auto nameTaken = [this](const QString& candidate) {
+        const std::string want = candidate.toStdString();
+        for (const SceneModel::Piece& existing : myScene.pieces()) {
+            if (existing.name == want) return true;
+        }
+        return false;
+    };
+    for (int suffix = 2; nameTaken(pieceName); ++suffix)
+        pieceName = QStringLiteral("%1 %2").arg(baseName).arg(suffix);
     const int pieceId = myScene.addPiece(furnitureId.toStdString(), pieceName.toStdString());
     if (pieceId == 0) return false;
 
@@ -655,10 +835,28 @@ bool SceneWindow::addPiece(const QString& furnitureId)
 
 bool SceneWindow::removePiece(int pieceId)
 {
+    // Taking a piece out is the change this window's undo stack was built
+    // for: before it existed, removal was final and needed a two-click
+    // confirm to be safe at all.
+    myScene.checkpoint();
     // The viewport first, the model second: the bodies are this window's own
     // ids and nothing else knows them, so they have to go here or they stay on
     // screen belonging to a piece that no longer exists.
     for (int bodyId : bodyIdsForPiece(pieceId)) myView->removeSolid(bodyId);
+    // THE GRAIN LIST TOO. It is keyed by body id and was the one map
+    // removePiece() did not clean, so a piece taken out left its ids behind -
+    // inert, because ids are never reused within a session, but handed back
+    // to setBodyGrainAcross() on every later piece as a list naming bodies
+    // that no longer exist.
+    {
+        const std::vector<int> going = bodyIdsForPiece(pieceId);
+        for (int bodyId : going) {
+            myGrainAcrossBodies.erase(
+                std::remove(myGrainAcrossBodies.begin(), myGrainAcrossBodies.end(), bodyId),
+                myGrainAcrossBodies.end());
+        }
+        if (myView) myView->setBodyGrainAcross(myGrainAcrossBodies);
+    }
     myPieceBodies.erase(pieceId);
     myPieceShapes.erase(pieceId);
     myBrokenPieces.erase(pieceId);

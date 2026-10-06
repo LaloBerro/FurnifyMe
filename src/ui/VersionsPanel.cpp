@@ -18,6 +18,8 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
+
+#include "PanelCloseButton.h"
 #include <QRegularExpression>
 #include <QTimer>
 #include <QScrollArea>
@@ -39,8 +41,8 @@ constexpr int kBaseWidth = 240;
 QString nameSpecimen() { return QStringLiteral("A version name that runs a little long"); }
 QString dateSpecimen() { return QStringLiteral("Jan 1, 2026, 12:00 PM"); }
 constexpr int kRadius = 10;
-constexpr int kCardRadius = 8;
-constexpr int kPad = 12;
+constexpr int kCardRadius = Theme::Space::Tight;
+constexpr int kPad = Theme::Space::Snug;
 constexpr int kMinHeight = 160;
 constexpr int kButtonHeight = 22;
 // 16:10-ish, per the picked mockup.
@@ -134,7 +136,14 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
     auto* header = new QWidget(this);
     header->setStyleSheet(QStringLiteral("background: transparent;"));
     auto* headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(0, 0, 0, 0);
+    // THE CORNER IS SPOKEN FOR. MainWindow parents a PanelCloseButton to this
+    // panel, and it places itself at the top right - the same corner this
+    // header puts its "+" in, so the two drew on top of each other (the close
+    // button at x [w-28, w-8] over a "+" at [w-40, w-12]). The header gives
+    // that square back rather than the close button moving: the hover-only x
+    // is in the same place on every panel that has one, and a panel with a
+    // control in its corner is the one that has to make room.
+    headerLayout->setContentsMargins(0, 0, PanelCloseButton::buttonSize(), 0);
     headerLayout->setSpacing(8);
 
     myTitle = new QLabel(tr("Versions"), header);

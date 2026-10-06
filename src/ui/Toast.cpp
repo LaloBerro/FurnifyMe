@@ -27,7 +27,7 @@ constexpr int kPad = 14;
 constexpr int kWidth = 360;
 constexpr int kUndoWidth = 64;
 constexpr int kUndoHeight = 26;
-constexpr int kBottomMargin = 24;
+constexpr int kBottomMargin = Theme::Space::Wide;
 constexpr int kClearance = 8;   // gap left when stepping around the guide
 // How far a message lifts into place as it fades in. Six pixels: enough to
 // read as movement at the fade's own 160 ms, small enough that a card caught

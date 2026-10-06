@@ -42,7 +42,7 @@ QString nameSpecimen() { return QStringLiteral("Left side panel"); }
 // edge, and a different corner between immediate neighbours reads as a
 // mistake rather than as a distinction.
 constexpr int kRadius = 10;
-constexpr int kPad = 12;
+constexpr int kPad = Theme::Space::Snug;
 // The height the empty state genuinely needs - title, the "no bodies yet"
 // message wrapped at this width, and the padding around them. Used as a
 // FLOOR rather than only as the empty layout's natural size, so the card does
@@ -52,7 +52,7 @@ constexpr int kMinHeight = 176;
 // How far one level of the folder tree indents a row (improvements item 10).
 // 12 is the twisty's own width plus its gap, so a folder's contents line up
 // under its name rather than under its twisty.
-constexpr int kIndentPx = 12;
+constexpr int kIndentPx = Theme::Space::Snug;
 // How far the pointer has to travel before a press on a row becomes a DRAG
 // rather than a click. Qt's own startDragDistance() is 10 at default settings
 // and is about dragging OUT of an application; a row moving inside a 200px
@@ -361,6 +361,16 @@ void ItemsPanel::refresh()
                          QString::fromStdString(outline.name) + QLatin1Char('\x1f') +
                          (myDocument->isVisible(outline.id) ? QLatin1Char('1')
                                                             : QLatin1Char('0')) +
+                         // AND WHICH FOLDER IT IS IN - the fourth time this one
+                         // lesson has had to be applied here. The folder TREE is in
+                         // the signature above, but which folder each ITEM hangs in
+                         // was not - and that is what decides a row's indent and its
+                         // place in the list. Dragging a row into a folder therefore
+                         // changed the rows while the signature said nothing had
+                         // changed, so the early-out below kept the pre-drag list on
+                         // screen. The user's report: "the item list is not being
+                         // updated correctly when i move something".
+                         QString::number(myDocument->groupOf(outline.id)) +
                          QLatin1Char('\x1e');
         }
         for (const DocumentModel::Solid& solid : myDocument->solids()) {
@@ -391,6 +401,10 @@ void ItemsPanel::refresh()
                          // that reads the document.
                          (myDocument->bodyGrainAcross(solid.id) ? QLatin1Char('1')
                                                                : QLatin1Char('0')) +
+                         // AND WHICH FOLDER IT IS IN - see the outline loop above for
+                         // why. This is the term the drag-and-drop gesture actually
+                         // moves, and without it the drawer kept the pre-drag list.
+                         QString::number(myDocument->groupOf(solid.id)) +
                          QLatin1Char('\x1e');
         }
     }

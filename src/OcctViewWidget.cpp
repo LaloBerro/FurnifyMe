@@ -1910,13 +1910,18 @@ void OcctViewWidget::setModelingPreviews(const std::vector<std::pair<int, TopoDS
         ModelingOps::tessellate(shape, 0.1);
 
         Handle(AIS_Shape) preview = new AIS_Shape(shape);
-        // The same yellow setPreview() uses. One rule - a preview is yellow, a
-        // body is grey - rather than a second preview colour per feature. It
-        // also has to differ from the pull arrow standing on top of it: both
-        // were Theme::accent() at first, and the magnified capture showed an
-        // arrow that was technically drawn and practically invisible against
-        // the shape it was pulling.
-        preview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
+        // THE RESULT WEARS THE BODY'S OWN GREY, and what the edit CHANGED is
+        // what gets tinted (below). It used to be painted entirely in
+        // Quantity_NOC_YELLOW - one saturated colour over the whole body, at
+        // exactly the moment the user is judging a shape, which flattens the
+        // shading that tells a fillet from a chamfer and was also the one
+        // untokenised colour left in the app.
+        //
+        // The old comment's point still stands and is answered differently:
+        // the preview had to differ from the pull arrow standing on top of
+        // it. It does - the arrow is accent over a GREY body now, and the
+        // coloured thing on screen is the change rather than the whole shape.
+        preview->SetColor(Quantity_Color(Quantity_NOC_GRAY70));
         preview->SetWidth(2.0);
         // In the sketch-work layer with the rest of the feedback: a pull or a
         // bevel preview carving a body sitting on the ground grid is exactly
@@ -1941,6 +1946,53 @@ void OcctViewWidget::setModelingPreviews(const std::vector<std::pair<int, TopoDS
             myModelingPreviewSolids.push_back(replacesSolidId);
         } else {
             myModelingPreviewSolids.push_back(-1);
+        }
+
+        // AND THE CHANGE ITSELF, tinted. Material going IN wears
+        // booleanStay(), material coming OUT wears booleanOut() - the same
+        // pair, and the same meaning, the boolean gesture already uses on the
+        // wood. That is the whole point of drawing the difference rather than
+        // recolouring the body: a fillet and a chamfer of the same size
+        // produce different slivers here, where one flat yellow body made
+        // them look alike.
+        if (it != mySolids.end() && !it->second.IsNull()) {
+            const ModelingOps::PreviewDifference diff =
+                ModelingOps::previewDifference(it->second->Shape(), shape);
+            if (diff.ok) {
+                auto tint = [this](const TopoDS_Shape& volume, bool staying) {
+                    if (volume.IsNull()) return;
+                    // An empty difference is an answer, not a shape - a pure
+                    // carve adds nothing and a pure grow removes nothing.
+                    TopExp_Explorer probe(volume, TopAbs_SOLID);
+                    if (!probe.More()) return;
+
+                    BRepMesh_IncrementalMesh(volume, 0.1);
+                    Handle(AIS_Shape) drawing = new AIS_Shape(volume);
+                    const QColor token =
+                        staying ? Theme::booleanStay() : Theme::booleanOut();
+                    const Quantity_Color colour(token.redF(), token.greenF(), token.blueF(),
+                                                Quantity_TOC_sRGB);
+                    drawing->SetColor(colour);
+                    // Translucent with its boundary at full strength -
+                    // setBooleanRegion()'s own treatment, for the same reason:
+                    // a carved volume lives INSIDE the board it is cutting,
+                    // and a 45% fill alone reads as haze rather than an edge.
+                    drawing->SetTransparency(0.45f);
+                    drawing->SetDisplayMode(AIS_Shaded);
+                    const Handle(Prs3d_Drawer)& look = drawing->Attributes();
+                    look->SetFaceBoundaryDraw(Standard_True);
+                    look->SetFaceBoundaryAspect(
+                        new Prs3d_LineAspect(colour, Aspect_TOL_SOLID, 2.0));
+                    // The joints' layer, which is depth-cleared - "ghosted
+                    // geometry seen THROUGH the wood", which is exactly what a
+                    // volume being cut out of a board is.
+                    drawing->SetZLayer(myJointsLayer);
+                    myContext->Display(drawing, AIS_Shaded, -1, Standard_False);
+                    myModelingPreviewTints.push_back(drawing);
+                };
+                tint(diff.added, /*staying=*/true);
+                tint(diff.removed, /*staying=*/false);
+            }
         }
     }
 
@@ -2050,6 +2102,13 @@ void OcctViewWidget::clearModelingPreview()
         changed = true;
     }
     myModelingPreviews.clear();
+
+    for (const Handle(AIS_Shape)& tint : myModelingPreviewTints) {
+        if (tint.IsNull()) continue;
+        myContext->Remove(tint, Standard_False);
+        changed = true;
+    }
+    myModelingPreviewTints.clear();
 
     if (changed) scheduleRedraw();
 }

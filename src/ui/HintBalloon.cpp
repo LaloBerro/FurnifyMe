@@ -16,7 +16,7 @@
 #include <QPainter>
 
 namespace {
-constexpr int kPad = 12;
+constexpr int kPad = Theme::Space::Snug;
 constexpr int kWidth = 250;
 constexpr int kClearance = 8;   // gap left when stepping around an obstacle
 

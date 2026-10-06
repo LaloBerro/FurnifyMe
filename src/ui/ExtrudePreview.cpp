@@ -23,7 +23,7 @@
 #include <algorithm>
 
 namespace {
-constexpr int kPad = 12;
+constexpr int kPad = Theme::Space::Snug;
 constexpr int kWidth = 230;
 constexpr int kLabelHeight = 20;
 constexpr int kFieldHeight = 26;
@@ -35,7 +35,7 @@ constexpr int kHintHeight = 16;
 // it, and that is zero now, so painted edge and widget rect coincide; the
 // subtraction survives in both places as the record of what the number
 // actually measures.
-constexpr int kMargin = 16;
+constexpr int kMargin = Theme::Space::Room;
 }  // namespace
 
 ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)

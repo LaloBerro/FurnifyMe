@@ -713,6 +713,52 @@ BooleanResult booleanRegion(BooleanKind kind, const TopoDS_Shape& base,
     return overlap;
 }
 
+PreviewDifference previewDifference(const TopoDS_Shape& before, const TopoDS_Shape& after,
+                                    double fuzzyValue)
+{
+    PreviewDifference out;
+    if (before.IsNull() || after.IsNull()) return out;
+
+    // TWO CUTS, both directions. after-minus-before is what the edit put
+    // there; before-minus-after is what it took away. An empty result is a
+    // legitimate answer rather than a refusal - a pure carve adds nothing and
+    // a pure grow removes nothing - which is booleanRegion()'s own rule for a
+    // tool that misses: a picture, not a failure.
+    auto cut = [fuzzyValue](const TopoDS_Shape& a, const TopoDS_Shape& b, TopoDS_Shape& result) {
+        BRepAlgoAPI_Cut op(a, b);
+        op.SetRunParallel(Standard_True);
+        op.SetFuzzyValue(fuzzyValue);
+        op.Build();
+        if (!op.IsDone()) return false;
+        result = op.Shape();
+        return true;
+    };
+
+    TopoDS_Shape added;
+    TopoDS_Shape removed;
+    if (!cut(after, before, added)) return out;
+    if (!cut(before, after, removed)) return out;
+
+    // Coplanar faces merged, exactly as every other boolean in this file
+    // finishes - without it the difference carries the junk edges that make
+    // later selection miserable, and these shapes are DISPLAYED.
+    if (!added.IsNull()) {
+        ShapeUpgrade_UnifySameDomain unify(added, Standard_True, Standard_True, Standard_True);
+        unify.Build();
+        added = unify.Shape();
+    }
+    if (!removed.IsNull()) {
+        ShapeUpgrade_UnifySameDomain unify(removed, Standard_True, Standard_True, Standard_True);
+        unify.Build();
+        removed = unify.Shape();
+    }
+
+    out.ok = true;
+    out.added = added;
+    out.removed = removed;
+    return out;
+}
+
 TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes)
 {
     if (shapes.empty()) return TopoDS_Shape();
