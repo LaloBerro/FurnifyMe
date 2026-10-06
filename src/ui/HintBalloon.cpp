@@ -111,8 +111,17 @@ bool HintBalloon::conditionHolds(const QString& event) const
 QString HintBalloon::textForEvent(const QString& event) const
 {
     if (event == kBooleanEvent) {
-        return tr("Two bodies selected — Union combines them, Subtract cuts the second "
-                  "out of the first, Intersect keeps only the overlap.");
+        // Rewritten from the badge model (2026-10 review, F8). It used to say
+        // "Subtract cuts the second out of the first" - "cut" is Subtract's
+        // Never column, and the rule was the old one, where selection order
+        // decided which body survived. The gesture now marks the BIGGEST body
+        // to keep and puts the answer on the wood, so the hint teaches the
+        // badges. Their two words come from MainWindow, which paints them, so
+        // the hint and the pills cannot disagree.
+        return tr("Two bodies selected — pick Union, Subtract or Intersect and each "
+                  "body wears a badge. The bigger one reads %1; click a badge to "
+                  "choose which body is kept, then press Enter.")
+            .arg(MainWindow::booleanKeepBadgeText());
     }
     if (event == kAutoPickEvent) {
         // Rewritten for auto selection: this hint used to point at a rail

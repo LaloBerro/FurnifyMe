@@ -51,6 +51,8 @@
 #include "MitreTool.h"
 #include "NameFurnitureCard.h"
 #include "ReMeasureTool.h"
+#include "SlatsTool.h"
+#include "KeyClaim.h"
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
@@ -977,6 +979,7 @@ constexpr BlockInfo kBlocks[] = {
     { "re-measure-right-click-a-size-and-type-a-new-one", false, true },
     { "pressing-a-control-never-drops-the-selection", false, true },
     { "booleans-roles-on-the-wood-and-the-region-drawn", false, true },
+    { "every-chip-writes-enter-and-esc-one-way", false, true },
     { "the-rail-and-the-drawer-start-on-one-line", false, true },
 };
 
@@ -1746,12 +1749,19 @@ QStringList bannedWords()
     // joinery made "Joint" this app's own word and it contains "Join": a
     // "join" followed by "t" is not the banned verb, while "joined", "joining"
     // and "joins" still are. See usesBannedWord() and isJointStem().
-    return {QStringLiteral("Fuse"),  QStringLiteral("Solid"),
-            QStringLiteral("OCCT"),  QStringLiteral("mm3"),
-            QStringLiteral("(s)"),   QStringLiteral("Merge"),
-            QStringLiteral("Join"),  QStringLiteral("bevel"),
-            QStringLiteral("round"), QStringLiteral("flatten"),
-            QStringLiteral("symmetry")};
+    //
+    // "kernel" and "engine" joined after the 2026-10 review (F7): a Fillet
+    // refusal said "the geometry engine would build it on only some of them"
+    // and the Slats fallback "the kernel refused these sizes" - OCCT's own
+    // name banned while its job description went straight past. Substrings,
+    // like OCCT: neither stem is the start of any word this app's copy uses.
+    return {QStringLiteral("Fuse"),   QStringLiteral("Solid"),
+            QStringLiteral("OCCT"),   QStringLiteral("mm3"),
+            QStringLiteral("(s)"),    QStringLiteral("Merge"),
+            QStringLiteral("Join"),   QStringLiteral("bevel"),
+            QStringLiteral("round"),  QStringLiteral("flatten"),
+            QStringLiteral("symmetry"), QStringLiteral("kernel"),
+            QStringLiteral("engine")};
 }
 
 // Which of the banned words are matched at a word boundary rather than as a
@@ -3550,6 +3560,19 @@ int main(int argc, char* argv[])
                   QStringLiteral("the corrupt-load Failure toast uses no banned word "
                                  "(\"%1\", found: %2)")
                       .arg(toastText, offenders.join(QStringLiteral(", "))));
+            // The 2026-10 review's F7: the reason after the dash used to be
+            // FurnifySerial's own error, passed straight through - the store's
+            // private file layout and a parser's words in a user's toast.
+            // It says what is wrong with the FURNITURE now.
+            const QString why = toastText.section(QChar(0x2014), 1).trimmed();
+            check(!why.isEmpty() && why.contains(QStringLiteral("damaged")) &&
+                      !toastText.contains(QStringLiteral("blob"), Qt::CaseInsensitive) &&
+                      !toastText.contains(QStringLiteral("shapes"), Qt::CaseInsensitive) &&
+                      !toastText.contains(QStringLiteral("manifest"), Qt::CaseInsensitive) &&
+                      !toastText.contains(QStringLiteral("FurnifySerial")),
+                  QStringLiteral("and its reason is about the furniture, not about a file "
+                                 "inside it or a parser (\"%1\")")
+                      .arg(why));
         }
     }
 
@@ -8467,6 +8490,18 @@ int main(int argc, char* argv[])
             const QString thirdHint = hint->currentHint();
             check(thirdHint.contains(QStringLiteral("Union")) && thirdHint != secondHint,
                   "selecting two bodies preempts the hint that was already up");
+            // The 2026-10 review's F8: it said "Subtract cuts the second out of
+            // the first" - Subtract's Never column, and a selection-order rule
+            // the badge gesture retired. It teaches the badges now, in the
+            // pills' own word, and the key that applies the gesture.
+            check(!thirdHint.contains(QStringLiteral("cut"), Qt::CaseInsensitive) &&
+                      !thirdHint.contains(QStringLiteral("second"), Qt::CaseInsensitive) &&
+                      thirdHint.contains(MainWindow::booleanKeepBadgeText()) &&
+                      thirdHint.contains(QStringLiteral("badge")) &&
+                      thirdHint.contains(QStringLiteral("Enter")),
+                  QStringLiteral("the boolean hint teaches the KEEP badge and Enter, never "
+                                 "a cut or a selection order (\"%1\")")
+                      .arg(thirdHint));
             check(hint->isVisible(), "the boolean hint is genuinely visible");
 
             // --- trigger 2: the condition going away clears it, not just a
@@ -14946,6 +14981,36 @@ int main(int argc, char* argv[])
                            false, kCopyStamp);
             settle(60);
 
+            // The 2026-10 review's F7: three refusals that named the
+            // machinery instead of the wood. None of them can be triggered
+            // from a probe - a slat build failing on a plan checkSlats()
+            // accepted, and a contact the kernel THROWS on - so each is shown
+            // here through the accessor its real path calls. "kernel" and
+            // "engine" are banned words now, so the toast sweep below is
+            // what turns red if either comes back.
+            check(!MainWindow::slatsBuildRefusalText().endsWith(QLatin1Char('.')) &&
+                      MainWindow::slatsBuildRefusalText().contains(QChar(0x2014)) &&
+                      MainWindow::slatsBuildRefusalText().contains(QStringLiteral("width")),
+                  QStringLiteral("the slats build refusal names what to change, in the "
+                                 "wood's terms (\"%1\")")
+                      .arg(MainWindow::slatsBuildRefusalText()));
+            copyHost->show(MainWindow::slatsBuildRefusalText(), Toast::Kind::Failure, false,
+                           kCopyStamp);
+            settle(60);
+            const QString thrownContact = JointsPanel::reasonText(
+                "contact: kernel exception - BRepAlgoAPI_Common: near-tangent faces");
+            check(!thrownContact.contains(QStringLiteral("contact:")) &&
+                      !thrownContact.contains(QStringLiteral("BRep")) &&
+                      thrownContact.contains(QStringLiteral("move one")),
+                  QStringLiteral("a contact the kernel threw on reads as advice, never as "
+                                 "the exception (\"%1\")")
+                      .arg(thrownContact));
+            check(JointsPanel::reasonText("these two pieces don't meet") ==
+                      QStringLiteral("these two pieces don't meet"),
+                  "while Joinery's own reasons, written for the user, pass through as they are");
+            copyHost->show(thrownContact, Toast::Kind::Failure, false, kCopyStamp);
+            settle(60);
+
             copyHost->show(MainWindow::transformRefusalText(rotated), Toast::Kind::Failure,
                            false, kCopyStamp);
             settle(60);
@@ -17118,7 +17183,7 @@ int main(int argc, char* argv[])
                 if (accentSwatch && textLinesPage && textLinesPage->isAncestorOf(accentSwatch))
                     keptFaults << QStringLiteral("a colour swatch: reachable from Text & lines");
                 const MovedControlCase keptButtons[] = {
-                    {panel->resetButton(), "Reset to the original look"},
+                    {panel->resetButton(), "Reset colours and sizes"},
                     {panel->saveButton(), "Save colours..."},
                     {panel->loadButton(), "Load colours..."},
                 };
@@ -18191,12 +18256,119 @@ int main(int argc, char* argv[])
                   "is not vacuous");
             QWidget* reset = panel->resetButton();
             check(reset != nullptr && reset->isVisible(), "the reset control is on screen");
+            auto* resetButton = qobject_cast<QPushButton*>(reset);
+
+            // Named for what it puts back, never "look" - that word is a
+            // material's in this app's vocabulary.
+            check(resetButton != nullptr &&
+                      resetButton->text() == AppearancePanel::resetLabel() &&
+                      !resetButton->text().contains(QStringLiteral("look"), Qt::CaseInsensitive),
+                  QStringLiteral("the reset button names what it resets (\"%1\")")
+                      .arg(resetButton ? resetButton->text() : QString()));
+            // DEMOTED: it used to span the tab under Save and Load and was the
+            // widest control there. Now it is narrower than a swatch row and
+            // than the Save/Load row it sits under.
+            {
+                QWidget* fileRow = panel->saveButton() ? panel->saveButton()->parentWidget()
+                                                       : nullptr;
+                QWidget* swatchRow = panel->swatchFor(QStringLiteral("accent"))
+                                         ? panel->swatchFor(QStringLiteral("accent"))
+                                               ->parentWidget()
+                                         : nullptr;
+                check(reset != nullptr && fileRow != nullptr && swatchRow != nullptr &&
+                          reset->width() < fileRow->width() &&
+                          reset->width() < swatchRow->width(),
+                      QStringLiteral("and it is no longer the widest control on Colours "
+                                     "(%1 px against the Save/Load row's %2 and a swatch "
+                                     "row's %3)")
+                          .arg(reset ? reset->width() : -1)
+                          .arg(fileRow ? fileRow->width() : -1)
+                          .arg(swatchRow ? swatchRow->width() : -1));
+            }
+
+            // ONE click arms it and resets NOTHING - a whole spec has no Undo.
+            const Theme::Spec themedBeforeReset = Theme::spec();
+            check(!panel->resetArmed(), "the reset starts unarmed");
             if (reset) {
+                clickAt(reset, reset->rect().center());
+                settle(60);
+            }
+            check(Theme::spec() == themedBeforeReset && panel->resetArmed() &&
+                      resetButton != nullptr &&
+                      resetButton->text() == AppearancePanel::resetArmedLabel(),
+                  QStringLiteral("one click on Reset only arms it — nothing is reset yet "
+                                 "and the button says click again (\"%1\")")
+                      .arg(resetButton ? resetButton->text() : QString()));
+            check(panel->resetArmedMs() > 0 &&
+                      panel->resetArmedMs() <= AppearancePanel::kResetConfirmMs,
+                  QStringLiteral("and the arm is a LIVE countdown (%1 of %2 ms)")
+                      .arg(panel->resetArmedMs())
+                      .arg(AppearancePanel::kResetConfirmMs));
+            check(resetButton != nullptr &&
+                      resetButton->width() >= QFontMetrics(resetButton->font())
+                                                  .horizontalAdvance(resetButton->text()),
+                  "and the armed label fits the button it is painted on");
+
+            // The arm EXPIRES. Not waited out for four seconds: the arm's own
+            // timer, found by name, is fired early - which is the timeout
+            // connection itself being exercised, not a stand-in for it.
+            auto* armTimer = panel->findChild<QTimer*>(QStringLiteral("appearanceResetArm"));
+            check(armTimer != nullptr && armTimer->isActive(),
+                  "the arm is that named timer, running");
+            if (armTimer) {
+                armTimer->start(20);
+                // waitFully(), not settle(): settle() returns once Qt goes
+                // idle, which it does before a 20 ms timer is due.
+                waitFully(150);
+                armTimer->setInterval(AppearancePanel::kResetConfirmMs);
+            }
+            check(!panel->resetArmed() && resetButton != nullptr &&
+                      resetButton->text() == AppearancePanel::resetLabel() &&
+                      Theme::spec() == themedBeforeReset,
+                  QStringLiteral("left alone, the reset arm expires — the label goes back "
+                                 "and still nothing was reset (\"%1\")")
+                      .arg(resetButton ? resetButton->text() : QString()));
+            // So the next click after an expiry is a FIRST click again.
+            if (reset) {
+                clickAt(reset, reset->rect().center());
+                settle(60);
+            }
+            check(panel->resetArmed() && Theme::spec() == themedBeforeReset,
+                  "a click after the arm expired arms it again rather than resetting");
+
+            // Hiding the drawer drops the arm too: a click on a reopened
+            // drawer minutes later must not be the second of a pair.
+            if (appearance) {
+                appearance->trigger();   // close
+                settle(60);
+            }
+            check(!panel->isVisible() && !panel->resetArmed() &&
+                      Theme::spec() == themedBeforeReset,
+                  "closing the drawer drops an armed reset");
+            if (appearance) {
+                appearance->trigger();   // and open it again
+                settle(120);
+            }
+            panel->setCurrentTab(AppearancePanel::Tab::Colours);
+            settle(60);
+            check(panel->isVisible() && !panel->resetArmed() && resetButton != nullptr &&
+                      resetButton->text() == AppearancePanel::resetLabel(),
+                  "and the reopened drawer shows Reset unarmed");
+
+            // TWO clicks reset.
+            if (reset) {
+                clickAt(reset, reset->rect().center());
+                settle(60);
+                check(Theme::spec() == themedBeforeReset,
+                      "the first of the two clicks still changed nothing");
                 clickAt(reset, reset->rect().center());
                 settle(250);
             }
             check(Theme::spec() == Theme::defaultSpec(),
-                  "Reset restores defaultSpec() exactly");
+                  "the second click within the window restores defaultSpec() exactly");
+            check(!panel->resetArmed() && resetButton != nullptr &&
+                      resetButton->text() == AppearancePanel::resetLabel(),
+                  "and the button is back at rest afterwards");
             check(graphiteDrawerWidth > 0 && window.itemsPanel() &&
                       window.itemsPanel()->width() == graphiteDrawerWidth,
                   QStringLiteral("and the items drawer is back at exactly the width it "
@@ -36009,7 +36181,7 @@ int main(int argc, char* argv[])
                   QStringLiteral("chip: and selects the joint's own two pieces, whole (%1 of 2)")
                       .arg(selected.size()));
             check(chip->labelText() == QStringLiteral("Dowel") &&
-                      chip->hintText() == QStringLiteral("Enter applies, Esc cancels"),
+                      chip->hintText() == KeyClaim::hintText(),
                   QStringLiteral("chip: it names the kind and both keys (\"%1\", \"%2\")")
                       .arg(chip->labelText(), chip->hintText()));
             QLineEdit* countField = chip->fieldFor(JointChip::Slot::Count);
@@ -38646,6 +38818,145 @@ int main(int argc, char* argv[])
 
         check(bw.findChildren<QDialog*>().isEmpty(),
               "bool: the whole gesture raised no modal dialog at any point");
+    }
+
+    // --- every chip writes Enter and Esc ONE way ------------------------------
+    // The 2026-10 review's F23: eight chips claim Enter and Escape through
+    // KeyClaim, and they spelled the two keys four ways - "Enter applies, Esc
+    // cancels", "Enter applies — Esc cancels", "Enter adds the body — Esc
+    // cancels", "Enter · Esc" - while the pull arrow painted no keys at all
+    // and kept them in a tooltip. KeyClaim::hintText() is the one spelling
+    // now. Each chip's paintedTexts() is the list its paintEvent() draws from,
+    // so asking it is asking what is painted; the pull arrow, which is the one
+    // that STARTED painting, is also rendered and its hint row read as pixels.
+    if (blockEnabled("every-chip-writes-enter-and-esc-one-way")) {
+        RequiredTempDir keysDir;
+        QString keysId;
+        {
+            FurnitureStore seedStore(keysDir.path());
+            keysId = seedStore.createFurniture(QStringLiteral("Keys bench"));
+            DocumentModel seedDoc;
+            // A base board and an upright standing on it, end-on - a contact
+            // a joint can be placed on, so the joint chip has a joint to show.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 600.0, 300.0, 18.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 18.0), 18.0, 300.0, 400.0));
+            check(!keysId.isEmpty() && seedStore.saveFurniture(keysId, seedDoc, QImage()),
+                  "keys: a base and an upright are seeded");
+        }
+        MainWindow kw(nullptr, /*persistProgress=*/false, keysDir.path());
+        kw.setAttribute(Qt::WA_ShowWithoutActivating);
+        kw.resize(1100, 800);
+        kw.show();
+        waitFully(300);
+        kw.view()->setAnimationsEnabled(false);
+        check(kw.openFurniture(keysId), "keys: the seeded furniture opens");
+        settle(300);
+
+        const QString hint = KeyClaim::hintText();
+        check(hint.contains(QStringLiteral("Enter")) && hint.contains(QStringLiteral("Esc")) &&
+                  hint.contains(QChar(0x2014)) && !hint.endsWith(QLatin1Char('.')),
+              QStringLiteral("keys: the one hint names both keys, clauses split by an em "
+                             "dash (\"%1\")")
+                  .arg(hint));
+
+        // The joint chip paints only for a live joint, and the boolean chip
+        // only for a live gesture - so each is made live in turn and its
+        // painted copy read while it is up.
+        const std::vector<DocumentModel::Solid> keySolids = kw.document().solids();
+        if (keySolids.size() == 2) {
+            kw.view()->setSelectedSolids({keySolids[0].id, keySolids[1].id});
+            settle(150);
+        }
+        check(kw.placeJointBetweenSelected() && kw.jointChip() != nullptr &&
+                  kw.jointChip()->isVisible(),
+              "keys: a joint placed between the two puts the joint chip up");
+        settle(150);
+        const QStringList jointTexts =
+            kw.jointChip() ? kw.jointChip()->paintedTexts() : QStringList();
+        kw.setSelectedJoint(0);
+        settle(150);
+        if (keySolids.size() == 2) {
+            kw.view()->setSelectedSolids({keySolids[0].id, keySolids[1].id});
+            settle(150);
+        }
+        check(kw.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)) &&
+                  kw.booleanTool() != nullptr && kw.booleanTool()->isVisible(),
+                  "keys: a live Subtract puts the boolean chip up");
+
+        struct ChipTexts {
+            const char* name;
+            QStringList texts;
+        };
+        const auto textsOf = [](auto* chip) {
+            return chip ? chip->paintedTexts() : QStringList();
+        };
+        const ChipTexts chips[] = {
+            {"ExtrudePreview", textsOf(kw.findChild<ExtrudePreview*>())},
+            {"PullArrow", textsOf(kw.findChild<PullArrow*>())},
+            {"BevelArrow", textsOf(kw.findChild<BevelArrow*>())},
+            {"BooleanTool", textsOf(kw.booleanTool())},
+            {"JointChip", jointTexts},
+            {"MitreTool", textsOf(kw.findChild<MitreTool*>())},
+            {"ReMeasureTool", textsOf(kw.findChild<ReMeasureTool*>())},
+            {"SlatsTool", textsOf(kw.findChild<SlatsTool*>())},
+        };
+        QStringList missing;
+        QStringList oldSpellings;
+        for (const ChipTexts& chip : chips) {
+            bool carries = false;
+            for (const QString& text : chip.texts) {
+                if (text.contains(hint)) carries = true;
+                if (text.contains(QStringLiteral("Enter ·")) ||
+                    text.contains(QStringLiteral("Enter applies,")) ||
+                    text.contains(QStringLiteral("Enter adds")))
+                    oldSpellings << QString::fromLatin1(chip.name) + QStringLiteral(": ") + text;
+            }
+            if (!carries) missing << QString::fromLatin1(chip.name);
+        }
+        check(missing.isEmpty(),
+              QStringLiteral("keys: every chip that claims Enter and Esc paints the one shared "
+                             "hint (missing on: %1)")
+                  .arg(missing.isEmpty() ? QStringLiteral("none")
+                                         : missing.join(QStringLiteral(", "))));
+        check(oldSpellings.isEmpty(),
+              QStringLiteral("keys: and none still paints one of the four old spellings (%1)")
+                  .arg(oldSpellings.isEmpty() ? QStringLiteral("none")
+                                              : oldSpellings.join(QStringLiteral("; "))));
+        kw.cancelBoolean();
+        settle(100);
+
+        // The pull arrow PAINTS it now - read off the pixels, since its
+        // paintedTexts() carried the line all through the tooltip era too.
+        // Its hint row is the band under where the field sits; the field is
+        // a viewport sibling and renderExact() draws only the card, so before
+        // this change the band was bare surface.
+        PullArrow* pull = kw.findChild<PullArrow*>();
+        check(pull != nullptr, "keys: the window has a pull arrow chip");
+        if (pull) {
+            const int hintWidth = QFontMetrics(Theme::badgeFont()).horizontalAdvance(hint);
+            check(pull->width() >= hintWidth + 2 * 10,
+                  QStringLiteral("keys: the pull chip is sized from its painted hint, measured "
+                                 "in the badge font it is painted with (%1 px for %2)")
+                      .arg(pull->width())
+                      .arg(hintWidth));
+            const QImage card = renderExact(pull);
+            const QColor ground = card.pixelColor(card.width() / 2, card.height() - 4);
+            const int bandTop = card.height() - 10 - 14;   // kPad, kHintHeight
+            int ink = 0;
+            for (int y = bandTop; y < card.height() - 10; ++y) {
+                for (int x = 12; x < card.width() - 12; ++x) {
+                    const QColor c = card.pixelColor(x, y);
+                    if (std::abs(c.red() - ground.red()) + std::abs(c.green() - ground.green()) +
+                            std::abs(c.blue() - ground.blue()) > 60)
+                        ++ink;
+                }
+            }
+            check(ink > 40,
+                  QStringLiteral("keys: the pull arrow PAINTS its keys under the field now, "
+                                 "not only in a tooltip (%1 inked pixels in the hint row)")
+                      .arg(ink));
+        }
+        check(kw.findChildren<QDialog*>().isEmpty(), "keys: no modal dialog anywhere");
     }
 
     if (blockEnabled("re-measure-right-click-a-size-and-type-a-new-one")) {

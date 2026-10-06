@@ -26,6 +26,7 @@
 
 #include <QCoreApplication>
 #include <QEvent>
+#include <QFontMetrics>
 #include <QHideEvent>
 #include <QKeyEvent>
 #include <QLineEdit>
@@ -276,25 +277,10 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
     setAttribute(Qt::WA_TransparentForMouseEvents);
     // See Theme::makeSurfaceTransparent()'s own comment.
     Theme::makeSurfaceTransparent(this);
-    {
-        const int margin = Theme::surfaceShadowMargin();
-        // Through Theme::wholeDevicePixels() - see Theme.h. This card's 176x80
-        // happens to be whole at every quarter-step scale already, so today
-        // this changes nothing; it is here so that the day a line is added to
-        // it the card does not silently start painting a black hairline over
-        // the GL surface, which is exactly how the round/flatten chip found
-        // the rule.
-        setFixedSize(Theme::wholeDevicePixels(
-            QSize(kWidth + margin * 2,
-                  // kHintGap + kHintHeight go with the painted hint: keeping
-                  // them would leave an empty band exactly as tall as the
-                  // sentence that used to be there.
-                  kPad * 2 + kLabelHeight + kFieldHeight +
-                      margin * 2)));
-    }
-    // The verbs moved here when they stopped being painted. Set once rather
-    // than on every refresh: the sentence does not change with the value.
-    setToolTip(hintText());
+    applySize();
+    // The gesture the painted line does not name. Set once rather than on
+    // every refresh: the sentence does not change with the value.
+    setToolTip(tr("Drag the arrow — %1").arg(hintText()));
 
     myField = new QLineEdit(view);
     myField->setAttribute(Qt::WA_NoMousePropagation);
@@ -304,6 +290,8 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
     myField->setFont(Theme::bodyFont());
     connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
         myField->setFont(Theme::bodyFont());
+        // A Text size or Font edit changes what the painted hint measures.
+        applySize();
         update();
     });
     connect(myField, &QLineEdit::textChanged, this,
@@ -559,14 +547,30 @@ QString PullArrow::labelText() const
 
 QString PullArrow::hintText() const
 {
-    // NOT PAINTED ANY MORE - the user's own call: "just display the numbers
-    // and not display any text". It is the chip's TOOLTIP now rather than a
-    // deleted string, which keeps the one thing the old comment here was
-    // right about: a modeless panel with invisible verbs is how the keyboard
-    // commit and cancel went unnoticed for a whole branch on ExtrudePreview.
-    // Drawn, it cost a third of the chip's height on every pull; on hover it
-    // costs nothing and still answers "how do I apply this".
-    return tr("Drag the arrow — Enter applies, Esc cancels");
+    // PAINTED AGAIN (the 2026-10 review, F23). It was taken off the chip by
+    // the user's own call - "just display the numbers and not display any
+    // text" - and kept as a tooltip, which made the pull arrow the one chip of
+    // eight whose keys could only be found by hovering. It is KeyClaim's one
+    // short line now, the same every other chip paints, under the field.
+    return KeyClaim::hintText();
+}
+
+void PullArrow::applySize()
+{
+    const int margin = Theme::surfaceShadowMargin();
+    // Wide enough for the hint in the font it is painted with - kWidth is the
+    // floor, not the answer, so a larger type scale cannot clip the line.
+    const int content =
+        std::max(kWidth - kPad * 2, QFontMetrics(Theme::badgeFont()).horizontalAdvance(hintText()));
+    // Through Theme::wholeDevicePixels() - see Theme.h: a card whose size is
+    // not whole device pixels paints a hairline over the GL surface, which is
+    // exactly how the round/flatten chip found the rule.
+    const QSize wanted = Theme::wholeDevicePixels(
+        QSize(content + kPad * 2 + margin * 2,
+              kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight + margin * 2));
+    if (wanted == size()) return;
+    setFixedSize(wanted);
+    if (isVisible()) reposition();
 }
 
 QRect PullArrow::fieldRect() const
@@ -661,9 +665,7 @@ void PullArrow::paintEvent(QPaintEvent* /*event*/)
 
     painter.setFont(Theme::badgeFont());
     painter.setPen(Theme::textMuted());
-    // The hint line is deliberately NOT drawn - see hintText(). It is this
-    // widget's tooltip, and the space it used to take is gone from the chip's
-    // fixed height rather than left as a blank band.
+    painter.drawText(hintRect(), Qt::AlignVCenter | Qt::AlignLeft, hintText());
 }
 
 void PullArrow::showEvent(QShowEvent* event)

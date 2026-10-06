@@ -56,6 +56,7 @@
 #include <QWidget>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 class MainWindow;
@@ -83,6 +84,14 @@ public:
     // does not compare is a field that stops updating. A no-op while hidden:
     // showEvent() refreshes, so an opened drawer is always current.
     void refresh();
+
+    // A joint refusal's reason, as the user reads it - THE one mapping from
+    // Joinery's error string to copy, used by this drawer's broken rows, the
+    // joint chip's kind menu and every MainWindow joint refusal toast.
+    // Joinery's own reasons are written for the user and pass through; a
+    // kernel exception (Joinery tags those "contact:") is written for a log
+    // and is never shown - it becomes a sentence a woodworker can act on.
+    static QString reasonText(const std::string& error);
 
     int rowCount() const { return static_cast<int>(myRows.size()); }
     // What the closed row says: "<A> ↔ <B>", the kind line (or the reason when

@@ -12,9 +12,11 @@
 // What stays at the CALL SITE is what the keys DO - commit() and cancel()
 // are each chip's own - and the visible-gate is read off the owner here so
 // a hidden chip can never claim a key.
+#include <QCoreApplication>
 #include <QEvent>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QString>
 #include <QWidget>
 
 namespace KeyClaim {
@@ -63,6 +65,19 @@ inline bool claim(const QWidget* owner, QObject* watched, QEvent* event, bool wa
     }
     *pressedKey = key;
     return true;
+}
+
+// The words for the claim above, and the ONE place they are written. Every
+// chip that claims Enter and Escape paints this line (the 2026-10 review, F23:
+// seven chips had spelled the same two keys four different ways - "Enter
+// applies, Esc cancels", "Enter applies — Esc cancels", "Enter adds the body
+// — Esc cancels" and "Enter · Esc" - and the pull arrow showed them only in a
+// tooltip). A chip with something more to say adds it after its own em dash
+// rather than rewording this. Each chip still measures it with the font it
+// paints it with, so a longer translation cannot clip.
+inline QString hintText()
+{
+    return QCoreApplication::translate("KeyClaim", "Enter applies — Esc cancels");
 }
 
 }  // namespace KeyClaim

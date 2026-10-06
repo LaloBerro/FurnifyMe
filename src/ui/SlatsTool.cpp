@@ -302,7 +302,7 @@ QString SlatsTool::countText() const
 
 QString SlatsTool::hintText() const
 {
-    return tr("Enter · Esc");
+    return KeyClaim::hintText();
 }
 
 QStringList SlatsTool::paintedTexts() const

@@ -386,7 +386,7 @@ file's own "improvements item 5". A **piece** is one whole furniture standing in
 concepts, two words. The row says what a piece must not be called *in the scene window's own
 copy*; it does not retire a word the editor needs. Nothing in the enforced list changed: the
 swept words are still `OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, `Join`, `bevel`,
-`symmetry`, `round` and `flatten`, and adding "item" to that list would redden the Items
+`symmetry`, `round`, `flatten`, `kernel` and `engine`, and adding "item" to that list would redden the Items
 drawer, which is correct English for what it holds.
 
 **"Group" is not in the folder row's Never column, deliberately.** This app already owns
@@ -427,7 +427,13 @@ calls when an end cannot be pulled (improvements item 13). Nothing painted says 
 the user typed a size and got a board of that size, which is all Re-measure ever claims. The enforced bans match the bare word (case-insensitive):
 `OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, `Join` and `bevel` are forbidden
 everywhere in action text and widget tooltips, regardless of capitalization —
-and so is `symmetry`, added in Milestone 4's fix wave. The kernel-facing
+and so is `symmetry`, added in Milestone 4's fix wave — and `kernel` and `engine`, added
+after the 2026-10 review found "the geometry engine would build it on only some of them"
+and "the kernel refused these sizes" in two Failure toasts: OCCT's name was banned while
+its job description went straight past. A refusal says what is wrong with the wood or the
+furniture, never with the machinery or a file inside it — `FurnitureStore`'s load reasons
+are written for the user, and a joint's kernel exception goes through
+`JointsPanel::reasonText()`, the one mapping every joint refusal shares. The kernel-facing
 `DocumentModel::symmetryOn()`/`setSymmetry()` and every private member keep that spelling
 for the same reason `BooleanKind::Fuse` does; nothing PAINTED may. The Model menu reads
 **Mirror** (`S`) and **Turn Mirroring Off**, the status label reads `Mirror on — …`, and
@@ -691,6 +697,10 @@ application-wide filter installed on `show` and removed on `hide`, plus a
 working the moment anything else took focus, and an RMB orbit — the entire reason a *live*
 preview exists — does exactly that. The panel also names both keys in painted text; a
 modeless panel with invisible verbs is how that went unnoticed for a whole branch.
+**Every chip that claims the two keys paints the same line, `KeyClaim::hintText()`**
+("Enter applies — Esc cancels") — the 2026-10 review found four spellings across eight
+chips and a pull arrow that kept its keys in a tooltip; a chip with more to say adds its
+own clause after an em dash (Re-measure's "click an end to keep it"), never rewords it.
 
 **Cancelling restores the face; it does not clear the slot.** `OcctViewWidget` has one
 preview channel and two features write it — `onFinishSketch()` puts the closed face there,
@@ -2410,7 +2420,7 @@ size — with a tab bar under the title and a `QStackedWidget` below it.
 
 | Tab | Rows |
 |---|---|
-| Colours | 27 colour swatches (scrolled; 29 tokens less the two retired) · Save/Load colours · Reset |
+| Colours | 27 colour swatches (scrolled; 29 tokens less the two retired) · Save/Load colours · Reset colours and sizes |
 | Text & lines | Text size · Font · Edge lines · Outline lines · Button border |
 | Viewport | Show the grid · **Grid detail** · Show sizes around a selection · Projection · **Gizmo size** · Show notifications |
 | Units | Sizes in (Millimetres/Centimetres) · Snap to Grid · Magnet |
@@ -2424,6 +2434,15 @@ none of which is a colour. Colours kept the swatches and the three file-shaped a
 that act on the whole look (Save, Load, Reset); the five type/line rows moved to a new
 Text & lines tab, in the order this table lists them. All five stayed exactly the
 `Theme::Spec` values and the exact mechanism they always were — only their page changed.
+
+**Reset takes two clicks, and it is the narrowest of the three.** It puts the whole
+`Theme::Spec` back — every colour, the text size and font, the line widths, Grid detail and
+Gizmo size — with no Undo, and the 400 ms debounce writes it to disk, so one stray click
+used to cost every colour a user had chosen. It is version Delete's confirm now: the first click arms
+it ("Reset — click again") and changes nothing, a second within `kResetConfirmMs` resets,
+and the arm drops on its timer and whenever the drawer is hidden. It reads **Reset colours
+and sizes** rather than "the original look" — a look is a material's word — and sits at the
+right of its row at its own width, under Save and Load rather than spanning the tab.
 
 **Five tabs do not fit one row of this card's 272 logical pixels of content width** — Text
 & lines alone runs close to what four tabs used to share between them — so the tab bar

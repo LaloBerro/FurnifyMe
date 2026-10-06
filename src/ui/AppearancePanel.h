@@ -217,8 +217,28 @@ public:
     // Spec::sketchLineWidthPx, clamped to Theme's own range.
     void setSketchLineWidth(double px);
     void setFontFamily(const QString& family);
-    // Back to Theme::defaultSpec() - Graphite, and the bundled family at 10pt.
+    // Back to Theme::defaultSpec() - every colour, the text size and family,
+    // the line widths, the button border, Grid detail and Gizmo size. The
+    // EFFECT, not the button: the button arms first (see onResetClicked()).
     void reset();
+
+    // --- the reset button's second click ------------------------------------
+    //
+    // Two clicks, VersionsPanel's version Delete and ScenePiecesPanel's piece
+    // removal to the letter: a reset of the whole spec has no Undo and the
+    // debounce persists it 400 ms later, so a stray click must cost nothing.
+    // The first click arms it - the label becomes resetArmedLabel() and a
+    // timer starts - and changes nothing; a second click while armed resets.
+    // The arm drops on the timer, and when the drawer is hidden, so a click
+    // made minutes later on a reopened drawer is a first click again.
+    static constexpr int kResetConfirmMs = 4000;
+    static QString resetLabel();
+    static QString resetArmedLabel();
+    // What the button itself does - the route a click takes, and the suite's.
+    void onResetClicked();
+    bool resetArmed() const;
+    // Milliseconds left on the arm, or -1 when it is not armed.
+    int resetArmedMs() const;
 
     // --- a look, written to a file and read back ----------------------------
     //
@@ -321,6 +341,8 @@ protected:
     // here is the wheel-shaped half of the WA_NoMousePropagation this widget
     // already carries for presses and releases.
     void wheelEvent(QWheelEvent* event) override;
+    // Drops an armed reset - see onResetClicked().
+    void hideEvent(QHideEvent* event) override;
 
 private:
     struct Row {
@@ -399,6 +421,12 @@ private:
     QSpinBox* myStroke = nullptr;
     QComboBox* myFamily = nullptr;
     class QPushButton* myReset = nullptr;
+    // Running exactly while the reset is armed - the timer IS the arm, so
+    // there is no second boolean to fall out of step with it.
+    class QTimer* myResetArm = nullptr;
+    void disarmReset();
+    // Wide enough for both labels, so arming does not move the button.
+    void fitResetWidth();
     class QPushButton* mySave = nullptr;
     class QPushButton* myLoad = nullptr;
     QColorDialog* myDialog = nullptr;

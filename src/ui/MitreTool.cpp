@@ -318,7 +318,7 @@ QString MitreTool::labelText() const
 
 QString MitreTool::hintText() const
 {
-    return tr("Enter · Esc");
+    return KeyClaim::hintText();
 }
 
 QString MitreTool::flipText()

@@ -286,6 +286,10 @@ public:
     // mitreRefusalFor()'s contract: ModelingOps answers with a value and only
     // this function turns it into words.
     QString slatsRefusalFor(const ModelingOps::SlatPlan& plan) const;
+    // The Failure slatsApply() shows when checkSlats() passed and the build
+    // still came back empty - static so the suite's copy sweep can show it,
+    // since no probe can make the build fail on a plan the check accepted.
+    static QString slatsBuildRefusalText();
     // How many slats `plan` would lay, for the chip's count line. 0 when none
     // would fit.
     int slatsCountFor(const ModelingOps::SlatPlan& plan) const;

@@ -469,8 +469,7 @@ QString BevelArrow::hintText(int line) const
     // correctly and are still the wrong copy: the chip's own title row, the
     // field's tooltip and every refusal say Fillet and Chamfer, so a hint that
     // says something else is a second name for the same thing.
-    return line == 0 ? tr("Drag in to Fillet, out to Chamfer")
-                     : tr("Enter applies, Esc cancels");
+    return line == 0 ? tr("Drag in to Fillet, out to Chamfer") : KeyClaim::hintText();
 }
 
 QRect BevelArrow::fieldRect() const

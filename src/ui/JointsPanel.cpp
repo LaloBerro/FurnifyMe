@@ -143,16 +143,20 @@ QString layoutKey(int cardWidth)
            Theme::titleFont().toString() + QLatin1Char('|') + QString::number(cardWidth);
 }
 
+}  // namespace
+
 // A derivation's refusal, as the row says it. Joinery's own reasons are written
 // for the user; a kernel exception's text is written for a log, and CLAUDE.md
-// never shows one - it gets the plain sentence instead.
-QString reasonText(const std::string& error)
+// never shows one - it gets the plain sentence instead, and the sentence says
+// what to do: the throw is OCCT's near-tangent weak spot, which a piece moved
+// to meet the other squarely steps out of.
+QString JointsPanel::reasonText(const std::string& error)
 {
     if (error.rfind("contact:", 0) == 0)
-        return JointsPanel::tr("these two pieces can't be measured");
+        return tr("these two pieces can't be measured where they meet — move one so "
+                  "they meet squarely");
     return QString::fromStdString(error);
 }
-}  // namespace
 
 // Everything one row paints, decided in refresh() and never changed after:
 // the row widget holds it by shared_ptr-to-const and its paintEvent() only
@@ -263,7 +267,7 @@ std::shared_ptr<RowModel> contentFor(const DocumentModel& doc, const DocumentMod
     if (!d.ok) {
         // No readout, no numbers, no caveat - a derivation that refused carries
         // none of them, and nothing here reaches back for the last good one.
-        m->kindLine = JointsPanel::tr("Broken — %1").arg(reasonText(d.error));
+        m->kindLine = JointsPanel::tr("Broken — %1").arg(JointsPanel::reasonText(d.error));
         return m;
     }
 

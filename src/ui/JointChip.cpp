@@ -2,6 +2,7 @@
 
 #include "GestureChip.h"
 #include "KeyClaim.h"
+#include "JointsPanel.h"
 #include "MainWindow.h"
 #include "Measure.h"
 #include "OcctViewWidget.h"
@@ -193,7 +194,7 @@ public:
         const QFontMetrics badge(Theme::badgeFont());
         const QFontMetrics label(Theme::labelFont());
         const QString contactError =
-            contact.ok ? QString() : QString::fromStdString(contact.error);
+            contact.ok ? QString() : JointsPanel::reasonText(contact.error);
 
         int content = kMenuMinWidth - kMenuPad * 2;
         for (KindEntry* entry : myEntries) {
@@ -633,9 +634,9 @@ QString JointChip::valueText() const
 
 QString JointChip::hintText() const
 {
-    // BevelArrow's own wording, to the letter: two chips with one Enter/Escape
-    // contract must not word it two ways.
-    return tr("Enter applies, Esc cancels");
+    // KeyClaim's one spelling: chips with one Enter/Escape contract must not
+    // word it two ways.
+    return KeyClaim::hintText();
 }
 
 std::vector<JointChip::Slot> JointChip::familySlots() const

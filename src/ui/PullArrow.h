@@ -184,6 +184,9 @@ private:
     // be guarding a different copy than the one on screen.
     QString labelText() const;
     QString hintText() const;
+    // Fixed size from the painted text - the hint measured in the font it is
+    // painted with. Re-run on every Theme broadcast.
+    void applySize();
     // A distance in millimetres, spelled in whatever unit the field reads -
     // "30" in millimetres, "3" in centimetres. Because a drag writes the
     // field and the field is what commits, the number the user sees is

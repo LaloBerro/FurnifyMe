@@ -1104,33 +1104,40 @@ bool FurnitureStore::loadFurniture(const QString& id, DocumentModel& doc, QStrin
         return false;
     };
 
-    if (!QFileInfo::exists(manifestPath(id))) return fail(QStringLiteral("furniture not found"));
+    // Every reason below is shown to the user - after "Couldn't open this
+    // furniture — " in the editor, and where the name goes on a scene's broken
+    // piece - so each is written for somebody at a bench: what is wrong with
+    // the furniture, never which file inside it or what a parser said. The
+    // file names are this class's private layout (see the header); a reason
+    // that leaked them would be the only place the user ever met them.
+    if (!QFileInfo::exists(manifestPath(id)))
+        return fail(QObject::tr("it is no longer in the library"));
 
     const QJsonObject manifest = readManifestObject(id);
     if (manifest.isEmpty() || !manifest.contains(QStringLiteral("format"))) {
-        return fail(QStringLiteral("the manifest is unreadable or corrupt"));
+        return fail(QObject::tr("its file is damaged and can't be read"));
     }
     const int format = manifest.value(QStringLiteral("format")).toInt(-1);
     if (format != kManifestFormatVersion) {
-        return fail(QStringLiteral("this furniture was saved by a version of FurnifyMe this "
-                                    "build does not understand (format %1)")
-                         .arg(format));
+        return fail(QObject::tr("it was saved by a version of FurnifyMe this one can't "
+                                "read — open it in the version that saved it"));
     }
 
     std::ifstream shapesIn(shapesPath(id).toStdString(), std::ios::binary);
-    if (!shapesIn) return fail(QStringLiteral("the shapes file is missing"));
+    if (!shapesIn) return fail(QObject::tr("its bodies are missing from its file"));
     FurnifySerial::SerializedDocument serial;
     const FurnifySerial::SerialResult read = FurnifySerial::readShapes(shapesIn, serial);
-    if (!read.ok) return fail(QString::fromStdString(read.error));
+    // read.error is FurnifySerial's, written for a log - never shown.
+    if (!read.ok) return fail(QObject::tr("its bodies are damaged and can't be read"));
 
     DocumentModel::DocumentMeta meta;
     if (!jsonToItemMeta(manifest.value(QStringLiteral("bodies")).toObject(), meta.bodyNames,
                         meta.bodyVisible)) {
-        return fail(QStringLiteral("the manifest's body names/visibility are corrupt"));
+        return fail(QObject::tr("its list of bodies is damaged"));
     }
     if (!jsonToItemMeta(manifest.value(QStringLiteral("outlines")).toObject(), meta.outlineNames,
                         meta.outlineVisible)) {
-        return fail(QStringLiteral("the manifest's outline names/visibility are corrupt"));
+        return fail(QObject::tr("its list of outlines is damaged"));
     }
     // Absent entirely for any furniture created before this task - decodes
     // to symmetry OFF, never a refusal. See jsonToSymmetry()'s own comment.
@@ -1148,7 +1155,8 @@ bool FurnitureStore::loadFurniture(const QString& id, DocumentModel& doc, QStrin
     // Scratch, then swap - never half-load, per the standing contract.
     DocumentModel scratch;
     if (!scratch.fromSerialized(serial, meta)) {
-        return fail(QStringLiteral("the shapes do not match the manifest's item count - file is corrupt"));
+        return fail(QObject::tr("its bodies and its list of them don't agree — the file "
+                                "is damaged"));
     }
 
     doc = scratch;

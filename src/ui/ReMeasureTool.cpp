@@ -118,8 +118,9 @@ void ReMeasureTool::begin()
         myField->blockSignals(true);
         myField->setText(plainLength(mySize));
         myField->blockSignals(false);
-        myField->setToolTip(tr("%1 in %2 — Enter applies, Esc cancels")
-                                .arg(labelText(), QString::fromStdString(Measure::unitSuffix())));
+        myField->setToolTip(tr("%1 in %2 — %3")
+                                .arg(labelText(), QString::fromStdString(Measure::unitSuffix()),
+                                     KeyClaim::hintText()));
     }
 
     applySize();
@@ -252,7 +253,8 @@ QString ReMeasureTool::labelText() const
 
 QString ReMeasureTool::hintText() const
 {
-    return tr("Enter · Esc — click an end to keep it");
+    // KeyClaim's one spelling of the keys, then this chip's own clause.
+    return tr("%1 — click an end to keep it").arg(KeyClaim::hintText());
 }
 
 QStringList ReMeasureTool::paintedTexts() const

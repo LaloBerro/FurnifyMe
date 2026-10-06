@@ -34,7 +34,7 @@ class QShowEvent;
 // The split is PullArrow's. OcctViewWidget draws the dial IN THE SCENE and
 // owns its drag (a dial painted over the viewport would slide off the board
 // the moment the camera turned); this widget is the chip - "Mitre [45°]
-// ⇄ Flip  Enter · Esc" - and owns everything the gesture DOES: the live
+// ⇄ Flip  Enter applies — Esc cancels" - and owns everything the gesture DOES: the live
 // preview, the dial's angle, Flip, and the Enter/Escape claim.
 //
 // Its visibility is DERIVED: refresh() reads MainWindow::mitreEndActive() on

@@ -1,6 +1,7 @@
 #include "BooleanTool.h"
 
 #include "../MainWindow.h"
+#include "KeyClaim.h"
 #include "../OcctViewWidget.h"
 #include "Theme.h"
 
@@ -163,7 +164,8 @@ QString BooleanTool::hintText() const
 {
     // Both verbs named in painted text. A modeless card with invisible keys
     // is how ExtrudePreview's own pair went unnoticed for a whole branch.
-    return tr("Enter applies — Esc cancels");
+    // KeyClaim's one spelling, so no two chips word the same keys two ways.
+    return KeyClaim::hintText();
 }
 
 QStringList BooleanTool::paintedTexts() const

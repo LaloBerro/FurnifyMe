@@ -11,8 +11,10 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFontDatabase>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QHash>
+#include <QHideEvent>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPainter>
@@ -23,6 +25,7 @@
 #include <QScrollBar>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -715,7 +718,7 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     strokeLine->addWidget(myStroke);
     textLines->insertWidget(textLines->count() - 1, strokeRow);
 
-    // --- the look as a file, back on COLOURS ---------------------------------
+    // --- the colours as a file, back on COLOURS ------------------------------
     auto* fileRow = new QWidget(coloursPage);
     makeTransparent(fileRow, QStringLiteral("appearanceFileRow"));
     auto* fileLine = new QHBoxLayout(fileRow);
@@ -723,21 +726,41 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     fileLine->setSpacing(8);
     mySave = new QPushButton(tr("Save colours..."), fileRow);
     mySave->setToolTip(tr("Write the colours and text size to a file\n"
-                          "Keep a look you like, or hand it to somebody else."));
+                          "Keep colours you like, or hand them to somebody else."));
     connect(mySave, &QPushButton::clicked, this, &AppearancePanel::chooseSaveFile);
     fileLine->addWidget(mySave, 1);
     myLoad = new QPushButton(tr("Load colours..."), fileRow);
-    myLoad->setToolTip(tr("Read a look back out of a file\n"
+    myLoad->setToolTip(tr("Read colours back out of a file\n"
                           "Applied as soon as it is opened."));
     connect(myLoad, &QPushButton::clicked, this, &AppearancePanel::chooseLoadFile);
     fileLine->addWidget(myLoad, 1);
     colours->addWidget(fileRow);
 
-    myReset = new QPushButton(tr("Reset to the original look"), coloursPage);
-    myReset->setToolTip(tr("Put every colour and the text size back the way "
-                           "they shipped"));
-    connect(myReset, &QPushButton::clicked, this, &AppearancePanel::reset);
-    colours->addWidget(myReset);
+    // RESET, demoted and guarded. It used to be the widest control on the tab,
+    // full width under Save and Load, and one click threw away every colour
+    // with no Undo - the 400 ms debounce then wrote that to disk. Now it sits
+    // at the right at its own width and takes two clicks (onResetClicked()).
+    // Named for what it puts back rather than "the original look": a look is
+    // a material's in this app's vocabulary, and colours are not the half of
+    // it a user would guess - the sizes go back too.
+    auto* resetRow = new QWidget(coloursPage);
+    makeTransparent(resetRow, QStringLiteral("appearanceResetRow"));
+    auto* resetLine = new QHBoxLayout(resetRow);
+    resetLine->setContentsMargins(0, 0, 0, 0);
+    resetLine->addStretch(1);
+    myReset = new QPushButton(resetLabel(), resetRow);
+    myReset->setToolTip(tr("Put every colour, the text size and font, the line widths, "
+                           "Grid detail and Gizmo size back the way they shipped — "
+                           "click twice"));
+    connect(myReset, &QPushButton::clicked, this, &AppearancePanel::onResetClicked);
+    resetLine->addWidget(myReset);
+    colours->addWidget(resetRow);
+    myResetArm = new QTimer(this);
+    myResetArm->setObjectName(QStringLiteral("appearanceResetArm"));
+    myResetArm->setSingleShot(true);
+    myResetArm->setInterval(kResetConfirmMs);
+    connect(myResetArm, &QTimer::timeout, this, &AppearancePanel::disarmReset);
+    fitResetWidth();
 
     // The tab chips read myTab, which nothing has pushed onto them yet.
     setCurrentTab(myTab);
@@ -1084,6 +1107,9 @@ void AppearancePanel::applyTheme()
                                    .arg(Theme::titleFont().pointSizeF()));
     }
 
+    // A Text size or Font edit changes what both reset labels measure.
+    fitResetWidth();
+
     mySyncing = false;
     update();
 }
@@ -1156,6 +1182,54 @@ void AppearancePanel::setFontFamily(const QString& family)
 void AppearancePanel::reset()
 {
     Theme::setSpec(Theme::defaultSpec());
+}
+
+QString AppearancePanel::resetLabel() { return tr("Reset colours and sizes"); }
+QString AppearancePanel::resetArmedLabel() { return tr("Reset — click again"); }
+
+void AppearancePanel::onResetClicked()
+{
+    if (resetArmed()) {
+        // Disarmed BEFORE the reset: setSpec() broadcasts and applyTheme()
+        // runs off it, and the label it re-measures should be the resting one.
+        disarmReset();
+        reset();
+        return;
+    }
+    if (myReset) myReset->setText(resetArmedLabel());
+    if (myResetArm) myResetArm->start();
+}
+
+bool AppearancePanel::resetArmed() const { return myResetArm && myResetArm->isActive(); }
+
+int AppearancePanel::resetArmedMs() const
+{
+    return resetArmed() ? myResetArm->remainingTime() : -1;
+}
+
+void AppearancePanel::disarmReset()
+{
+    if (myResetArm) myResetArm->stop();
+    if (myReset) myReset->setText(resetLabel());
+}
+
+void AppearancePanel::fitResetWidth()
+{
+    if (!myReset) return;
+    // Measured with the button's own font - the font it paints its label
+    // with - and the style's padding read off its own sizeHint() for the
+    // label it is showing now, so the two labels share one width.
+    const QFontMetrics metrics(myReset->font());
+    const int padding = myReset->sizeHint().width() - metrics.horizontalAdvance(myReset->text());
+    myReset->setMinimumWidth(std::max(metrics.horizontalAdvance(resetLabel()),
+                                      metrics.horizontalAdvance(resetArmedLabel())) +
+                             std::max(0, padding));
+}
+
+void AppearancePanel::hideEvent(QHideEvent* event)
+{
+    disarmReset();
+    QWidget::hideEvent(event);
 }
 
 QString AppearancePanel::colourFileSuffix() { return QStringLiteral(".furnifytheme"); }
@@ -1339,7 +1413,9 @@ QStringList AppearancePanel::paintedTexts() const
     if (myFamilyLabel) texts << myFamilyLabel->text();
     if (mySave) texts << mySave->text();
     if (myLoad) texts << myLoad->text();
-    if (myReset) texts << myReset->text();
+    // Both of the reset button's labels, not only the one it shows now - the
+    // armed one is up for four seconds and the sweep must cover it too.
+    texts << resetLabel() << resetArmedLabel();
     // The tab words, every mirrored row's name and every choice chip's
     // label. Collected as each is built rather than listed again here, so a
     // row added later cannot slip past the sweep by being forgotten in this

@@ -293,8 +293,9 @@ QString ExtrudePreview::hintText() const
 {
     // A modeless panel with invisible verbs is how the keyboard-only commit
     // and cancel went unnoticed for a whole branch. This panel has no
-    // buttons, so the two keys have to be on it in words.
-    return tr("Enter adds the body — Esc cancels");
+    // buttons, so the two keys have to be on it in words - KeyClaim's one
+    // spelling of them, the same line every other chip paints.
+    return KeyClaim::hintText();
 }
 
 QString ExtrudePreview::defaultHeightText() const
@@ -413,8 +414,8 @@ void ExtrudePreview::applyTheme()
     // MEASURED with the fonts paintEvent() actually draws these two strings
     // with, not assumed from kWidth alone. kWidth was chosen against the
     // shipped 10pt scale and stays the floor, so the card is exactly the size
-    // it has always been at the default look - but at 13pt "Enter adds the
-    // body — Esc cancels" is wider than 230px and used to run off the card.
+    // it has always been at the default look - but at 13pt the old "Enter adds
+    // the body — Esc cancels" was wider than 230px and used to run off the card.
     // BevelArrow::applyTheme() is the same measurement three files away.
     const QFontMetrics label(Theme::labelFont());
     const QFontMetrics badge(Theme::badgeFont());

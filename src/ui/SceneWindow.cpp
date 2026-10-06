@@ -43,6 +43,15 @@ constexpr double kSnapStepMm = 10.0;
 // ON the other. A hair, so pieces that merely touch along an edge are not
 // treated as supports.
 constexpr double kSupportTouchMm = 0.5;
+
+// What a broken piece's row prints where its name goes. FurnitureStore's
+// reason is a clause written to follow "Couldn't open this furniture — ", so
+// standing alone in a row it needs a subject of its own.
+QString brokenPieceReason(const QString& loadError)
+{
+    if (loadError.isEmpty()) return SceneWindow::tr("This furniture could not be read");
+    return SceneWindow::tr("This furniture can't be opened — %1").arg(loadError);
+}
 }  // namespace
 
 SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
@@ -486,9 +495,7 @@ void SceneWindow::resyncPieces()
         } else {
             myPieceBodies[piece.id] = {};
             myPieceShapes[piece.id] = {};
-            myBrokenPieces[piece.id] = loadError.isEmpty()
-                                           ? tr("This furniture could not be read")
-                                           : loadError;
+            myBrokenPieces[piece.id] = brokenPieceReason(loadError);
         }
     }
 
@@ -554,9 +561,7 @@ bool SceneWindow::openScene(const QString& id)
         } else {
             myPieceBodies[piece.id] = {};
             myPieceShapes[piece.id] = {};
-            myBrokenPieces[piece.id] = loadError.isEmpty()
-                                           ? tr("This furniture could not be read")
-                                           : loadError;
+            myBrokenPieces[piece.id] = brokenPieceReason(loadError);
         }
     }
     mySavedRevision = myScene.revision();
@@ -805,11 +810,13 @@ bool SceneWindow::addPiece(const QString& furnitureId)
     if (!loaded) {
         myPieceBodies[pieceId] = {};
         myPieceShapes[pieceId] = {};
-        myBrokenPieces[pieceId] =
-            error.isEmpty() ? tr("This furniture could not be read") : error;
+        myBrokenPieces[pieceId] = brokenPieceReason(error);
         if (myToasts) {
+            // The store's own clause straight after the dash - the row's
+            // standalone sentence would put a second subject in the middle.
             myToasts->show(tr("Couldn't put %1 in this scene — %2")
-                               .arg(pieceName, myBrokenPieces[pieceId]),
+                               .arg(pieceName,
+                                    error.isEmpty() ? tr("it could not be read") : error),
                            Toast::Kind::Failure, false);
         }
         refreshSurfaces();

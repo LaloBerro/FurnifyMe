@@ -32,6 +32,7 @@
 #include "VersionsPanel.h"
 #include "JointChip.h"
 #include "JointsPanel.h"
+#include "KeyClaim.h"
 #include "MitreTool.h"
 #include "LoadingCard.h"
 #include "MaterialCard.h"
@@ -5600,6 +5601,14 @@ int MainWindow::slatsCountFor(const ModelingOps::SlatPlan& plan) const
     return count;
 }
 
+QString MainWindow::slatsBuildRefusalText()
+{
+    // For a run checkSlats() passed and the build still turned down - so it
+    // names the one thing the user can change. It said "the kernel refused
+    // these sizes" until the 2026-10 review: a word for OCCT, not for wood.
+    return tr("These slats can't be made at these sizes — try a different width or gap");
+}
+
 QString MainWindow::slatsRefusalFor(const ModelingOps::SlatPlan& plan) const
 {
     if (mySlatsRebuild) {
@@ -5641,7 +5650,7 @@ void MainWindow::slatsApply(const ModelingOps::SlatPlan& plan)
         // Never silently: a refusal the user cannot see is the thing this app
         // does not do.
         const QString why = slatsRefusalFor(plan);
-        myToasts->show(why.isEmpty() ? tr("Slats — the kernel refused these sizes") : why,
+        myToasts->show(why.isEmpty() ? slatsBuildRefusalText() : why,
                        Toast::Kind::Failure, false);
         return;
     }
@@ -6773,7 +6782,7 @@ bool MainWindow::canMitreSelectedFace() const
 
 QString MainWindow::mitreUnavailableReason() const
 {
-    if (myMitreActive) return tr("A mitre is already live — Enter applies, Esc cancels");
+    if (myMitreActive) return tr("A mitre is already live — %1").arg(KeyClaim::hintText());
     if (myRenderModeOn) return tr("Unavailable in render mode");
     if (isCompareOpen()) return tr("Unavailable while comparing versions");
     if (myView->mirrorPlacementActive())
@@ -7237,13 +7246,16 @@ QString MainWindow::bevelCombinationRefusalText(bool fillet, int totalBodies)
     // itself instead. The sweep can see this pair now - `round` and `flatten`
     // joined the banned list with word-boundary matching, so "background"
     // stays legal and "rounded" does not.
+    //
+    // And "the geometry engine would build it on only some of them" after
+    // that (the 2026-10 review): nobody at a bench has a geometry engine. What
+    // the user would actually see is some of the edges left as they were -
+    // square - so the sentence says that.
     const QString base = fillet
-        ? tr("These edges can't take a fillet together — the geometry "
-             "engine would build it on only some of them. Try them one "
-             "at a time")
-        : tr("These edges can't take a chamfer together — the geometry "
-             "engine would build it on only some of them. Try them one "
-             "at a time");
+        ? tr("These edges can't take a fillet together — some of them would be "
+             "left square. Try them one at a time")
+        : tr("These edges can't take a chamfer together — some of them would be "
+             "left square. Try them one at a time");
     // Milestone 5: a cross-body gesture can reach this same per-body
     // combination refusal on any one of the bodies it touches. `totalBodies`
     // defaults to 1, which reproduces the sentence above byte for byte - the
@@ -7332,8 +7344,8 @@ QString MainWindow::transformRefusalText(const gp_Trsf& delta)
     // sentence this replaced said "the geometry engine refused the change" and
     // sailed through every run only because nothing ever triggered it - which
     // is exactly why the suite now shows this copy through a probe.
-    return tr("This body couldn't be %1 — that left nothing to keep. Try a "
-              "change down. Try a smaller drag, or a different handle")
+    return tr("This body couldn't be %1 — that would leave nothing to keep. "
+              "Try a smaller drag, or a different handle")
         .arg(transformPastVerb(delta));
 }
 
@@ -9127,7 +9139,9 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
         return false;
     };
     const auto cannotTake = [&refuse, this](const std::string& why) {
-        return refuse(tr("These pieces can't take a joint — %1").arg(QString::fromStdString(why)));
+        // Through JointsPanel's one mapping: a kernel exception's text is
+        // written for a log and never reaches a toast.
+        return refuse(tr("These pieces can't take a joint — %1").arg(JointsPanel::reasonText(why)));
     };
 
     // The HOST by geometry. Piece A is simply whichever shape is passed first -
@@ -9578,7 +9592,7 @@ bool MainWindow::setJointKind(int jointId, Joinery::Kind kind)
     Joinery::ContactResult contact;
     if (!jointContact(jointId, contact)) {
         refuseJointEdit(tr("This joint can't change kind — %1")
-                            .arg(QString::fromStdString(contact.error)));
+                            .arg(JointsPanel::reasonText(contact.error)));
         return false;
     }
     const std::string why = Joinery::validityOf(kind, contact.contact);
@@ -9637,7 +9651,7 @@ bool MainWindow::setJointHost(int jointId, int hostBodyId)
         Joinery::findContact(myDocument.shapeOf(joint.bodyB), myDocument.shapeOf(joint.bodyA));
     if (!contact.ok) {
         refuseJointEdit(tr("This joint can't change which piece it is cut into — %1")
-                            .arg(QString::fromStdString(contact.error)));
+                            .arg(JointsPanel::reasonText(contact.error)));
         return false;
     }
     const std::string why = Joinery::validityOf(joint.kind, contact.contact);
