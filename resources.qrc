@@ -8,4 +8,10 @@
   <qresource prefix="/icons">
     <file alias="app.png">assets/Icon.png</file>
   </qresource>
+  <!-- The default wood (the 2026-10 review's F11): compiled in as well as
+       copied beside the binary, so render mode's default never depends on
+       what was deployed. 142 KB. -->
+  <qresource prefix="/materials">
+    <file alias="oak-natural.jpg">assets/materials/oak-natural.jpg</file>
+  </qresource>
 </RCC>

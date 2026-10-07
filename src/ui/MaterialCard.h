@@ -28,6 +28,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <vector>
+
 class QAbstractButton;
 class QHideEvent;
 class QLabel;
@@ -62,7 +64,15 @@ public:
     // Opens the card for `material`, seeded with everything it currently
     // looks like. Opening it again for another material re-seeds rather than
     // stacking a second card.
-    void open(const QString& material, const Look& look);
+    //
+    // `wood` says what KIND of material this is, and a wood is not offered
+    // Metal: a board is never bare metal, and the review's capture of a
+    // stored Metal 100 turning oak into grey steel showed what offering it
+    // costs (T-039). The row is hidden, not zeroed - the stored value is the
+    // furniture's and is left exactly as it was. Surface stays: varnished
+    // and raw are both real woods. Every material this app ships is a wood,
+    // which is why that is the default.
+    void open(const QString& material, const Look& look, bool wood = true);
     // THE ONE EDIT PATH, and it is both what a drag lands in and what the
     // suite drives - RenderSettingsPanel's own rule, one card over. It
     // clamps, pushes every control and reports the change, so a test that
@@ -72,6 +82,11 @@ public:
     void close();
     bool isOpen() const { return !isHidden(); }
     QString material() const { return myMaterial; }
+    bool isWood() const { return myWood; }
+    // The two dials whose being offered depends on the kind of material, for
+    // a check that must ask the widget the user would see.
+    QWidget* metalControl() const;
+    QWidget* surfaceControl() const;
 
     Look look() const { return myLook; }
     QColor colour() const { return myLook.colour; }
@@ -110,6 +125,7 @@ private:
 
     QString myMaterial;
     Look myLook;
+    bool myWood = true;
 
     QPointer<QAbstractButton> mySwatch;
     QPointer<QSlider> mySlider;
@@ -126,6 +142,10 @@ private:
     Dial myMetal;
     Dial myGrainSize;
     Dial myGrainAngle;
+    // The dials this kind of material is offered, top to bottom - the ONE
+    // list layoutCard(), and replace() both walk, so a hidden
+    // row leaves no gap and the card's height counts only what is shown.
+    std::vector<Dial*> offeredDials();
     // Guards the seeding pass in open(), so pushing a value into a slider
     // does not report it straight back out as a user edit - RenderSettingsPanel's
     // mySyncing, the same problem one card over.

@@ -40,6 +40,16 @@ struct Spec {
     QColor textDisabled;
     QColor border;
     QColor viewport;
+    // THE BODIES THEMSELVES, outside render mode - the flat colour every
+    // modelling presentation is shaded in, in the editor and in the scene
+    // editor's arranging view alike. It was OCCT's Quantity_NOC_GRAY70 until
+    // the 2026-10 review (T-039): a neutral grey that read as nothing in
+    // particular. A quiet, low-chroma wood now - plain shaded colour, no
+    // texture, because the photographic wood belongs to render mode - chosen
+    // from captures to sit clear of the hover cyan, the selection orange, the
+    // outline yellow, the boolean pair and the sizes' blue (gui_smoke pins
+    // each of those distances from the tokens).
+    QColor body;
     QColor gridMinor;
     QColor gridMajor;
     QColor axisX;
@@ -295,7 +305,8 @@ QColor textMuted();     // shortcut badges
 QColor textDisabled();
 QColor border();
 QColor viewport();      // OCCT background
-QColor gridMinor();     // ground grid, minor lines
+QColor body();          // a modelling body's flat shaded colour - see Spec
+QColor gridMinor();    // ground grid, minor lines
 QColor gridMajor();     // ground grid, major lines
 QColor axisX();         // ground grid, X axis tint (muted red)
 QColor axisY();         // ground grid, Y axis tint (muted green)

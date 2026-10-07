@@ -278,6 +278,9 @@ QString AppearancePanel::nameForToken(const QString& id)
     // in the shell.
     static const QHash<QString, QString> names = {
         {QStringLiteral("viewport"), QObject::tr("Viewport")},
+        // What the bodies are shaded in while modelling - render mode dresses
+        // them in their own wood instead, which is why the row says so.
+        {QStringLiteral("body"), QObject::tr("Bodies while modelling")},
         {QStringLiteral("gridMinor"), QObject::tr("Grid lines")},
         {QStringLiteral("gridMajor"), QObject::tr("Grid — every tenth line")},
         {QStringLiteral("axisX"), QObject::tr("X axis")},

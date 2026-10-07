@@ -183,11 +183,21 @@ public:
     // the three gloss/metal tiles takes wood off in the same gesture.
     void setWood(bool wood);
     bool wood() const { return myWood; }
-    // Which textured material is the active one while wood() is on - "Wood"
-    // for the built-in grain, otherwise the tile's own name (derived from
-    // the image's filename). Silent, persistence's return path.
+    // Which textured material is the active one while wood() is on - the
+    // tile's own name, derived from the image's filename. Empty, and the
+    // retired built-in "Wood", select the default wood. Silent, persistence's
+    // return path.
     void setWoodSelection(const QString& name);
     QString woodSelection() const { return myWoodName; }
+    // THE DEFAULT WOOD's tile name - the bundled photographic oak, which is
+    // what render mode dresses a furniture in until a wood is chosen (the
+    // 2026-10 review's F11; it replaced a procedurally drawn grain).
+    static QString defaultWoodName();
+    // The image a material's tile is built from (empty for a name no tile
+    // answers to), and whether it is a wood - every tile today is, which is
+    // also the answer for an unknown name.
+    QString materialFilePath(const QString& name) const;
+    bool isWoodMaterial(const QString& name) const;
     // The material's two dials, silent return paths - see the signals.
     void setWoodTileMm(double mm);
     void setWoodAngle(double degrees);
@@ -196,8 +206,8 @@ public:
 
     // One tile per image the user dropped into the materials folder -
     // MainWindow scans and calls this once, right after construction. The
-    // selector lays every tile (the three gloss/metal presets, the built-in
-    // Wood, and however many of these) in a WRAPPING grid, so more
+    // selector lays every tile (one per image - the default oak among them)
+    // in a WRAPPING grid, so more
     // materials grow rows rather than clipping - the user's own ask.
     void addTextureMaterials(const std::vector<std::pair<QString, QString>>& namesAndPaths);
 
@@ -280,8 +290,8 @@ signals:
     // the moment they are made.
     void materialEditRequested(QString material);
     void woodChanged(bool wood);
-    // A textured tile was clicked: `path` is the image file, empty for the
-    // built-in procedural grain. MainWindow routes it into
+    // A textured tile was clicked: `path` is the image file (every tile has
+    // one since the procedural grain was retired). MainWindow routes it into
     // OcctViewWidget::setRenderTextureFile() + setRenderWood(true).
     void woodTextureChosen(const QString& name, const QString& path);
     // Grain size (how much real material one tile of the image covers) and
@@ -363,7 +373,13 @@ private:
     Guides myGuides = Guides::Thirds;
     class QLabel* myExportNote = nullptr;
     bool myWood = false;
-    QString myWoodName = QStringLiteral("Wood");
+    QString myWoodName = defaultWoodName();
+    // The Material section's own parts, shown only while there is a tile to
+    // choose - see syncMaterialSection().
+    QLabel* myMaterialHead = nullptr;
+    QWidget* myMaterialGrid = nullptr;
+    QWidget* myMaterialRule = nullptr;
+    void syncMaterialSection();
     class QGridLayout* myTileGrid = nullptr;
     // Watches the material tiles for a double-click - see addTile().
     bool eventFilter(QObject* watched, QEvent* event) override;

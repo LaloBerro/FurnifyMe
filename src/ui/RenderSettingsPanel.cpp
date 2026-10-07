@@ -283,25 +283,6 @@ protected:
                                    myCurrent ? 2.0 : 1.0);
             return;
         }
-        if (myWood) {
-            for (int x = 0; x < width(); ++x) {
-                const double band =
-                    std::sin((x + 4.0 * std::sin(x * 0.10)) * 0.55) * 0.5 + 0.5;
-                const QColor grain =
-                    band < 0.5 ? QColor(0x6b, 0x48, 0x2a) : QColor(0x8f, 0x6a, 0x45);
-                painter.fillRect(QRect(x, 0, 1, height()), grain);
-            }
-            const QRect woodStrip(0, height() - 13, width(), 13);
-            painter.fillRect(woodStrip, QColor(0, 0, 0, 150));
-            painter.setPen(myCurrent ? QColor(Qt::white) : Theme::textMuted());
-            painter.setFont(Theme::badgeFont());
-            painter.drawText(woodStrip, Qt::AlignCenter, myName);
-            painter.restore();
-            Theme::drawCrispBorder(painter, body,
-                                   myCurrent ? Theme::accent() : Theme::border(), kTileRadius,
-                                   myCurrent ? 2.0 : 1.0);
-            return;
-        }
         const QRectF ball(width() * 0.5 - height() * 0.30, height() * 0.16,
                           height() * 0.60, height() * 0.60);
         const QColor base = myMetal > 0.5 ? QColor(0x9a, 0x9c, 0xa2)
@@ -511,7 +492,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         outer->addWidget(head);
     };
 
-    auto addRule = [&] {
+    auto addRule = [&]() -> QWidget* {
         auto* rule = new QWidget(this);
         rule->setFixedHeight(1);
         makeTransparent(rule, QStringLiteral("renderSettingsRule"));
@@ -526,6 +507,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         // The extra breathing room a rule wants beyond the ordinary
         // between-row gap kRowSpacing already gives every pair of rows.
         outer->addSpacing(kSectionGap - kRowSpacing);
+        return rule;
     };
 
     // `key` is a plain ASCII identifier for the object-name selectors
@@ -697,6 +679,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
 
     // --- Material (mockup B's selector: preset tiles over the sliders) ---
     addSection(tr("Material"));
+    myMaterialHead = mySectionLabels.back();
     {
         auto* grid = new QWidget(this);
         makeTransparent(grid, QStringLiteral("renderSettingsPresetGrid"));
@@ -715,24 +698,14 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         // card, per material, a tile whose whole content was a pair of them
         // had nothing left to be.
         //
-        // What that buys beyond the user's own reason: activeMaterialName()
-        // used to DERIVE which of the three was current from the live gloss
-        // and metal, so moving those values per material would have made the
-        // name depend on the very values it was selecting. With woods only,
-        // the live material simply names itself.
-        //
-        // The built-in Wood tile: a material flag, not a slider pair - see
-        // setWood(). File-backed materials join the same grid through
-        // addTextureMaterials().
-        auto* woodTile = new MaterialTile(tr("Wood"), 0.0, 0.0, grid, /*wood=*/true);
-        woodTile->setToolTip(tr("Dress every body in wood grain for the picture"));
-        connect(woodTile, &QAbstractButton::clicked, this, [this, woodTile] {
-            if (myWood && myWoodName == woodTile->name()) return;
-            myWoodName = woodTile->name();
-            setWood(true);
-            emit woodTextureChosen(woodTile->name(), QString());
-        });
-        addTile(woodTile);
+        // AND SO IS THE BUILT-IN "WOOD" TILE (the 2026-10 review's F11). It
+        // was a procedurally drawn grain that every furniture wore unless it
+        // chose otherwise, and it read as corrugated bars on a board's side
+        // and as fabric at thumbnail size. Its only real job was being the
+        // default, which the bundled photographic oak now is - so every tile
+        // here is an image, added by addTextureMaterials(), and the default
+        // is the Oak natural tile among them (defaultWoodName()).
+        myMaterialGrid = grid;
         outer->addWidget(grid);
     }
     // SURFACE, METAL, GRAIN SIZE AND GRAIN ANGLE ARE NOT HERE ANY MORE. They
@@ -753,7 +726,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     myMaterialNote->setWordWrap(true);
     outer->addWidget(myMaterialNote);
 
-    addRule();
+    myMaterialRule = addRule();
 
     // --- Scene ----------------------------------------------------------
     // "Studio", not "Scene": scene is the vocabulary table's Never-word
@@ -950,6 +923,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
 
     syncValueLabels();
     syncPresetTiles();
+    syncMaterialSection();
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
             &RenderSettingsPanel::applyTheme);
@@ -1251,10 +1225,51 @@ double RenderSettingsPanel::woodAngle() const
     return myWoodAngleSlider ? static_cast<double>(myWoodAngleSlider->value()) : 0.0;
 }
 
+QString RenderSettingsPanel::defaultWoodName()
+{
+    // The tile the bundled oak-natural.jpg becomes - the folder scan names a
+    // tile after its file, dashes to spaces, first letter up.
+    return QStringLiteral("Oak natural");
+}
+
 void RenderSettingsPanel::setWoodSelection(const QString& name)
 {
-    myWoodName = name.isEmpty() ? QStringLiteral("Wood") : name;
+    // Empty, and the retired built-in "Wood", both mean the default wood: a
+    // session or a furniture that never chose one recorded "Wood" because it
+    // was the default, not because anybody picked a procedural grain.
+    myWoodName = name.isEmpty() || name == QLatin1String("Wood") ? defaultWoodName() : name;
     syncPresetTiles();
+}
+
+QString RenderSettingsPanel::materialFilePath(const QString& name) const
+{
+    for (MaterialTile* tile : myPresetTiles) {
+        if (tile && tile->name() == name) return tile->filePath();
+    }
+    return QString();
+}
+
+bool RenderSettingsPanel::isWoodMaterial(const QString& name) const
+{
+    for (MaterialTile* tile : myPresetTiles) {
+        if (tile && tile->name() == name) return tile->isWood();
+    }
+    // Every material this app ships is a wood, so a name no tile answers to
+    // is one too.
+    return true;
+}
+
+void RenderSettingsPanel::syncMaterialSection()
+{
+    // DERIVED from the tiles: a panel with no material to choose - a scene's,
+    // where every piece wears its own furniture's wood - shows no Material
+    // section at all, rather than a heading over an empty grid and a note
+    // telling the user to double-click a tile that is not there.
+    const bool any = !myPresetTiles.empty();
+    for (QWidget* part : {static_cast<QWidget*>(myMaterialHead), myMaterialGrid,
+                          static_cast<QWidget*>(myMaterialNote), myMaterialRule}) {
+        if (part) part->setVisible(any);
+    }
 }
 
 bool RenderSettingsPanel::eventFilter(QObject* watched, QEvent* event)
@@ -1299,6 +1314,7 @@ void RenderSettingsPanel::addTextureMaterials(
         addTile(tile);
     }
     syncPresetTiles();
+    syncMaterialSection();
 }
 
 void RenderSettingsPanel::setTierStatus(const QString& tierName, double progress01)

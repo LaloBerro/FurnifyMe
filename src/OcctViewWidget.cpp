@@ -22,6 +22,7 @@
 
 #include "OcctViewWidget.h"
 
+#include "DocumentModel.h"
 #include "ModelingOps.h"
 #include "SketchController.h"
 #include "Theme.h"
@@ -33,6 +34,8 @@
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfMarker.hxx>
 #include <Bnd_Box.hxx>
+#include <Bnd_OBB.hxx>
+#include <TColgp_Array1OfPnt.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -113,6 +116,7 @@
 #include <QDir>
 #include <QEasingCurve>
 #include <QElapsedTimer>
+#include <QCoreApplication>
 #include <QFile>
 #include <QImage>
 #include <QPainter>
@@ -279,6 +283,22 @@ const Quantity_Color kWoodUnderTexture(0.95, 0.94, 0.92, Quantity_TOC_sRGB);
 // between two faces picks up where its larger neighbour left off instead
 // of restarting the image. Never pickable, exactly as every other bespoke
 // presentation in this file is.
+//
+// THE GRAIN RUNS ALONG THE BOARD (the 2026-10 review's F11, card T-046). The
+// projection used to be the world's: a top face mapped (X, Y) and every side
+// face (·, Z), so the image's grain ran along world Y on a top and straight UP
+// every side - a shelf long in X wore vertical bars across its front edge,
+// which is the "corrugated zebra" the review saw. `along` is now the board's
+// own LONG axis and `second` its next-longest, read off the body's measured
+// box (grainAxesOf() below). On each face the along-the-grain direction is
+// `along` laid flat into the face's plane - so every face of one board shares
+// it and the grain wraps an edge unbroken - and an END face, where `along`
+// stands straight out of the face, takes `second` instead.
+//
+// AND THE IMAGE KEEPS ITS PROPORTIONS. A tile is `tileMm` across the grain and
+// `tileMm * aspect` along it, aspect being the image's own height over width:
+// the bundled oak is about twice as tall as it is wide, and mapping both to one
+// length squashed its cathedral figure to half height.
 class WoodBodyObject : public AIS_InteractiveObject {
 public:
     TopoDS_Shape shape;
@@ -286,6 +306,32 @@ public:
     Graphic3d_MaterialAspect material;
     double tileMm = 300.0;
     double angleDeg = 0.0;
+    double aspect = 1.0;
+    // Whether the IMAGE's grain runs along its width (U) rather than its
+    // height (V) - measured per image at its decode (see buildWoodTexture()).
+    bool grainAlongU = false;
+    gp_Dir along = gp_Dir(1.0, 0.0, 0.0);
+    gp_Dir second = gp_Dir(0.0, 1.0, 0.0);
+    // Which image this overlay wears, as asked for - empty is the default
+    // wood. Recorded for woodOverlayProbe(), never read by the drawing.
+    QString texturePath;
+
+    // The along-the-grain direction on a face whose (axis-aligned) normal is
+    // `n`. Shared by Compute() and woodOverlayProbe(), so the probe reports
+    // the direction the drawing actually used.
+    gp_XYZ grainOnFace(const gp_XYZ& n) const
+    {
+        gp_XYZ g = along.XYZ() - n * along.XYZ().Dot(n);
+        if (g.Modulus() < 0.35) g = second.XYZ() - n * second.XYZ().Dot(n);
+        if (g.Modulus() < 1.0e-9) {
+            // Neither axis lies in this face at all - only reachable for a
+            // degenerate frame. Any in-plane direction will do.
+            g = std::fabs(n.X()) < 0.9 ? gp_XYZ(1.0, 0.0, 0.0) - n * n.X()
+                                        : gp_XYZ(0.0, 1.0, 0.0) - n * n.Y();
+        }
+        g.Normalize();
+        return g;
+    }
 
     void Compute(const Handle(PrsMgr_PresentationManager)&,
                  const Handle(Prs3d_Presentation)& presentation, const Standard_Integer) override
@@ -337,6 +383,19 @@ public:
             const double ay = std::fabs(accumulated.Y());
             const double az = std::fabs(accumulated.Z());
             const int dominant = (az >= ax && az >= ay) ? 2 : (ax >= ay ? 0 : 1);
+            // The face's frame: along the grain, and across it in the face's
+            // own plane. The normal is the dominant AXIS, not the triangle's,
+            // so neighbouring faces that share a dominant axis share a frame
+            // and a bevel between them picks up where its neighbour left off.
+            const gp_XYZ n = dominant == 2 ? gp_XYZ(0.0, 0.0, 1.0)
+                                           : (dominant == 0 ? gp_XYZ(1.0, 0.0, 0.0)
+                                                            : gp_XYZ(0.0, 1.0, 0.0));
+            const gp_XYZ grain = grainOnFace(n);
+            const gp_XYZ across = n.Crossed(grain);
+            // One tile is `tileMm` ACROSS the grain whichever way the image
+            // runs; along it, the image's other side in proportion.
+            const double safeAspect = std::max(0.1, aspect);
+            const double alongTile = grainAlongU ? tileMm / safeAspect : tileMm * safeAspect;
 
             for (int t = 1; t <= triangulation->NbTriangles(); ++t) {
                 int n1, n2, n3;
@@ -352,17 +411,17 @@ public:
                 const double angleRad = angleDeg * 3.14159265358979323846 / 180.0;
                 const double cosA = std::cos(angleRad);
                 const double sinA = std::sin(angleRad);
-                auto uv = [this, dominant, cosA, sinA](const gp_Pnt& p) {
-                    double a, b;
-                    switch (dominant) {
-                        case 2:  a = p.X(); b = p.Y(); break;
-                        case 0:  a = p.Y(); b = p.Z(); break;
-                        default: a = p.X(); b = p.Z(); break;
-                    }
+                auto uv = [this, &grain, &across, alongTile, cosA, sinA](const gp_Pnt& p) {
+                    // a: across the grain, b: along it. b goes to whichever
+                    // image axis the picture's own grain runs down.
+                    const double a = p.XYZ().Dot(across);
+                    const double b = p.XYZ().Dot(grain);
                     // The grain-angle dial: rotate the projection inside the
                     // face's own plane before scaling to tiles.
-                    return gp_Pnt2d((a * cosA - b * sinA) / tileMm,
-                                    (a * sinA + b * cosA) / tileMm);
+                    const double ra = a * cosA - b * sinA;
+                    const double rb = a * sinA + b * cosA;
+                    return grainAlongU ? gp_Pnt2d(rb / alongTile, ra / tileMm)
+                                       : gp_Pnt2d(ra / tileMm, rb / alongTile);
                 };
                 array->AddVertex(p1, dir, uv(p1));
                 array->AddVertex(p2, dir, uv(p2));
@@ -1601,9 +1660,11 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
     ModelingOps::tessellate(shape, 0.1);
 
     Handle(AIS_Shape) presentation = new AIS_Shape(shape);
-    // Neutral grey so the cyan hover and orange selection stand out, and face
-    // boundaries drawn so the shape's edges are readable when shaded.
-    presentation->SetColor(Quantity_Color(Quantity_NOC_GRAY70));
+    // The body token - a quiet, low-chroma wood rather than the GRAY70 it
+    // replaced (T-039), chosen so the cyan hover and orange selection still
+    // stand out against it - and face boundaries drawn so the shape's edges
+    // are readable when shaded. applyTheme() re-applies it on a theme edit.
+    presentation->SetColor(toOcctColor(Theme::body()));
     // Milestone 5, item 6: the boundary width is an editable token now - 0
     // means no boundary lines at all, the same rule chipStrokePx's 0 already
     // follows for a chip's own ring.
@@ -1919,9 +1980,10 @@ void OcctViewWidget::setModelingPreviews(const std::vector<std::pair<int, TopoDS
         //
         // The old comment's point still stands and is answered differently:
         // the preview had to differ from the pull arrow standing on top of
-        // it. It does - the arrow is accent over a GREY body now, and the
+        // it. It does - the arrow is accent over a plain body now, and the
         // coloured thing on screen is the change rather than the whole shape.
-        preview->SetColor(Quantity_Color(Quantity_NOC_GRAY70));
+        // The body token, so the result reads as the same body it will be.
+        preview->SetColor(toOcctColor(Theme::body()));
         preview->SetWidth(2.0);
         // In the sketch-work layer with the rest of the feedback: a pull or a
         // bevel preview carving a body sitting on the ground grid is exactly
@@ -2123,6 +2185,29 @@ TopoDS_Shape OcctViewWidget::modelingPreviewShape() const
     if (myModelingPreviews.size() != 1 || myModelingPreviews.front().IsNull())
         return TopoDS_Shape();
     return myModelingPreviews.front()->Shape();
+}
+
+namespace {
+QColor presentationColour(const Handle(AIS_Shape)& shape)
+{
+    if (shape.IsNull() || !shape->HasColor()) return QColor();
+    Quantity_Color colour;
+    shape->Color(colour);
+    NCollection_Vec3<float> srgb = Quantity_Color::Convert_LinearRGB_To_sRGB(colour.Rgb());
+    return QColor::fromRgbF(srgb.r(), srgb.g(), srgb.b());
+}
+}  // namespace
+
+QColor OcctViewWidget::solidColour(int id) const
+{
+    const auto it = mySolids.find(id);
+    return it == mySolids.end() ? QColor() : presentationColour(it->second);
+}
+
+QColor OcctViewWidget::modelingPreviewColour() const
+{
+    if (myModelingPreviews.size() != 1) return QColor();
+    return presentationColour(myModelingPreviews.front());
 }
 
 void OcctViewWidget::showPullArrow(const gp_Pnt& centre, const gp_Dir& outward)
@@ -5437,6 +5522,21 @@ void OcctViewWidget::applyTheme()
     // forced every body's boundary off (setRenderModeEnabled()) and a theme
     // edit made mid-render must not undo that - the exit path there is what
     // restores this state, at whatever width is live at that moment.
+    // The body token rides the same loop, for the same reason: a theme edit
+    // must reach a body already on screen, not only the next one displayed.
+    // Render mode is no exception for the colour - a body wearing it there is
+    // the plain material, and wood draws over it as an overlay regardless.
+    {
+        const Quantity_Color bodyColour = toOcctColor(Theme::body());
+        for (auto& entry : mySolids) {
+            if (entry.second.IsNull()) continue;
+            entry.second->SetColor(bodyColour);
+            if (myRenderModeActive) myContext->Redisplay(entry.second, Standard_False);
+        }
+        for (auto& preview : myModelingPreviews) {
+            if (!preview.IsNull()) preview->SetColor(bodyColour);
+        }
+    }
     if (!myRenderModeActive) {
         const double edgeWidth = Theme::edgeWidthPx();
         for (auto& entry : mySolids) {
@@ -5918,6 +6018,20 @@ void OcctViewWidget::setRenderWoodAngleDeg(double degrees)
     }
 }
 
+QString OcctViewWidget::defaultWoodTextureFile()
+{
+    // THE BUNDLED OAK (the 2026-10 review's F11, the user's "oak in render and
+    // scene"). The copy beside the binary first, because that is the file the
+    // Oak natural tile is built from and one path means one texture; the copy
+    // compiled into the binary when the folder is missing, so the default can
+    // never be absent - a default that depends on deployment is a default the
+    // next install loses.
+    const QString beside =
+        QCoreApplication::applicationDirPath() + QStringLiteral("/materials/oak-natural.jpg");
+    if (QFile::exists(beside)) return beside;
+    return QStringLiteral(":/materials/oak-natural.jpg");
+}
+
 Handle(Graphic3d_TextureMap) OcctViewWidget::woodTextureFor(const QString& path)
 {
     if (path.isEmpty()) {
@@ -5926,20 +6040,7 @@ Handle(Graphic3d_TextureMap) OcctViewWidget::woodTextureFor(const QString& path)
     }
     const auto cached = myBodyWoodTextures.find(path);
     if (cached != myBodyWoodTextures.end()) return cached->second;
-
-    // Built through ensureWoodTexture() rather than beside it: that function
-    // owns the 2048 cap, the row-copy and the procedural fallback, and a
-    // second copy of all three would be a second thing to keep in step. The
-    // swap is local and restored unconditionally.
-    const QString keepFile = myWoodTextureFile;
-    const Handle(Graphic3d_TextureMap) keepTexture = myWoodTexture;
-    myWoodTextureFile = path;
-    myWoodTexture.Nullify();
-    ensureWoodTexture();
-    const Handle(Graphic3d_TextureMap) built = myWoodTexture;
-    myWoodTextureFile = keepFile;
-    myWoodTexture = keepTexture;
-
+    const Handle(Graphic3d_TextureMap) built = buildWoodTexture(path);
     myBodyWoodTextures[path] = built;
     return built;
 }
@@ -5952,107 +6053,113 @@ void OcctViewWidget::clearBodyWoodTextures()
 void OcctViewWidget::ensureWoodTexture()
 {
     if (!myWoodTexture.IsNull()) return;
+    myWoodTexture = buildWoodTexture(myWoodTextureFile);
+}
 
-    // The user's own image first, when one is chosen - the procedural plank
-    // below is the fallback, not the point.
-    if (!myWoodTextureFile.isEmpty()) {
-        QImage file(myWoodTextureFile);
-        if (!file.isNull()) {
-            // Capped at 2048: the user's 4K oak is 16.7M pixels through the
-            // per-pixel copy below and just as many texels for a texture
-            // that repeats every ~300 mm - half the side keeps every visible
-            // detail at this tile size and a quarter of both costs.
-            if (file.width() > 2048 || file.height() > 2048)
-                file = file.scaled(2048, 2048, Qt::KeepAspectRatio,
-                                   Qt::SmoothTransformation);
-            const QImage rgb = file.convertToFormat(QImage::Format_RGB888);
-            Handle(Image_PixMap) filePix = new Image_PixMap();
-            if (filePix->InitTrash(Image_Format_RGB, rgb.width(), rgb.height())) {
-                // ROW COPIES, not per-pixel: both sides are packed 3-byte
-                // RGB, and the SetPixelColor loop this replaces ran ~4.2M
-                // QColor round-trips for a 2048-square image - hundreds of
-                // blocked-UI milliseconds per material pick (the branch
-                // review's measurement). Row-by-row rather than one block
-                // because each side pads its rows to its OWN alignment.
-                const int rowBytes = rgb.width() * 3;
-                for (int y = 0; y < rgb.height(); ++y) {
-                    std::memcpy(filePix->ChangeRow(y), rgb.constScanLine(y),
-                                size_t(rowBytes));
-                }
-                Handle(Graphic3d_Texture2D) fileTexture = new Graphic3d_Texture2D(filePix);
-                fileTexture->GetParams()->SetModulate(Standard_True);
-                fileTexture->GetParams()->SetRepeat(Standard_True);
-                // NO params scale - the first ship carried 1/300 on a
-                // millimetre-UV assumption, and the user's pixel corrected
-                // it: AIS_Shape maps a texture across each face's NORMALIZED
-                // parametric space (its own header: "parametrized in
-                // (0,1)x(0,1)"), so that scale crushed sampling into a
-                // single corner texel and every wood rendered as one flat
-                // brown. At identity each face wears the image once - a
-                // veneer sheet per panel, which is how furniture is actually
-                // faced.
-                myWoodTexture = fileTexture;
-                return;
+Handle(Graphic3d_TextureMap) OcctViewWidget::buildWoodTexture(const QString& requested)
+{
+    // EMPTY MEANS THE DEFAULT WOOD, and a file that will not load falls back
+    // to it too. There used to be a third answer under both: a procedurally
+    // drawn plank of sine bands, generated here. It was the default every
+    // furniture with no wood of its own wore, and the review read it as
+    // corrugated bars on a board's sides and as fabric at thumbnail size
+    // (F11). Nothing chose it except by not choosing, so it is gone rather
+    // than kept as a tile nobody would pick on purpose.
+    const QString fallback = defaultWoodTextureFile();
+    const QString first = requested.isEmpty() ? fallback : requested;
+    for (const QString& path : {first, fallback}) {
+        QImage file(path);
+        if (file.isNull()) continue;
+        // Capped at 2048: the user's 4K oak is 16.7M pixels through the
+        // row copy below and just as many texels for a texture that repeats
+        // every ~300 mm - half the side keeps every visible detail at this
+        // tile size and a quarter of both costs.
+        if (file.width() > 2048 || file.height() > 2048)
+            file = file.scaled(2048, 2048, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        const QImage rgb = file.convertToFormat(QImage::Format_RGB888);
+        Handle(Image_PixMap) filePix = new Image_PixMap();
+        if (!filePix->InitTrash(Image_Format_RGB, rgb.width(), rgb.height())) continue;
+        // ROW COPIES, not per-pixel: both sides are packed 3-byte RGB, and
+        // the SetPixelColor loop this replaces ran ~4.2M QColor round-trips
+        // for a 2048-square image - hundreds of blocked-UI milliseconds per
+        // material pick (the branch review's measurement). Row-by-row rather
+        // than one block because each side pads its rows to its OWN alignment.
+        const int rowBytes = rgb.width() * 3;
+        for (int y = 0; y < rgb.height(); ++y)
+            std::memcpy(filePix->ChangeRow(y), rgb.constScanLine(y), size_t(rowBytes));
+
+        // WHAT THE WOOD LOOKS LIKE AS ONE COLOUR, and how tall the image is
+        // against its width - both measured here, once per image, beside the
+        // only decode it ever gets. The colour is what the material card's
+        // swatch opens on (a wood's own colour, never the grey it used to
+        // show) and what a picked colour is measured against; the aspect is
+        // what keeps the grain's proportions on the board.
+        WoodImage info;
+        const QImage tiny = rgb.scaled(16, 16, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        double r = 0.0, g = 0.0, b = 0.0;
+        for (int y = 0; y < tiny.height(); ++y) {
+            for (int x = 0; x < tiny.width(); ++x) {
+                const QRgb px = tiny.pixel(x, y);
+                r += qRed(px);
+                g += qGreen(px);
+                b += qBlue(px);
             }
         }
-        // A file that fails to load falls through to the procedural grain
-        // rather than to no material at all.
-    }
-
-    // A procedural plank: wavy longitudinal grain bands with fine per-pixel
-    // variation, drawn once into a QImage and handed to OCCT as an
-    // Image_PixMap - no asset, no file, nothing to deploy. 512 wraps
-    // seamlessly enough at the repeat scale below that seams read as grain.
-    constexpr int kSize = 512;
-    QImage image(kSize, kSize, QImage::Format_RGB888);
-    const QColor dark(0x6b, 0x48, 0x2a);
-    const QColor mid(0x8f, 0x6a, 0x45);
-    const QColor light(0xa8, 0x82, 0x58);
-    auto mix = [](const QColor& a, const QColor& b, double t) {
-        return QColor(int(a.red() + (b.red() - a.red()) * t),
-                      int(a.green() + (b.green() - a.green()) * t),
-                      int(a.blue() + (b.blue() - a.blue()) * t));
-    };
-    // Deterministic hash noise, so every session grows the same tree.
-    auto noise = [](int x, int y) {
-        unsigned n = static_cast<unsigned>(x) * 374761393u + static_cast<unsigned>(y) * 668265263u;
-        n = (n ^ (n >> 13)) * 1274126177u;
-        return double((n ^ (n >> 16)) & 0xffff) / 65535.0;
-    };
-    for (int y = 0; y < kSize; ++y) {
-        for (int x = 0; x < kSize; ++x) {
-            // Grain runs along Y: bands are a function of X, wobbled by a
-            // slow sine of Y and a touch of noise so no two lines match.
-            const double wobble = 6.0 * std::sin(y * 0.024 + x * 0.01) +
-                                  2.0 * std::sin(y * 0.11);
-            const double band = std::sin((x + wobble) * 0.55) * 0.5 + 0.5;
-            const double fine = noise(x, y) * 0.18;
-            double t = band * 0.75 + fine;
-            QColor c = t < 0.5 ? mix(dark, mid, t * 2.0) : mix(mid, light, (t - 0.5) * 2.0);
-            // Occasional darker vessel line.
-            if (noise(x / 3, y / 7) > 0.978) c = c.darker(130);
-            image.setPixelColor(x, y, c);
+        const double n = std::max(1, tiny.width() * tiny.height()) * 255.0;
+        info.mean = QColor::fromRgbF(float(r / n), float(g / n), float(b / n));
+        info.aspect = rgb.width() > 0 ? double(rgb.height()) / double(rgb.width()) : 1.0;
+        // WHICH WAY THE IMAGE'S OWN GRAIN RUNS. Images do not agree: the
+        // bundled oak's streaks run down the picture and the veneer's run
+        // across it, so a mapping that assumed one would lay the other across
+        // every board. Measured, not declared - grain is the direction the
+        // picture changes LEAST along - on a copy shrunk with its proportions
+        // kept, so the measure is not skewed by a squash.
+        {
+            const QImage probe = rgb.scaledToWidth(std::min(256, rgb.width()),
+                                                   Qt::SmoothTransformation)
+                                     .convertToFormat(QImage::Format_Grayscale8);
+            double dx = 0.0, dy = 0.0;
+            for (int y = 0; y + 1 < probe.height(); ++y) {
+                const uchar* row = probe.constScanLine(y);
+                const uchar* next = probe.constScanLine(y + 1);
+                for (int x = 0; x + 1 < probe.width(); ++x) {
+                    dx += std::abs(int(row[x + 1]) - int(row[x]));
+                    dy += std::abs(int(next[x]) - int(row[x]));
+                }
+            }
+            info.grainAlongU = dx < dy;
         }
-    }
+        myWoodImages[requested] = info;
+        myWoodImages[path] = info;
 
-    Handle(Image_PixMap) pix = new Image_PixMap();
-    if (!pix->InitTrash(Image_Format_RGB, kSize, kSize)) return;
-    for (int y = 0; y < kSize; ++y) {
-        for (int x = 0; x < kSize; ++x) {
-            const QColor c = image.pixelColor(x, y);
-            pix->SetPixelColor(x, y,
-                              Quantity_ColorRGBA(float(c.redF()), float(c.greenF()),
-                                                 float(c.blueF()), 1.0f));
-        }
+        Handle(Graphic3d_Texture2D) texture = new Graphic3d_Texture2D(filePix);
+        texture->GetParams()->SetModulate(Standard_True);
+        texture->GetParams()->SetRepeat(Standard_True);
+        // NO params scale: the overlays generate their own UVs in real
+        // millimetres (see WoodBodyObject), so the texture repeats at
+        // identity and the tile size lives in those UVs alone.
+        return texture;
     }
+    return Handle(Graphic3d_TextureMap)();
+}
 
-    Handle(Graphic3d_Texture2D) texture = new Graphic3d_Texture2D(pix);
-    // Identity scale, for the reason the file branch above records: face
-    // UVs are normalized, so any down-scale samples one texel and reads as
-    // flat paint. One grain image per face.
-    texture->GetParams()->SetModulate(Standard_True);
-    texture->GetParams()->SetRepeat(Standard_True);
-    myWoodTexture = texture;
+OcctViewWidget::WoodImage OcctViewWidget::woodImageOf(const QString& path)
+{
+    // Empty asks about the LIVE image, exactly as woodTextureFor() reads it.
+    const QString key = path.isEmpty() ? myWoodTextureFile : path;
+    const auto known = myWoodImages.find(key);
+    if (known != myWoodImages.end()) return known->second;
+    // Asked before any texture of this image was built - build it, which is
+    // the one place an image is decoded and measured, and cache it the way
+    // the overlays would have.
+    woodTextureFor(path);
+    const auto now = myWoodImages.find(key);
+    return now != myWoodImages.end() ? now->second : WoodImage();
+}
+
+QColor OcctViewWidget::woodColourOf(const QString& path)
+{
+    return woodImageOf(path).mean;
 }
 
 void OcctViewWidget::setBodyGrainAcross(const std::vector<int>& bodyIds)
@@ -6099,6 +6206,131 @@ bool OcctViewWidget::bodyWood(int bodyId, BodyWood& out) const
     return true;
 }
 
+namespace {
+// THE BOARD'S OWN AXES, for the grain: its longest side and its next. Read off
+// the triangulation the body is already drawn with - an oriented box built
+// from points, under measuredBox()'s own rule that the world box wins when it
+// fits within 1% - rather than through ModelingOps::measuredBox() itself,
+// whose optimal fit on the exact B-rep is measured on every selection click
+// and has no business running once per body each time wood is dressed (a
+// scene of 122 bodies does that in one go).
+void grainAxesOf(const TopoDS_Shape& shape, gp_Dir& along, gp_Dir& second)
+{
+    std::vector<gp_Pnt> points;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        TopLoc_Location location;
+        const Handle(Poly_Triangulation)& triangulation =
+            BRep_Tool::Triangulation(TopoDS::Face(it.Current()), location);
+        if (triangulation.IsNull()) continue;
+        const gp_Trsf transform = location.Transformation();
+        for (int n = 1; n <= triangulation->NbNodes(); ++n)
+            points.push_back(triangulation->Node(n).Transformed(transform));
+    }
+    if (points.size() < 4) return;
+
+    Bnd_Box world;
+    for (const gp_Pnt& p : points) world.Add(p);
+    Standard_Real x0, y0, z0, x1, y1, z1;
+    world.Get(x0, y0, z0, x1, y1, z1);
+    gp_Dir axes[3] = {gp_Dir(1, 0, 0), gp_Dir(0, 1, 0), gp_Dir(0, 0, 1)};
+    double ext[3] = {x1 - x0, y1 - y0, z1 - z0};
+
+    TColgp_Array1OfPnt array(1, static_cast<int>(points.size()));
+    for (std::size_t i = 0; i < points.size(); ++i)
+        array.SetValue(static_cast<int>(i) + 1, points[i]);
+    Bnd_OBB obb;
+    try {
+        obb.ReBuild(array);
+    } catch (const Standard_Failure&) {
+        obb.SetVoid();
+    }
+    if (!obb.IsVoid()) {
+        const double hair = 1.0e-6;
+        const double obbExt[3] = {2.0 * obb.XHSize(), 2.0 * obb.YHSize(), 2.0 * obb.ZHSize()};
+        const double worldVolume =
+            std::max(ext[0], hair) * std::max(ext[1], hair) * std::max(ext[2], hair);
+        const double obbVolume =
+            std::max(obbExt[0], hair) * std::max(obbExt[1], hair) * std::max(obbExt[2], hair);
+        if (worldVolume > obbVolume * (1.0 + ModelingOps::kPreferWorldBoxTolerance)) {
+            axes[0] = obb.XDirection();
+            axes[1] = obb.YDirection();
+            axes[2] = obb.ZDirection();
+            for (int i = 0; i < 3; ++i) ext[i] = obbExt[i];
+        }
+    }
+    int order[3] = {0, 1, 2};
+    std::sort(order, order + 3, [&ext](int a, int b) { return ext[a] > ext[b] + 1.0e-9; });
+    along = axes[order[0]];
+    second = axes[order[1]];
+}
+
+// Whether a look still carries the colour it was born with, which for a wood
+// means "no colour chosen" - the wood as it comes. MaterialLook's defaults are
+// the grey this app always drew a body in, and a look edited only for its
+// brightness or grain writes that grey straight back (to the 1/65535 a QColor
+// rounds it to), so it is compared with room for that rounding and nothing
+// more. Read off MaterialLook's own defaults rather than restated.
+bool isUntintedLook(double red, double green, double blue)
+{
+    const DocumentModel::MaterialLook unset;
+    return std::fabs(red - unset.red) < 1.0e-3 && std::fabs(green - unset.green) < 1.0e-3 &&
+           std::fabs(blue - unset.blue) < 1.0e-3;
+}
+}  // namespace
+
+Graphic3d_MaterialAspect OcctViewWidget::woodMaterial(double red, double green, double blue,
+                                                     double brightness, double roughness,
+                                                     const QString& texturePath)
+{
+    // ONE material for every wood overlay, the editor's live one and each
+    // scene piece's own - they used to be two recipes, and they disagreed:
+    // the editor ignored a look's colour and brightness entirely while the
+    // scene multiplied the raw colour into the grain, so one furniture read
+    // darker in a scene than in its own editor.
+    //
+    // A WOOD'S COLOUR IS A TINT RELATIVE TO ITSELF. The swatch opens on the
+    // image's own average colour; picking a colour asks for the wood to read
+    // as THAT colour, so the grain is multiplied by picked / own. An untinted
+    // look is the wood exactly as it comes - the near-white under-texture,
+    // which is what keeps the image's colour from being red-shifted (see
+    // kWoodUnderTexture).
+    double tint[3] = {1.0, 1.0, 1.0};
+    if (!isUntintedLook(red, green, blue)) {
+        const QColor own = woodColourOf(texturePath);
+        const double base[3] = {own.isValid() ? own.redF() : 1.0,
+                                own.isValid() ? own.greenF() : 1.0,
+                                own.isValid() ? own.blueF() : 1.0};
+        const double picked[3] = {red, green, blue};
+        for (int i = 0; i < 3; ++i)
+            tint[i] = std::clamp(picked[i] / std::max(0.05, base[i]), 0.0, 2.0);
+    }
+    const double k = std::clamp(brightness, 0.25, 2.0);
+    const Quantity_Color colour(
+        std::clamp(kWoodUnderTexture.Red() * tint[0] * k, 0.0, 1.0),
+        std::clamp(kWoodUnderTexture.Green() * tint[1] * k, 0.0, 1.0),
+        std::clamp(kWoodUnderTexture.Blue() * tint[2] * k, 0.0, 1.0), Quantity_TOC_RGB);
+
+    Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
+    material.SetColor(colour);
+    Graphic3d_PBRMaterial pbr;
+    pbr.SetColor(material.Color());
+    // A WOOD IS NEVER METAL. Metal is not offered on a wood's card any more,
+    // and a value the user cannot see must not be what they are looking at:
+    // the review's render_settings_card capture had a stored Metal 100
+    // turning an oak body into grey steel. The stored value is left alone -
+    // this reads it as zero, it does not write it.
+    pbr.SetMetallic(0.0f);
+    pbr.SetRoughness(static_cast<float>(std::clamp(roughness, 0.0, 1.0)));
+    material.SetPBRMaterial(pbr);
+    // The BSDF beside the PBR material, never instead of it: SetPBRMaterial()
+    // is an inline that writes myPBRMaterial and nothing else, and the BSDF is
+    // the ONLY description OCCT's path tracer integrates - without this line
+    // the body renders black on the top tier (CLAUDE.md's Pitfalls, which this
+    // cost three fix rounds to learn once already).
+    material.SetBSDF(Graphic3d_BSDF::CreateMetallicRoughness(pbr));
+    return material;
+}
+
 void OcctViewWidget::applyWoodTexture(bool on)
 {
     // Kept as the one switchboard the material appliers call; the actual
@@ -6111,22 +6343,10 @@ void OcctViewWidget::applyWoodTexture(bool on)
     }
     ensureWoodTexture();
     if (myWoodTexture.IsNull()) return;
-    // The material the overlays wear is the one the caller just derived -
-    // rebuilt here from the same fields rather than passed, so the two
-    // appliers need no signature change: wood base under the grain, the
-    // user's own roughness/metal on the PBR pipeline.
-    Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
-    material.SetColor(Quantity_Color(0.95, 0.94, 0.92, Quantity_TOC_sRGB));
-    Graphic3d_PBRMaterial pbr;
-    pbr.SetColor(material.Color());
-    pbr.SetMetallic(static_cast<float>(myRenderMetallic));
-    pbr.SetRoughness(static_cast<float>(myRenderRoughness));
-    material.SetPBRMaterial(pbr);
-    material.SetBSDF(Graphic3d_BSDF::CreateMetallicRoughness(pbr));
-    refreshWoodOverlays(material);
+    refreshWoodOverlays();
 }
 
-void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& material)
+void OcctViewWidget::refreshWoodOverlays()
 {
     clearWoodOverlays();
     if (myContext.IsNull() || myWoodTexture.IsNull()) return;
@@ -6148,61 +6368,39 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
 
         Handle(WoodBodyObject) overlay = new WoodBodyObject();
         overlay->shape = entry.second->Shape();
-        // THIS BODY'S OWN IMAGE when it names one. A scene holds several
-        // furniture, each with its own wood; the editor names none and gets
-        // the single live texture exactly as before.
-        {
-            const auto entryWood = myBodyWood.find(entry.first);
-            const QString wantedTexture =
-                entryWood == myBodyWood.end() ? QString() : entryWood->second.texturePath;
-            const Handle(Graphic3d_TextureMap) chosen = woodTextureFor(wantedTexture);
-            overlay->texture = chosen.IsNull() ? myWoodTexture : chosen;
-        }
-        // THIS BODY'S OWN WOOD when it has one, the single live material when
-        // it does not. The fallback is what keeps the furniture editor
-        // identical: it sets no entries at all, so every body takes the
-        // `material` the caller derived, exactly as before.
-        //
+        grainAxesOf(overlay->shape, overlay->along, overlay->second);
         // A QUARTER TURN for a body the user has flipped, added to whichever
         // grain angle applies rather than replacing it, so turning the whole
         // run still turns both: "across" means across THIS wood, not across
         // the world.
         const double across = bodyGrainAcross(entry.first) ? 90.0 : 0.0;
+        // THIS BODY'S OWN WOOD when it has one - image, look and grain - and
+        // the single live wood when it does not. The fallback is what keeps
+        // the furniture editor on one wood: it sets no entries at all.
         const auto own = myBodyWood.find(entry.first);
         if (own == myBodyWood.end()) {
-            overlay->material = material;
+            overlay->texturePath = myWoodTextureFile;
+            overlay->texture = myWoodTexture;
+            overlay->material =
+                woodMaterial(myMaterialRed, myMaterialGreen, myMaterialBlue,
+                             myMaterialBrightness, myRenderRoughness, QString());
             overlay->tileMm = std::max(10.0, myWoodTileMm);
             overlay->angleDeg = myWoodAngleDeg + across;
+            const WoodImage image = woodImageOf(QString());
+            overlay->aspect = image.aspect;
+            overlay->grainAlongU = image.grainAlongU;
         } else {
             const BodyWood& wood = own->second;
-            Graphic3d_MaterialAspect mine(Graphic3d_NameOfMaterial_UserDefined);
-            // CLAMPED. Brightness runs to 2.0 by design (MaterialLook's own
-            // range), so any colour above 0.5 multiplies past 1.0 and
-            // Quantity_Color THROWS "Color out of range" - which unwound the
-            // whole wood loop and took the process down on a real scene. The
-            // editor never met it because the window-wide material path
-            // clamps; this per-body branch did not.
-            const auto lit = [](double channel, double brightness) {
-                return std::clamp(channel * brightness, 0.0, 1.0);
-            };
-            mine.SetColor(Quantity_Color(lit(wood.red, wood.brightness),
-                                         lit(wood.green, wood.brightness),
-                                         lit(wood.blue, wood.brightness), Quantity_TOC_sRGB));
-            Graphic3d_PBRMaterial pbr;
-            pbr.SetColor(mine.Color());
-            pbr.SetMetallic(static_cast<float>(wood.metal));
-            pbr.SetRoughness(static_cast<float>(1.0 - wood.surface));
-            mine.SetPBRMaterial(pbr);
-            // The BSDF beside the PBR material, never instead of it:
-            // SetPBRMaterial() is an inline that writes myPBRMaterial and
-            // nothing else, and the BSDF is the ONLY description OCCT's path
-            // tracer integrates - without this line the body renders black on
-            // the top tier (CLAUDE.md's Pitfalls, which this cost three fix
-            // rounds to learn once already).
-            mine.SetBSDF(Graphic3d_BSDF::CreateMetallicRoughness(pbr));
-            overlay->material = mine;
+            overlay->texturePath = wood.texturePath;
+            const Handle(Graphic3d_TextureMap) chosen = woodTextureFor(wood.texturePath);
+            overlay->texture = chosen.IsNull() ? myWoodTexture : chosen;
+            overlay->material = woodMaterial(wood.red, wood.green, wood.blue, wood.brightness,
+                                             1.0 - wood.surface, wood.texturePath);
             overlay->tileMm = std::max(10.0, wood.grainSize);
             overlay->angleDeg = wood.grainAngle + across;
+            const WoodImage image = woodImageOf(wood.texturePath);
+            overlay->aspect = image.aspect;
+            overlay->grainAlongU = image.grainAlongU;
         }
         myContext->Display(overlay, 0, -1, Standard_False);   // never pickable
         // AND IT STANDS WHERE THE BODY STANDS. The overlay is built from the
@@ -6239,6 +6437,34 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
                                   "in the plain material.";
     }
     scheduleRedraw();
+}
+
+bool OcctViewWidget::woodOverlayProbe(int bodyId, WoodOverlayProbe& out) const
+{
+    const auto it = myWoodOverlays.find(bodyId);
+    if (it == myWoodOverlays.end() || it->second.IsNull()) return false;
+    const auto* overlay = dynamic_cast<const WoodBodyObject*>(it->second.get());
+    if (!overlay) return false;
+    out.texturePath = overlay->texturePath;
+    out.texture = overlay->texture.get();
+    out.metallic = overlay->material.PBRMaterial().Metallic();
+    const Quantity_Color colour = overlay->material.Color();
+    out.red = colour.Red();
+    out.green = colour.Green();
+    out.blue = colour.Blue();
+    out.aspect = overlay->aspect;
+    out.imageGrainAlongU = overlay->grainAlongU;
+    out.along = overlay->along;
+    // The direction the drawing used on a face square to world Z - the top of
+    // a board lying on the ground - after the grain-angle dial: V grows along
+    // across*sin + grain*cos, which is where the image's grain runs.
+    const gp_XYZ n(0.0, 0.0, 1.0);
+    const gp_XYZ grain = overlay->grainOnFace(n);
+    const gp_XYZ across = n.Crossed(grain);
+    const double angleRad = overlay->angleDeg * 3.14159265358979323846 / 180.0;
+    const gp_XYZ v = across * std::sin(angleRad) + grain * std::cos(angleRad);
+    out.grainOnTop = gp_Dir(v);
+    return true;
 }
 
 void OcctViewWidget::clearWoodOverlays()

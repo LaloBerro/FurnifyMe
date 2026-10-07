@@ -2610,6 +2610,14 @@ void MainWindow::buildOverlay()
         };
         scan(QCoreApplication::applicationDirPath() + QStringLiteral("/materials"));
         scan(myStore.rootPath() + QStringLiteral("/materials"));
+        // THE DEFAULT WOOD IS ALWAYS A TILE. It is the bundled oak beside the
+        // binary in every build that deployed the folder; where it did not,
+        // the copy compiled into the binary stands in, so the tile the
+        // default selects can never be missing from the grid.
+        const QString defaultWood = RenderSettingsPanel::defaultWoodName();
+        if (std::none_of(textures.begin(), textures.end(),
+                         [&](const auto& entry) { return entry.first == defaultWood; }))
+            textures.insert(textures.begin(), {defaultWood, OcctViewWidget::defaultWoodTextureFile()});
         myRenderSettingsPanel->addTextureMaterials(textures);
     }
 
@@ -5787,7 +5795,7 @@ void MainWindow::onUngroupSelection()
 
 QString MainWindow::activeMaterialName() const
 {
-    if (!myRenderSettingsPanel) return QStringLiteral("Wood");
+    if (!myRenderSettingsPanel) return RenderSettingsPanel::defaultWoodName();
     // A WOOD NAMES ITSELF, and since Matte/Satin/Metal were removed that is
     // the whole derivation. It used to have a second half: with no wood
     // chosen the name was worked out from the live gloss and metal, exactly
@@ -5796,7 +5804,7 @@ QString MainWindow::activeMaterialName() const
     // been derived from the values it was selecting - and it did not need to,
     // because the tiles it named are gone.
     const QString wood = myRenderSettingsPanel->woodSelection();
-    return wood.isEmpty() ? QStringLiteral("Wood") : wood;
+    return wood.isEmpty() ? RenderSettingsPanel::defaultWoodName() : wood;
 }
 
 void MainWindow::applyMaterialLook()
@@ -5830,12 +5838,28 @@ void MainWindow::onMaterialEditRequested(const QString& material)
     myDocument.materialLook(material.toStdString(), stored);
     MaterialCard::Look look;
     look.colour = QColor::fromRgbF(stored.red, stored.green, stored.blue);
+    // A WOOD OPENS ON ITS OWN COLOUR (T-039). A look nobody has tinted still
+    // carries MaterialLook's default - the grey this app used to draw every
+    // body in - and the swatch showed exactly that grey over a golden oak.
+    // The wood's own colour is its image's average, measured by the viewport
+    // at the one decode the image gets; picking it back leaves the wood
+    // exactly as it comes (OcctViewWidget::woodMaterial()).
+    const bool wood = myRenderSettingsPanel ? myRenderSettingsPanel->isWoodMaterial(material) : true;
+    const DocumentModel::MaterialLook unset;
+    if (wood && std::fabs(stored.red - unset.red) < 1.0e-3 &&
+        std::fabs(stored.green - unset.green) < 1.0e-3 &&
+        std::fabs(stored.blue - unset.blue) < 1.0e-3) {
+        const QString path =
+            myRenderSettingsPanel ? myRenderSettingsPanel->materialFilePath(material) : QString();
+        const QColor own = myView ? myView->woodColourOf(path) : QColor();
+        if (own.isValid()) look.colour = own;
+    }
     look.brightness = stored.brightness;
     look.surface = stored.surface;
     look.metal = stored.metal;
     look.grainSize = stored.grainSize;
     look.grainAngle = stored.grainAngle;
-    myMaterialCard->open(material, look);
+    myMaterialCard->open(material, look, wood);
 }
 
 void MainWindow::onMaterialLookChanged(const QString& material, const MaterialCard::Look& edited)

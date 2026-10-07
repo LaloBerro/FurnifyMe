@@ -1217,10 +1217,10 @@ they generalize.
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
 `Theme::Spec`; `defaultSpec()` is **the user's own look** — Graphite plus six baked deltas
 from `assets/defaultcolors.furnifytheme` (near-black viewport and grids, `#6a00ff` accent,
-tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 33 colour defaults are
+tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 34 colour defaults are
 pinned to hex in the suite (three of them, `gizmoAxisX/Y/Z`, added in Milestone 3 — see
 "Direct modeling"'s gizmo restyle note; `sizesOneBody`/`sizesGroup` by the selection sizes —
-see "Sizes around the selection"; the last two, `accentText`/`dangerText`, by the 2026-10
+see "Sizes around the selection"; `accentText`/`dangerText` and `body` by the 2026-10
 review). **`accent()` and `danger()` are fills and strokes; words take `accentText()` and
 `dangerText()`** (F5, F24): the violet measured 1.80:1 as the toast's Undo on `chipHover`,
 the red about 3.1:1 under a broken joint. The text inks ship at `#bb9cff` (4.77:1 on
@@ -1232,8 +1232,15 @@ diff against. Edits apply live through one `themeChanged` broadcast — no
 widget may cache a colour across it — and persist **debounced** (400 ms, flushed on close),
 because a colour-wheel drag fires per mouse-move. The picker opens with `show()`, never
 `open()`: `QDialog::open()` forces window-modality regardless of `setModal(false)`, and
-nothing in this app blocks. The OCCT body/preview materials are the remaining untokenised
-colours, by scope ruling.
+nothing in this app blocks. **The modelling body is a token now** (`Theme::body()`, `#a08c78`,
+"Bodies while modelling" in the Viewport group; T-039 reversed the old scope ruling that left it
+OCCT's `GRAY70`): every `displaySolid()` presentation and the modelling preview's body are
+shaded in it, in the editor and the scene's arranging view, and `applyTheme()` re-colours what
+is already on screen. A quiet low-chroma wood, picked from captures (near-black viewport,
+hovered, selected, pull preview, boolean region); `gui_smoke` pins it ≥100 RGB from hover,
+selection, outline, both boolean tokens, both sizes inks and the measuring line, and ≥2.5:1
+against the `GRAY30` face boundaries. The render-mode materials and the material tiles'
+studio miniature stay untokenised: they depict wood and the studio, not the shell.
 
 **HISTORICAL: the AIS_Manipulator styling wall** (the class is deleted since the custom
 gizmo's Phase 2, and the wall is WHY the custom gizmo exists). Milestone 3 tried to carry
@@ -1584,6 +1591,31 @@ changes.
 
 `View → Render mode` (menu-only, checkable, **session-only** — it is never persisted, the app
 always starts in modeling) strips the viewport down to the furniture and nothing else.
+
+- **The default wood is the bundled photographic oak** (T-046, the user's "oak in render and
+  scene, tint in editor"). The procedural sine-band grain it replaced read as corrugated bars
+  on a board's side and as fabric at thumbnail size (F11); it only ever served as the default,
+  so it is **deleted**, built-in "Wood" tile and generator both. An empty texture path, a file
+  that will not load, and the legacy name "Wood" all resolve to the default:
+  `OcctViewWidget::defaultWoodTextureFile()` (the copy beside the binary, else the one compiled
+  into `resources.qrc`) and `RenderSettingsPanel::defaultWoodName()` ("Oak natural"), which the
+  folder scan guarantees is a tile. A recorded image and look are kept. **The grain runs along
+  each board's long axis**: `WoodBodyObject` lays the board's own longest axis (an OBB of its
+  triangulation, world box preferred within 1%, the `measuredBox()` rule) flat into each face,
+  an end face taking the next-longest; it used to map world (X, Y) on tops and (·, Z) on every
+  side, so a shelf's front edge wore vertical bars. The image keeps its proportions (a tile is
+  `grainSize` across the grain and that × the image's aspect along it), and which image axis the
+  picture's own grain runs down is MEASURED at decode — the oak runs down its image, the veneer
+  across — so neither lies across a board. **A grain angle or a per-body "across" flag set
+  before this is now relative to the board, not the world.** Wood stays OFF in a window built
+  with persistence off (the suite's), as before — the calibration probes measure the plain
+  material, which outside wood is now the `body` token on the Phong tiers. Floor blends, the
+  path-traced ratio and the export did not move (Shadows Δ3/5/6, PathTracing Δ9/9/8 and
+  122/191 = 0.639, export 193 against 191 at rest). **The Shadows ratio did: 138/186 = 0.742 →
+  107/186 = 0.575**, and an A/B with the token set back to GRAY70's `#b3b3b3` read 138 again on
+  the same binary — the probe takes the darkest box anywhere in frame, and the darker body
+  token's unlit face is now that box rather than the floor's shadow. The floor and its shadow
+  are unchanged; the band 0.40–0.95 was not touched.
 
 - **"The viewport is the furniture alone" reaches every overlay, not just the obvious ones.**
   Grid, axis-gizmo card, rail, drawers, dimension, markers, every live gizmo, and the symmetry
@@ -2082,6 +2114,9 @@ this section as claiming a piece can be snapped to another piece today.
   below that said nothing in the shipped app calls it were true until this window existed, and
   both are corrected. A scene has no gesture that wants a face or an edge, so arbitrating
   between candidates no tool can use would be work for nothing.
+- **A furniture that records no wood renders in the bundled oak** (T-046), in the scene as in
+  the editor: an empty texture path IS the default wood now (see "The default wood" under
+  Render mode), and a recorded image and look are kept exactly.
 - **Each piece renders in ITS OWN furniture's wood.** `refreshWoodOverlays()` already built one
   `WoodBodyObject` per body, each with its own material, tile and grain angle, and was simply
   handed the same material every time; `OcctViewWidget::setBodyWood()` adds a per-body lookup
@@ -2411,7 +2446,17 @@ is exactly how a material gets judged. What it edits is
 `DocumentModel::MaterialLook{material, red, green, blue, brightness}`, stored **outside
 `State`** — presentation, the same category as visibility, so it is persisted with the
 furniture and bumps `revision()` (autosave notices, the unsaved dot lights) but takes **no
-checkpoint**, because a colour is not an edit to undo. `MainWindow::activeMaterialName()` is
+checkpoint**, because a colour is not an edit to undo. **On a wood the colour is a tint
+relative to the wood itself** (T-039): the swatch opens on the image's own average colour
+(`OcctViewWidget::woodColourOf()`, measured at the image's one decode) rather than the grey
+every look is born with, and `woodMaterial()` multiplies the grain by picked ÷ own — so a look
+still carrying `MaterialLook`'s default grey is the wood exactly as it comes, and the editor and
+the scene build a wood overlay through that ONE function (they used to disagree: the editor
+ignored colour and brightness, the scene multiplied the raw grey in). **A wood is offered no
+Metal**: `MaterialCard::open(…, wood)` hides the row (Surface stays — varnished and raw are both
+woods), a stored Metal is left untouched, and the overlay reads it as 0, because a stored
+Metal 100 was rendering oak as grey steel with no visible control to blame. Every tile today is a
+wood. `MainWindow::activeMaterialName()` is
 the one derivation of which record is live (a wood names itself; everything else is the
 nearest preset, derived exactly as the tiles' own highlight is), `applyMaterialLook()` pushes
 it into the viewport on every `appStateChanged`, and the card closes itself when the material
@@ -2532,7 +2577,7 @@ size — with a tab bar under the title and a `QStackedWidget` below it.
 
 | Tab | Rows |
 |---|---|
-| Colours | 31 colour swatches (scrolled; 33 tokens less the two retired) · Save/Load colours · Reset colours and sizes |
+| Colours | 32 colour swatches (scrolled; 34 tokens less the two retired) · Save/Load colours · Reset colours and sizes |
 | Text & lines | Text size · Font · Edge lines · Outline lines · Button border |
 | Viewport | Show the grid · **Grid detail** · Show sizes around a selection · Projection · **Gizmo size** · Show notifications |
 | Units | Sizes in (Millimetres/Centimetres) · Snap to Grid · Magnet |

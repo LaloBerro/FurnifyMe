@@ -985,6 +985,7 @@ constexpr BlockInfo kBlocks[] = {
     { "and-the-show-sizes-preference-persists", false, true },
     { "re-measure-right-click-a-size-and-type-a-new-one", false, true },
     { "pressing-a-control-never-drops-the-selection", false, true },
+    { "modelling-wears-the-body-token-and-render-wears-oak", false, true },
     { "booleans-roles-on-the-wood-and-the-region-drawn", false, true },
     { "every-chip-writes-enter-and-esc-one-way", false, true },
     { "words-in-a-hue-read-and-a-failure-is-a-shape", false, true },
@@ -17279,6 +17280,10 @@ int main(int argc, char* argv[])
                 {QStringLiteral("textDisabled"), QStringLiteral("#5c5c64")},
                 {QStringLiteral("border"), QStringLiteral("#3a3a40")},
                 {QStringLiteral("viewport"), QStringLiteral("#1c1c1e")},
+                // The 2026-10 review's T-039: the bodies' own flat colour
+                // while modelling, a quiet low-chroma wood in place of
+                // OCCT's GRAY70 - picked from captures, see Theme.h.
+                {QStringLiteral("body"), QStringLiteral("#a08c78")},
                 {QStringLiteral("gridMinor"), QStringLiteral("#2d2d31")},
                 {QStringLiteral("gridMajor"), QStringLiteral("#35353b")},
                 {QStringLiteral("axisX"), QStringLiteral("#7a4a4a")},
@@ -17349,7 +17354,7 @@ int main(int argc, char* argv[])
                       .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
             check(drifted.isEmpty(),
                   QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
-                      .arg(drifted.isEmpty() ? QStringLiteral("all 33 exact")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 34 exact")
                                              : drifted.join(QStringLiteral(", "))));
             check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
                   QStringLiteral("and the shipped base size is still 10pt (%1)")
@@ -25908,8 +25913,13 @@ int main(int argc, char* argv[])
             // everything the grid actually holds, in both directions: the
             // woods are still there and the three are not.
             const QStringList tiles = panel ? panel->materialTileNames() : QStringList();
-            check(!tiles.isEmpty() && tiles.contains(QStringLiteral("Wood")),
-                  QStringLiteral("the wood tiles are still here (%1)")
+            // The default wood by its own name now - the bundled photographic
+            // oak, which replaced the procedural "Wood" tile (the 2026-10
+            // review's F11).
+            check(!tiles.isEmpty() && tiles.contains(RenderSettingsPanel::defaultWoodName()) &&
+                      !tiles.contains(QStringLiteral("Wood")),
+                  QStringLiteral("the wood tiles are still here, led by the default oak and "
+                                 "with no procedural Wood tile (%1)")
                       .arg(tiles.join(QStringLiteral(", "))));
             check(!tiles.contains(QStringLiteral("Matte")) &&
                       !tiles.contains(QStringLiteral("Satin")) &&
@@ -40318,6 +40328,516 @@ int main(int argc, char* argv[])
                              "every one of them (%1)")
                   .arg(misaligned.isEmpty() ? QStringLiteral("all level")
                                             : misaligned.join(QStringLiteral("; "))));
+    }
+
+    // --- modelling wears the body token, render mode wears the oak -----------
+    //
+    // The 2026-10 review's T-039 and T-046, decided by the user as "oak in
+    // render and scene, tint in editor". Outside render mode every body is
+    // shaded in ONE flat token, a quiet low-chroma wood in place of OCCT's
+    // GRAY70; inside it, a furniture that has recorded no wood wears the
+    // bundled photographic oak rather than the procedural sine-band grain the
+    // review read as corrugated bars (F11), and that grain runs along each
+    // board's own long axis. A wood is offered no Metal, and its card opens
+    // on the wood's own colour rather than the grey every look was born with.
+    //
+    // PIXELS where the claim is about pixels: the body token is the SUBJECT
+    // of the first half, but a shaded face is never exactly its token, so the
+    // modelling checks ask what the token decides - which way the colour
+    // leans - and a live theme edit has to move the same pixels the other
+    // way. Presence claims (the oak is drawn, the grain runs along the board)
+    // are differs and both-direction comparisons, never one-sided thresholds.
+    if (blockEnabled("modelling-wears-the-body-token-and-render-wears-oak")) {
+        RequiredTempDir oakDir;
+        QString oakId;
+        {
+            FurnitureStore seedStore(oakDir.path());
+            oakId = seedStore.createFurniture(QStringLiteral("Oak bench"));
+            DocumentModel seedDoc;
+            // A board long in X, a peg on it, and a second board long in Y -
+            // the grain has to follow EACH board, so the fixture carries two
+            // boards that disagree about which world axis is long.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 600.0, 300.0, 18.0));
+            // Sunk 8 mm into the board, so a Subtract has an overlap to draw.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(60.0, 60.0, 10.0), 60.0, 60.0, 60.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(700.0, 0.0, 0.0), 160.0, 600.0, 18.0));
+            check(!oakId.isEmpty() && seedStore.saveFurniture(oakId, seedDoc, QImage()),
+                  "oak: a board along X, a peg and a board along Y are seeded - recording "
+                  "no wood at all");
+        }
+
+        MainWindow ow(nullptr, /*persistProgress=*/false, oakDir.path());
+        ow.setAttribute(Qt::WA_ShowWithoutActivating);
+        ow.resize(1100, 800);
+        ow.show();
+        waitFully(300);
+        OcctViewWidget* ov = ow.view();
+        ov->setAnimationsEnabled(false);
+        check(ow.openFurniture(oakId), "oak: the seeded furniture opens");
+        settle(300);
+        const std::vector<DocumentModel::Solid> oakSolids = ow.document().solids();
+        check(oakSolids.size() == 3, "oak: three bodies opened");
+        const int longXId = oakSolids.size() > 0 ? oakSolids[0].id : 0;
+        const int pegId = oakSolids.size() > 1 ? oakSolids[1].id : 0;
+        const int longYId = oakSolids.size() > 2 ? oakSolids[2].id : 0;
+        trigger(ow, QStringLiteral("Axonometric"));
+        trigger(ow, QStringLiteral("Fit All"));
+        settle(250);
+
+        // Per-channel medians over a box around a projected point, in the
+        // DUMP's pixel grid - the logical point mapped through the real
+        // ratio, CLAUDE.md's capture-mapping rule.
+        const auto patchAt = [ov](const QImage& image, const gp_Pnt& world, int half,
+                                  QColor& out) {
+            QPoint logical;
+            if (image.isNull() || !ov->projectToScreen(world, logical)) return false;
+            const double sx = image.width() / double(std::max(1, ov->width()));
+            const double sy = image.height() / double(std::max(1, ov->height()));
+            const QPoint at(int(logical.x() * sx), int(logical.y() * sy));
+            std::vector<int> r, g, b;
+            for (int y = at.y() - half; y <= at.y() + half; ++y) {
+                for (int x = at.x() - half; x <= at.x() + half; ++x) {
+                    if (x < 0 || y < 0 || x >= image.width() || y >= image.height()) continue;
+                    const QColor c = image.pixelColor(x, y);
+                    r.push_back(c.red());
+                    g.push_back(c.green());
+                    b.push_back(c.blue());
+                }
+            }
+            if (r.empty()) return false;
+            for (auto* v : {&r, &g, &b}) std::sort(v->begin(), v->end());
+            out = QColor(r[r.size() / 2], g[g.size() / 2], b[b.size() / 2]);
+            return true;
+        };
+        const auto dump = [&](OcctViewWidget* view, const QString& name) {
+            const QString path = outDir + QStringLiteral("/") + name + QStringLiteral(".png");
+            return view->saveSnapshot(path) ? QImage(path) : QImage();
+        };
+        // The open top of the X board, clear of the peg.
+        const gp_Pnt boardTop(450.0, 150.0, 18.0);
+
+        // --- the token, against everything drawn over or beside a body ----
+        // Named by what must stay legible ON a body: the two highlights, the
+        // outline, the boolean pair, both sizes inks, the measuring line -
+        // and the near-black ground a body has to stand out from. The face
+        // boundary lines are OCCT's GRAY30, so they are measured as contrast.
+        {
+            const QColor body = Theme::body();
+            const struct { const char* name; QColor colour; } neighbours[] = {
+                {"hover", Theme::highlightHover()},
+                {"selection", Theme::highlightSelected()},
+                {"outline", Theme::outlineLineColour()},
+                {"material coming out", Theme::booleanOut()},
+                {"material staying", Theme::booleanStay()},
+                {"sizes - one body", Theme::sizesOneBody()},
+                {"sizes - several", Theme::sizesGroup()},
+                {"measuring line", Theme::dimensionLine()},
+                {"viewport", Theme::viewport()},
+            };
+            QStringList tooClose;
+            QStringList all;
+            for (const auto& n : neighbours) {
+                const double d = colorDistance(body, n.colour);
+                all << QStringLiteral("%1 %2").arg(QString::fromLatin1(n.name)).arg(d, 0, 'f', 0);
+                if (d < 100.0) tooClose << QString::fromLatin1(n.name);
+            }
+            check(tooClose.isEmpty(),
+                  QStringLiteral("oak: the body token %1 sits at least 100 from every colour "
+                                 "drawn over a body (%2)")
+                      .arg(body.name(), all.join(QStringLiteral(", "))));
+            const double edgeContrast = contrastRatio(body, QColor(77, 77, 77));
+            check(edgeContrast >= 2.5,
+                  QStringLiteral("oak: and the GRAY30 face boundaries read against it "
+                                 "(%1:1, at least 2.5)")
+                      .arg(edgeContrast, 0, 'f', 2));
+            // QUIET: low chroma, by the token's own HSV saturation - a wood
+            // that shouted would compete with the selection for attention.
+            check(body.hsvSaturationF() > 0.1 && body.hsvSaturationF() < 0.4 &&
+                      body.red() > body.blue(),
+                  QStringLiteral("oak: and it is a warm, quiet colour - saturation %1, "
+                                 "between 0.1 and 0.4, red above blue")
+                      .arg(body.hsvSaturationF(), 0, 'f', 2));
+        }
+
+        // --- modelling: the presentation IS the token ----------------------
+        check(colorDistance(ov->solidColour(longXId), Theme::body()) < 3.0 &&
+                  colorDistance(ov->solidColour(longYId), Theme::body()) < 3.0,
+              QStringLiteral("oak: every body's presentation is shaded in the body token "
+                             "(%1, %2 against %3) - not GRAY70")
+                  .arg(ov->solidColour(longXId).name(), ov->solidColour(longYId).name(),
+                       Theme::body().name()));
+        const QImage modelShot = dump(ov, QStringLiteral("oak-modelling"));
+        // Measured BEFORE the check, never inside its argument list: MSVC
+        // builds the message first, and a message reading a variable the
+        // condition fills reports the value from before it was measured.
+        QColor modelPatch;
+        const bool modelSampled = patchAt(modelShot, boardTop, 6, modelPatch);
+        check(modelSampled && modelPatch.red() - modelPatch.blue() > 15 &&
+                  colorDistance(modelPatch, Theme::viewport()) > 60.0,
+              QStringLiteral("oak: and on screen the board leans warm the way its token "
+                             "does - %1, red %2 above blue (GRAY70 shades with none)")
+                  .arg(modelPatch.name())
+                  .arg(modelPatch.red() - modelPatch.blue()));
+        // A LIVE THEME EDIT moves the very same pixels the other way - the
+        // token, not a constant that happens to be warm, decides them.
+        {
+            const Theme::Spec before = Theme::spec();
+            Theme::Spec cool = before;
+            cool.body = QColor(QStringLiteral("#5a7ac8"));
+            Theme::setSpec(cool);
+            settle(200);
+            const QImage coolShot = dump(ov, QStringLiteral("oak-modelling-cool-token"));
+            QColor coolPatch;
+            const bool coolSampled = patchAt(coolShot, boardTop, 6, coolPatch);
+            check(coolSampled && coolPatch.blue() - coolPatch.red() > 15,
+                  QStringLiteral("oak: an edited body token reaches a body ALREADY on screen - "
+                                 "%1 now leans blue")
+                      .arg(coolPatch.name()));
+            Theme::setSpec(before);
+            settle(200);
+        }
+
+        // --- a pull preview wears the body token too, under its tint -------
+        {
+            QPoint topAt;
+            check(ov->projectToScreen(boardTop, topAt), "oak: the board's top projects");
+            clickAt(ov, QPointF(topAt));
+            settle(150);
+            PullArrow* arrow = ow.findChild<PullArrow*>();
+            check(!ov->selectedFace().IsNull() && arrow != nullptr && arrow->field() != nullptr,
+                  "oak: a click on the board's top selects the face and raises the pull arrow");
+            if (arrow && arrow->field()) {
+                arrow->field()->setText(QStringLiteral("40"));
+                settle(250);
+            }
+            dump(ov, QStringLiteral("oak-pull-preview"));
+            check(ov->hasModelingPreview() &&
+                      colorDistance(ov->modelingPreviewColour(), Theme::body()) < 3.0,
+                  QStringLiteral("oak: the pull preview's body wears the same token (%1)")
+                      .arg(ov->modelingPreviewColour().name()));
+            if (arrow) arrow->cancel();
+            ov->clearSelection();
+            settle(150);
+        }
+        // Captured for looking - the selection and a boolean region over the
+        // token, which is what the colour was chosen against.
+        pickBodyOf(ow, longXId);
+        settle(150);
+        dump(ov, QStringLiteral("oak-modelling-selected"));
+        ov->setSelectedSolids({longXId, pegId});
+        settle(150);
+        if (ow.beginBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut))) {
+            settle(200);
+            dump(ov, QStringLiteral("oak-modelling-boolean"));
+            ow.cancelBoolean();
+        }
+        ov->clearSelection();
+        settle(150);
+
+        // --- render mode: the default wood IS the bundled oak --------------
+        RenderSettingsPanel* oakPanel = ow.renderSettingsPanel();
+        const QString defaultWood = RenderSettingsPanel::defaultWoodName();
+        check(oakPanel && oakPanel->woodSelection() == defaultWood,
+              QStringLiteral("oak: with nothing recorded the live wood is the default, \"%1\" "
+                             "(\"%2\")")
+                  .arg(defaultWood, oakPanel ? oakPanel->woodSelection() : QString()));
+        const QStringList oakTiles = oakPanel ? oakPanel->materialTileNames() : QStringList();
+        check(oakTiles.contains(defaultWood) && !oakTiles.contains(QStringLiteral("Wood")),
+              QStringLiteral("oak: the default is a tile of its own and the procedural Wood "
+                             "tile is gone (%1)")
+                  .arg(oakTiles.join(QStringLiteral(", "))));
+        // The default's IMAGE, independently: the copy compiled into the
+        // binary, averaged here exactly as the viewport averages what it
+        // loaded - so a default that pointed at any other picture fails.
+        QColor bundledOak;
+        {
+            const QImage oak(QStringLiteral(":/materials/oak-natural.jpg"));
+            check(!oak.isNull(), "oak: the bundled oak is compiled into the binary");
+            const QImage tiny =
+                oak.convertToFormat(QImage::Format_RGB888)
+                    .scaled(16, 16, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            double r = 0.0, g = 0.0, b = 0.0;
+            for (int y = 0; y < tiny.height(); ++y)
+                for (int x = 0; x < tiny.width(); ++x) {
+                    r += qRed(tiny.pixel(x, y));
+                    g += qGreen(tiny.pixel(x, y));
+                    b += qBlue(tiny.pixel(x, y));
+                }
+            const double n = std::max(1, tiny.width() * tiny.height());
+            bundledOak = QColor(int(std::lround(r / n)), int(std::lround(g / n)),
+                                int(std::lround(b / n)));
+        }
+
+        QAction* oakRender = action(ow, QStringLiteral("Render mode"));
+        check(oakRender != nullptr, "oak: there is a Render mode action");
+        if (oakRender) oakRender->trigger();
+        waitFully(400);
+        // Wood is always on in the shipping app; a window built with no
+        // persisted settings starts with it off (see MainWindow.h), so it is
+        // turned on here, as the shipping branch does.
+        ov->setRenderWood(true);
+        waitFully(900);
+        check(ov->renderModeActive() && ov->renderWood(), "oak: render mode is on, wearing wood");
+
+        OcctViewWidget::WoodOverlayProbe overX;
+        OcctViewWidget::WoodOverlayProbe overY;
+        const bool haveX = ov->woodOverlayProbe(longXId, overX);
+        const bool haveY = ov->woodOverlayProbe(longYId, overY);
+        check(haveX && haveY, "oak: both boards are dressed in a wood overlay");
+        const QColor wornOak = ov->woodColourOf(overX.texturePath);
+        check(wornOak.isValid() && colorDistance(wornOak, bundledOak) < 4.0,
+              QStringLiteral("oak: and the image they wear is the bundled oak - its own colour "
+                             "%1 against the compiled-in file's %2")
+                  .arg(wornOak.name(), bundledOak.name()));
+        check(haveX && overX.texture != nullptr &&
+                  overX.texture == ov->woodTextureIdentity(overX.texturePath),
+              "oak: through the live texture, not a second copy of it");
+        // The aspect the image keeps: the oak is about twice as tall as it is
+        // wide, and a tile squashed to a square halves its figure.
+        check(haveX && overX.aspect > 1.8 && overX.aspect < 2.2,
+              QStringLiteral("oak: the grain keeps the image's own proportions (aspect %1)")
+                  .arg(overX.aspect, 0, 'f', 2));
+
+        // --- the grain runs along each board -------------------------------
+        check(haveX && std::fabs(overX.along.X()) > 0.99 && std::fabs(overX.grainOnTop.X()) > 0.99,
+              QStringLiteral("oak: on the board long in X the grain runs along X (axis %1 %2 %3, "
+                             "grain on top %4 %5 %6)")
+                  .arg(overX.along.X(), 0, 'f', 2).arg(overX.along.Y(), 0, 'f', 2)
+                  .arg(overX.along.Z(), 0, 'f', 2).arg(overX.grainOnTop.X(), 0, 'f', 2)
+                  .arg(overX.grainOnTop.Y(), 0, 'f', 2).arg(overX.grainOnTop.Z(), 0, 'f', 2));
+        check(haveY && std::fabs(overY.along.Y()) > 0.99 && std::fabs(overY.grainOnTop.Y()) > 0.99,
+              QStringLiteral("oak: and on the board long in Y it runs along Y (axis %1 %2 %3, "
+                             "grain on top %4 %5 %6)")
+                  .arg(overY.along.X(), 0, 'f', 2).arg(overY.along.Y(), 0, 'f', 2)
+                  .arg(overY.along.Z(), 0, 'f', 2).arg(overY.grainOnTop.X(), 0, 'f', 2)
+                  .arg(overY.grainOnTop.Y(), 0, 'f', 2).arg(overY.grainOnTop.Z(), 0, 'f', 2));
+        // AND IN PIXELS, both directions. Looking straight down, grain that
+        // runs along a board varies less ALONG the board than across it; the
+        // two boards lie at right angles, so each must show the opposite
+        // lean. One fixture-dependent threshold could pass on noise; two
+        // opposite answers from one frame cannot.
+        trigger(ow, QStringLiteral("Top"));
+        trigger(ow, QStringLiteral("Fit All"));
+        waitFully(1500);
+        const QImage topShot = dump(ov, QStringLiteral("oak-render-top"));
+        const auto streak = [&](const gp_Pnt& world, double& alongScreenX, double& alongScreenY) {
+            QPoint logical;
+            if (topShot.isNull() || !ov->projectToScreen(world, logical)) return false;
+            const double sx = topShot.width() / double(std::max(1, ov->width()));
+            const double sy = topShot.height() / double(std::max(1, ov->height()));
+            const QPoint at(int(logical.x() * sx), int(logical.y() * sy));
+            double dx = 0.0, dy = 0.0;
+            int n = 0;
+            for (int y = at.y() - 20; y < at.y() + 20; ++y) {
+                for (int x = at.x() - 20; x < at.x() + 20; ++x) {
+                    if (x < 0 || y < 0 || x + 1 >= topShot.width() || y + 1 >= topShot.height())
+                        continue;
+                    const int here = qGray(topShot.pixel(x, y));
+                    dx += std::abs(qGray(topShot.pixel(x + 1, y)) - here);
+                    dy += std::abs(qGray(topShot.pixel(x, y + 1)) - here);
+                    ++n;
+                }
+            }
+            if (n == 0) return false;
+            alongScreenX = dx / n;
+            alongScreenY = dy / n;
+            return true;
+        };
+        double xBoardDx = 0.0, xBoardDy = 0.0, yBoardDx = 0.0, yBoardDy = 0.0;
+        const bool streaked = streak(gp_Pnt(450.0, 150.0, 18.0), xBoardDx, xBoardDy) &&
+                              streak(gp_Pnt(780.0, 420.0, 18.0), yBoardDx, yBoardDy);
+        check(streaked && xBoardDx < xBoardDy && yBoardDy < yBoardDx,
+              QStringLiteral("oak: seen from above, the X board's grain streaks run across the "
+                             "screen (step along %1 vs across %2) and the Y board's run up it "
+                             "(along %3 vs across %4)")
+                  .arg(xBoardDx, 0, 'f', 2).arg(xBoardDy, 0, 'f', 2)
+                  .arg(yBoardDy, 0, 'f', 2).arg(yBoardDx, 0, 'f', 2));
+        trigger(ow, QStringLiteral("Axonometric"));
+        trigger(ow, QStringLiteral("Fit All"));
+        waitFully(900);
+        const QImage oakShot = dump(ov, QStringLiteral("oak-render"));
+        // PRESENCE, as a differ: the same frame with wood off is the plain
+        // material, and the board's own pixels must move between the two.
+        ov->setRenderWood(false);
+        waitFully(900);
+        const QImage plainShot = dump(ov, QStringLiteral("oak-render-plain"));
+        ov->setRenderWood(true);
+        waitFully(600);
+        QColor oakPatch, plainPatch;
+        const bool oakSampled = patchAt(oakShot, boardTop, 8, oakPatch) &&
+                                patchAt(plainShot, boardTop, 8, plainPatch);
+        check(oakSampled && colorDistance(oakPatch, plainPatch) > 12.0,
+              QStringLiteral("oak: the oak is genuinely drawn - the board reads %1 in wood "
+                             "and %2 without it")
+                  .arg(oakPatch.name(), plainPatch.name()));
+
+        // --- the card: a wood opens on its own colour, with no Metal --------
+        MaterialCard* oakCard = ow.materialCard();
+        QAbstractButton* oakTile = nullptr;
+        if (oakPanel) {
+            for (QAbstractButton* b : oakPanel->findChildren<QAbstractButton*>())
+                if (b->toolTip() == defaultWood) oakTile = b;
+        }
+        check(oakCard != nullptr && oakTile != nullptr,
+              "oak: there is a card and a tile for the default wood");
+        if (oakTile) doubleClickAt(oakTile, QPointF(oakTile->width() / 2.0, oakTile->height() / 2.0));
+        settle(200);
+        check(oakCard && oakCard->isOpen() && oakCard->material() == defaultWood && oakCard->isWood(),
+              QStringLiteral("oak: a double-click on the tile opens the card on that wood (\"%1\")")
+                  .arg(oakCard ? oakCard->material() : QString()));
+        check(oakCard && colorDistance(oakCard->colour(), bundledOak) < 4.0 &&
+                  colorDistance(oakCard->colour(), QColor(178, 178, 173)) > 30.0,
+              QStringLiteral("oak: and its swatch opens on the wood's OWN colour, %1 against the "
+                             "oak's %2 - not the grey every look was born with")
+                  .arg(oakCard ? oakCard->colour().name() : QString(), bundledOak.name()));
+        check(oakCard && oakCard->metalControl() && !oakCard->metalControl()->isVisible() &&
+                  oakCard->surfaceControl() && oakCard->surfaceControl()->isVisible(),
+              "oak: a wood's card offers Surface and does NOT offer Metal");
+        // A STORED Metal survives untouched, and still never reaches the wood.
+        if (oakCard) {
+            MaterialCard::Look metallic = oakCard->look();
+            metallic.metal = 1.0;
+            oakCard->setLook(metallic);
+        }
+        settle(300);
+        DocumentModel::MaterialLook storedOak;
+        const bool oakStored = ow.document().materialLook(defaultWood.toStdString(), storedOak);
+        check(oakStored && std::fabs(storedOak.metal - 1.0) < 1.0e-9,
+              QStringLiteral("oak: a Metal already stored is left exactly as it was (%1)")
+                  .arg(storedOak.metal));
+        OcctViewWidget::WoodOverlayProbe afterMetal;
+        const bool afterMetalRead = ov->woodOverlayProbe(longXId, afterMetal);
+        check(afterMetalRead && afterMetal.metallic == 0.0,
+              QStringLiteral("oak: and the wood the board wears is still not metal (metallic %1)")
+                  .arg(afterMetal.metallic));
+        // The swatch's own colour handed back is the wood as it comes - and a
+        // genuine tint moves the material, so the swatch is not decoration.
+        check(afterMetalRead && std::fabs(afterMetal.red - afterMetal.blue) < 0.08,
+              QStringLiteral("oak: picking the wood's own colour leaves it untinted (base "
+                             "%1 %2 %3)")
+                  .arg(afterMetal.red, 0, 'f', 3).arg(afterMetal.green, 0, 'f', 3)
+                  .arg(afterMetal.blue, 0, 'f', 3));
+        if (oakCard) {
+            MaterialCard::Look darker = oakCard->look();
+            darker.colour = QColor(90, 55, 30);
+            oakCard->setLook(darker);
+        }
+        settle(300);
+        OcctViewWidget::WoodOverlayProbe tinted;
+        const bool tintedRead = ov->woodOverlayProbe(longXId, tinted);
+        check(tintedRead && tinted.blue < afterMetal.blue - 0.1,
+              QStringLiteral("oak: a darker picked colour darkens the wood it tints (blue %1 "
+                             "from %2)")
+                  .arg(tinted.blue, 0, 'f', 3).arg(afterMetal.blue, 0, 'f', 3));
+        // A NON-wood material is offered both - the card's own rule, asked
+        // directly, since every tile this app ships is a wood.
+        if (oakCard) oakCard->open(QStringLiteral("Lacquer"), MaterialCard::Look{}, false);
+        settle(100);
+        check(oakCard && !oakCard->isWood() && oakCard->metalControl()->isVisible() &&
+                  oakCard->surfaceControl()->isVisible(),
+              "oak: a material that is not a wood is offered Metal and Surface both");
+        if (oakCard) oakCard->close();
+        settle(100);
+        if (oakRender && oakRender->isChecked()) oakRender->trigger();
+        settle(200);
+        ow.close();
+
+        // --- the scene: nothing recorded is oak, a recorded wood survives ---
+        {
+            const QString woodsDir =
+                QCoreApplication::applicationDirPath() + QStringLiteral("/materials");
+            const QString veneer = woodsDir + QStringLiteral("/oak-veneer.jpg");
+            if (!QFile::exists(veneer)) {
+                skipByEnvironment(9, QStringLiteral("the shipped veneer image is not beside "
+                                                    "this binary"));
+            } else {
+            FurnitureStore sceneStore(oakDir.path());
+            const QString plainId = sceneStore.createFurniture(QStringLiteral("Nothing recorded"));
+            {
+                DocumentModel doc;
+                doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 200.0, 18.0));
+                check(sceneStore.saveFurniture(plainId, doc, QImage()),
+                      "oak: a furniture recording no wood");
+            }
+            const QString veneerId = sceneStore.createFurniture(QStringLiteral("Veneered"));
+            {
+                DocumentModel doc;
+                doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 200.0, 18.0));
+                doc.setActiveMaterial("Oak veneer");
+                doc.setWoodTextureFile(veneer.toStdString());
+                DocumentModel::MaterialLook look;
+                look.material = "Oak veneer";
+                look.brightness = 0.8;
+                doc.setMaterialLook(look);
+                check(sceneStore.saveFurniture(veneerId, doc, QImage()),
+                      "oak: and one recording the veneer and a look of its own");
+            }
+            SceneWindow oakScene(&sceneStore);
+            oakScene.setAttribute(Qt::WA_ShowWithoutActivating);
+            oakScene.resize(1000, 720);
+            oakScene.show();
+            settle(250);
+            const QString sceneId = sceneStore.createScene(QStringLiteral("Oak and veneer"));
+            check(oakScene.openScene(sceneId) && oakScene.addPiece(plainId) &&
+                      oakScene.addPiece(veneerId),
+                  "oak: both go into a scene");
+            settle(300);
+            // The ARRANGING view is modelling too: the same body token.
+            const std::vector<SceneModel::Piece> pieces = oakScene.scene().pieces();
+            const std::vector<int> plainBodies =
+                pieces.size() == 2 ? oakScene.bodyIdsForPiece(pieces[0].id) : std::vector<int>();
+            const std::vector<int> veneerBodies =
+                pieces.size() == 2 ? oakScene.bodyIdsForPiece(pieces[1].id) : std::vector<int>();
+            check(!plainBodies.empty() && !veneerBodies.empty() &&
+                      colorDistance(oakScene.view()->solidColour(plainBodies.front()),
+                                    Theme::body()) < 3.0,
+                  QStringLiteral("oak: the scene's arranging view shades its pieces in the body "
+                                 "token too (%1)")
+                      .arg(plainBodies.empty()
+                               ? QString()
+                               : oakScene.view()->solidColour(plainBodies.front()).name()));
+            oakScene.view()->fitAll();
+            settle(200);
+            dump(oakScene.view(), QStringLiteral("oak-scene-arranging"));
+            oakScene.studio()->setEnabled(true);
+            waitFully(1200);
+            dump(oakScene.view(), QStringLiteral("oak-scene-render"));
+            OcctViewWidget::WoodOverlayProbe plainWood;
+            OcctViewWidget::WoodOverlayProbe veneerWood;
+            const bool both = !plainBodies.empty() && !veneerBodies.empty() &&
+                              oakScene.view()->woodOverlayProbe(plainBodies.front(), plainWood) &&
+                              oakScene.view()->woodOverlayProbe(veneerBodies.front(), veneerWood);
+            check(both, "oak: both pieces are dressed in wood in the scene's render");
+            const QColor plainOwn = oakScene.view()->woodColourOf(plainWood.texturePath);
+            check(both && colorDistance(plainOwn, bundledOak) < 4.0,
+                  QStringLiteral("oak: the piece that recorded nothing wears the bundled oak "
+                                 "(%1 against %2)")
+                      .arg(plainOwn.name(), bundledOak.name()));
+            check(both && veneerWood.texturePath == veneer &&
+                      colorDistance(oakScene.view()->woodColourOf(veneerWood.texturePath),
+                                    bundledOak) > 4.0,
+                  QStringLiteral("oak: and the piece that recorded the veneer keeps it (\"%1\")")
+                      .arg(veneerWood.texturePath));
+            // Each image's own grain direction, measured at its decode: the
+            // bundled oak's streaks run down the picture, the veneer's across
+            // it - and a mapping that assumed one laid the other across every
+            // board, which is what this scene showed before it was measured.
+            check(both && !plainWood.imageGrainAlongU && veneerWood.imageGrainAlongU,
+                  QStringLiteral("oak: the oak's grain is read as running down its image and the "
+                                 "veneer's as running across it (%1, %2)")
+                      .arg(plainWood.imageGrainAlongU ? QStringLiteral("across")
+                                                      : QStringLiteral("down"),
+                           veneerWood.imageGrainAlongU ? QStringLiteral("across")
+                                                       : QStringLiteral("down")));
+            check(both && veneerWood.red < plainWood.red - 0.1,
+                  QStringLiteral("oak: with its own look's brightness - 0.8 reads darker than the "
+                                 "untouched oak (%1 against %2)")
+                      .arg(veneerWood.red, 0, 'f', 3).arg(plainWood.red, 0, 'f', 3));
+            oakScene.studio()->setEnabled(false);
+            settle(150);
+            oakScene.close();
+            }
+        }
     }
 
     if (blockEnabled("booleans-roles-on-the-wood-and-the-region-drawn")) {

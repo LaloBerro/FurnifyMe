@@ -7,6 +7,7 @@
 #include <Aspect_NeutralWindow.hxx>
 #include <SelectMgr_EntityOwner.hxx>
 #include <Graphic3d_CLight.hxx>
+#include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_RenderingParams.hxx>
 #include <Graphic3d_ToneMappingMethod.hxx>
 #include <Graphic3d_TextureMap.hxx>
@@ -35,6 +36,7 @@
 #include "ResizePinRenderer.h"
 #include "TransformGizmo.h"
 
+#include <QColor>
 #include <QImage>
 #include <QOpenGLContext>
 #include <QOpenGLWidget>
@@ -432,6 +434,12 @@ public:
     // than one is - a multi-body caller built its own shapes and has no need
     // to ask this accessor for a body it did not name.
     TopoDS_Shape modelingPreviewShape() const;
+    // The colour a body's own presentation - or the one preview - is shaded
+    // in, as OCCT holds it: the Theme::body() token outside render mode. For
+    // a check that must ask the presentation rather than the token; invalid
+    // when there is no such body or no single preview.
+    QColor solidColour(int id) const;
+    QColor modelingPreviewColour() const;
 
     // The face-pull arrow, drawn in the scene so it stays glued to its face
     // under orbit. See PullArrow.h for the split between this presentation
@@ -1590,20 +1598,52 @@ public:
     bool renderQuick() const { return myRenderQuality == RenderQuality::Simple; }
 
     // The wood material (Milestone 5): render-mode bodies dress in a
-    // procedurally generated wood grain - a texture on the raster tiers,
-    // and at minimum a wood-toned PBR/BSDF on the path-traced one (whether
-    // this build's ray pipeline samples the texture too is the user's pixel
-    // to judge; the albedo makes wood read as wood either way). Session +
-    // persisted state exactly as Surface/Metal are; applies live while
-    // render mode is on, restored completely on exit - modeling never sees
-    // it.
+    // photographic wood - a texture on every tier, through the overlays
+    // below. Session + persisted state exactly as Surface/Metal are; applies
+    // live while render mode is on, restored completely on exit - modeling
+    // never sees it (modelling wears the flat Theme::body() token instead).
     void setRenderWood(bool on);
     bool renderWood() const { return myRenderWood; }
-    // Which image file the wood texture is built from - empty means the
-    // built-in procedural grain. Changing it drops the cached texture and,
-    // mid-render-mode with wood on, re-dresses the bodies live.
+    // Which image file the wood texture is built from - empty means THE
+    // DEFAULT WOOD, the bundled photographic oak (defaultWoodTextureFile()).
+    // It used to mean a procedurally drawn grain, retired by the 2026-10
+    // review (F11). Changing it drops the cached texture and, mid-render-
+    // mode with wood on, re-dresses the bodies live.
     void setRenderTextureFile(const QString& path);
     QString renderTextureFile() const { return myWoodTextureFile; }
+    // The bundled oak: the copy beside the binary when it is there (the file
+    // the Oak natural tile is built from), the copy compiled into the binary
+    // when it is not - so the default never depends on what was deployed.
+    static QString defaultWoodTextureFile();
+    // A wood's OWN colour - its image's average, measured once at the single
+    // decode the image ever gets. Empty asks about the live wood. It is what
+    // the material card's swatch opens on, and what a picked colour is
+    // measured against (see woodMaterial()). Invalid when nothing loads.
+    QColor woodColourOf(const QString& texturePath);
+
+    // WHAT ONE BODY'S WOOD OVERLAY WAS ACTUALLY BUILT WITH, for a check that
+    // must read the drawing rather than the setters: the image it wears, the
+    // material's metallic and colour, the image's aspect, the board axis the
+    // grain follows, and the direction the grain runs across the top of a
+    // board lying flat. False when the body has no overlay (wood off, render
+    // mode off, or the body hidden).
+    struct WoodOverlayProbe {
+        QString texturePath;
+        const void* texture = nullptr;   // identity only - which texture handle
+        double metallic = -1.0;
+        double red = 0.0, green = 0.0, blue = 0.0;
+        double aspect = 0.0;
+        bool imageGrainAlongU = false;   // the picture's own grain, measured
+        gp_Dir along;
+        gp_Dir grainOnTop;
+    };
+    bool woodOverlayProbe(int bodyId, WoodOverlayProbe& out) const;
+    // Which texture handle a path resolves to, for comparing against a probe's
+    // `texture` - empty is the live wood.
+    const void* woodTextureIdentity(const QString& texturePath)
+    {
+        return woodTextureFor(texturePath).get();
+    }
     // The material's own two dials (user feedback): how much real material
     // one tile of the image covers, and which way the grain runs (a
     // rotation of the UV projection inside each face's plane). Both rebuild
@@ -3195,8 +3235,9 @@ private:
     RenderTier myRenderTierBest = RenderTier::Plain;
     RenderQuality myRenderQuality = RenderQuality::Deep;
     bool myRenderCutout = false;
-    // The live material's look - the defaults are the tone this app has
-    // always drawn a body in, so nothing changes until a furniture says so.
+    // The live material's look. The colour defaults are MaterialLook's own,
+    // which on a wood mean "no tint" - the wood exactly as its image comes
+    // (see woodMaterial()).
     double myMaterialRed = 0.70;
     double myMaterialGreen = 0.70;
     double myMaterialBlue = 0.68;
@@ -3205,8 +3246,8 @@ private:
     RenderAspect myRenderAspect = RenderAspect::Free;
     RenderGuides myRenderGuides = RenderGuides::Thirds;
     // Wood (Milestone 5) - see setRenderWood(). The texture is built once
-    // per session, lazily, from a procedural QImage; the handle lives for
-    // the widget's life and dies with the GL resources.
+    // per image, lazily; the handle lives for the widget's life and dies with
+    // the GL resources.
     bool myRenderWood = false;
     double myWoodTileMm = 300.0;
     double myWoodAngleDeg = 0.0;
@@ -3218,6 +3259,21 @@ private:
     std::map<QString, Handle(Graphic3d_TextureMap)> myBodyWoodTextures;
     Handle(Graphic3d_TextureMap) myWoodTexture;
     void ensureWoodTexture();
+    // The one decode an image gets: builds its texture and records its own
+    // colour and proportions beside it. An empty path, or a file that will
+    // not load, is the default wood.
+    Handle(Graphic3d_TextureMap) buildWoodTexture(const QString& path);
+    struct WoodImage {
+        QColor mean;          // invalid until the image has loaded
+        double aspect = 1.0;  // height over width
+        bool grainAlongU = false;   // the picture's grain runs across it
+    };
+    std::map<QString, WoodImage> myWoodImages;
+    WoodImage woodImageOf(const QString& path);
+    // ONE material for every wood overlay - see the definition.
+    Graphic3d_MaterialAspect woodMaterial(double red, double green, double blue,
+                                          double brightness, double roughness,
+                                          const QString& texturePath);
     // The wood overlays (user feedback round): AIS_Shape stretches a texture
     // 0..1 across EACH face's own parametric box, so a long side smeared the
     // grain and a bevel strip squeezed the whole image into a sliver. These
@@ -3230,7 +3286,7 @@ private:
     // lost. `on` routes through the current material so a Surface/Metal drag
     // rebuilds the look live.
     void applyWoodTexture(bool on);
-    void refreshWoodOverlays(const Graphic3d_MaterialAspect& material);
+    void refreshWoodOverlays();
     void clearWoodOverlays();
     std::map<int, Handle(AIS_InteractiveObject)> myWoodOverlays;
     std::vector<int> myWoodHiddenIds;

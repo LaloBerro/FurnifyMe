@@ -141,10 +141,17 @@ MaterialCard::MaterialCard(QWidget* viewport)
     hide();
 }
 
-void MaterialCard::open(const QString& material, const Look& look)
+void MaterialCard::open(const QString& material, const Look& look, bool wood)
 {
     myMaterial = material;
     myLook = look;
+    myWood = wood;
+    // Hidden or shown BEFORE replace() below measures the card, so its height
+    // follows the rows it actually holds.
+    for (QWidget* part : {static_cast<QWidget*>(myMetal.name), static_cast<QWidget*>(myMetal.slider),
+                          static_cast<QWidget*>(myMetal.value)}) {
+        if (part) part->setVisible(!wood);
+    }
     if (!myLook.colour.isValid()) myLook.colour = QColor(178, 178, 173);
     myLook.brightness = std::clamp(myLook.brightness, kBrightMin / 100.0, kBrightMax / 100.0);
     myLook.surface = std::clamp(myLook.surface, 0.0, 1.0);
@@ -182,7 +189,7 @@ void MaterialCard::setLook(const Look& look)
     const QString material = myMaterial;
     // open() is the clamp-and-seed pass; reusing it keeps one copy of both.
     // It does not report, so the emit below is what makes this an edit.
-    open(material, look);
+    open(material, look, myWood);
     emitChange();
 }
 
@@ -280,9 +287,10 @@ void MaterialCard::replace()
 {
     if (!parentWidget()) return;
     const QFontMetrics title(titleFontBold());
-    // Title, the colour row, four dial rows, then Done.
+    // Title, the colour row, the dial rows this material is offered, then Done.
+    const int dials = static_cast<int>(offeredDials().size());
     const int height = kPad * 2 + title.height() + kGap + kRowHeight + kGap +
-                       4 * (kRowHeight + kDialGap) + kGap + kRowHeight;
+                       dials * (kRowHeight + kDialGap) + kGap + kRowHeight;
     setFixedSize(Theme::wholeDevicePixels(QSize(kCardWidth, height)));
 
     // Bottom LEFT of the viewport: the render settings are a docked panel down
@@ -312,7 +320,7 @@ void MaterialCard::layoutCard()
     if (myValue) myValue->setGeometry(width() - kPad - kValueWidth, top, kValueWidth, kRowHeight);
 
     top += kRowHeight + kGap;
-    for (Dial* dial : {&mySurface, &myMetal, &myGrainSize, &myGrainAngle}) {
+    for (Dial* dial : offeredDials()) {
         if (dial->name) dial->name->setGeometry(kPad, top, kNameWidth, kRowHeight);
         if (dial->slider) {
             const int left = kPad + kNameWidth;
@@ -329,6 +337,18 @@ void MaterialCard::layoutCard()
         myDone->setGeometry(width() - kPad - kDoneWidth, top + kGap - kDialGap, kDoneWidth,
                             kRowHeight);
     }
+}
+
+QWidget* MaterialCard::metalControl() const { return myMetal.slider; }
+QWidget* MaterialCard::surfaceControl() const { return mySurface.slider; }
+
+std::vector<MaterialCard::Dial*> MaterialCard::offeredDials()
+{
+    std::vector<Dial*> dials{&mySurface};
+    if (!myWood) dials.push_back(&myMetal);
+    dials.push_back(&myGrainSize);
+    dials.push_back(&myGrainAngle);
+    return dials;
 }
 
 QStringList MaterialCard::paintedTexts() const

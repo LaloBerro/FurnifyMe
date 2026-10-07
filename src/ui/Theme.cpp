@@ -59,6 +59,10 @@ Spec graphite()
     s.textDisabled      = QColor("#5c5c64");
     s.border            = QColor("#3a3a40");
     s.viewport          = QColor("#45454b");
+    // A modelling body's flat colour - see Theme.h. A quiet, low-chroma
+    // wood, picked from captures against the near-black viewport, hovered,
+    // selected, under a pull preview and inside a boolean region.
+    s.body              = QColor("#a08c78");
     s.gridMinor         = QColor("#3e3e44");
     s.gridMajor         = QColor("#4d4d55");
     s.axisX             = QColor("#7a4a4a");   // muted red
@@ -268,6 +272,7 @@ const QVector<ColourToken>& colourTokens()
     // text; then the accents that mark state.
     static const QVector<ColourToken> tokens = {
         {QStringLiteral("viewport"), &Spec::viewport},
+        {QStringLiteral("body"), &Spec::body},
         {QStringLiteral("gridMinor"), &Spec::gridMinor},
         {QStringLiteral("gridMajor"), &Spec::gridMajor},
         {QStringLiteral("axisX"), &Spec::axisX},
@@ -479,6 +484,7 @@ QColor textMuted()    { return spec().textMuted; }
 QColor textDisabled() { return spec().textDisabled; }
 QColor border()       { return spec().border; }
 QColor viewport()     { return spec().viewport; }
+QColor body()         { return spec().body; }
 QColor gridMinor()    { return spec().gridMinor; }
 QColor gridMajor()    { return spec().gridMajor; }
 QColor axisX()        { return spec().axisX; }
