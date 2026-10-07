@@ -750,6 +750,23 @@ public:
         std::vector<int> bodyGroups;
         std::vector<int> outlineGroups;
 
+        // The sibling order (T-063), POSITIONAL like every block above: one
+        // record per parent that has a stored sequence, `parentIndex` -1 for
+        // the root or an index into `groups`, each item named by its kind and
+        // its position in serial.bodies / serial.outlineFaces / groups. Empty
+        // means "automatic order everywhere", which is exactly what every file
+        // written before this existed carries.
+        struct ItemRef {
+            enum class Kind { Body, Outline, Folder };
+            Kind kind = Kind::Body;
+            int index = -1;
+        };
+        struct OrderRecord {
+            int parentIndex = -1;
+            std::vector<ItemRef> items;
+        };
+        std::vector<OrderRecord> order;
+
         // How each material looks on this furniture - see MaterialLook.
         // Keyed by NAME rather than by position, unlike everything above it:
         // a material is not an item in a list this document owns, it is a

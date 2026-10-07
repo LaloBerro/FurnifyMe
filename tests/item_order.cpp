@@ -264,6 +264,80 @@ int main()
               "...and the version's folders, not the live document's");
     }
 
+    // --- the order in DocumentMeta: round trip, absent key, every refusal ----
+    {
+        DocumentModel doc;
+        const int carcass = doc.createGroup("Carcass");
+        const int drawer = doc.createGroup("Drawer", carcass);
+        body(doc, "Side left", 0.0, carcass);
+        const int top = body(doc, "Top", 100.0, carcass);
+        const int shelf = body(doc, "Shelf", 200.0);
+        outline(doc, "Sketch A");
+        doc.moveItems({shelf}, 0, carcass);    // root:    Shelf, Carcass, Sketch A
+        doc.moveItems({top}, carcass, drawer); // Carcass: Top, Drawer, Side left
+
+        DocumentModel::DocumentMeta meta;
+        const FurnifySerial::SerializedDocument serial = doc.toSerialized(meta);
+        check(meta.order.size() == 2,
+              "two parents carry a stored sequence, so two records are written (" +
+                  std::to_string(meta.order.size()) + ")");
+
+        DocumentModel back;
+        const bool loaded = back.fromSerialized(serial, meta);
+        check(loaded, "a document with an order block loads");
+        check(namesIn(back, 0) == "Shelf, Carcass, Sketch A",
+              "...the root reads as it was saved (" + namesIn(back, 0) + ")");
+        check(namesIn(back, folderNamed(back, "Carcass")) == "Top, Drawer, Side left",
+              "...and so does Carcass (" + namesIn(back, folderNamed(back, "Carcass")) + ")");
+
+        DocumentModel::DocumentMeta older = meta;
+        older.order.clear();
+        DocumentModel flat;
+        const bool flatLoaded = flat.fromSerialized(serial, older);
+        check(flatLoaded && namesIn(flat, 0) == "Carcass, Sketch A, Shelf",
+              "a file with no order block loads in the automatic order (" + namesIn(flat, 0) + ")");
+
+        // Every refusal leaves a target that already holds a body untouched.
+        const auto refuses = [&](const DocumentModel::DocumentMeta& bad, const std::string& what) {
+            DocumentModel target;
+            const int keep = body(target, "Keep", 0.0);
+            const bool accepted = target.fromSerialized(serial, bad);
+            check(!accepted && target.count() == 1 && target.contains(keep),
+                  what + " - refused, the target untouched");
+        };
+        using Ref = DocumentModel::DocumentMeta::ItemRef;
+        {
+            DocumentModel::DocumentMeta bad = meta;
+            bad.order[0].parentIndex = 7;
+            refuses(bad, "a sequence for a folder that does not exist");
+        }
+        {
+            DocumentModel::DocumentMeta bad = meta;
+            bad.order.push_back(bad.order[0]);
+            refuses(bad, "two sequences for one parent");
+        }
+        {
+            DocumentModel::DocumentMeta bad = meta;
+            bad.order[0].items.push_back(bad.order[0].items[0]);
+            refuses(bad, "one item named twice in a sequence");
+        }
+        {
+            DocumentModel::DocumentMeta bad = meta;
+            bad.order[0].items[0].index = 99;
+            refuses(bad, "an item index past the end of its list");
+        }
+        {
+            // order[0] is the ROOT's record (std::map emits parent 0 first);
+            // body position 0 is Side left, which lives in Carcass.
+            DocumentModel::DocumentMeta bad = meta;
+            Ref stray;
+            stray.kind = Ref::Kind::Body;
+            stray.index = 0;
+            bad.order[0].items.push_back(stray);
+            refuses(bad, "a sequence naming a body that lives in another folder");
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

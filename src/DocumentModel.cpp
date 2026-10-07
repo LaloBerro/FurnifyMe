@@ -1490,6 +1490,39 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
                 meta.outlineGroups.push_back(it == indexOfGroup.end() ? -1 : it->second);
             }
         }
+
+        // THE ORDER (T-063), one record per stored sequence, written only for
+        // entries that are still children of that parent - a sequence keeps
+        // dead ids until it is read, and a file must not.
+        std::unordered_map<int, int> positionOfOutline;
+        for (std::size_t i = 0; i < myOutlines.size(); ++i)
+            positionOfOutline[myOutlines[i].id] = static_cast<int>(i);
+        for (const auto& kv : myOrder) {
+            DocumentMeta::OrderRecord record;
+            if (kv.first != 0) {
+                const auto parentIt = indexOfGroup.find(kv.first);
+                if (parentIt == indexOfGroup.end()) continue;   // a folder since removed
+                record.parentIndex = parentIt->second;
+            }
+            std::unordered_set<int> written;
+            for (int id : kv.second) {
+                if (!isKnownItem(id) || groupOf(id) != kv.first || !written.insert(id).second)
+                    continue;
+                DocumentMeta::ItemRef ref;
+                if (contains(id)) {
+                    ref.kind = DocumentMeta::ItemRef::Kind::Body;
+                    ref.index = static_cast<int>(positionOfId[id]);
+                } else if (containsOutline(id)) {
+                    ref.kind = DocumentMeta::ItemRef::Kind::Outline;
+                    ref.index = positionOfOutline[id];
+                } else {
+                    ref.kind = DocumentMeta::ItemRef::Kind::Folder;
+                    ref.index = indexOfGroup[id];
+                }
+                record.items.push_back(ref);
+            }
+            if (!record.items.empty()) meta.order.push_back(std::move(record));
+        }
     }
 
     // How each material looks on this furniture - straight across, by name.
@@ -1635,6 +1668,43 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         }
     }
 
+    // The order (T-063), validated in full before anything is mutated: every
+    // parent names the root or a real folder, no parent has two sequences,
+    // every item index is in range for its kind, no item is named twice, and
+    // every item really is a child of the parent its sequence is for. A
+    // stale or hand-edited sequence is refused, the folders' own rule.
+    {
+        using Kind = DocumentMeta::ItemRef::Kind;
+        const int groupCount = static_cast<int>(meta.groups.size());
+        const int bodyCount = static_cast<int>(serial.bodies.size());
+        const int outlineCount = static_cast<int>(serial.outlineFaces.size());
+        std::set<int> parents;
+        for (const DocumentMeta::OrderRecord& record : meta.order) {
+            if (record.parentIndex < -1 || record.parentIndex >= groupCount) return false;
+            if (!parents.insert(record.parentIndex).second) return false;
+            std::set<std::pair<int, int>> named;
+            for (const DocumentMeta::ItemRef& ref : record.items) {
+                int actualParent = -2;
+                if (ref.kind == Kind::Body) {
+                    if (ref.index < 0 || ref.index >= bodyCount) return false;
+                    actualParent = meta.bodyGroups.empty()
+                                       ? -1
+                                       : meta.bodyGroups[static_cast<std::size_t>(ref.index)];
+                } else if (ref.kind == Kind::Outline) {
+                    if (ref.index < 0 || ref.index >= outlineCount) return false;
+                    actualParent = meta.outlineGroups.empty()
+                                       ? -1
+                                       : meta.outlineGroups[static_cast<std::size_t>(ref.index)];
+                } else {
+                    if (ref.index < 0 || ref.index >= groupCount) return false;
+                    actualParent = meta.groups[static_cast<std::size_t>(ref.index)].parentIndex;
+                }
+                if (actualParent != record.parentIndex) return false;
+                if (!named.insert({static_cast<int>(ref.kind), ref.index}).second) return false;
+            }
+        }
+    }
+
     mySolids.clear();
     myOutlines.clear();
     myUndo.clear();
@@ -1727,6 +1797,21 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         for (std::size_t i = 0; i < meta.outlineGroups.size() && i < outlineIds.size(); ++i) {
             const int index = meta.outlineGroups[i];
             if (index >= 0) setItemGroup(outlineIds[i], groupIds[static_cast<std::size_t>(index)]);
+        }
+
+        // The order, translated onto the ids just handed out. Validated above,
+        // so every index is in range and every item is a child of its parent.
+        for (const DocumentMeta::OrderRecord& record : meta.order) {
+            const int parent =
+                record.parentIndex < 0 ? 0 : groupIds[static_cast<std::size_t>(record.parentIndex)];
+            std::vector<int> sequence;
+            for (const DocumentMeta::ItemRef& ref : record.items) {
+                const std::size_t i = static_cast<std::size_t>(ref.index);
+                sequence.push_back(ref.kind == DocumentMeta::ItemRef::Kind::Body      ? bodyIds[i]
+                                   : ref.kind == DocumentMeta::ItemRef::Kind::Outline ? outlineIds[i]
+                                                                                      : groupIds[i]);
+            }
+            if (!sequence.empty()) myOrder[parent] = sequence;
         }
     }
 
