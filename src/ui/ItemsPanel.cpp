@@ -22,6 +22,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <unordered_map>
 
 namespace {
 // The card's width AT THE SHIPPED TYPE SCALE. Fixed rather than
@@ -206,6 +207,100 @@ int ItemsPanel::cardWidth()
     return std::max(kBaseWidth, kBaseWidth + now - atShippedScale);
 }
 
+const ItemsPanel::Row* ItemsPanel::visibleRow(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(myVisible.size())) return nullptr;
+    return &myRowList[myVisible[static_cast<std::size_t>(index)]];
+}
+
+int ItemsPanel::rowCount() const { return static_cast<int>(myVisible.size()); }
+
+QString ItemsPanel::rowTextAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row ? row->text : QString();
+}
+
+QWidget* ItemsPanel::rowWidgetAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row ? row->widget : nullptr;
+}
+
+int ItemsPanel::rowIdAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row ? row->id : 0;
+}
+
+QPushButton* ItemsPanel::grainMarkAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row ? row->grain : nullptr;
+}
+
+bool ItemsPanel::rowIsOutlineAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row && row->isOutline;
+}
+
+bool ItemsPanel::rowIsGroupAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row && row->isGroup;
+}
+
+int ItemsPanel::rowDepthAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row ? row->depth : 0;
+}
+
+void ItemsPanel::relayoutCard()
+{
+    // See refresh()'s own comment on why BOTH layouts are invalidated by
+    // hand: QBoxLayout caches its hint behind a flag only its own
+    // addItem/removeItem sets, so a row shown or hidden inside myRows leaves
+    // myOuter handing back the hint it computed last time.
+    myRows->invalidate();
+    myOuter->invalidate();
+    myOuter->activate();
+    updateGeometry();
+    adjustSize();
+}
+
+void ItemsPanel::syncTwisty(Row& row, bool open)
+{
+    if (!row.twisty || row.twistyOpen == open) return;
+    row.twistyOpen = open;
+    row.twisty->setIcon(
+        IconSet::icon(open ? IconSet::Glyph::ChevronDown : IconSet::Glyph::ChevronRight));
+    row.twisty->setToolTip(open ? tr("Close this folder") : tr("Open this folder"));
+}
+
+void ItemsPanel::applyRowVisibility()
+{
+    myVisible.clear();
+    // folder id -> its row is shown AND it is open. The tree is built depth
+    // first, so a folder's entry exists before any of its children ask.
+    std::unordered_map<int, bool> openFolder;
+    for (std::size_t i = 0; i < myRowList.size(); ++i) {
+        Row& row = myRowList[i];
+        const bool shown = row.parentId == 0 || openFolder[row.parentId];
+        if (row.isGroup) {
+            openFolder[row.id] = shown && isGroupExpanded(row.id);
+            syncTwisty(row, isGroupExpanded(row.id));
+        }
+        // A HIDDEN row is QWidgetItem::isEmpty(), so it contributes nothing
+        // to myRows' sizeHint() and the card is measured from the visible
+        // rows alone. Only touched when it actually changes: setVisible() on
+        // a row already in that state still costs a layout request.
+        if (row.widget->isHidden() == shown) row.widget->setVisible(shown);
+        if (shown) myVisible.push_back(i);
+    }
+}
+
 void ItemsPanel::applyTheme()
 {
     // Restyle in place - NOT refresh(). See the header: a theme edit arrives
@@ -357,16 +452,23 @@ void ItemsPanel::refresh()
     QString signature;
     if (myDocument) {
         // The FOLDER TREE first (improvements item 10): which folders exist,
-        // what they are called, where they hang and which are open. All four
-        // are things a row shows, and the Phase-5 lesson this function's own
+        // what they are called and where they hang. All three are things a
+        // row shows, and the Phase-5 lesson this function's own
         // comment records is that a field a row shows but the early-out does
         // not compare is a field that stops updating.
         for (const DocumentModel::Group& group : myDocument->groups()) {
             signature += QStringLiteral("g") + QString::number(group.id) + QLatin1Char('') +
                          QString::fromStdString(group.name) + QLatin1Char('') +
-                         QString::number(group.parent) + QLatin1Char('') +
-                         (isGroupExpanded(group.id) ? QLatin1Char('1') : QLatin1Char('0')) +
-                         QLatin1Char('');
+                         QString::number(group.parent) + QLatin1Char('');
+        }
+        // THE STORED ORDER (T-063): a reorder changes which row sits where,
+        // so the early-out has to see it - the Phase-5 lesson again. Which
+        // folders are OPEN is deliberately NOT here any more: opening one is
+        // visibility (applyRowVisibility()), never a rebuild.
+        for (const auto& kv : myDocument->storedOrder()) {
+            signature += QStringLiteral("o") + QString::number(kv.first) + QLatin1Char(':');
+            for (int id : kv.second) signature += QString::number(id) + QLatin1Char(',');
+            signature += QLatin1Char('\x1e');
         }
         // Outlines first, exactly as the rows are built below. Everything a
         // row DISPLAYS goes into the signature - id, name, visibility - which
@@ -461,6 +563,7 @@ void ItemsPanel::refresh()
         delete item;
     }
     myRowList.clear();
+    myVisible.clear();
     if (!myDocument) return;
 
     // The tree, from the root down - folders and the items inside them, to
@@ -468,6 +571,7 @@ void ItemsPanel::refresh()
     // this walks straight into the two item loops and builds exactly the
     // list it always did.
     buildGroupRows(0, 0);
+    applyRowVisibility();
 
     if (myRowList.empty()) {
         auto* empty = new QLabel(tr("No bodies yet.\n\nPress Ctrl+K and click points on "
@@ -510,17 +614,13 @@ void ItemsPanel::refresh()
     // anyone asked - the empty state's - and the drawer stayed at that
     // height with eight bodies listed in it. Measured, not reasoned about:
     // sizeHint() reported 325 while the widget sat at 176.
-    myRows->invalidate();
-    myOuter->invalidate();
-    myOuter->activate();
-    updateGeometry();
-    adjustSize();
+    relayoutCard();
 
     if (myView) showSelection(myView->selectedSolidIds());
 }
 
 void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool isOutline,
-                            int depth)
+                            int depth, int parentId)
 {
     auto* row = new QWidget(this);
     auto* layout = new QHBoxLayout(row);
@@ -638,11 +738,13 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     entry.id = id;
     entry.isOutline = isOutline;
     entry.depth = depth;
+    entry.parentId = parentId;
+    entry.onScreen = onScreen;
     entry.text = name->text();
     myRowList.push_back(entry);
 }
 
-void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth)
+void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, int parentId)
 {
     // A FOLDER row (improvements item 10): a twisty, the folder's name, and
     // one eye that speaks for everything under it. It is the same row an item
@@ -723,6 +825,8 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth)
     entry.id = groupId;
     entry.isGroup = true;
     entry.depth = depth;
+    entry.parentId = parentId;
+    entry.twistyOpen = open;
     entry.text = groupName;
     myRowList.push_back(entry);
 }
@@ -730,25 +834,23 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth)
 void ItemsPanel::buildGroupRows(int groupId, int depth)
 {
     if (!myDocument) return;
-    // Folders first, then the loose items at this level - so a folder's own
-    // contents sit directly under its row rather than after everything else
-    // that shares its parent.
-    for (int childId : myDocument->childGroups(groupId)) {
-        addGroupRow(childId, QString::fromStdString(myDocument->groupNameOf(childId)), depth);
-        if (isGroupExpanded(childId)) buildGroupRows(childId, depth + 1);
-    }
-    // Outlines ABOVE bodies, at every level: an outline is the thing the user
-    // is about to act on, and it is the newest item in the document whenever
-    // one exists.
-    for (const DocumentModel::Outline& outline : myDocument->outlines()) {
-        if (myDocument->groupOf(outline.id) != groupId) continue;
-        addItemRow(outline.id, QString::fromStdString(outline.name),
-                   myDocument->isVisible(outline.id), /*isOutline=*/true, depth);
-    }
-    for (const DocumentModel::Solid& solid : myDocument->solids()) {
-        if (myDocument->groupOf(solid.id) != groupId) continue;
-        addItemRow(solid.id, QString::fromStdString(solid.name),
-                   myDocument->isVisible(solid.id), /*isOutline=*/false, depth);
+    // EVERY row of the tree, open or folded, in the order the document
+    // resolves (T-063): explicit sequence first, then the automatic order
+    // (folders, outlines, bodies). Folding is visibility
+    // (applyRowVisibility()), so opening a folder - a twisty, spring-loading
+    // mid-drag, a reveal - creates no widget at all, and the row a drag was
+    // pressed on is never destroyed under the hand.
+    for (int id : myDocument->orderedChildren(groupId)) {
+        if (myDocument->groupExists(id)) {
+            addGroupRow(id, QString::fromStdString(myDocument->groupNameOf(id)), depth, groupId);
+            buildGroupRows(id, depth + 1);
+        } else if (myDocument->containsOutline(id)) {
+            addItemRow(id, QString::fromStdString(myDocument->outlineNameOf(id)),
+                       myDocument->isVisible(id), /*isOutline=*/true, depth, groupId);
+        } else if (myDocument->contains(id)) {
+            addItemRow(id, QString::fromStdString(myDocument->nameOf(id)),
+                       myDocument->isVisible(id), /*isOutline=*/false, depth, groupId);
+        }
     }
 }
 
@@ -762,10 +864,12 @@ void ItemsPanel::setGroupExpanded(int groupId, bool expanded)
     if (expanded == isGroupExpanded(groupId)) return;
     if (expanded) myExpanded.insert(groupId);
     else myExpanded.erase(groupId);
-    // WHICH ROWS EXIST changes, so this is a rebuild rather than a restyle -
-    // and refresh()'s signature carries the open/closed state for exactly
-    // this call's sake, or the early-out would swallow it.
-    refresh();
+    // VISIBILITY, not a rebuild: every row of the tree already exists (see
+    // buildGroupRows()), so opening or folding a folder only shows or hides
+    // the rows under it and re-measures the card.
+    applyRowVisibility();
+    relayoutCard();
+    restyleRows();
 }
 
 std::vector<int> ItemsPanel::selectionFor(int id, Qt::KeyboardModifiers mods) const
@@ -785,19 +889,22 @@ std::vector<int> ItemsPanel::selectionFor(int id, Qt::KeyboardModifiers mods) co
     if ((mods & Qt::ShiftModifier) && myAnchorRowId != 0) {
         int from = -1;
         int to = -1;
-        for (std::size_t i = 0; i < myRowList.size(); ++i) {
-            if (myRowList[i].isGroup || myRowList[i].isOutline) continue;
-            if (myRowList[i].id == myAnchorRowId) from = static_cast<int>(i);
-            if (myRowList[i].id == id) to = static_cast<int>(i);
+        // VISIBLE rows only: a folded folder's bodies are rows that exist but
+        // that the user cannot see, and a range swept across a folded folder
+        // takes only what was on screen between the two clicks.
+        for (std::size_t v = 0; v < myVisible.size(); ++v) {
+            const Row& row = myRowList[myVisible[v]];
+            if (row.isGroup || row.isOutline) continue;
+            if (row.id == myAnchorRowId) from = static_cast<int>(v);
+            if (row.id == id) to = static_cast<int>(v);
         }
         if (from >= 0 && to >= 0) {
             if (from > to) std::swap(from, to);
             std::vector<int> ids;
-            for (int i = from; i <= to; ++i) {
-                if (myRowList[static_cast<std::size_t>(i)].isGroup ||
-                    myRowList[static_cast<std::size_t>(i)].isOutline)
-                    continue;
-                ids.push_back(myRowList[static_cast<std::size_t>(i)].id);
+            for (int v = from; v <= to; ++v) {
+                const Row& row = myRowList[myVisible[static_cast<std::size_t>(v)]];
+                if (row.isGroup || row.isOutline) continue;
+                ids.push_back(row.id);
             }
             return ids;
         }
@@ -838,7 +945,10 @@ void ItemsPanel::showRowMenu(const QPoint& globalPos, int rowId, bool isGroupRow
 
 int ItemsPanel::dropTargetAt(const QPoint& pos) const
 {
-    for (const Row& row : myRowList) {
+    // VISIBLE rows only: a hidden row keeps whatever geometry it last had,
+    // and a point over where it used to be must not drop into it.
+    for (std::size_t i : myVisible) {
+        const Row& row = myRowList[i];
         // Mapped, not compared: a row's own geometry() is in the scrolling
         // host's coordinates now, and `pos` is in this card's - the two agree
         // only while the list is scrolled to the top, which is exactly the
@@ -1086,7 +1196,11 @@ void ItemsPanel::beginRenameForItem(int id, bool isOutline)
 
     for (const Row& row : myRowList) {
         if (row.id != id || row.isOutline != isOutline) continue;
-        if (!row.name) return;
+        // A row inside a FOLDED folder exists but is hidden, and an edit
+        // opened over it is the wedge the isVisible() guard above describes:
+        // it could never take focus. Before every row was built this row
+        // simply did not exist and the call fell through to nothing - kept.
+        if (!row.name || row.widget->isHidden()) return;
         const QString current = row.name->text();
         // The name label's own geometry, in row.widget's coordinates - the
         // "text cell" InlineRename opens over. Not the whole row: the eye
@@ -1111,7 +1225,8 @@ void ItemsPanel::beginRenameForGroup(int groupId)
 
     for (const Row& row : myRowList) {
         if (!row.isGroup || row.id != groupId) continue;
-        if (!row.name) return;
+        // Hidden inside a folded parent - see beginRenameForItem().
+        if (!row.name || row.widget->isHidden()) return;
         InlineRename::beginRename(
             row.widget, row.name->geometry(), row.name->text(),
             [this, groupId](QString newName) { emit groupRenameCommitted(groupId, newName); });

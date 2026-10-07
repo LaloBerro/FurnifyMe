@@ -53,66 +53,30 @@ public:
     ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* parent = nullptr);
 
     void refresh();
-    int rowCount() const { return static_cast<int>(myRowList.size()); }
-    // The name painted on one row - a read accessor for the suite, which is
-    // preferable to it walking this panel's child widgets itself. No
-    // dimension is painted on a row any more (sizes moved to the viewport's
-    // own selection-sizes drawing, see CLAUDE.md's "Direct modeling" section);
-    // this reports the name alone. Empty for an out-of-range index.
-    QString rowTextAt(int index) const
-    {
-        return index >= 0 && index < static_cast<int>(myRowList.size()) ? myRowList[index].text
-                                                                       : QString();
-    }
-    // The row's own QWidget, id and whether it is an outline row - a read
-    // accessor for the suite, on the same terms rowTextAt() is: it lets a
-    // test hit-test the REAL widget with childAt()/doubleClickAt() rather
-    // than sending an event straight at a pointer it merely hopes is
-    // reachable (CLAUDE.md's childAt()-vs-sendEvent trap). Null/0/false for
-    // an out-of-range index.
-    QWidget* rowWidgetAt(int index) const
-    {
-        return index >= 0 && index < static_cast<int>(myRowList.size())
-                   ? myRowList[index].widget
-                   : nullptr;
-    }
-    int rowIdAt(int index) const
-    {
-        return index >= 0 && index < static_cast<int>(myRowList.size()) ? myRowList[index].id
-                                                                        : 0;
-    }
-    // The grain mark on a BODY row, or null for an outline or a folder row
-    // (neither carries one - see addItemRow()). Asked of the panel rather
-    // than found by scanning for a button of the right shape, which is the
-    // failure this file has already been bitten by twice.
-    class QPushButton* grainMarkAt(int index) const
-    {
-        return index >= 0 && index < static_cast<int>(myRowList.size())
-                   ? myRowList[index].grain
-                   : nullptr;
-    }
-    bool rowIsOutlineAt(int index) const
-    {
-        return index >= 0 && index < static_cast<int>(myRowList.size())
-                   ? myRowList[index].isOutline
-                   : false;
-    }
-    // Folder rows (improvements item 10) - the suite asks the same way it
-    // asks about outline rows, and for the same reason: a row's kind decides
-    // what a click on it means.
-    bool rowIsGroupAt(int index) const
-    {
-        return index >= 0 && index < static_cast<int>(myRowList.size())
-                   ? myRowList[index].isGroup
-                   : false;
-    }
+    // The rows the user can SEE, top to bottom. Every row of the whole tree
+    // is built (see refresh()) and a folded folder's contents are HIDDEN rows,
+    // so these count and index only the visible ones - which is what every
+    // caller has always meant by "row 3". Read accessors for the suite, which
+    // hit-tests the REAL row widget with childAt() rather than sending an
+    // event at a pointer it merely hopes is reachable (CLAUDE.md's
+    // childAt()-vs-sendEvent trap). rowTextAt() reports the name alone - no
+    // dimension is painted on a row any more. grainMarkAt() is null for an
+    // outline or a folder row (neither carries one - see addItemRow()); it is
+    // asked of the panel rather than found by scanning for a button of the
+    // right shape, which is the failure this file has been bitten by twice.
+    // Null/0/false/empty out of range.
+    int rowCount() const;
+    QString rowTextAt(int index) const;
+    QWidget* rowWidgetAt(int index) const;
+    int rowIdAt(int index) const;
+    class QPushButton* grainMarkAt(int index) const;
+    bool rowIsOutlineAt(int index) const;
+    bool rowIsGroupAt(int index) const;
     // How deep in the tree the row sits: 0 at the document's root.
-    int rowDepthAt(int index) const
-    {
-        return index >= 0 && index < static_cast<int>(myRowList.size())
-                   ? myRowList[index].depth
-                   : 0;
-    }
+    int rowDepthAt(int index) const;
+
+    // What a row IS, handed to every gesture that acts on one.
+    enum class RowKind { Body, Outline, Folder };
 
     // Highlights the rows for these solids. Called when the viewport selection
     // changes, so the two views of the document never disagree.
@@ -274,6 +238,9 @@ private:
         // another.
         bool isGroup = false;
         int depth = 0;     // 0 at the document's root
+        int parentId = 0;        // the folder it sits in, 0 at the root
+        bool onScreen = true;    // its item is actually drawn (eye and Isolate)
+        bool twistyOpen = false; // what the twisty currently shows
         class QPushButton* twisty = nullptr;
         QString text;      // what rowTextAt() reports
     };
@@ -299,9 +266,20 @@ private:
     // window rather than a number picked on one screen. Zero until the card
     // has a parent to ask.
     int rowsHeightCap() const;
-    // The document's outlines first, then its bodies - the order the rows are
-    // built in, which is what rowTextAt(index) reports against.
+    // EVERY row of the tree, open or folded, in the order the document
+    // resolves (DocumentModel::orderedChildren()), depth first.
     std::vector<Row> myRowList;
+    // Indices into myRowList of the rows on screen, top to bottom - what
+    // rowCount()/rowTextAt(index) and the rest report against.
+    std::vector<std::size_t> myVisible;
+    const Row* visibleRow(int index) const;
+    // Shows exactly the rows whose ancestors are open, hides the rest, and
+    // rebuilds myVisible. Cheap: no widget is created or destroyed.
+    void applyRowVisibility();
+    // Re-measures the card after its visible rows changed (see refresh()'s
+    // comment for why both layouts are invalidated by hand).
+    void relayoutCard();
+    void syncTwisty(Row& row, bool open);
     // What the rows currently say, so refresh() can tell a call that would
     // rebuild them identically from one that would not. See refresh().
     QString myRowSignature;
@@ -332,8 +310,9 @@ private:
     // Builds `groupId`'s children into the rows, depth first. Recursive: the
     // tree nests to any depth, and a loop with an explicit stack would be the
     // same thing written longer.
-    void addItemRow(int id, const QString& itemName, bool visible, bool isOutline, int depth);
-    void addGroupRow(int groupId, const QString& groupName, int depth);
+    void addItemRow(int id, const QString& itemName, bool visible, bool isOutline, int depth,
+                    int parentId);
+    void addGroupRow(int groupId, const QString& groupName, int depth, int parentId);
     void buildGroupRows(int groupId, int depth);
     // The drag that moves a row into a folder. myDragId is what is being
     // dragged (0 = nothing), myDragStart where the press landed, and
