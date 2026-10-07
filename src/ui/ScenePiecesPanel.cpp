@@ -282,7 +282,9 @@ void ScenePiecesPanel::rebuild()
         eye->setCheckable(true);
         eye->setChecked(wanted.visible);
         eye->setFixedSize(kRowButtonPx, kRowButtonPx);
-        eye->setIcon(IconSet::icon(IconSet::Glyph::Body));
+        eye->setFocusPolicy(Qt::NoFocus);
+        // The Items drawer's own eye pair - see IconSet::Glyph::Eye.
+        eye->setIcon(IconSet::toggleIcon(IconSet::Glyph::Eye, IconSet::Glyph::EyeHidden));
         eye->setToolTip(tr("Show or hide this piece"));
         const int id = wanted.pieceId;
         connect(eye, &QPushButton::toggled, this,
@@ -291,6 +293,7 @@ void ScenePiecesPanel::rebuild()
 
         auto* remove = new QPushButton(row);
         remove->setFixedSize(kRowButtonPx, kRowButtonPx);
+        remove->setFocusPolicy(Qt::NoFocus);
         remove->setToolTip(removeTipText());
         remove->setCursor(Qt::PointingHandCursor);
         connect(remove, &QPushButton::clicked, this, [this, id] {

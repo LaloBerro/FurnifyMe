@@ -264,13 +264,16 @@ constexpr double kMagnetFlushMm = 0.05;
 // Phong diffuse both derive from, so the two pipelines disagree about
 // shading, never about what colour wood is. The texture's own palette
 // brackets it either side.
-const Quantity_Color kWoodTone(0.55, 0.38, 0.23, Quantity_TOC_sRGB);
+//
+// NOT-A-UI-COLOUR, both: render-material albedos calibrated against the
+// path tracer's own output, not colours the interface paints.
+const Quantity_Color kWoodTone(0.55, 0.38, 0.23, Quantity_TOC_sRGB);  // NOT-A-UI-COLOUR
 // What sits UNDER the grain texture: near-white, because the modulate
 // pipeline MULTIPLIES the texture by this - the path tracer proved it by
 // red-shifting the user's oak through kWoodTone (their own two-tier
 // screenshot comparison). The texture carries the colour; this only keeps
 // a hair of warmth from clipping.
-const Quantity_Color kWoodUnderTexture(0.95, 0.94, 0.92, Quantity_TOC_sRGB);
+const Quantity_Color kWoodUnderTexture(0.95, 0.94, 0.92, Quantity_TOC_sRGB);  // NOT-A-UI-COLOUR
 
 // One body dressed in wood (Milestone 5 feedback round) - a textured mesh
 // presentation with UVs THIS class generates, because AIS_Shape's own
@@ -430,7 +433,9 @@ public:
         }
 
         Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d(
-            Aspect_IS_SOLID, material.Color(), Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0,
+            // NOT-A-UI-COLOUR: the interior's edge colour, and edges are never
+            // drawn on this aspect - OCCT's signature wants one regardless.
+            Aspect_IS_SOLID, material.Color(), Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0,  // NOT-A-UI-COLOUR
             material, material);
         aspect->SetTextureMap(texture);
         aspect->SetTextureMapOn(true);
@@ -1673,7 +1678,8 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
         presentation->Attributes()->SetFaceBoundaryDraw(edgeWidth > 0.0);
         if (edgeWidth > 0.0) {
             presentation->Attributes()->SetFaceBoundaryAspect(
-                new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, edgeWidth));
+                new Prs3d_LineAspect(toOcctColor(Theme::Fixed::bodyEdge()), Aspect_TOL_SOLID,
+                                     edgeWidth));
         }
     }
     myContext->Display(presentation, myWireframe ? AIS_WireFrame : AIS_Shaded,
@@ -3283,11 +3289,10 @@ void OcctViewWidget::updateSymmetryIndicator()
 
     Handle(SymmetryPlaneObject) indicator = new SymmetryPlaneObject();
     indicator->segments = array;
-    // A fixed, faint, untokenised colour - the same scope ruling CLAUDE.md
-    // already makes for the gizmo's axis hues and the OCCT body/preview
-    // materials: this is scene decoration on the OCCT side of the bridge,
-    // not a Theme surface.
-    indicator->colour = Quantity_Color(0.55, 0.55, 0.65, Quantity_TOC_sRGB);
+    // A fixed, faint colour - scene decoration on the OCCT side of the
+    // bridge, not something a user picks, so one of Theme's FIXED colours
+    // rather than an editable token (its hex lives in Theme.cpp).
+    indicator->colour = toOcctColor(Theme::Fixed::mirrorPlaneEdge());
     markInSketchLayer(indicator);
 
     if (!mySymmetryIndicator.IsNull()) myContext->Remove(mySymmetryIndicator, Standard_False);
@@ -5544,7 +5549,8 @@ void OcctViewWidget::applyTheme()
             entry.second->Attributes()->SetFaceBoundaryDraw(edgeWidth > 0.0);
             if (edgeWidth > 0.0) {
                 entry.second->Attributes()->SetFaceBoundaryAspect(
-                    new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, edgeWidth));
+                    new Prs3d_LineAspect(toOcctColor(Theme::Fixed::bodyEdge()), Aspect_TOL_SOLID,
+                                     edgeWidth));
             }
             myContext->Redisplay(entry.second, Standard_False);
         }
@@ -5745,9 +5751,12 @@ void OcctViewWidget::applyRenderFloorMaterialForTier(bool pbrTier)
         // now that it did in Milestone 3, unlike fix round 1's PBR attempt,
         // which read these same four calls as unconditional linear PBR
         // terms with no floor to land on.
-        material.SetAmbientColor(toOcctColor(QColor(0, 0, 0)));
-        material.SetDiffuseColor(toOcctColor(QColor(118, 118, 118)));
-        material.SetSpecularColor(toOcctColor(QColor(0, 0, 0)));
+        // NOT-A-UI-COLOUR, all three: calibrated reflectances of the studio
+        // floor's MATERIAL, measured against sampled Dump() pixels - lighting
+        // physics, not a colour anybody sees as such.
+        material.SetAmbientColor(toOcctColor(QColor(0, 0, 0)));        // NOT-A-UI-COLOUR
+        material.SetDiffuseColor(toOcctColor(QColor(118, 118, 118)));  // NOT-A-UI-COLOUR
+        material.SetSpecularColor(toOcctColor(QColor(0, 0, 0)));       // NOT-A-UI-COLOUR
         material.SetEmissiveColor(
             toOcctColor(QColor(static_cast<int>(floorColour.red() * 0.875),
                                static_cast<int>(floorColour.green() * 0.875),
@@ -7653,7 +7662,8 @@ void OcctViewWidget::setRenderMode(bool on)
             entry.second->Attributes()->SetFaceBoundaryDraw(edgeWidth > 0.0);
             if (edgeWidth > 0.0) {
                 entry.second->Attributes()->SetFaceBoundaryAspect(
-                    new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, edgeWidth));
+                    new Prs3d_LineAspect(toOcctColor(Theme::Fixed::bodyEdge()), Aspect_TOL_SOLID,
+                                     edgeWidth));
             }
             // The render-mode PBR material off, back to whatever stood
             // before applyRenderBodyMaterials() ran - see that function's

@@ -103,7 +103,9 @@ face counts and volumes -> 494-entity `out.step`; ray/plane unprojection includi
 parallel-ray case; sketch accumulation; document id lifecycle; compound building - plus
 direct modeling, the serial round trip, `Measure`, `UserProgress`, the oriented measured
 box, the mitre frame, the whole joinery layer (665 on its own) and `resizeAlongAxis` with
-its stretch.
+its stretch. (`ctest` is **14/14** as of 2026-10-07 - the scene model, booleans and
+`headless_colour_literals`, which holds hex to `Theme.cpp`, came after that count; the check
+total above was not re-measured with them.)
 
 Verified by driving the running app and reading the screenshots:
 viewport renders with grid, triedron and lighting; sketch mode draws a live yellow polyline
@@ -305,7 +307,7 @@ Source files under `src/`, plus `tests/`:
 | `OcctViewWidget.{h,cpp}` | the Qt↔OCCT bridge — the only genuinely tricky file |
 | `DocumentModel.{h,cpp}` | owns the list of solids |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |
-| `ui/Theme.{h,cpp}` | colour tokens + the app stylesheet; the only place hex lives |
+| `ui/Theme.{h,cpp}` | colour tokens, the `Fixed` colours + the app stylesheet; the only place hex lives (`headless_colour_literals` enforces it) |
 | `ui/IconSet.{h,cpp}` | glyphs painted with QPainter (no qtsvg installed) |
 | `ui/ToolChip.{h,cpp}` | a button built from a `QAction`, never storing its own state |
 | `ui/ToolCluster.{h,cpp}` | a vertical stack of chips |
@@ -326,7 +328,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/ReMeasureTool.{h,cpp}` | Re-Measure chip: a size number becomes a field; preview by the commit's own call |
 | `ui/ResizePinRenderer.{h,cpp}` | the Re-Measure pin: which end stays put, three marks on the dimension line |
 | `ui/TransformGizmo.{h,cpp}` | the gizmo we draw: shared `GizmoRenderer` base + the Move tool |
-| `ui/AppearancePanel.{h,cpp}` | the **Settings** drawer — five tabs; Theme tokens live and debounced, every other row a mirror of a `QAction` (class name kept, see its header) |
+| `ui/AppearancePanel.{h,cpp}` | the **Settings** drawer — four tabs; Theme tokens live and debounced, every other row a mirror of a `QAction` (class name kept, see its header) |
 | `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
 | `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
@@ -673,6 +675,17 @@ Failure also paints `IconSet::Glyph::Warning` before its message and its whole b
 `sizeHint()` measures against that column, so the toast still sizes itself from what it
 paints. A Note is exactly what it was. `gui_smoke` reads the mark as pixels in
 `glyphRect()` — present on a Failure, absent from a Note.
+
+**Painted words are also accessible names, and a toast is ANNOUNCED** (F26, "the cheap
+version"). Every `ToolChip` takes its `accessibleName` from its action's text (mnemonic
+stripped) and its `accessibleDescription` from its composed tooltip, on every
+`QAction::changed`; a `Toast` is named by its message and described as a Note or a Failure,
+its painted Undo pill is named Undo, `HintBalloon` by its hint, `StatusMessageLine` by its
+WHOLE sentence (never the elided cut, with a `NameChanged`). `ToastHost::show()` and
+`HintBalloon::showHint()` raise a `QAccessible::Alert` — `updateAccessibility()` is a no-op
+with nothing listening. No screen reader is installed, so `controls-carry-accessible-names`
+pins the announcement at Qt's own seam, `QAccessible::installUpdateHandler()`. The banned-word
+sweep reads action text, so the names it is derived from are already swept.
 
 **The status bar has two channels, one job each** (F9, the user's ruling). The LEFT
 (`showMessage()`) is the selection — `selectionStatusText()`, which now counts in the
@@ -1228,7 +1241,15 @@ the red about 3.1:1 under a broken joint. The text inks ship at `#bb9cff` (4.77:
 `#ff8f82` (4.87:1 on `chipActive`, 6.10:1 on a broken joint's tinted row), and `gui_smoke`
 pins every site's ratio from the tokens and, where the site can be put on screen, from the
 painted pixels. A colour file saved before them loads and takes them at their defaults. `graphite()` stays as the readable base the deltas
-diff against. Edits apply live through one `themeChanged` broadcast — no
+diff against. **Every colour that is NOT a token is a `Theme::Fixed` colour** (F19): the gizmo
+hub, a body's `GRAY30` face boundaries (`bodyEdge()`), the Mirror plane's outline, a material
+tile's miniature studio, white ink on a fill, the render frame's guides and mask, a material
+card's starting look. Their hex lives in `Theme.cpp` beside the tokens, and
+`headless_colour_literals` (ctest, Qt-free, reads `src/` as text with comments stripped)
+fails on any hex string, numeric `QColor`/`Quantity_Color` or `Quantity_NOC_*` anywhere else.
+A literal that is genuinely not a UI colour — the studio floor's calibrated reflectances, the
+wood albedos, an edge colour OCCT's signature demands for an edge it never draws — carries
+`NOT-A-UI-COLOUR` on its line and the test prints every one. Edits apply live through one `themeChanged` broadcast — no
 widget may cache a colour across it — and persist **debounced** (400 ms, flushed on close),
 because a colour-wheel drag fires per mouse-move. The picker opens with `show()`, never
 `open()`: `QDialog::open()` forces window-modality regardless of `setModal(false)`, and
@@ -1432,7 +1453,13 @@ on by default, persisted as `showSizes`, no shortcut.
   669.6 × 559.8 in the list) — while the viewport's own selection sizes read the board's true
   600 × 300 × 18 from day one of this feature. (The drawer grew folders and a scroll area
   later — see "Improvements" — but a row is still name and eye button, and the folders work
-  did not put a size back on one.)
+  did not put a size back on one.) **The row icons say what they do** (F14): every eye —
+  body, outline, folder and a scene piece — is `IconSet::toggleIcon(Eye, EyeHidden)`, an open
+  eye while checked and a struck-through one while hidden, picked by Qt from the button's own
+  checked state (they wore the Body glyph, a folder's the New-folder glyph). The grain mark is
+  a board outline with its grain drawn in it — the old three lines lying down were the Items
+  glyph, a hamburger menu. The eyes stay checkable and the grain mark stays not, which is what
+  `firstVisibleRowToggle()` tells them apart by.
 
 ### Files, versions and the library
 
@@ -2566,7 +2593,22 @@ Colours tab, since a swatch for a colour nothing paints is a control that does n
 `gui_smoke` pins the exemption by name rather than letting the every-token-has-a-row check
 quietly cover two fewer tokens.
 
-### Settings: one drawer, five tabs, and every row a mirror
+**And no chip TAKES keyboard focus** (the 2026-10 review's F17, the user's pick: "NoFocus on
+chips"). With the rings gone a chip that still took focus held it invisibly — Tab walked
+through a row of controls that showed nothing, and a click on a chip took focus out of the
+field being typed in. `ToolChip`, `OptionChip`, both `Swatch`es, `MaterialTile`, `SegChip`,
+the shutter, `ShapeTile`, the hub's cards and sort chips, and every row and card button
+(eyes, grain, remove, Save/Load/Reset, Compare/Restore/Delete) are `Qt::NoFocus`; typed
+fields keep their focus and their accent cue. Every chip mirrors a `QAction`, so the
+keyboard still reaches each one through its menu entry or shortcut. `gui_smoke`'s
+`chips-take-no-keyboard-focus` sweeps every visible `QAbstractButton` in the editor (drawer
+and every Settings tab open), the hub and the scene window, and walks forty Tab presses
+from a field asserting no stop is a button. **An in-process click cannot test click-focus**:
+Qt moves focus on a press only when the event is SPONTANEOUS, and this suite's presses are
+`sendEvent()`s by law — so the click check there pins that no chip's own handler takes
+focus, and the policy sweep is what decides a real click.
+
+### Settings: one drawer, four tabs, and every row a mirror
 
 Improvements item 10, mockup pick **B** ("grow the Appearance panel into a Settings
 drawer"). The settings used to live in three places — the colours card, the View menu,
@@ -2579,9 +2621,18 @@ size — with a tab bar under the title and a `QStackedWidget` below it.
 |---|---|
 | Colours | 32 colour swatches (scrolled; 34 tokens less the two retired) · Save/Load colours · Reset colours and sizes |
 | Text & lines | Text size · Font · Edge lines · Outline lines · Button border |
-| Viewport | Show the grid · **Grid detail** · Show sizes around a selection · Projection · **Gizmo size** · Show notifications |
-| Units | Sizes in (Millimetres/Centimetres) · Snap to Grid · Magnet |
-| Files | Autosave (Off / After every change / Every minute / 5 / 15) |
+| Viewport | Show the grid · **Grid detail** · Show sizes around a selection · Projection · **Gizmo size** · Show notifications · Snap to Grid · Magnet |
+| Working | Sizes in (Millimetres/Centimetres) · Autosave (Off / After every change / Every minute / 5 / 15) |
+
+**Units and Files are one tab, Working** (the 2026-10 review's F22). Each held one row, and
+two one-row tabs were what pushed the bar onto a second line. "Units & saving" was the first
+name and measured 93 px, which still wrapped; "Working" measures 59, all four tabs fit one
+row at the shipped scale (266 of 272 px), and its tooltip names both rows. The enumerator is
+`Tab::UnitsSaving`. **The Font row shows the family alone**: the bundled face registers as
+"DM Sans 14pt" — an optical-size cut — and sat under "Text size 10 pt" reading as a second,
+disagreeing size. `AppearancePanel::familyDisplayName()` drops a trailing optical size, each
+combo entry carries the real family as its data (what is applied never changes), and each
+shown name is listed once — the same file also registers plain "DM Sans", the same face.
 
 **Colours split into Colours and Text & lines, and only that split changed.** A user
 review of the four-tab drawer put it plainly — "the color tab doesnt not make any sense,
@@ -2601,19 +2652,17 @@ and the arm drops on its timer and whenever the drawer is hidden. It reads **Res
 and sizes** rather than "the original look" — a look is a material's word — and sits at the
 right of its row at its own width, under Save and Load rather than spanning the tab.
 
-**Five tabs do not fit one row of this card's 272 logical pixels of content width** — Text
-& lines alone runs close to what four tabs used to share between them — so the tab bar
-wraps to a **second row**. The wrap is measured, not a hand-picked split: each chip's own
+**The tab bar still wraps when it has to** — five tabs did not fit this card's 272 logical
+pixels, four do — and the wrap is measured, not a hand-picked split: each chip's own
 `sizeHint()` (built from `QFontMetrics(Theme::labelFont())`, the exact font `OptionChip`
 paints its label with — `chip->setFont(Theme::labelFont())` at construction and again on
 every `applyTheme()`, so a probe reading the chip's own `font()` reads what is actually on
 screen) is packed greedily into row one until the next chip would overflow the card's
-content width, and everything after that goes to row two. `gui_smoke` pins both the
+content width, and everything after that goes to row two. `gui_smoke` pins the
 no-clipping property (every chip's real width is measured against an independent
 `QFontMetrics(chip->font())` re-measurement, not a call back into the chip's own
-`sizeHint()`, which would be grading the implementation against itself) and that the wrap
-actually happened (two distinct row positions, not five chips narrow enough to squeeze
-onto one line today).
+`sizeHint()`, which would be grading the implementation against itself) and that the four
+now sit in ONE row (it pinned "exactly two rows" while there were five).
 
 **Grid detail and Gizmo size MOVED from Colours to Viewport, and only their place moved.**
 They are `Theme::Spec` values still: an edit writes `Theme::setSpec()`, the notifier
@@ -2725,7 +2774,7 @@ rather than floating beside it:
   `appStateChanged` rather than mirroring a `QAction::changed()` - and a unit is a thing you
   set once and then read off a number, not a tool you reach for beside Fit All. The unit
   itself did not move anywhere secret: it is the View menu's two entries and the Settings
-  drawer's Units tab, both of which already existed and both of which are where the rest of
+  drawer's Working tab, both of which already existed and both of which are where the rest of
   this app's settings live. `ToolChip`'s text-glyph constructor STAYS - it is a real second
   spelling of a chip and the next word-shaped control should use it rather than inventing a
   sibling class - but nothing constructs one today, which is stated here so its absence from
@@ -2771,6 +2820,16 @@ rather than floating beside it:
   first, in `buildOverlay()`), and `MainWindow::viewControls()` is the accessor for the
   other one, rather than a caller having to guess which of `findChildren<ToolCluster*>()`'s
   two results it wants.
+- **The minimum WIDTH is derived too, sideways** (the 2026-10 review's F21): the pill and the
+  window buttons share the top row, and at 540 px the buttons covered View and Help.
+  `ViewportOverlay::minimumWidthBeside(left, anchor, right)` adds the two widgets' own
+  `sizeHint()`s (rounded as `relayout()` rounds them), one `kStackGap` and the two margins
+  relayout() places against; `MainWindow::syncViewportMinimumWidth()` sets it on the viewport
+  (about 610 px at the shipped scale) and re-derives it on every Theme change, because the pill
+  grows with the type scale. The scene window takes the max of its pill/buttons pair and its
+  Pieces card/tool cluster pair. **relayout() has no collision rule, on purpose**: a pill
+  pushed off its corner is not a fix, a window that cannot get that narrow is. Old narrow probes
+  (440, 540 and 600 px) now drive to `minimumWidth()` and say so where they do.
 - **The items drawer** floats beside the rail - and, since it stacks in the same
   `Anchor::TopLeft` column the pill used to occupy alone, below the pill's own bottom edge
   too - toggled by the existing Items action: visibility is derived from the action's
@@ -2920,6 +2979,16 @@ rule below exists so no card ever has a row to leave unpainted in the first plac
 a multiple of four is whole at every quarter-step Windows scale, so it does not read
 `devicePixelRatioF()` - a size that is only right on the monitor it was written on is the same
 bug with a longer fuse.
+
+**A scrollbar is one description, in `Theme::install()`'s sheet** (F18): a quiet
+`chipActive` handle on a transparent track, no arrows, and **add-page and sub-page named**
+— a sheet that styles the bar and leaves those two out hands them back to Qt, which paints its
+default dither there; it shipped as hatched slabs in the hub, the Joints drawer and the render
+card. The Settings drawer's own per-widget bar sheet is gone into it. On the render card the
+sections take a 6 px right gutter while (and only while) the bar shows, or the Studio chip
+stood flush against the track. `the-scrollbars-wear-the-theme` reads the track's pixels for
+neighbours that differ and the handle's for the token, and maps the chip and the bar into the
+card before comparing them.
 
 **`QScrollArea::sizeHint()` DOES NOT ANSWER FOR ITS WIDGET, and any layout
 holding one inherits that lie.** It returns a cached size bounded to roughly 24 text lines

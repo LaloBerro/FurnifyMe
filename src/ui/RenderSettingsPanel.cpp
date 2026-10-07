@@ -15,6 +15,7 @@
 #include <QPainterPath>
 #include <QRadialGradient>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSlider>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -59,6 +60,9 @@ constexpr int kRowSpacing = 10;
 constexpr int kSectionGap = 12;
 
 constexpr int kSliderWidth = 120;
+// What the sections keep between their right edge and the scroll bar while
+// the bar is shown - see syncScrollGutter().
+constexpr int kScrollGutter = 6;
 
 constexpr int kSwatchWidth = 46;
 constexpr int kSwatchHeight = 18;
@@ -120,7 +124,7 @@ public:
     explicit Swatch(QWidget* parent) : QAbstractButton(parent)
     {
         setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
+        setFocusPolicy(Qt::NoFocus);
         setFixedSize(kSwatchWidth, kSwatchHeight);
     }
 
@@ -170,7 +174,7 @@ public:
         , myWood(wood)
     {
         setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
+        setFocusPolicy(Qt::NoFocus);
         setAttribute(Qt::WA_NoMousePropagation);
         Theme::makeSurfaceTransparent(this);
         setFixedSize(kTileWidth, kTileHeight);
@@ -188,7 +192,7 @@ public:
         , myWood(true)
     {
         setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
+        setFocusPolicy(Qt::NoFocus);
         setAttribute(Qt::WA_NoMousePropagation);
         Theme::makeSurfaceTransparent(this);
         setFixedSize(kTileWidth, kTileHeight);
@@ -247,15 +251,14 @@ protected:
         painter.setClipPath(clip);
 
         // The studio in miniature: warm backdrop over a slightly deeper
-        // floor band - the same flat-grey world render mode dresses. The
-        // literals are MATERIAL DEPICTION, not shell chrome: they mimic
-        // the render backdrop (itself calibrated against sampled pixels,
-        // not a Theme token) the way the OCCT body materials do, and fall
-        // under the same "remaining untokenised colours, by scope ruling"
-        // line CLAUDE.md already draws for those.
-        painter.fillRect(rect(), QColor(0xc6, 0xc3, 0xbe));
+        // floor band - the same flat-grey world render mode dresses. MATERIAL
+        // DEPICTION, not shell chrome, which is why these are Theme's FIXED
+        // colours rather than editable tokens: they mimic the render backdrop
+        // (itself calibrated against sampled pixels), and a user who tinted
+        // them would only make the thumbnail lie about the studio.
+        painter.fillRect(rect(), Theme::Fixed::tileBackdrop());
         painter.fillRect(QRect(0, int(height() * 0.66), width(), height()),
-                         QColor(0xb7, 0xb4, 0xae));
+                         Theme::Fixed::tileFloor());
 
         // The sphere: base tone by metal, highlight sharpness by gloss -
         // and the wood tile paints its own grain across the whole face
@@ -273,8 +276,8 @@ protected:
             painter.drawPixmap(QRectF(at, logical), myThumb,
                                QRectF(QPointF(0, 0), QSizeF(myThumb.size())));
             const QRect texStrip(0, height() - 13, width(), 13);
-            painter.fillRect(texStrip, QColor(0, 0, 0, 150));
-            painter.setPen(myCurrent ? QColor(Qt::white) : Theme::textMuted());
+            painter.fillRect(texStrip, Theme::Fixed::tileCaptionScrim());
+            painter.setPen(myCurrent ? Theme::Fixed::inkOnFill() : Theme::textMuted());
             painter.setFont(Theme::badgeFont());
             painter.drawText(texStrip, Qt::AlignCenter, myName);
             painter.restore();
@@ -285,8 +288,8 @@ protected:
         }
         const QRectF ball(width() * 0.5 - height() * 0.30, height() * 0.16,
                           height() * 0.60, height() * 0.60);
-        const QColor base = myMetal > 0.5 ? QColor(0x9a, 0x9c, 0xa2)
-                                          : QColor(0x8f, 0x6a, 0x45);
+        const QColor base = myMetal > 0.5 ? Theme::Fixed::tileMetal()
+                                          : Theme::Fixed::tileWood();
         QRadialGradient shade(ball.center() + QPointF(-ball.width() * 0.18,
                                                       -ball.height() * 0.22),
                               ball.width() * 0.85);
@@ -299,8 +302,9 @@ protected:
         painter.drawEllipse(ball);
         // A glossy surface carries a hard white catchlight.
         if (myGloss > 0.35) {
-            painter.setBrush(QColor(255, 255, 255,
-                                    int(90 + 130 * std::min(1.0, myGloss))));
+            QColor catchlight = Theme::Fixed::catchlight();
+            catchlight.setAlpha(int(90 + 130 * std::min(1.0, myGloss)));
+            painter.setBrush(catchlight);
             const double r = ball.width() * (0.06 + 0.06 * myGloss);
             painter.drawEllipse(QPointF(ball.center().x() - ball.width() * 0.2,
                                         ball.center().y() - ball.height() * 0.24),
@@ -309,8 +313,8 @@ protected:
 
         // The caption strip, panel-dark so the name reads on any thumbnail.
         const QRect strip(0, height() - 13, width(), 13);
-        painter.fillRect(strip, QColor(0, 0, 0, 150));
-        painter.setPen(myCurrent ? QColor(Qt::white) : Theme::textMuted());
+        painter.fillRect(strip, Theme::Fixed::tileCaptionScrim());
+        painter.setPen(myCurrent ? Theme::Fixed::inkOnFill() : Theme::textMuted());
         QFont f = Theme::badgeFont();
         painter.setFont(f);
         painter.drawText(strip, Qt::AlignCenter, myName);
@@ -342,7 +346,10 @@ public:
     {
         setText(text);
         setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
+        // No keyboard focus, on every control of this card - ToolChip's rule
+        // (see its init()): focus with no ring to show it is focus nobody can
+        // see, and a click must not take it from a field being typed in.
+        setFocusPolicy(Qt::NoFocus);
         setAttribute(Qt::WA_NoMousePropagation);
         Theme::makeSurfaceTransparent(this);
         setFixedHeight(kSegHeight);
@@ -479,6 +486,14 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     shell->addWidget(sectionScroll, 1);
     myScroll = sectionScroll;
     myScrollContent = sectionContent;
+    mySectionColumn = outer;
+    // The bar takes its 8 px out of the viewport, and the rows then ran
+    // straight up to it: the Studio chip at the end of its row stood flush
+    // against the track, which read as the two colliding (the 2026-10
+    // review's F18). A gutter the width of one gap opens on the content's
+    // right while - and only while - the bar is shown, so a card with no bar
+    // keeps its rows flush with the pinned footer below.
+    sectionScroll->verticalScrollBar()->installEventFilter(this);
 
     // A section header - smaller and more muted than a row label, the studio
     // panel's own grouping device (mockup A). Collected for applyTheme() and
@@ -756,6 +771,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         // the floor following it, and there was no control that undid it. The
         // viewport could always clear the override; nothing could ask it to.
         auto* reset = new SegChip(tr("Studio"), row);
+        myStudioReset = reset;
         reset->setToolTip(tr("Put the backdrop back to the studio tone this render mode is "
                              "calibrated for"));
         connect(reset, &QAbstractButton::clicked, this,
@@ -1272,8 +1288,34 @@ void RenderSettingsPanel::syncMaterialSection()
     }
 }
 
+QScrollBar* RenderSettingsPanel::sectionScrollBar() const
+{
+    return myScroll ? myScroll->verticalScrollBar() : nullptr;
+}
+
+void RenderSettingsPanel::syncScrollGutter()
+{
+    if (!mySectionColumn || !myScroll) return;
+    // isVisibleTo(), not isVisible(): the card itself is hidden outside
+    // render mode, and the gutter has to be right on the frame it appears.
+    const bool barShown = myScroll->verticalScrollBar()->isVisibleTo(myScroll);
+    const int right = barShown ? kScrollGutter : 0;
+    if (mySectionColumn->contentsMargins().right() == right) return;
+    mySectionColumn->setContentsMargins(0, 0, right, 0);
+}
+
 bool RenderSettingsPanel::eventFilter(QObject* watched, QEvent* event)
 {
+    if (myScroll && watched == myScroll->verticalScrollBar() &&
+        (event->type() == QEvent::Show || event->type() == QEvent::Hide)) {
+        // The scroll area shows and hides the bar's CONTAINER, not the bar,
+        // so the bar hears about it as a child - possibly before the
+        // container's own state has settled. Once now and once queued, so the
+        // gutter follows whichever order Qt delivers them in.
+        syncScrollGutter();
+        QMetaObject::invokeMethod(this, [this] { syncScrollGutter(); }, Qt::QueuedConnection);
+        return QWidget::eventFilter(watched, event);
+    }
     if (event->type() == QEvent::MouseButtonDblClick) {
         // Asked of the list rather than by casting: MaterialTile is a plain
         // class in this file with no Q_OBJECT of its own (it needs none - it
@@ -1510,7 +1552,7 @@ RenderShutterButton::RenderShutterButton(QAction* action, QWidget* parent, bool 
     Theme::makeSurfaceTransparent(this);
     setAttribute(Qt::WA_Hover, true);
     setCursor(Qt::PointingHandCursor);
-    setFocusPolicy(Qt::StrongFocus);
+    setFocusPolicy(Qt::NoFocus);
     if (myWide) {
         setFixedHeight(kShutterWideHeight);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -1587,7 +1629,7 @@ void RenderShutterButton::paintEvent(QPaintEvent*)
         IconSet::icon(IconSet::Glyph::Camera)
             .paint(&painter, iconRect, Qt::AlignCenter,
                   isEnabled() ? QIcon::Normal : QIcon::Disabled);
-        painter.setPen(isEnabled() ? QColor(Qt::white) : Theme::textDisabled());
+        painter.setPen(isEnabled() ? Theme::Fixed::inkOnFill() : Theme::textDisabled());
         painter.drawText(QRect(startX + glyphAndGap, 0, width() - startX - glyphAndGap,
                                height()),
                          Qt::AlignVCenter | Qt::AlignLeft, label);

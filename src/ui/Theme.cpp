@@ -207,6 +207,14 @@ void install(QApplication& app)
     // QStatusBar's own internal message label, which showMessage() creates
     // privately and this code never gets a pointer to. Read from labelFont()
     // rather than hand-typed, so it cannot drift from the scale in Theme.h.
+    //
+    // THE SCROLLBARS: a quiet chipActive bar on a TRANSPARENT track, no
+    // arrows. add-page and sub-page - the track either side of the handle -
+    // MUST be named: a sheet that styles the bar and leaves those two out
+    // hands them back to Qt, which paints its default dither there, and that
+    // shipped as hatched grey slabs in the hub, the Joints drawer and the
+    // render settings card (the 2026-10 review's F18). gui_smoke reads the
+    // track's pixels for that pattern and the handle's for this token.
     QString sheet = QStringLiteral(R"(
 QMainWindow, QWidget       { background-color: @chrome; color: @text; }
 QMenuBar                   { background-color: @chrome; color: @text;
@@ -226,15 +234,22 @@ QStatusBar QLabel          { color: @textMuted; font-size: @labelPt; }
 QSplitter::handle          { background-color: @border; width: 1px; }
 QToolTip                   { background-color: @panel; color: @text;
                              border: 1px solid @border; padding: 4px; }
-QScrollBar:vertical        { background: @panel; width: 10px; margin: 0; }
-QScrollBar::handle:vertical{ background: @border; border-radius: 5px;
-                             min-height: 24px; }
+QScrollBar:vertical        { background: transparent; width: 8px; margin: 0; }
+QScrollBar:horizontal      { background: transparent; height: 8px; margin: 0; }
+QScrollBar::handle:vertical  { background: @chipActive; border-radius: 4px;
+                               min-height: 24px; }
+QScrollBar::handle:horizontal{ background: @chipActive; border-radius: 4px;
+                               min-width: 24px; }
+QScrollBar::handle:hover   { background: @textDisabled; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 )");
     // Longest keys first: "@chipHover" contains "@chip", and a naive pass in
     // declaration order would rewrite the prefix and leave "Hover" stranded.
     const std::pair<const char*, QString> substitutions[] = {
         {"@chipHover", chipHover().name()},
+        {"@chipActive", chipActive().name()},
         {"@textDisabled", textDisabled().name()},
         {"@textMuted", textMuted().name()},
         {"@chrome", chrome().name()},
@@ -507,6 +522,27 @@ QColor booleanOut()        { return spec().booleanOut; }
 QColor booleanStay()       { return spec().booleanStay; }
 QColor sizesOneBody()      { return spec().sizesOneBody; }
 QColor sizesGroup()        { return spec().sizesGroup; }
+
+namespace Fixed {
+// Each value is the literal it replaced at its old call site, byte for byte,
+// so tokenising moved no pixel.
+QColor gizmoHub()          { return QColor("#c8c8cc"); }
+// Quantity_NOC_GRAY30 - OCCT defines its named colours in sRGB, and 0.30 of
+// full scale is 76.5, which lands on the same 8-bit pixel either way.
+QColor bodyEdge()          { return QColor("#4d4d4d"); }
+// sRGB (0.55, 0.55, 0.65), the indicator's old untokenised Quantity_Color.
+QColor mirrorPlaneEdge()   { return QColor("#8c8ca6"); }
+QColor tileBackdrop()      { return QColor("#c6c3be"); }
+QColor tileFloor()         { return QColor("#b7b4ae"); }
+QColor tileMetal()         { return QColor("#9a9ca2"); }
+QColor tileWood()          { return QColor("#8f6a45"); }
+QColor tileCaptionScrim()  { return QColor(0, 0, 0, 150); }
+QColor catchlight()        { return QColor("#ffffff"); }
+QColor inkOnFill()         { return QColor("#ffffff"); }
+QColor frameGuide()        { return QColor("#ffffff"); }
+QColor frameMask()         { return QColor("#0d0d0f"); }
+QColor materialLookStart() { return QColor("#b2b2ad"); }
+}  // namespace Fixed
 
 double chipStrokePx() { return spec().chipStrokePx; }
 double gridDensity()  { return spec().gridDensity; }

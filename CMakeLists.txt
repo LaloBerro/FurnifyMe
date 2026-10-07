@@ -100,6 +100,13 @@ add_executable(headless_boolean_multi tests/boolean_multi.cpp)
 target_link_libraries(headless_boolean_multi PRIVATE furnify_geometry)
 add_test(NAME headless_boolean_multi COMMAND headless_boolean_multi)
 
+# Hex lives only in Theme.cpp (the 2026-10 review's F19): reads src/ as text,
+# links nothing - no OCCT, no Qt - so it runs wherever the others do.
+add_executable(headless_colour_literals tests/colour_literals.cpp)
+target_compile_definitions(headless_colour_literals PRIVATE
+  FURNIFY_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
+add_test(NAME headless_colour_literals COMMAND headless_colour_literals)
+
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
 # ---------------------------------------------------------------------------

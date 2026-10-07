@@ -27,6 +27,17 @@ const int kMargin = 16 - Theme::surfaceShadowMargin();
 constexpr int kGap = ViewportOverlay::kStackGap;
 }  // namespace
 
+int ViewportOverlay::minimumWidthBeside(const QWidget* left, Anchor leftAnchor,
+                                        const QWidget* right)
+{
+    auto placedWidth = [](const QWidget* w) {
+        if (!w) return 0;
+        return Theme::wholeDevicePixels(std::max(w->sizeHint().width(), w->minimumWidth()));
+    };
+    const int leftInset = leftAnchor == Anchor::LeftEdge ? kEdgeMargin : kMargin;
+    return leftInset + placedWidth(left) + kGap + placedWidth(right) + kMargin;
+}
+
 ViewportOverlay::ViewportOverlay(QWidget* viewport)
     : QObject(viewport)
     , myViewport(viewport)

@@ -70,6 +70,15 @@ constexpr int kRowButtonPx = 24;
 // ViewportOverlay::kEdgeMargin plus a hair, so a full-height list still reads
 // as a floating card rather than as something wedged into the corner.
 constexpr int kBottomClearance = 16;
+// The eye every visibility button in this drawer wears: open while the
+// thing is on screen (the button checked), struck through while it is hidden.
+// The 2026-10 review's F14 - these rows wore the Body glyph, which said
+// nothing about seeing.
+QIcon eyeIcon()
+{
+    return IconSet::toggleIcon(IconSet::Glyph::Eye, IconSet::Glyph::EyeHidden);
+}
+
 }  // namespace
 
 ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* parent)
@@ -221,8 +230,15 @@ void ItemsPanel::applyTheme()
                                         .arg(Theme::text().name()));
         // Rasterised out of text()/textDisabled() when it was built, so it is
         // pixels rather than a description - the same cached-appearance value
-        // ToolChip::applyTheme() has to rebuild.
-        if (row.eye) row.eye->setIcon(IconSet::icon(IconSet::Glyph::Body));
+        // ToolChip::applyTheme() has to rebuild. Every eye is the same pair
+        // now, a folder's included (it used to be re-dressed as a body's here
+        // after wearing the New-folder glyph on its first paint); the grain
+        // mark is rebuilt in whichever direction its body runs.
+        if (row.eye) row.eye->setIcon(eyeIcon());
+        if (row.grain && myDocument)
+            row.grain->setIcon(IconSet::icon(myDocument->bodyGrainAcross(row.id)
+                                                 ? IconSet::Glyph::GrainAcross
+                                                 : IconSet::Glyph::GrainAlong));
     }
 
     // The empty state's message is a plain child of myRows with no entry in
@@ -541,7 +557,10 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     eye->setCheckable(true);
     eye->setChecked(visible);
     eye->setFixedSize(kRowButtonPx, kRowButtonPx);
-    eye->setIcon(IconSet::icon(IconSet::Glyph::Body));
+    // No keyboard focus, like every chip-sized control in the app - see
+    // ToolChip's init().
+    eye->setFocusPolicy(Qt::NoFocus);
+    eye->setIcon(eyeIcon());
     eye->setToolTip(isOutline ? tr("Show or hide this outline") : tr("Show or hide this body"));
     connect(eye, &QPushButton::toggled, this, [this, id, isOutline](bool show) {
         // DocumentModel owns visibility now (Task 1's isVisible()/
@@ -576,6 +595,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     if (!isOutline) {
         auto* grain = new QPushButton(row);
         grain->setFixedSize(kRowButtonPx, kRowButtonPx);
+        grain->setFocusPolicy(Qt::NoFocus);
         const bool across = myDocument && myDocument->bodyGrainAcross(id);
         grain->setIcon(IconSet::icon(across ? IconSet::Glyph::GrainAcross
                                             : IconSet::Glyph::GrainAlong));
@@ -670,7 +690,11 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth)
     }
     eye->setChecked(allVisible);
     eye->setFixedSize(kRowButtonPx, kRowButtonPx);
-    eye->setIcon(IconSet::icon(IconSet::Glyph::Folder));
+    eye->setFocusPolicy(Qt::NoFocus);
+    // The same eye every item row wears. It was the Folder glyph - the very
+    // mark the title row's New folder button shows - so the one control on a
+    // folder row that hides things looked like the one that makes folders.
+    eye->setIcon(eyeIcon());
     eye->setToolTip(tr("Show or hide everything in this folder"));
     connect(eye, &QPushButton::toggled, this, [this, groupId](bool show) {
         if (!myDocument) return;

@@ -1488,6 +1488,12 @@ private:
     // definition.
     void goAxonometric();
     void buildOverlay();
+    // The viewport's minimum WIDTH, derived the way its minimum height is:
+    // the menu pill and the window buttons share the top row, and below
+    // their two widths plus margins the buttons covered View and Help (the
+    // 2026-10 review's F21). Re-derived on every Theme change, because the
+    // pill grows with the type scale.
+    void syncViewportMinimumWidth();
     void updateActions();
 
     // Pushes both sketch constraints onto the viewport from the sketch's own

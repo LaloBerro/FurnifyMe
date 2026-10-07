@@ -338,6 +338,23 @@ void SceneWindow::buildMenus()
     view->addAction(mySnapAction);
 }
 
+void SceneWindow::syncViewportMinimumWidth()
+{
+    if (!myView || !myAppBar || !myWindowButtons) return;
+    // MainWindow::syncViewportMinimumWidth()'s rule, for this window's two
+    // rows: the pill beside the window buttons, and under them the Pieces
+    // card beside the Move/Rotate/Render cluster - both pairs stand in the
+    // same TopLeft/TopRight columns, so either could be the one that meets.
+    int wanted = ViewportOverlay::minimumWidthBeside(
+        myAppBar, ViewportOverlay::Anchor::TopLeft, myWindowButtons);
+    if (myPieces && myArrangeTools) {
+        wanted = std::max(wanted, ViewportOverlay::minimumWidthBeside(
+                                      myPieces, ViewportOverlay::Anchor::TopLeft,
+                                      myArrangeTools));
+    }
+    myView->setMinimumWidth(wanted);
+}
+
 void SceneWindow::buildOverlay()
 {
     myOverlay = new ViewportOverlay(myView);
@@ -393,6 +410,9 @@ void SceneWindow::buildOverlay()
     // The card's own Add piece row - the action's mirror, see setAddAction().
     myPieces->setAddAction(myAddPieceAction);
     myOverlay->addWidget(myPieces, ViewportOverlay::Anchor::TopLeft);
+    syncViewportMinimumWidth();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this,
+            &SceneWindow::syncViewportMinimumWidth);
 
     // THE RENDER LAYER, the same class the furniture editor drives. Built
     // after the pieces list so its Back chip is the LAST TopLeft entry and

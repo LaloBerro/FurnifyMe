@@ -161,6 +161,8 @@ private:
 
     void buildMenus();
     void buildOverlay();
+    // MainWindow::syncViewportMinimumWidth()'s twin - see there.
+    void syncViewportMinimumWidth();
     // Re-displays every piece from the store at the placement the LIVE scene
     // holds. Two callers, and the name says what it does rather than why one
     // of them needs it: a graphics context can die under this window - a

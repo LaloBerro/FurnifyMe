@@ -152,7 +152,7 @@ void MaterialCard::open(const QString& material, const Look& look, bool wood)
                           static_cast<QWidget*>(myMetal.value)}) {
         if (part) part->setVisible(!wood);
     }
-    if (!myLook.colour.isValid()) myLook.colour = QColor(178, 178, 173);
+    if (!myLook.colour.isValid()) myLook.colour = Theme::Fixed::materialLookStart();
     myLook.brightness = std::clamp(myLook.brightness, kBrightMin / 100.0, kBrightMax / 100.0);
     myLook.surface = std::clamp(myLook.surface, 0.0, 1.0);
     myLook.metal = std::clamp(myLook.metal, 0.0, 1.0);

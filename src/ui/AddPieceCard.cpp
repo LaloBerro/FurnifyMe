@@ -139,6 +139,7 @@ void AddPieceCard::rebuild(const QVector<FurnitureStore::FurnitureInfo>& furnitu
     for (const FurnitureStore::FurnitureInfo& info : furniture) {
         auto* button = new QPushButton(info.name, myList);
         button->setCursor(Qt::PointingHandCursor);
+        button->setFocusPolicy(Qt::NoFocus);   // no invisible focus - see ToolChip
         const QString id = info.id;
         connect(button, &QPushButton::clicked, this, [this, id] {
             // Hidden BEFORE the answer is reported, so a toast the answer

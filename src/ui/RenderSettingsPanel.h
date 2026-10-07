@@ -263,6 +263,11 @@ public:
     QSlider* lightStrengthControl() const { return myLightStrengthSlider; }
     QWidget* backgroundSwatch() const;
     QSlider* fovControl() const { return myFovSlider; }
+    // The Studio row's reset chip and the sections' own scroll bar - the two
+    // that used to touch (the 2026-10 review's F18), exposed so the suite can
+    // map both into this card and measure the gap between them.
+    class QAbstractButton* studioResetControl() const { return myStudioReset; }
+    class QScrollBar* sectionScrollBar() const;
     // The live modeless picker, or null when none is open -
     // AppearancePanel::activeColourDialog()'s own reason to exist: the
     // suite can assert it is modeless and close it, so the "no QDialog
@@ -342,6 +347,11 @@ private:
     // the rows are. See sizeHint().
     QWidget* myScrollContent = nullptr;
     class QScrollArea* myScroll = nullptr;
+    // The sections' own layout, whose RIGHT margin is the gutter the bar
+    // stands in while it is shown - see syncScrollGutter().
+    class QVBoxLayout* mySectionColumn = nullptr;
+    class QAbstractButton* myStudioReset = nullptr;
+    void syncScrollGutter();
     void openBackgroundDialog();
     // Restyles every row's font/colour off Theme - AppearancePanel's own
     // applyTheme(), hooked to the same Theme::notifier() broadcast.

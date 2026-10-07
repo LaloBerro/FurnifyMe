@@ -1,5 +1,7 @@
 #include "UnsavedCloseCard.h"
 
+#include <QAccessible>
+
 #include "Theme.h"
 
 #include <QCoreApplication>
@@ -484,6 +486,13 @@ StatusMessageLine::StatusMessageLine(QStatusBar* bar)
     if (myBar) {
         connect(myBar, &QStatusBar::messageChanged, this, [this] {
             syncToolTip();
+            // The sentence is PAINTED, so it is also this widget's accessible
+            // name - the whole of it, never the elided cut (the 2026-10
+            // review's F26). NameChanged tells anything listening that it
+            // moved; a no-op with nothing listening.
+            setAccessibleName(fullText());
+            QAccessibleEvent changed(this, QAccessible::NameChanged);
+            QAccessible::updateAccessibility(&changed);
             update();
         });
     }

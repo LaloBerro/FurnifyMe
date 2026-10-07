@@ -6,6 +6,7 @@
 #include "Theme.h"
 #include "ViewportOverlay.h"
 
+#include <QAccessible>
 #include <QFontMetrics>
 #include <QHideEvent>
 #include <QMouseEvent>
@@ -104,6 +105,9 @@ Toast::Toast(QWidget* parent)
     // See Theme::makeSurfaceTransparent()'s own comment.
     Theme::makeSurfaceTransparent(this);
     myUndo = new UndoControl([this] { emit undoClicked(); }, parent);
+    // It paints nothing itself - the toast draws the pill - so it carries the
+    // word it stands for, or assistive technology meets a nameless control.
+    myUndo->setAccessibleName(undoLabel());
     myUndo->hide();
     hide();
 }
@@ -123,6 +127,12 @@ void Toast::setMessage(const QString& text, Kind kind, bool undo)
     myText = text;
     myKind = kind;
     myHasUndo = undo;
+    // The message is PAINTED, so nothing a screen reader asks would find it
+    // without this (the 2026-10 review's F26): the toast's name is what it
+    // says, and its description which kind of message it is. ToastHost::show()
+    // announces it.
+    setAccessibleName(text);
+    setAccessibleDescription(kind == Kind::Failure ? tr("Failure") : tr("Note"));
     // Recorded for paintedTexts(), deduped so a repeated outcome does not
     // grow the list without bound.
     if (!text.isEmpty() && !myShownTexts.contains(text)) myShownTexts << text;
@@ -466,6 +476,12 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int docum
     myToast->show();
     myToast->raise();
     if (myToast->undoControl()) myToast->undoControl()->raise();
+    // ANNOUNCED, not merely shown: a toast arrives without focus and says its
+    // piece in paint, so an Alert is the only way assistive technology hears
+    // it - a Failure's reason above all. updateAccessibility() is a no-op with
+    // nothing listening, so it needs no isActive() guard.
+    QAccessibleEvent alert(myToast, QAccessible::Alert);
+    QAccessible::updateAccessibility(&alert);
 
     // fadeTo() stops whatever fade is already running before doing anything
     // else, so this is correct whether the toast was hidden (a real fade-in

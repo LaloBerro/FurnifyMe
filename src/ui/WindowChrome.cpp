@@ -136,7 +136,7 @@ void WindowButtons::paintEvent(QPaintEvent*)
                                  ? QColor(base.red(), base.green(), base.blue(), 150)
                                  : Theme::textMuted();
         QColor ink = hovered || pressed ? base : quiet;
-        if (i == 2 && (hovered || pressed)) ink = QColor(Qt::white);
+        if (i == 2 && (hovered || pressed)) ink = Theme::Fixed::inkOnFill();
 
         const IconSet::Glyph glyph =
             i == 0 ? IconSet::Glyph::Minimize

@@ -20,6 +20,8 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QRegularExpression>
+#include <QSet>
 #include <QAction>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -106,7 +108,7 @@ public:
     explicit Swatch(QWidget* parent) : QAbstractButton(parent)
     {
         setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
+        setFocusPolicy(Qt::NoFocus);
         setFixedSize(kSwatchWidth, kSwatchHeight);
     }
 
@@ -160,7 +162,12 @@ public:
     {
         setText(text);
         setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::StrongFocus);
+        // NO KEYBOARD FOCUS - ToolChip's rule (see its init()): a chip that
+        // held focus with no ring to show it would be focus nobody can see,
+        // and a click on one would take focus away from a field being typed
+        // in. Every chip in the app is a mirror of something with a menu
+        // entry or a shortcut, which is where the keyboard reaches it.
+        setFocusPolicy(Qt::NoFocus);
         // Every interactive control over the GL surface carries it - a press
         // that reached the viewport underneath would re-pick the model behind
         // this card. See CLAUDE.md's "Widgets over the viewport".
@@ -263,6 +270,19 @@ private:
 
 // --- AppearancePanel ---------------------------------------------------------
 
+QString AppearancePanel::familyDisplayName(const QString& family)
+{
+    // A trailing optical size - " 14pt", " 9 pt", " 36pt" - is the name of a
+    // CUT, not of the family, and only ever confuses a row that already sits
+    // under a text size of its own.
+    static const QRegularExpression opticalSize(
+        QStringLiteral("\\s+\\d+(\\.\\d+)?\\s*pt$"),
+        QRegularExpression::CaseInsensitiveOption);
+    QString shown = family;
+    shown.remove(opticalSize);
+    return shown.isEmpty() ? family : shown;
+}
+
 bool AppearancePanel::isRetiredToken(const QString& id)
 {
     // See the row loop: these two are kept in Theme::Spec for backward
@@ -354,8 +374,8 @@ AppearancePanel::AppearancePanel(QWidget* parent)
 
     // --- the tab bar --------------------------------------------------------
     //
-    // Five chips now (the Colours/Text & lines split), each one a view of
-    // myTab and nothing else - a click calls setCurrentTab(), which is the
+    // Four chips (the Colours/Text & lines split, then the Units/Files fold),
+    // each one a view of myTab and nothing else - a click calls setCurrentTab(), which is the
     // single place the current tab is decided and the single place every
     // chip is re-synced from it.
     //
@@ -368,11 +388,11 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     // exists to catch, and it is also what lets a plain QFontMetics(chip->
     // font()) probe outside this class read the SAME width sizeHint() uses.
     //
-    // Five chips do not fit this card's 272 logical pixels of content width
-    // in one row - "Text & lines" alone runs close to what four tabs used to
-    // split between them - so the bar wraps to a SECOND row rather than
-    // clipping a label or widening the whole card. The wrap is measured, not
-    // guessed: each chip's own sizeHint() (built from the same
+    // Four chips fit this card's 272 logical pixels of content width in one
+    // row at the shipped type scale (266 of them, measured); five did not,
+    // and wrapped. The bar still wraps to a SECOND row rather than clipping a
+    // label or widening the card whenever they stop fitting - a translation,
+    // a font that runs wide. The wrap is measured, not guessed: each chip's own sizeHint() (built from the same
     // QFontMetrics(labelFont) the no-clipping suite check reads) is packed
     // greedily into row one until the next chip would overflow this card's
     // content width, and everything after that goes to row two. A
@@ -393,13 +413,12 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     tabColumn->addLayout(tabRow2);
 
     const QString tabNames[kTabCount] = {tr("Colours"), tr("Text & lines"), tr("Viewport"),
-                                         tr("Units"), tr("Files")};
+                                         tr("Working")};
     const QString tabTips[kTabCount] = {
         tr("Every colour the app draws with"),
         tr("Text size, the font, and the app's line weights"),
         tr("What the 3D area shows around your furniture"),
-        tr("The unit sizes are written in, and what the cursor snaps to"),
-        tr("How often this furniture is written to disk")};
+        tr("The unit sizes are written in, and how often this furniture is saved to disk")};
     const int tabContentWidth = kWidth - 2 * kPad;
     // MEASURED FIRST, PLACED SECOND. The split has to be decided with every
     // chip's width already in hand, because a greedy fill cannot know that
@@ -488,15 +507,9 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     makeTransparent(scroll, QStringLiteral("appearanceScroll"));
     makeTransparent(scroll->viewport(), QStringLiteral("appearanceScrollViewport"));
-    // THE BAR IS THEMED, like everything else on this card. It was the
-    // platform's own widget - a raw light-grey slab pressed against the swatch
-    // column - which made it the most un-designed pixel in the product, inside
-    // the panel whose entire subject is appearance.
-    //
-    // Painted from Theme tokens through a stylesheet rather than a custom
-    // widget: it is a scrollbar, and the only thing wrong with it was that it
-    // did not belong to this app's palette. Re-applied on every theme change
-    // by applyTheme(), like every other styled control here.
+    // THE BAR IS THEMED, like everything else on this card - by the app-wide
+    // sheet, which every scrollbar in the app now shares (see applyTheme()).
+    // Named so the suite can find this one.
     scroll->verticalScrollBar()->setObjectName(QStringLiteral("appearanceScrollBar"));
 
     auto* content = new QWidget(scroll);
@@ -624,17 +637,37 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         // The bundled family first, because it is the default and the one
         // this shell was designed around; then everything installed, so a
         // user who wants their own can have it.
+        //
+        // Each entry SHOWS the family's name and CARRIES the real family as
+        // its data (the 2026-10 review's F22): the bundled DM Sans registers
+        // as "DM Sans 14pt" - an optical-size cut, named after the size it
+        // was drawn for - and a row reading "Font  DM Sans 14pt" right under
+        // "Text size  10 pt" reads as two sizes that disagree.
+        // familyDisplayName() is the one place that name is shortened.
+        //
+        // EACH SHOWN NAME ONCE. The bundled file registers its typographic
+        // family ("DM Sans") beside the cut Theme applies ("DM Sans 14pt"), so
+        // the two read the same once the size is dropped - and they ARE the
+        // same face. The first one listed wins, which puts the bundled cut
+        // first; applyTheme() finds a stored family by its shown name when its
+        // own entry was the one folded away.
         QStringList families;
         const QString bundled = Theme::defaultSpec().fontFamily;
         if (!bundled.isEmpty()) families << bundled;
         for (const QString& family : QFontDatabase::families()) {
             if (family != bundled) families << family;
         }
-        myFamily->addItems(families);
+        QSet<QString> shownNames;
+        for (const QString& family : families) {
+            const QString shown = familyDisplayName(family);
+            if (shownNames.contains(shown)) continue;
+            shownNames.insert(shown);
+            myFamily->addItem(shown, family);
+        }
     }
-    connect(myFamily, &QComboBox::currentTextChanged, this, [this](const QString& family) {
-        if (mySyncing) return;
-        setFontFamily(family);
+    connect(myFamily, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (mySyncing || index < 0) return;
+        setFontFamily(myFamily->itemData(index).toString());
     });
     // LIVE while the list is open: `highlighted` fires for whichever row the
     // keyboard or the cursor is on, before anything is chosen, so arrowing
@@ -647,7 +680,7 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     // writes the combo under mySyncing.
     connect(myFamily, &QComboBox::highlighted, this, [this](int index) {
         if (mySyncing || index < 0) return;
-        setFontFamily(myFamily->itemText(index));
+        setFontFamily(myFamily->itemData(index).toString());
     });
     // view() builds the popup container on first call, which is what makes it
     // filterable here rather than at the moment it is first shown.
@@ -738,11 +771,14 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     mySave->setToolTip(tr("Write the colours and text size to a file\n"
                           "Keep colours you like, or hand them to somebody else."));
     connect(mySave, &QPushButton::clicked, this, &AppearancePanel::chooseSaveFile);
+    // The three buttons take no keyboard focus, like every chip on this card.
+    mySave->setFocusPolicy(Qt::NoFocus);
     fileLine->addWidget(mySave, 1);
     myLoad = new QPushButton(tr("Load colours..."), fileRow);
     myLoad->setToolTip(tr("Read colours back out of a file\n"
                           "Applied as soon as it is opened."));
     connect(myLoad, &QPushButton::clicked, this, &AppearancePanel::chooseLoadFile);
+    myLoad->setFocusPolicy(Qt::NoFocus);
     fileLine->addWidget(myLoad, 1);
     colours->addWidget(fileRow);
 
@@ -763,6 +799,7 @@ AppearancePanel::AppearancePanel(QWidget* parent)
                            "Grid detail and Gizmo size back the way they shipped — "
                            "click twice"));
     connect(myReset, &QPushButton::clicked, this, &AppearancePanel::onResetClicked);
+    myReset->setFocusPolicy(Qt::NoFocus);
     resetLine->addWidget(myReset);
     colours->addWidget(resetRow);
     myResetArm = new QTimer(this);
@@ -1067,23 +1104,11 @@ void AppearancePanel::applyTheme()
                                 .arg(Theme::textMuted().name()));
     }
 
-    // THE SCROLLBAR, in this app's own palette. Styled here rather than at
-    // construction so a theme edit moves it with everything else - the handle
-    // is the chip colour, brighter under the pointer, on a transparent track
-    // with no arrows, which is as close to the "invisible" bar the Items
-    // drawer uses as a bar that must stay visible can get.
-    if (QWidget* bar = findChild<QWidget*>(QStringLiteral("appearanceScrollBar"))) {
-        bar->setStyleSheet(
-            QStringLiteral(
-                "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }"
-                "QScrollBar::handle:vertical { background: %1; border-radius: 4px;"
-                " min-height: 24px; }"
-                "QScrollBar::handle:vertical:hover { background: %2; }"
-                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-                "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
-                " background: transparent; }")
-                .arg(Theme::chipActive().name(), Theme::accent().name()));
-    }
+    // THE SCROLLBAR wears the app-wide sheet's bar now (Theme.cpp's install()),
+    // which is the look this card used to set for itself alone - a quiet
+    // chipActive handle on a transparent track. One description of a
+    // scrollbar rather than this card's and a second, dithered one everywhere
+    // else (the 2026-10 review's F18).
     for (const Theme::ColourToken& token : Theme::colourTokens()) {
         for (Row& row : myRows) {
             if (row.id == token.id && row.swatch) row.swatch->setColour(live.*(token.member));
@@ -1096,7 +1121,8 @@ void AppearancePanel::applyTheme()
     if (myGizmoScale) myGizmoScale->setValue(live.gizmoScale);
     if (myStroke) myStroke->setValue(static_cast<int>(live.chipStrokePx));
     if (myFamily) {
-        const int index = myFamily->findText(live.fontFamily);
+        int index = myFamily->findData(live.fontFamily);
+        if (index < 0) index = myFamily->findText(familyDisplayName(live.fontFamily));
         if (index >= 0) myFamily->setCurrentIndex(index);
     }
     // The tab chips' own font() tracks Theme::labelFont() the same way their

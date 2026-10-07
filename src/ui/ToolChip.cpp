@@ -66,9 +66,14 @@ void ToolChip::init()
     }
     setAttribute(Qt::WA_Hover, true);
     setCursor(Qt::PointingHandCursor);
-    // Every chip is keyboard-reachable, not just clickable - a focus ring
-    // that can never actually receive focus would be dead code.
-    setFocusPolicy(Qt::StrongFocus);
+    // NO KEYBOARD FOCUS (the 2026-10 review's F17, the user's pick: "NoFocus
+    // on chips"). The focus ring is gone - the user asked for every one of
+    // them removed, twice - and a chip that still TOOK focus held it
+    // invisibly: Tab walked through a row of controls that showed nothing,
+    // and a click on a chip took focus away from a field being typed in.
+    // Every chip mirrors a QAction, and the keyboard already reaches each of
+    // those through its menu entry or its shortcut, so nothing is lost.
+    setFocusPolicy(Qt::NoFocus);
     // The icon and the font-size stylesheet are the only two appearance
     // values this widget cannot re-derive inside paintEvent(), so they are
     // set through the same applyTheme() a live Appearance edit calls rather
@@ -86,6 +91,9 @@ void ToolChip::init()
     connect(this, &QAbstractButton::pressed, this, [this] { dipTo(kPressScale); });
     connect(this, &QAbstractButton::released, this, [this] { dipTo(1.0); });
 
+    // The text-glyph variant may have no action to be named after; its word
+    // IS its name.
+    if (myUsesTextGlyph) setAccessibleName(myTextGlyph);
     if (myAction) {
         connect(this, &QAbstractButton::clicked, myAction, &QAction::trigger);
         connect(myAction, &QAction::changed, this, &ToolChip::syncFromAction);
@@ -97,6 +105,7 @@ void ToolChip::setTextGlyph(const QString& text)
 {
     if (!myUsesTextGlyph || myTextGlyph == text) return;
     myTextGlyph = text;
+    if (!myAction) setAccessibleName(text);
     update();
 }
 
@@ -152,6 +161,14 @@ void ToolChip::syncFromAction()
         else if (!tip.startsWith(label)) tip = label + QLatin1Char('\n') + tip;
     }
     setToolTip(tip);
+    // WHAT ASSISTIVE TECHNOLOGY READS (the 2026-10 review's F26). An
+    // icon-only chip paints no word, so without these a screen reader met
+    // ten nameless buttons down the rail. Both are the action's own strings,
+    // the label and the tooltip composed above - no new copy enters the app,
+    // and they follow the action on every QAction::changed like everything
+    // else here.
+    setAccessibleName(label);
+    setAccessibleDescription(tip);
 
     myShortcut = myAction->shortcut().toString(QKeySequence::NativeText);
     updateGeometry();

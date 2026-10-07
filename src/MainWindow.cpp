@@ -197,6 +197,7 @@ public:
         myName = new QLabel(this);
         myClose = new QPushButton(MainWindow::compareBadgeCloseLabel(), this);
         myClose->setFixedHeight(22);
+        myClose->setFocusPolicy(Qt::NoFocus);   // no invisible focus - see ToolChip
 
         auto* layout = new QHBoxLayout(this);
         layout->setContentsMargins(kPad, kPad, kPad, kPad);
@@ -2098,6 +2099,19 @@ void MainWindow::buildAppBar(QMenuBar* menus)
     myAppBar = new AppBar(menus);
 }
 
+void MainWindow::syncViewportMinimumWidth()
+{
+    if (!myView || !myAppBar || !myWindowButtons) return;
+    // THE TOP ROW: the pill leads the left column at the rail's own margin,
+    // the window buttons hold the top-right corner, and nothing in between
+    // may cover a menu title. Derived from the two widgets' own sizeHint()s
+    // through ViewportOverlay, never measured once and written down - the
+    // minimum height's rule, sideways. The window follows its central
+    // widget's minimum, so a QMainWindow that is narrower grows to it.
+    myView->setMinimumWidth(ViewportOverlay::minimumWidthBeside(
+        myAppBar, ViewportOverlay::Anchor::LeftEdge, myWindowButtons));
+}
+
 void MainWindow::buildOverlay()
 {
     myOverlay = new ViewportOverlay(myView);
@@ -2319,6 +2333,9 @@ void MainWindow::buildOverlay()
     // Windows 11's snap layouts) - see WindowChrome.h.
     myWindowButtons = new WindowButtons(WindowButtons::Look::Card, myView);
     myOverlay->addWidget(myWindowButtons, ViewportOverlay::Anchor::TopRight);
+    syncViewportMinimumWidth();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this,
+            &MainWindow::syncViewportMinimumWidth);
 
     // The orientation gizmo. Its own label chip and the unit readout that sat
     // under it are in the app bar; only the axes stay over the viewport.
@@ -2361,7 +2378,7 @@ void MainWindow::buildOverlay()
     viewTool(myOrthographicAction, IconSet::Glyph::Projection);
     // NO UNIT CHIP here any more (improvements item 18, the user's own call:
     // "remove the mm button, keep mm in the View tab"). The unit lives in
-    // Settings -> Units, where the rest of the reading preferences are, and
+    // Settings -> Working, where the rest of the reading preferences are, and
     // in the View menu's own two entries - which is where a setting flipped
     // once in a session belongs, rather than on a chip beside the four
     // controls a user reaches for constantly. Nothing about the unit itself
@@ -2432,7 +2449,7 @@ void MainWindow::buildOverlay()
     myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Show notifications"),
                                     myNotificationsAction);
 
-    myAppearancePanel->addChoiceRow(SettingsTab::Units, tr("Sizes in"),
+    myAppearancePanel->addChoiceRow(SettingsTab::UnitsSaving, tr("Sizes in"),
                                     {myUnitsMillimetresAction, myUnitsCentimetresAction},
                                     {tr("Millimetres"), tr("Centimetres")});
     // SNAP AND MAGNET ARE NOT UNITS. They are drawing aids - what a dragged
@@ -2446,7 +2463,7 @@ void MainWindow::buildOverlay()
     // Autosave's five modes stacked rather than segmented: five chips in a
     // 272-pixel row would be five unreadable chips.
     myAppearancePanel->addChoiceRow(
-        SettingsTab::Files, tr("Autosave"),
+        SettingsTab::UnitsSaving, tr("Autosave"),
         {myAutosaveModeActions[static_cast<int>(AutosaveMode::Off)],
          myAutosaveModeActions[static_cast<int>(AutosaveMode::AfterEveryChange)],
          myAutosaveModeActions[static_cast<int>(AutosaveMode::EveryMinute)],

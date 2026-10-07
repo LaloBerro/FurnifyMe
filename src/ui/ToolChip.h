@@ -80,20 +80,9 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void enterEvent(QEnterEvent* event) override;
     void leaveEvent(QEvent* event) override;
-    // Keyboard focus is otherwise invisible on a custom-painted widget - Qt
-    // does not repaint one on its own just because focus moved, the way it
-    // does for built-in styled controls. Both just call update(); the ring
-    // itself is painted in paintEvent() from window()->focusWidget() == this,
-    // NOT hasFocus() - hasFocus() (and QApplication::focusWidget()) stay
-    // false for every widget in a window that is not the OS-active one,
-    // which gui_smoke relies on (it drives real MainWindows shown with
-    // WA_ShowWithoutActivating so the suite never steals OS focus). A
-    // window's own focusWidget() is remembered independently of activation,
-    // so the ring's colour and weight - not its presence - are what change
-    // with window()->isActiveWindow(): full amber while this app is what the
-    // user is actually typing into, a muted ring once they have moved to
-    // another window, so a chip does not keep shouting focus at someone who
-    // has moved on.
+    // A chip takes no keyboard focus at all (Qt::NoFocus - see init()), and
+    // paints no ring if something gives it focus programmatically. These two
+    // only repaint, kept so that a focus change can never leave a stale frame.
     void focusInEvent(QFocusEvent* event) override;
     void focusOutEvent(QFocusEvent* event) override;
     // Qt would otherwise flip our checked state locally, before the action has

@@ -1,5 +1,7 @@
 #include "HintBalloon.h"
 
+#include <QAccessible>
+
 #include "DocumentModel.h"
 #include "MainWindow.h"
 #include "OcctViewWidget.h"
@@ -386,17 +388,23 @@ void HintBalloon::showHint(const QString& event)
     myEvent = event;
     myText = textForEvent(event);
     myShownThisSession.insert(event);
+    // Painted copy, so it is the balloon's accessible name too - and arriving
+    // without focus, it is announced (the 2026-10 review's F26).
+    setAccessibleName(myText);
 
     reposition();
     show();
     raise();
     update();
+    QAccessibleEvent alert(this, QAccessible::Alert);
+    QAccessible::updateAccessibility(&alert);
 }
 
 void HintBalloon::dismiss()
 {
     myText.clear();
     myEvent.clear();
+    setAccessibleName(QString());
     hide();
 }
 

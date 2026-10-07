@@ -55,10 +55,20 @@ enum class Glyph {
     // Which way the grain runs on one body, for the Items drawer's per-row
     // mark (the user's pick from a drawn round). Two glyphs rather than one
     // rotated: the mark has to read as a STATE at a glance down a column of
-    // rows, and three lines lying down against three standing up is the
-    // clearest possible version of that.
-    GrainAlong,
-    GrainAcross,
+    // rows. A BOARD with its grain drawn in it since the 2026-10 review's
+    // F14: the old three bare lines lying down were the Items glyph's own
+    // three lines - a hamburger menu - and read as one. The outline says
+    // "a board", the lines inside it say which way it was cut.
+    GrainAlong,     // a board, its grain running the long way
+    GrainAcross,    // the same board, its grain running across it
+    // Visibility, for every eye button in the Items drawer and the scene's
+    // Pieces card (F14 again: the rows wore the Body glyph, and a folder's
+    // the New-folder glyph). A pair, used through toggleIcon() so a
+    // checkable button shows the open eye while the thing is on screen and
+    // the struck-through one while it is hidden - the state, not just a
+    // button that has one.
+    Eye,
+    EyeHidden,
     // The four view controls (Milestone 5, item 3) that moved off the old
     // text-button app bar onto icon-only chips under the axis gizmo. The
     // unit chip is not here - it paints its own text ("mm"/"cm") as the
@@ -109,6 +119,12 @@ enum class Glyph {
 
 // Returns an icon with Normal and Disabled modes already filled in.
 QIcon icon(Glyph glyph);
+
+// A two-state icon for a CHECKABLE button: `on` is drawn while it is checked
+// and `off` while it is not, in both Normal and Disabled modes. The button
+// holds the state and Qt picks the pixmap, so nothing has to swap icons on a
+// toggle - and a button cannot show the wrong one.
+QIcon toggleIcon(Glyph on, Glyph off);
 
 // Draws `glyph` on its 24x24 design grid with the painter's CURRENT pen -
 // the caller owns colour, width and transform. This is icon()'s own

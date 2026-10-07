@@ -102,16 +102,53 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(5, 12, 11, 18);
             p.drawLine(5, 12, 19, 12);
             break;
-        case Glyph::GrainAlong:                   // three lines lying down
-            p.drawLine(5, 8, 19, 8);
-            p.drawLine(5, 12, 19, 12);
-            p.drawLine(5, 16, 19, 16);
+        case Glyph::GrainAlong: {                 // a board, grain the long way
+            // The BOARD is what makes it read: three bare lines were a menu.
+            // Inside it the grain, gently waved so it reads as grain rather
+            // than as rules - waved more than this and at sixteen pixels it
+            // read as water, with a knot it read as a slider (both drawn,
+            // both looked at, both dropped).
+            p.drawRoundedRect(QRectF(3.0, 6.0, 18.0, 12.0), 2.0, 2.0);
+            QPainterPath grain;
+            grain.moveTo(6.0, 10.0);
+            grain.cubicTo(9.5, 9.0, 13.5, 11.0, 18.0, 10.0);
+            grain.moveTo(6.0, 14.0);
+            grain.cubicTo(10.5, 13.0, 14.5, 15.0, 18.0, 14.0);
+            p.drawPath(grain);
             break;
-        case Glyph::GrainAcross:                  // three lines standing up
-            p.drawLine(8, 5, 8, 19);
-            p.drawLine(12, 5, 12, 19);
-            p.drawLine(16, 5, 16, 19);
+        }
+        case Glyph::GrainAcross: {                // the same board, grain across it
+            p.drawRoundedRect(QRectF(3.0, 6.0, 18.0, 12.0), 2.0, 2.0);
+            QPainterPath grain;
+            for (const double x : {8.0, 12.0, 16.0}) {
+                grain.moveTo(x, 9.0);
+                grain.cubicTo(x - 0.8, 11.0, x + 0.8, 13.0, x, 15.0);
+            }
+            p.drawPath(grain);
             break;
+        }
+        case Glyph::Eye: {                        // an open eye
+            QPainterPath lids;
+            lids.moveTo(3.0, 12.0);
+            lids.quadTo(12.0, 3.5, 21.0, 12.0);
+            lids.quadTo(12.0, 20.5, 3.0, 12.0);
+            p.drawPath(lids);
+            p.drawEllipse(QPointF(12.0, 12.0), 3.0, 3.0);
+            p.setBrush(p.pen().color());
+            p.drawEllipse(QPointF(12.0, 12.0), 1.0, 1.0);
+            p.setBrush(Qt::NoBrush);
+            break;
+        }
+        case Glyph::EyeHidden: {                  // the same eye, struck through
+            QPainterPath lids;
+            lids.moveTo(3.0, 12.0);
+            lids.quadTo(12.0, 3.5, 21.0, 12.0);
+            lids.quadTo(12.0, 20.5, 3.0, 12.0);
+            p.drawPath(lids);
+            p.drawEllipse(QPointF(12.0, 12.0), 3.0, 3.0);
+            p.drawLine(QPointF(4.5, 19.5), QPointF(19.5, 4.5));
+            break;
+        }
         case Glyph::Items:                        // stacked list rows
             p.drawLine(5, 7, 19, 7);
             p.drawLine(5, 12, 19, 12);
@@ -309,6 +346,18 @@ QIcon icon(Glyph glyph)
     for (int size : {16, 24, 32, 48}) {
         result.addPixmap(render(glyph, Theme::text(), size), QIcon::Normal);
         result.addPixmap(render(glyph, Theme::textDisabled(), size), QIcon::Disabled);
+    }
+    return result;
+}
+
+QIcon toggleIcon(Glyph on, Glyph off)
+{
+    QIcon result;
+    for (int size : {16, 24, 32, 48}) {
+        result.addPixmap(render(on, Theme::text(), size), QIcon::Normal, QIcon::On);
+        result.addPixmap(render(on, Theme::textDisabled(), size), QIcon::Disabled, QIcon::On);
+        result.addPixmap(render(off, Theme::text(), size), QIcon::Normal, QIcon::Off);
+        result.addPixmap(render(off, Theme::textDisabled(), size), QIcon::Disabled, QIcon::Off);
     }
     return result;
 }

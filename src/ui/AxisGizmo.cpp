@@ -66,10 +66,11 @@ QPointF hubCenter(const QWidget& w)
 
 QColor AxisCard::hubColour()
 {
-    // The one hex literal this drawing carries. It is deliberately NOT a Theme
-    // token: a hub is neutral by definition and a user who tinted it would be
-    // adding a fourth axis colour to a control whose whole language is three.
-    return QColor("#c8c8cc");
+    // Deliberately NOT an editable token: a hub is neutral by definition and
+    // a user who tinted it would be adding a fourth axis colour to a control
+    // whose whole language is three. One of Theme's FIXED colours instead, so
+    // its hex lives in Theme.cpp with every other (the 2026-10 review's F19).
+    return Theme::Fixed::gizmoHub();
 }
 
 QFont AxisCard::letterFont()

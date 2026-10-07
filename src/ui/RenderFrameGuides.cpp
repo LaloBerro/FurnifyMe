@@ -1,6 +1,7 @@
 #include "RenderFrameGuides.h"
 
 #include "OcctViewWidget.h"
+#include "Theme.h"
 
 #include <QPainter>
 #include <QPaintEvent>
@@ -57,7 +58,8 @@ void RenderFrameGuides::paintEvent(QPaintEvent* event)
     // fill with a cleared hole: a cleared hole needs CompositionMode_Clear on
     // a translucent widget, and that punches through to the window behind
     // rather than to the GL scene this is floating over.
-    const QColor mask(13, 13, 15, kMaskAlpha);
+    QColor mask = Theme::Fixed::frameMask();
+    mask.setAlpha(kMaskAlpha);
     const QRect all = rect();
     if (myFrame.top() > all.top())
         p.fillRect(QRect(all.left(), all.top(), all.width(), myFrame.top() - all.top()), mask);
@@ -77,8 +79,10 @@ void RenderFrameGuides::paintEvent(QPaintEvent* event)
     // The guides, inside the picture, under its own edge.
     const OcctViewWidget::RenderGuides guides =
         myViewport ? myViewport->renderGuides() : OcctViewWidget::RenderGuides::Off;
+    QColor guideInk = Theme::Fixed::frameGuide();
+    guideInk.setAlpha(kGuideAlpha);
     if (guides == OcctViewWidget::RenderGuides::Thirds) {
-        p.setPen(QPen(QColor(255, 255, 255, kGuideAlpha), 1));
+        p.setPen(QPen(guideInk, 1));
         for (int i = 1; i <= 2; ++i) {
             const int x = myFrame.left() + myFrame.width() * i / 3;
             const int y = myFrame.top() + myFrame.height() * i / 3;
@@ -86,7 +90,7 @@ void RenderFrameGuides::paintEvent(QPaintEvent* event)
             p.drawLine(myFrame.left(), y, myFrame.right(), y);
         }
     } else if (guides == OcctViewWidget::RenderGuides::Centre) {
-        QPen pen(QColor(255, 255, 255, kGuideAlpha), 1, Qt::DashLine);
+        QPen pen(guideInk, 1, Qt::DashLine);
         pen.setDashPattern({5, 6});
         p.setPen(pen);
         const int cx = myFrame.center().x();
@@ -100,13 +104,15 @@ void RenderFrameGuides::paintEvent(QPaintEvent* event)
     // antialiased 1px pen at an integer coordinate smears across two rows at
     // half intensity, and this one is deliberately not antialiased, so the
     // rect is the one shrunk instead.
-    p.setPen(QPen(QColor(255, 255, 255, kEdgeAlpha), 1));
+    QColor edgeInk = Theme::Fixed::frameGuide();
+    edgeInk.setAlpha(kEdgeAlpha);
+    p.setPen(QPen(edgeInk, 1));
     p.drawRect(myFrame.adjusted(0, 0, -1, -1));
 
     // Corner ticks, at full strength: the edge above is a hairline over a
     // busy render, and the four corners are what the eye actually finds a
     // rectangle by.
-    p.setPen(QPen(QColor(255, 255, 255, 255), 2));
+    p.setPen(QPen(Theme::Fixed::frameGuide(), 2));
     const int t = std::min(kCornerPx, std::min(myFrame.width(), myFrame.height()) / 3);
     const QRect f = myFrame.adjusted(0, 0, -1, -1);
     p.drawLine(f.left(), f.top(), f.left() + t, f.top());

@@ -91,8 +91,8 @@ constexpr double kMeshDeflection = 0.0025;
 constexpr double kMeshAngleRad = 0.3;
 
 // The pivot sphere's neutral grey - it belongs to no axis, and colouring it
-// would read as a fourth handle.
-const QColor kHubColour(0xc8, 0xc8, 0xcc);
+// would read as a fourth handle. The axis card's own hub colour, which is
+// Theme's FIXED gizmoHub() - read where it is used, never cached here.
 
 // Spelled out rather than M_PI, which MSVC does not define without
 // _USE_MATH_DEFINES - the same literal every other file in this tree carries.
@@ -293,7 +293,7 @@ void GizmoRenderer::addHub(double armLength)
         BRepPrimAPI_MakeSphere(pivot(), armLength * (kHubSpherePx / kArmPixels)).Shape();
     BRepMesh_IncrementalMesh(hub, armLength * kMeshDeflection, Standard_False,
                              kMeshAngleRad, Standard_True);
-    addSolid(hub, kHubColour);
+    addSolid(hub, Theme::Fixed::gizmoHub());
 }
 
 // --- the shared arm-handle cache --------------------------------------------

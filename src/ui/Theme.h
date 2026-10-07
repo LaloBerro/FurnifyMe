@@ -348,7 +348,34 @@ QColor sizesGroup();        // selection sizes around a group - see Spec
 QColor booleanOut();        // a boolean's material coming out - see Spec
 QColor booleanStay();       // a boolean's material staying - see Spec
 
-double chipStrokePx();      // ToolChip border width - see Spec::chipStrokePx
+// --- the FIXED colours: drawn by the app, never offered as a Colours row -----
+//
+// Every colour the app paints that is not a user-editable token, written in
+// Theme.cpp and nowhere else (the 2026-10 review's F19). Not in Spec, by
+// ruling rather than by omission: each one is either neutral by definition (a
+// gizmo hub belongs to no axis), a depiction of something that is not the
+// shell (a material tile's miniature studio), or white-on-a-fill ink whose
+// whole job is to read against whatever accent or danger the user chose - and
+// a row for any of them would be a control that could only break the drawing.
+// headless_colour_literals fails the build's tests on a hex or numeric colour
+// literal anywhere in src/ outside Theme.cpp, so a new one lands here.
+namespace Fixed {
+QColor gizmoHub();          // the neutral centre of the axis card and the Move/Scale pivot
+QColor bodyEdge();          // a modelling body's face-boundary lines (OCCT's GRAY30)
+QColor mirrorPlaneEdge();   // the live Mirror plane's faint outline
+QColor tileBackdrop();      // a material tile's miniature studio wall
+QColor tileFloor();         // and its floor band
+QColor tileMetal();         // the preview ball, metallic
+QColor tileWood();          // the preview ball, not metallic
+QColor tileCaptionScrim();  // the translucent strip a tile's name sits on
+QColor catchlight();        // pure white; the caller sets the alpha
+QColor inkOnFill();         // white words and glyphs on a saturated fill
+QColor frameGuide();        // render-mode frame edge and guides; caller sets alpha
+QColor frameMask();         // what darkens outside the picture; caller sets alpha
+QColor materialLookStart(); // a material card's colour before anything is recorded
+}  // namespace Fixed
+
+double chipStrokePx();     // ToolChip border width - see Spec::chipStrokePx
 double gridDensity();       // grid line density multiplier - see Spec::gridDensity
 double edgeWidthPx();       // body boundary-line width - see Spec::edgeWidthPx
 double sketchLineWidthPx(); // outline line width - see Spec::sketchLineWidthPx

@@ -280,6 +280,7 @@ public:
         myDelete = new QPushButton(SelectorCardWidget::deleteLabel(), underRow);
         for (QPushButton* b : {myRename, myDelete}) {
             b->setFixedHeight(kActionButtonHeight);
+            b->setFocusPolicy(Qt::NoFocus);   // no invisible focus - see ToolChip
             b->setVisible(false);
             rowLayout->addWidget(b);
         }
@@ -504,6 +505,7 @@ public:
     {
         setText(tr("+ New furniture"));
         setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::NoFocus);   // no invisible focus - see ToolChip
         setAttribute(Qt::WA_NoSystemBackground);
         Theme::makeSurfaceTransparent(this);
         setFixedSize(Theme::wholeDevicePixels(
@@ -643,6 +645,9 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     for (QPushButton* chip : {mySortRecent, mySortName}) {
         chip->setFixedHeight(Theme::wholeDevicePixels(28));
         chip->setCursor(Qt::PointingHandCursor);
+        // No keyboard focus, so a click on a sort chip leaves it in the search
+        // field - see ToolChip's init().
+        chip->setFocusPolicy(Qt::NoFocus);
         chip->setCheckable(true);
         chip->setAutoExclusive(true);
         headerLayout->addWidget(chip);

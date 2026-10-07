@@ -22,6 +22,8 @@
 // change is reported at once (MainWindow writes it to the document and pushes
 // it to the viewport), so what is on screen and what is in the file are never
 // two different answers.
+#include "Theme.h"
+
 #include <QColor>
 #include <QPointer>
 #include <QString>
@@ -53,7 +55,9 @@ public:
     // OcctViewWidget deals in. The inversion stays where it always was, at
     // that one wiring site; nothing here says "roughness".
     struct Look {
-        QColor colour{178, 178, 173};
+        // Where a look starts before anything is recorded - Theme's FIXED
+        // materialLookStart(), so its hex lives in Theme.cpp.
+        QColor colour = Theme::Fixed::materialLookStart();
         double brightness = 1.0;
         double surface = 0.45;
         double metal = 0.0;

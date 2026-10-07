@@ -73,6 +73,20 @@ public:
     // against rather than a second copy that could drift from it.
     static constexpr int kStackGap = 8;
 
+    // THE NARROWEST VIEWPORT ON WHICH TWO CARDS SHARE A ROW WITHOUT MEETING
+    // (the 2026-10 review's F21). `left` stands at `leftAnchor` - LeftEdge
+    // (kEdgeMargin in) or a top-left corner anchor (the corner margin) - and
+    // `right` is a TopRight entry the corner margin in from the other side;
+    // the two need one kStackGap between them. Read off each widget's own
+    // sizeHint() (or its fixed minimum, whichever is wider), rounded through
+    // Theme::wholeDevicePixels() exactly as relayout() rounds them, so the
+    // floor a window sets from this is the width relayout() would actually
+    // need - the stacked-height derivation's sideways twin. Relayout has no
+    // collision rule of its own on purpose: a menu pill pushed off its corner
+    // is not a fix, and a window that cannot get that narrow is.
+    static int minimumWidthBeside(const QWidget* left, Anchor leftAnchor,
+                                  const QWidget* right);
+
     explicit ViewportOverlay(QWidget* viewport);
 
     void addWidget(QWidget* widget, Anchor anchor);

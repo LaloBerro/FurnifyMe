@@ -11,7 +11,7 @@
 // Settings, the action says Settings..., and nothing in here claims to be
 // about appearance alone.
 //
-// Five tabs, in this order, and the split is by MEANING rather than by
+// Four tabs, in this order, and the split is by MEANING rather than by
 // mechanism:
 //
 //   Colours     - the 28 colour swatches, Save/Load colours and Reset.
@@ -25,24 +25,29 @@
 //                 a grab bag wearing one label - "Colours" named the
 //                 swatches and nothing else on the page.
 //   Viewport    - the grid switch, Grid detail, Show sizes, Projection,
-//                 Gizmo size, Show notifications. A mix of QActions and two
-//                 Theme::Spec values, which is the point: Grid detail and
-//                 Gizmo size are SPEC values that belong beside the grid and
-//                 the gizmos they describe, not beside the colour swatches
-//                 they merely share a persistence mechanism with.
-//   Units       - Millimetres/Centimetres, Snap to Grid, Magnet.
-//   Files       - Autosave (Off / After every change / Every minute / 5 / 15).
+//                 Gizmo size, Show notifications, Snap to Grid, Magnet. A
+//                 mix of QActions and two Theme::Spec values, which is the
+//                 point: Grid detail and Gizmo size are SPEC values that
+//                 belong beside the grid and the gizmos they describe, not
+//                 beside the colour swatches they merely share a persistence
+//                 mechanism with.
+//   Working     - Sizes in (Millimetres/Centimetres) and Autosave (Off /
+//                 After every change / Every minute / 5 / 15): how you work,
+//                 rather than what you see. Two tabs of one row each, Units
+//                 and Files, until the 2026-10 review's F22 - and it was those
+//                 two that pushed the bar onto a second line. "Units & saving"
+//                 was the first name and measured 93 px, which still wrapped;
+//                 "Working" (59) lets all four sit in one row at the shipped
+//                 type scale, and its tooltip names both rows.
 //
-// FIVE TABS DO NOT FIT ONE ROW OF THIS CARD'S 272 LOGICAL PIXELS OF CONTENT
-// WIDTH - "Text & lines" alone is close to what four whole tabs used to
-// share - so the tab bar is laid out in TWO ROWS, packed greedily off each
-// chip's own sizeHint() (which is already Theme::labelFont()'s
+// THE TAB BAR STILL WRAPS WHEN IT HAS TO. The tabs are packed greedily off
+// each chip's own sizeHint() (which is already Theme::labelFont()'s
 // QFontMetrics, the same font OptionChip paints its label with - see
 // AppearancePanel.cpp's "Measure text with the font you paint it with"
-// comment at the tab bar). A fixed 3/2 split was rejected in favour of
-// measuring: a hand-picked split silently goes stale the day a tab's name
-// changes or the font does, and this project has a standing rule against
-// trusting a plausible-looking layout over a measured one.
+// comment at the tab bar), onto a second row only once the next chip would
+// overflow this card's 272 logical pixels of content width. A fixed split was
+// rejected in favour of measuring: a hand-picked split silently goes stale
+// the day a tab's name changes or the font does.
 //
 // THE LAW EVERY NON-COLOUR ROW FOLLOWS: a control here is built from the
 // window's existing QAction and MIRRORS it. It holds no checked state of its
@@ -130,10 +135,13 @@ class AppearancePanel : public QWidget {
     Q_OBJECT
 
 public:
-    // The five tabs, in the order they are drawn. Used as an index into
+    // The four tabs, in the order they are drawn. Used as an index into
     // myPages, so the order of the enumerators IS the order on screen.
-    enum class Tab { Colours = 0, TextLines = 1, Viewport = 2, Units = 3, Files = 4 };
-    static constexpr int kTabCount = 5;
+    // UnitsSaving - "Working" on screen - is the old Units and Files tabs
+    // folded into one (the 2026-10 review's F22): each held a single row, and
+    // two one-row tabs were what pushed the bar onto a second line.
+    enum class Tab { Colours = 0, TextLines = 1, Viewport = 2, UnitsSaving = 3 };
+    static constexpr int kTabCount = 4;
 
     explicit AppearancePanel(QWidget* parent = nullptr);
 
@@ -291,6 +299,12 @@ public:
     static bool isRetiredToken(const QString& id);
 
     static QString nameForToken(const QString& id);
+
+    // What the Font row SHOWS for a family: its name without a trailing
+    // optical size ("DM Sans 14pt" -> "DM Sans"). The combo carries the real
+    // family as each entry's data, so what is stored and applied never
+    // changes; and it lists each shown name once (see the constructor).
+    static QString familyDisplayName(const QString& family);
 
     // Every string this panel puts on screen - the title, each row's name,
     // the two control labels and the reset button. All of it is QLabel and

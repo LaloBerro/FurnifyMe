@@ -1087,6 +1087,7 @@ void JointsPanel::refresh()
         auto* widget = new JointRowWidget(this, m, host);
         widget->setFixedSize(m->rowWidth, m->height);
         auto* remove = new QPushButton(widget);
+        remove->setFocusPolicy(Qt::NoFocus);   // no invisible focus - see ToolChip
         remove->setFixedSize(Theme::wholeDevicePixels(QSize(kDeleteSize, kDeleteSize)));
         remove->move(m->deleteAt);
         remove->setIcon(myDeleteIcon);

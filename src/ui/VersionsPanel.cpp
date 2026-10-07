@@ -151,6 +151,7 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
 
     myAddButton = new QPushButton(QStringLiteral("+"), header);
     myAddButton->setFixedSize(Theme::wholeDevicePixels(QSize(26, 26)));
+    myAddButton->setFocusPolicy(Qt::NoFocus);   // no invisible focus - see ToolChip
     myAddButton->setToolTip(tr("Save a new version"));
     headerLayout->addWidget(myAddButton);
     connect(myAddButton, &QPushButton::clicked, this, &VersionsPanel::beginNewVersion);
@@ -641,16 +642,19 @@ void VersionsPanel::buildRealRow(const QString& name, const QDateTime& saved, bo
 
     auto* compare = new QPushButton(tr("Compare"), actions);
     compare->setFixedHeight(kButtonHeight);
+    compare->setFocusPolicy(Qt::NoFocus);   // no invisible focus - see ToolChip
     compare->setEnabled(enabled);
     actionsLayout->addWidget(compare);
 
     auto* restore = new QPushButton(tr("Restore"), actions);
     restore->setFixedHeight(kButtonHeight);
+    restore->setFocusPolicy(Qt::NoFocus);
     restore->setEnabled(enabled);
     actionsLayout->addWidget(restore);
 
     auto* remove = new QPushButton(deleteLabel(), actions);
     remove->setFixedHeight(kButtonHeight);
+    remove->setFocusPolicy(Qt::NoFocus);
     remove->setEnabled(enabled);
     actionsLayout->addWidget(remove);
 

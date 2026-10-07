@@ -85,6 +85,7 @@
 #include "WalkthroughPanel.h"
 
 #include <QAbstractButton>
+#include <QAccessible>
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -991,6 +992,11 @@ constexpr BlockInfo kBlocks[] = {
     { "words-in-a-hue-read-and-a-failure-is-a-shape", false, true },
     { "the-status-bar-gives-each-channel-one-job", false, true },
     { "the-rail-and-the-drawer-start-on-one-line", false, true },
+    { "the-scrollbars-wear-the-theme", false, true },
+    { "the-menu-pill-and-the-window-buttons-never-meet", false, true },
+    { "the-drawer-rows-say-what-their-buttons-do", false, true },
+    { "chips-take-no-keyboard-focus", false, true },
+    { "controls-carry-accessible-names", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -1995,6 +2001,16 @@ bool pickBodyOf(MainWindow& window, int bodyId, bool additive = false)
 // probe's coordinates environment-dependent. Works on a hidden widget too
 // (render() does not require the widget to be shown), which the isolated
 // probe chip relies on.
+// Every accessibility event the app raises while a probe has this installed
+// as QAccessible's update handler - the one seam that sees an announcement
+// with no screen reader on the machine. A plain function, because the handler
+// is a function pointer.
+std::vector<std::pair<QObject*, int>> g_accessibleEvents;
+void recordAccessibleEvent(QAccessibleEvent* event)
+{
+    g_accessibleEvents.emplace_back(event->object(), static_cast<int>(event->type()));
+}
+
 QImage renderExact(QWidget* widget)
 {
     QImage image(widget->size(), QImage::Format_ARGB32);
@@ -16308,8 +16324,10 @@ int main(int argc, char* argv[])
             // 585-640 band where that lands.
             {
                 // Same floor-height reasoning as the 800-wide probe above:
-                // 500 is no longer reachable, so use the real floor.
-                resizeViewport(600, nv->minimumHeight());
+                // 500 is no longer reachable, so use the real floor - and the
+                // same for the width since the derived width floor (F21),
+                // which at about 610 px is still inside that band.
+                resizeViewport(std::max(600, nv->minimumWidth()), nv->minimumHeight());
                 check(buildBody(narrow, 0.30, 0.30, 0.50, 0.50, 10.0),
                       "a second body on the narrow probe, so a hint has a reason to "
                       "be up");
@@ -16389,7 +16407,17 @@ int main(int argc, char* argv[])
             // below names whichever anchored widget actually collided rather
             // than assuming, so the probe cannot quietly become vacuous
             // again.
-            resizeViewport(440, 500);
+            //
+            // AND THEN THE WINDOW STOPPED GOING THAT NARROW (the 2026-10
+            // review's F21): the viewport's floor is derived from the menu
+            // pill and the window buttons, about 610 px, and 440 is no longer
+            // a width anybody can drag it to. The probe drives to that floor
+            // instead, and the claim it makes there is the stronger one: at
+            // the narrowest this window can be, the panel meets NOTHING
+            // anchored - so the collision ExtrudePreview::reposition() steps
+            // around is unreachable rather than merely survived - and a real
+            // click still finds its field.
+            resizeViewport(nv->minimumWidth(), 500);
 
             ExtrudePreview* panel = narrow.findChild<ExtrudePreview*>();
             check(panel != nullptr && panel->isVisible() && panel->field() != nullptr,
@@ -16406,11 +16434,11 @@ int main(int argc, char* argv[])
                     if (gizmo->isVisible() && gizmo->geometry().intersects(panel->geometry()))
                         overlaps << QStringLiteral("the axis gizmo");
                 }
-                check(!overlaps.isEmpty(),
-                      QStringLiteral("the panel really does collide with an anchored "
-                                     "widget at this width, so this check is exercising "
-                                     "something (viewport %1 wide; hits: %2)")
-                          .arg(nv->width())
+                check(nv->width() == nv->minimumWidth() && overlaps.isEmpty(),
+                      QStringLiteral("at the window's narrowest the panel collides with no "
+                                     "anchored widget - the floor keeps them apart (viewport "
+                                     "%1 wide, floor %2; hits: %3)")
+                          .arg(nv->width()).arg(nv->minimumWidth())
                           .arg(overlaps.isEmpty() ? QStringLiteral("none")
                                                   : overlaps.join(QStringLiteral(", "))));
                 const QPoint centre =
@@ -16673,14 +16701,21 @@ int main(int argc, char* argv[])
                 // height, the same way the toast's target further up is, so
                 // this reading keeps real clearance rather than sitting on a
                 // knife's edge the day either widget's size changes.
+                //
+                // 540 WIDE WAS A WIDTH THIS WINDOW CAN NO LONGER BE MADE: since
+                // the 2026-10 review's F21 the viewport's floor is derived from
+                // the menu pill and the window buttons (about 610 px), and at
+                // 540 those two covered View and Help. The narrowest the window
+                // really goes is the honest reading now.
                 const int clearH = drawerRect.bottom() + balloon->height() + 130;
-                resizeViewport(540, clearH);
+                const int narrowW = std::max(540, pv->minimumWidth());
+                resizeViewport(narrowW, clearH);
                 settle(300);
                 const QRect tallDrawer = drawer->geometry();
-                check(pv->width() == 540 && pv->height() == clearH,
-                      QStringLiteral("the probe reached the taller viewport "
-                                     "(got %1x%2, wanted 540x%3)")
-                          .arg(pv->width()).arg(pv->height()).arg(clearH));
+                check(pv->width() == narrowW && pv->height() == clearH,
+                      QStringLiteral("the probe reached the taller viewport at the window's "
+                                     "narrowest (got %1x%2, wanted %3x%4)")
+                          .arg(pv->width()).arg(pv->height()).arg(narrowW).arg(clearH));
                 check(tallDrawer.bottom() < balloon->geometry().top(),
                       QStringLiteral("where the drawer is clear of the balloon's band, so "
                                      "a band-aware floor has to ignore it (drawer bottom "
@@ -16710,7 +16745,7 @@ int main(int argc, char* argv[])
                 // layout evidence this case needs, and it comes from the
                 // same in-process rendering the rest of this file uses
                 // rather than from OS-level capture.
-                probe.grab().save(outDir + QStringLiteral("/balloon_540_band.png"));
+                probe.grab().save(outDir + QStringLiteral("/balloon_narrow_band.png"));
             }
         }
         probe.close();
@@ -16814,6 +16849,12 @@ int main(int argc, char* argv[])
             // long form of that same rule, and asking the wrong one here cost
             // an A/B run to find - the ring was painted correctly the whole
             // time.
+            //
+            // Since the 2026-10 review's F17 a chip takes NO focus of its own
+            // (Qt::NoFocus - see chips-take-no-keyboard-focus, which pins the
+            // policy). Focus here is GIVEN, by setFocus(), which a NoFocus
+            // widget still accepts; what stays pinned is that even then
+            // nothing paints a ring.
             chip->clearFocus();
             settle(40);
             const bool couldTake = chip->isVisible() && chip->isEnabled();
@@ -17534,7 +17575,7 @@ int main(int argc, char* argv[])
                       .arg(panel->paintedTexts().value(0)));
 
             // Not a QDialog and holding none - the no-modal law reaches the
-            // drawer that grew five tabs exactly as it reached the card that
+            // drawer that grew four tabs exactly as it reached the card that
             // had one.
             check(panel->findChildren<QDialog*>().isEmpty() &&
                       qobject_cast<QDialog*>(panel) == nullptr,
@@ -17549,8 +17590,9 @@ int main(int argc, char* argv[])
                 {AppearancePanel::Tab::Colours, "Colours"},
                 {AppearancePanel::Tab::TextLines, "TextLines"},
                 {AppearancePanel::Tab::Viewport, "Viewport"},
-                {AppearancePanel::Tab::Units, "Units"},
-                {AppearancePanel::Tab::Files, "Files"},
+                // Units and Files, folded into one tab (the 2026-10 review's
+                // F22) - each held a single row.
+                {AppearancePanel::Tab::UnitsSaving, "UnitsSaving"},
             };
 
             // Real hit-testing through the viewport, the rule for every
@@ -17572,8 +17614,8 @@ int main(int argc, char* argv[])
                 if (!found) unreachableTabs << QString::fromLatin1(tabCase.word);
             }
             check(unreachableTabs.isEmpty(),
-                  QStringLiteral("all five tabs are reachable by a real click (%1)")
-                      .arg(unreachableTabs.isEmpty() ? QStringLiteral("all five")
+                  QStringLiteral("all four tabs are reachable by a real click (%1)")
+                      .arg(unreachableTabs.isEmpty() ? QStringLiteral("all four")
                                                      : unreachableTabs.join(QStringLiteral(", "))));
 
             // Switching tabs SWAPS THE ROWS. Asserted on the pages
@@ -17611,9 +17653,10 @@ int main(int argc, char* argv[])
                                         QString::fromLatin1(tabCase.word).toLower() +
                                         QStringLiteral(".png"));
             }
-            check(swapsChecked == 5 && badSwaps.isEmpty(),
+            check(swapsChecked == AppearancePanel::kTabCount && swapsChecked == 4 &&
+                      badSwaps.isEmpty(),
                   QStringLiteral("clicking each tab shows its own rows and hides the other "
-                                 "four (%1 tabs, %2)")
+                                 "three (%1 tabs, %2)")
                       .arg(swapsChecked)
                       .arg(badSwaps.isEmpty() ? QStringLiteral("clean")
                                               : badSwaps.join(QStringLiteral("; "))));
@@ -17706,6 +17749,44 @@ int main(int argc, char* argv[])
                           .arg(movedFaults.isEmpty() ? QStringLiteral("all five")
                                                      : movedFaults.join(QStringLiteral("; "))));
 
+                // THE FONT ROW NAMES THE FAMILY, NOT A SIZE (the 2026-10
+                // review's F22): it sat under "Text size 10 pt" reading "DM Sans
+                // 14pt", two sizes that seemed to disagree. What the combo
+                // SHOWS has no size in it, while what it CARRIES is still the
+                // family Theme applies.
+                {
+                    QComboBox* family = panel->familyControl();
+                    const QString shown = family ? family->currentText() : QString();
+                    const QRegularExpression aSize(QStringLiteral("\\d\\s*pt\\b"),
+                                                   QRegularExpression::CaseInsensitiveOption);
+                    check(family && !shown.isEmpty() && !shown.contains(aSize) &&
+                              family->currentData().toString() == Theme::spec().fontFamily,
+                          QStringLiteral("the Font row names the family alone, no size in it "
+                                         "(shows \"%1\" for \"%2\")")
+                              .arg(shown, Theme::spec().fontFamily));
+                    check(AppearancePanel::familyDisplayName(QStringLiteral("DM Sans 14pt")) ==
+                                  QStringLiteral("DM Sans") &&
+                              AppearancePanel::familyDisplayName(QStringLiteral("Segoe UI")) ==
+                                  QStringLiteral("Segoe UI") &&
+                              AppearancePanel::familyDisplayName(QStringLiteral("Bahnschrift")) ==
+                                  QStringLiteral("Bahnschrift"),
+                          "and the shortening drops only an optical size");
+                    // And no two entries read the same: a list showing "DM
+                    // Sans" twice would be asking the user to guess.
+                    QSet<QString> seen;
+                    QStringList twice;
+                    for (int i = 0; family && i < family->count(); ++i) {
+                        if (seen.contains(family->itemText(i))) twice << family->itemText(i);
+                        seen.insert(family->itemText(i));
+                    }
+                    check(family && family->count() > 0 && twice.isEmpty(),
+                          QStringLiteral("and the list names each family once (%1 entries; "
+                                         "twice: %2)")
+                              .arg(family ? family->count() : 0)
+                              .arg(twice.isEmpty() ? QStringLiteral("none")
+                                                   : twice.join(QStringLiteral(", "))));
+                }
+
                 // And what STAYED: the swatches, Save, Load and Reset - present
                 // on Colours, absent from Text & lines.
                 panel->setCurrentTab(AppearancePanel::Tab::Colours);
@@ -17735,12 +17816,11 @@ int main(int argc, char* argv[])
                                                     : keptFaults.join(QStringLiteral("; "))));
             }
 
-            // --- the tab bar wraps to two rows, and no label clips -----------
+            // --- the tab bar fits one row, and no label clips ----------------
             //
-            // Five tabs do not fit one row of this card's content width -
-            // "Text & lines" alone runs close to what four tabs used to share -
-            // so the bar wraps. This is the check that would have caught a
-            // five-in-a-row layout: every chip's own width against the SAME
+            // Five tabs did not fit one row of this card's content width, so
+            // the bar wrapped; four do. This is the check that would have
+            // caught a squeezed-in layout: every chip's own width against the SAME
             // font it paints its label with (OptionChip::paintEvent uses
             // Theme::labelFont(), and the chip's own font() is set to match -
             // see AppearancePanel.cpp's tab-bar comment), plus the chip's own
@@ -17772,13 +17852,23 @@ int main(int argc, char* argv[])
                       QStringLiteral("no tab chip's label is wider than the chip itself (%1)")
                           .arg(clipped.isEmpty() ? QStringLiteral("none clipped")
                                                  : clipped.join(QStringLiteral("; "))));
-                // And the wrap actually happened - two distinct row tops, not
-                // five chips squeezed onto one line that merely happen not to
-                // clip because the font is narrow today.
-                check(rowTops.size() == 2,
-                      QStringLiteral("the tab bar lays out in exactly two rows (%1 distinct "
-                                     "row positions)")
-                          .arg(rowTops.size()));
+                // AND THEY FIT ONE ROW NOW. This read "exactly two rows" while
+                // there were five tabs; folding Units and Files into Working
+                // (the 2026-10 review's F22) was done precisely so the bar
+                // stops wrapping, so the check states the new truth with the
+                // widths that make it true. The greedy wrap itself stays in
+                // AppearancePanel for a type scale or a translation that no
+                // longer fits.
+                QStringList widthsSeen;
+                for (int i = 0; i < AppearancePanel::kTabCount; ++i) {
+                    QAbstractButton* button =
+                        panel->tabButton(static_cast<AppearancePanel::Tab>(i));
+                    if (button) widthsSeen << QString::number(button->width());
+                }
+                check(rowTops.size() == 1,
+                      QStringLiteral("the four tabs lay out in ONE row (%1 distinct row "
+                                     "positions; widths %2)")
+                          .arg(rowTops.size()).arg(widthsSeen.join(QStringLiteral(","))));
             }
 
             // --- the mirror, both ways, for every row that has one ----------
@@ -17797,8 +17887,10 @@ int main(int argc, char* argv[])
                 {AppearancePanel::Tab::Viewport, "Grid", "Show the grid"},
                 {AppearancePanel::Tab::Viewport, "Show sizes", "Show sizes"},
                 {AppearancePanel::Tab::Viewport, "Show notifications", "Show notifications"},
-                {AppearancePanel::Tab::Units, "Snap to Grid", "Snap to Grid"},
-                {AppearancePanel::Tab::Units, "Magnet", "Magnet"},
+                // Snap and Magnet live on Viewport beside the grid switch -
+                // they are drawing aids, not units (see MainWindow).
+                {AppearancePanel::Tab::Viewport, "Snap to Grid", "Snap to Grid"},
+                {AppearancePanel::Tab::Viewport, "Magnet", "Magnet"},
             };
             QStringList mirrorFaults;
             int mirrorsDriven = 0;
@@ -17879,9 +17971,10 @@ int main(int argc, char* argv[])
                 }
             }
 
-            // Units - two exclusive actions, one segmented row.
+            // Units - two exclusive actions, one segmented row, on the Units &
+            // saving tab.
             {
-                panel->setCurrentTab(AppearancePanel::Tab::Units);
+                panel->setCurrentTab(AppearancePanel::Tab::UnitsSaving);
                 settle(40);
                 QAction* mm = action(window, QStringLiteral("Millimetres"));
                 QAction* cm = action(window, QStringLiteral("Centimetres"));
@@ -17909,9 +18002,10 @@ int main(int argc, char* argv[])
             }
 
             // Autosave - five exclusive actions, stacked because five chips
-            // in a row of this width would be five unreadable chips.
+            // in a row of this width would be five unreadable chips. On the
+            // SAME tab as the unit since the Units/Files fold.
             {
-                panel->setCurrentTab(AppearancePanel::Tab::Files);
+                panel->setCurrentTab(AppearancePanel::Tab::UnitsSaving);
                 settle(40);
                 const char* modeTexts[] = {"Off", "After every change", "Every minute",
                                            "Every 5 minutes", "Every 15 minutes"};
@@ -17943,6 +18037,26 @@ int main(int argc, char* argv[])
                     check(modes[startedAt]->isChecked() && !modes[otherAt]->isChecked(),
                           "and choosing one in the drawer moves the File menu's own check");
                 }
+            }
+
+            // THE FOLD, from both sides (the 2026-10 review's F22): the unit row
+            // and the autosave row are on ONE page, that page is the last tab,
+            // and there is no fifth tab button left over for either of them.
+            {
+                QWidget* unitsPage = panel->pageFor(AppearancePanel::Tab::UnitsSaving);
+                QAction* mm = action(window, QStringLiteral("Millimetres"));
+                QAction* everyChange = action(window, QStringLiteral("After every change"));
+                QAbstractButton* mmChip = mm ? panel->controlFor(mm) : nullptr;
+                QAbstractButton* autosaveChip =
+                    everyChange ? panel->controlFor(everyChange) : nullptr;
+                check(unitsPage && mmChip && autosaveChip && unitsPage->isAncestorOf(mmChip) &&
+                          unitsPage->isAncestorOf(autosaveChip),
+                      "Sizes in and Autosave share the one Working tab");
+                QAbstractButton* lastTab = panel->tabButton(AppearancePanel::Tab::UnitsSaving);
+                check(lastTab && lastTab->text() == QStringLiteral("Working") &&
+                          panel->tabButton(static_cast<AppearancePanel::Tab>(4)) == nullptr,
+                      QStringLiteral("and it is the last of four tabs, named for both (\"%1\")")
+                          .arg(lastTab ? lastTab->text() : QString()));
             }
 
             // A row whose action is unavailable must be unavailable too. The
@@ -18113,14 +18227,17 @@ int main(int argc, char* argv[])
             // rather than named - and the check that one was found is a check,
             // not a silent guard.
             int other = -1;
+            // Asked of each entry's DATA, the family it applies: the text is
+            // the family's NAME alone since the 2026-10 review's F22, and may
+            // be shorter than the family it stands for.
             for (int i = 0; i < family->count() && other < 0; ++i) {
-                if (family->itemText(i) != startFamily) other = i;
+                if (family->itemData(i).toString() != startFamily) other = i;
             }
             check(other >= 0,
                   QStringLiteral("this machine offers a second font to preview (%1 in the "
                                  "list)").arg(family->count()));
             if (other >= 0) {
-                const QString previewFamily = family->itemText(other);
+                const QString previewFamily = family->itemData(other).toString();
                 // The popup cannot be opened from inside the event loop that
                 // would drive it, so the two halves the popup triggers are
                 // driven directly: beginFamilyPreview() is what its Show hooks
@@ -18923,11 +19040,13 @@ int main(int argc, char* argv[])
                                  "(showing %1)")
                       .arg(panel->sizeControl() ? panel->sizeControl()->value() : -1));
             check(panel->familyControl() != nullptr &&
-                      panel->familyControl()->currentText() == Theme::spec().fontFamily,
+                      panel->familyControl()->currentData().toString() ==
+                          Theme::spec().fontFamily,
                   QStringLiteral("and its family control names the family Theme reports "
                                  "(\"%1\" vs \"%2\")")
-                      .arg(panel->familyControl() ? panel->familyControl()->currentText()
-                                                  : QString(),
+                      .arg(panel->familyControl()
+                               ? panel->familyControl()->currentData().toString()
+                               : QString(),
                            Theme::spec().fontFamily));
             if (checkedChip) {
                 const QImage restored = renderExact(checkedChip);
@@ -40209,20 +40328,32 @@ int main(int argc, char* argv[])
         check(line && !line->isElided() && line->toolTip().isEmpty(),
               QStringLiteral("bar: at 1100 px the sentence fits whole, with no tooltip (\"%1\")")
                   .arg(line ? line->shownText() : QString()));
-        bw.resize(540, 800);
+        // AT THE WINDOW'S OWN FLOOR, with the longest sentence the bar carries.
+        // This was a 540 px window and the two-body sentence; since the
+        // 2026-10 review's F21 the editor cannot be made narrower than its
+        // menu pill and window buttons need (about 610 px here), where the
+        // two-body sentence fits whole. A refusal's reason is the sentence a
+        // narrow window actually has to elide, and the bar keeps it after the
+        // toast goes - so that is the one driven here.
+        bw.resize(320, 800);
         waitFully(250);
         settle(150);
+        check(!bw.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Common)),
+              "bar: at the floor, the Intersect is refused again so its reason is in the bar");
+        settle(150);
+        if (barHost && barHost->toast()) barHost->toast()->hide();
+        settle(100);
         if (line && nameMark) {
             const QString whole = bar->currentMessage();
-            check(line->fullText() == whole && whole.startsWith(QStringLiteral("2 bodies")) &&
+            check(line->fullText() == whole && whole == MainWindow::statusLineFor(refusal) &&
                       !whole.contains(QChar(0x2026)),
                   QStringLiteral("bar: the bar's message is still the whole sentence (\"%1\")")
                       .arg(whole));
             check(line->isElided() && line->shownText().endsWith(QChar(0x2026)) &&
                       line->toolTip() == whole,
-                  QStringLiteral("bar: at 540 px the left channel elides with an ellipsis, the "
-                                 "whole sentence in its tooltip (\"%1\")")
-                      .arg(line->shownText()));
+                  QStringLiteral("bar: at the window's floor (%1 px) the left channel elides with "
+                                 "an ellipsis, the whole sentence in its tooltip (\"%2\")")
+                      .arg(bw.width()).arg(line->shownText()));
             check(line->geometry().right() < nameMark->geometry().left() &&
                       line->x() + line->paintedRight() <= nameMark->x(),
                   QStringLiteral("bar: and stops short of the name mark (text ends at %1, the "
@@ -40230,11 +40361,22 @@ int main(int argc, char* argv[])
                       .arg(line->x() + line->paintedRight()).arg(nameMark->x()));
             // In PIXELS, because Qt still owns a paint of its own for this
             // message: between where the elided text ends and where the name
-            // begins there must be nothing but the bar's ground.
+            // begins there must be nothing but the bar's ground - EXCEPT the
+            // status bar's own item frames, the thin rules QStatusBar draws two
+            // pixels outside each permanent widget (CLAUDE.md's "a thin rule now
+            // stands between the left channel and the name"). They are the
+            // bar's design, not a leak of its message, and at 540 px they only
+            // fell outside this window by the luck of where the ellipsis
+            // landed; at the floor width the text ends a few pixels sooner and
+            // the rule is inside it. Excluded by POSITION, one device column
+            // each, so a leaked glyph anywhere else still counts.
             const QImage shot = bar->grab().toImage();
             const double dpr = shot.devicePixelRatio();
+            const double frameAfterLine = line->geometry().right() + 2.0;
+            const double frameBeforeName = nameMark->x() - 2.0;
             int stray = 0;
             int inked = 0;
+            QSet<int> strayColumns;
             const int textTop = static_cast<int>(line->y() * dpr);
             const int textBottom = static_cast<int>((line->y() + line->height()) * dpr) - 1;
             for (int y = std::max(0, textTop); y <= std::min(shot.height() - 1, textBottom); ++y) {
@@ -40242,19 +40384,28 @@ int main(int argc, char* argv[])
                     const double logicalX = x / dpr;
                     const bool ink = colorDistance(shot.pixelColor(x, y), Theme::chrome()) > 40.0;
                     if (!ink) continue;
+                    const bool itemFrame = std::fabs(logicalX - frameAfterLine) < 1.0 ||
+                                           std::fabs(logicalX - frameBeforeName) < 1.0;
                     if (logicalX >= line->x() + line->paintedRight() + 2 &&
-                        logicalX < nameMark->x() - 1)
+                        logicalX < nameMark->x() - 1 && !itemFrame) {
                         ++stray;
+                        strayColumns.insert(x);
+                    }
                     else if (logicalX >= line->x() && logicalX < line->x() + line->paintedRight())
                         ++inked;
                 }
             }
             check(inked > 0 && stray == 0,
                   QStringLiteral("bar: the elided text is painted (%1 ink pixels) and nothing "
-                                 "else reaches toward the name (%2 stray)")
-                      .arg(inked).arg(stray));
+                                 "but the bar's own item rules reaches toward the name (%2 stray "
+                                 "in %3 device columns; text ends %4, rules at %5 and %6)")
+                      .arg(inked).arg(stray).arg(strayColumns.size())
+                      .arg(line->x() + line->paintedRight()).arg(frameAfterLine)
+                      .arg(frameBeforeName));
             shot.save(outDir + QStringLiteral("/status_narrow.png"));
         }
+        bw.cancelBoolean();
+        settle(100);
         bw.resize(1100, 800);
         waitFully(250);
         settle(150);
@@ -41972,6 +42123,793 @@ int main(int argc, char* argv[])
                              "point (%1 -> %2)")
                   .arg(static_cast<int>(pointsBefore))
                   .arg(static_cast<int>(probe.sketch().pointCount())));
+    }
+
+    // --- the scrollbars wear the theme (the 2026-10 review's F18) -------------
+    //
+    // The app-wide sheet styled the bar and its handle but never named the
+    // track either side of the handle - add-page and sub-page - so Qt painted
+    // its own default there: a hatched dither, which shipped as grey slabs in
+    // the hub, the Joints drawer and the render settings card. And on that
+    // card the track stood flush against the Studio chip, which read as the
+    // two colliding.
+    //
+    // PIXELS, because the claim is about pixels: a dither is a pattern of
+    // neighbouring pixels that differ, so the track is read for exactly that,
+    // and the handle has to wear its token. And the collision is a GEOMETRY
+    // claim, so both rectangles are mapped into the one space the claim is
+    // about - the card's own - before they are compared.
+    if (blockEnabled("the-scrollbars-wear-the-theme")) {
+        // One reading of one bar, in the coordinates of `owner` - the card it
+        // stands on, whose own paint is what shows through a transparent
+        // track. The handle's rows are FOUND, by the token, rather than
+        // computed from the bar's range: a probe that predicted where the
+        // handle should be would be grading the style against itself.
+        auto readBar = [&](QWidget* owner, QScrollBar* bar, const QString& where) {
+            check(owner && bar && bar->isVisible() && bar->maximum() > 0,
+                  QStringLiteral("scrollbars: %1 has a bar on screen with somewhere to go "
+                                 "(max %2)")
+                      .arg(where).arg(bar ? bar->maximum() : -1));
+            if (!owner || !bar || !bar->isVisible()) return;
+            bar->setValue(bar->minimum());
+            settle(80);
+            const QRect inOwner(bar->mapTo(owner, QPoint(0, 0)), bar->size());
+            const QImage shot = owner->grab(inOwner).toImage().convertToFormat(QImage::Format_RGB32);
+            const QRgb handleInk = Theme::chipActive().rgb() & 0xffffff;
+            const int cx = shot.width() / 2;
+            int handleTop = -1;
+            int handleBottom = -1;
+            for (int y = 0; y < shot.height(); ++y) {
+                if ((shot.pixel(cx, y) & 0xffffff) != handleInk) continue;
+                if (handleTop < 0) handleTop = y;
+                handleBottom = y;
+            }
+            check(handleTop >= 0 && handleBottom - handleTop >= 8,
+                  QStringLiteral("scrollbars: %1's handle wears its token, chipActive %2 "
+                                 "(%3 rows of it down the bar's middle)")
+                      .arg(where, Theme::chipActive().name())
+                      .arg(handleTop < 0 ? 0 : handleBottom - handleTop + 1));
+            // The TRACK: every row clear of the handle (and of its rounded,
+            // antialiased ends) - with the bar at the top, that is the
+            // add-page below it. A dither alternates pixel by pixel, so it
+            // is counted as neighbours that differ; a themed track is one
+            // flat ground and has none.
+            int trackRows = 0;
+            int differing = 0;
+            for (int y = 0; y < shot.height(); ++y) {
+                if (handleTop >= 0 && y >= handleTop - 4 && y <= handleBottom + 4) continue;
+                ++trackRows;
+                for (int x = 1; x < shot.width(); ++x) {
+                    const QColor a = QColor::fromRgb(shot.pixel(x - 1, y));
+                    const QColor b = QColor::fromRgb(shot.pixel(x, y));
+                    if (colorDistance(a, b) > 12.0) ++differing;
+                }
+            }
+            check(trackRows >= 20 && differing == 0,
+                  QStringLiteral("scrollbars: %1's track is one flat ground, no dither "
+                                 "(%2 track rows, %3 neighbouring pixels differ)")
+                      .arg(where).arg(trackRows).arg(differing));
+        };
+
+        // THE RENDER SETTINGS CARD, on its own and short enough to scroll -
+        // the card is a plain widget, so it needs no render mode around it,
+        // and a fixed height makes the bar appear on every machine rather
+        // than only on a short screen.
+        {
+            QWidget host;
+            host.setAttribute(Qt::WA_ShowWithoutActivating);
+            host.resize(360, 460);
+            auto* card = new RenderSettingsPanel(&host);
+            card->move(12, 12);
+            card->resize(card->width(), 420);
+            host.show();
+            waitFully(250);
+            settle(200);
+            QScrollBar* bar = card->sectionScrollBar();
+            readBar(card, bar, QStringLiteral("the render settings card"));
+
+            // The Studio chip against the bar, both mapped into the CARD.
+            QAbstractButton* studio = card->studioResetControl();
+            check(studio != nullptr, "scrollbars: the Studio row's chip is there to measure");
+            if (studio && bar && bar->isVisible()) {
+                const QRect studioInCard(studio->mapTo(card, QPoint(0, 0)), studio->size());
+                const QRect barInCard(bar->mapTo(card, QPoint(0, 0)), bar->size());
+                const int gap = barInCard.left() - studioInCard.right() - 1;
+                check(!studioInCard.intersects(barInCard) && gap >= 4,
+                      QStringLiteral("scrollbars: the Studio chip stands clear of the bar, in the "
+                                     "card's own coordinates (chip right %1, bar left %2 - a %3 px "
+                                     "gap)")
+                          .arg(studioInCard.right()).arg(barInCard.left()).arg(gap));
+            }
+            // Scrolled so the Studio row is in the picture beside the bar.
+            if (QScrollArea* area = card->findChild<QScrollArea*>())
+                if (studio) area->ensureWidgetVisible(studio);
+            settle(120);
+            const QImage capture =
+                printWindowCapture(&host, outDir + QStringLiteral("/scrollbar-render-card.png"));
+            check(!capture.isNull(), "scrollbars: the render card is captured composited");
+            host.close();
+        }
+
+        // THE SETTINGS DRAWER'S COLOUR LIST, which used to set a bar of its
+        // own and now wears the app-wide one - so the same reading has to
+        // hold on a card that is really over the viewport.
+        {
+            RequiredTempDir barDir;
+            MainWindow bw(nullptr, /*persistProgress=*/false, barDir.path());
+            bw.setAttribute(Qt::WA_ShowWithoutActivating);
+            bw.resize(1100, 800);
+            bw.show();
+            waitFully(300);
+            bw.view()->setAnimationsEnabled(false);
+            enterFreshFurniture(bw);
+            if (QAction* settings = action(bw, QStringLiteral("Settings...")))
+                if (!settings->isChecked()) settings->trigger();
+            settle(250);
+            AppearancePanel* panel = bw.findChild<AppearancePanel*>();
+            if (panel) panel->setCurrentTab(AppearancePanel::Tab::Colours);
+            settle(150);
+            QScrollBar* coloursBar =
+                panel ? panel->findChild<QScrollBar*>(QStringLiteral("appearanceScrollBar"))
+                      : nullptr;
+            check(panel != nullptr && panel->isVisible(),
+                  "scrollbars: the Settings drawer is open on Colours");
+            readBar(panel, coloursBar, QStringLiteral("the Settings colour list"));
+            printWindowCapture(&bw, outDir + QStringLiteral("/scrollbar-settings.png"));
+            bw.close();
+        }
+    }
+
+    // --- the menu pill and the window buttons never meet (F21) ----------------
+    //
+    // The window buttons hold the top-right corner and the menu pill leads the
+    // left column, on the same row - and nothing stopped a window being made
+    // narrow enough for one to stand on the other: at 540 px the buttons
+    // covered "View" and Help could not be reached by mouse. The fix is the
+    // honest one, a minimum width DERIVED from the two widgets' own sizes, so
+    // this pins the derivation, the floor the window then cannot go under, and
+    // - at that floor - every menu title still under the cursor.
+    if (blockEnabled("the-menu-pill-and-the-window-buttons-never-meet")) {
+        // Every top-level menu title, asked of the menu bar's OWN geometry and
+        // hit-tested through the window: a title pushed into the overflow
+        // chevron has an empty rectangle, and one under the buttons hits them.
+        auto unreachableMenus = [](QWidget* window, QMenuBar* menus) {
+            QStringList missing;
+            int asked = 0;
+            if (!window || !menus) return QStringList{QStringLiteral("no menu bar")};
+            for (QAction* menu : menus->actions()) {
+                if (!menu->isVisible() || menu->isSeparator()) continue;
+                ++asked;
+                const QString name = menu->text().remove(QLatin1Char('&'));
+                const QRect title = menus->actionGeometry(menu);
+                if (title.isEmpty()) { missing << name + QStringLiteral(" (folded away)"); continue; }
+                const QPoint centre = menus->mapTo(window, title.center());
+                QWidget* hit = window->childAt(centre);
+                if (hit != menus) missing << name;
+            }
+            if (asked == 0) missing << QStringLiteral("no titles asked");
+            return missing;
+        };
+        auto rectIn = [](QWidget* w, QWidget* space) {
+            return w ? QRect(w->mapTo(space, QPoint(0, 0)), w->size()) : QRect();
+        };
+        auto buttonsOf = [](QWidget* root) -> QWidget* {
+            for (QWidget* w : root->findChildren<QWidget*>())
+                if (w->inherits("WindowButtons") && w->isVisible()) return w;
+            return nullptr;
+        };
+
+        // THE EDITOR.
+        {
+            RequiredTempDir narrowDir;
+            MainWindow nw(nullptr, /*persistProgress=*/false, narrowDir.path());
+            nw.setAttribute(Qt::WA_ShowWithoutActivating);
+            nw.resize(1100, 800);
+            nw.show();
+            waitFully(300);
+            nw.view()->setAnimationsEnabled(false);
+            enterFreshFurniture(nw);
+            OcctViewWidget* v = nw.view();
+            AppBar* pill = nw.appBar();
+            QWidget* buttons = buttonsOf(v);
+            check(pill != nullptr && buttons != nullptr,
+                  "narrow: the editor has its menu pill and its window buttons");
+            if (pill && buttons) {
+                const int derived = ViewportOverlay::minimumWidthBeside(
+                    pill, ViewportOverlay::Anchor::LeftEdge, buttons);
+                check(v->minimumWidth() == derived && derived > 540,
+                      QStringLiteral("narrow: the viewport's minimum width IS the pill, the "
+                                     "buttons and their margins (%1, derived %2)")
+                          .arg(v->minimumWidth()).arg(derived));
+
+                nw.resize(320, 800);
+                waitFully(250);
+                settle(200);
+                check(v->width() == v->minimumWidth(),
+                      QStringLiteral("narrow: asked for 320, the window stops at that floor "
+                                     "(viewport %1, floor %2)")
+                          .arg(v->width()).arg(v->minimumWidth()));
+                const QRect pillRect = rectIn(pill, &nw);
+                const QRect buttonsRect = rectIn(buttons, &nw);
+                check(!pillRect.intersects(buttonsRect),
+                      QStringLiteral("narrow: at the floor the pill and the window buttons do not "
+                                     "meet, in the window's coordinates (pill right %1, buttons "
+                                     "left %2)")
+                          .arg(pillRect.right()).arg(buttonsRect.left()));
+                const QStringList lost = unreachableMenus(&nw, pill->menus());
+                check(lost.isEmpty(),
+                      QStringLiteral("narrow: and every menu title - Help too - is under the "
+                                     "cursor there (%1)")
+                          .arg(lost.isEmpty() ? QStringLiteral("all reachable")
+                                              : lost.join(QStringLiteral(", "))));
+                printWindowCapture(&nw, outDir + QStringLiteral("/narrow-editor.png"));
+
+                // A LARGER TYPE SCALE widens the pill, and the floor has to
+                // follow it rather than stay where it was measured once.
+                const Theme::Spec saved = Theme::spec();
+                Theme::Spec bigger = saved;
+                bigger.basePt = Theme::kMaxBasePt;
+                const int floorBefore = v->minimumWidth();
+                Theme::setSpec(bigger);
+                settle(200);
+                nw.resize(320, 800);
+                waitFully(250);
+                settle(200);
+                const QStringList lostBig = unreachableMenus(&nw, pill->menus());
+                check(v->minimumWidth() > floorBefore &&
+                          !rectIn(pill, &nw).intersects(rectIn(buttons, &nw)) && lostBig.isEmpty(),
+                      QStringLiteral("narrow: at the largest text size the floor grows with the "
+                                     "pill (%1 -> %2) and still nothing meets (%3)")
+                          .arg(floorBefore).arg(v->minimumWidth())
+                          .arg(lostBig.isEmpty() ? QStringLiteral("all reachable")
+                                                 : lostBig.join(QStringLiteral(", "))));
+                Theme::setSpec(saved);
+                settle(200);
+            }
+            nw.close();
+        }
+
+        // THE SCENE WINDOW - the same pill and buttons, and under them the
+        // Pieces card beside the Move/Rotate/Render cluster.
+        {
+            RequiredTempDir sceneDir;
+            FurnitureStore sceneStore(sceneDir.path());
+            const QString sceneId = sceneStore.createScene(QStringLiteral("Narrow room"));
+            SceneWindow sw(&sceneStore);
+            sw.setAttribute(Qt::WA_ShowWithoutActivating);
+            sw.resize(1100, 800);
+            sw.show();
+            settle(300);
+            check(sw.openScene(sceneId), "narrow: a scene opens");
+            settle(200);
+            OcctViewWidget* sv = sw.view();
+            AppBar* scenePill = sw.findChild<AppBar*>();
+            QWidget* sceneButtons = sv ? buttonsOf(sv) : nullptr;
+            ScenePiecesPanel* pieces = sw.piecesPanel();
+            ToolCluster* arrange = sw.arrangeTools();
+            if (sv) {
+                sw.resize(320, 800);
+                waitFully(250);
+                settle(200);
+                check(sv->width() == sv->minimumWidth() && sv->minimumWidth() > 400,
+                      QStringLiteral("narrow: the scene window stops at a derived floor too "
+                                     "(viewport %1, floor %2)")
+                          .arg(sv->width()).arg(sv->minimumWidth()));
+                check(scenePill && sceneButtons &&
+                          !rectIn(scenePill, &sw).intersects(rectIn(sceneButtons, &sw)) &&
+                          pieces && arrange &&
+                          !rectIn(pieces, &sw).intersects(rectIn(arrange, &sw)),
+                      "narrow: where the scene's pill and buttons do not meet, nor its Pieces "
+                      "card and its tool cluster");
+                const QStringList lost =
+                    unreachableMenus(&sw, scenePill ? scenePill->menus() : nullptr);
+                check(lost.isEmpty(),
+                      QStringLiteral("narrow: and every scene menu title is under the cursor "
+                                     "(%1)")
+                          .arg(lost.isEmpty() ? QStringLiteral("all reachable")
+                                              : lost.join(QStringLiteral(", "))));
+                printWindowCapture(&sw, outDir + QStringLiteral("/narrow-scene.png"));
+            }
+            sw.close();
+        }
+
+        // THE HUB lays its title strip out with a real layout rather than
+        // floating cards, and sets a minimum width of its own - pinned here so
+        // a later change to either cannot reopen the collision there.
+        {
+            RequiredTempDir hubDir;
+            MainWindow hubOwner(nullptr, /*persistProgress=*/false, hubDir.path());
+            hubOwner.setAttribute(Qt::WA_ShowWithoutActivating);
+            SelectorWindow* hub = wireSelector(hubOwner);
+            if (hub) {
+                hub->resize(320, 600);
+                waitFully(250);
+                settle(200);
+                QWidget* hubButtons = buttonsOf(hub);
+                QStringList overlapping;
+                if (hubButtons && hubButtons->parentWidget()) {
+                    const QRect b = rectIn(hubButtons, hub);
+                    for (QWidget* sibling :
+                         hubButtons->parentWidget()->findChildren<QWidget*>(
+                             QString(), Qt::FindDirectChildrenOnly)) {
+                        if (sibling == hubButtons || !sibling->isVisible()) continue;
+                        if (rectIn(sibling, hub).intersects(b))
+                            overlapping << QString::fromLatin1(sibling->metaObject()->className());
+                    }
+                }
+                check(hubButtons != nullptr && hub->width() == hub->minimumWidth() &&
+                          overlapping.isEmpty(),
+                      QStringLiteral("narrow: the hub stops at its own floor (%1) with nothing in "
+                                     "its title strip under the window buttons (%2)")
+                          .arg(hub->minimumWidth())
+                          .arg(overlapping.isEmpty() ? QStringLiteral("clear")
+                                                     : overlapping.join(QStringLiteral(", "))));
+                printWindowCapture(hub, outDir + QStringLiteral("/narrow-hub.png"));
+            }
+            hubOwner.close();
+        }
+    }
+
+    // --- the drawer's row icons say what they do (F14) -------------------------
+    //
+    // The eye wore the Body glyph, a folder's eye wore the New-folder glyph,
+    // and the grain mark was three bare lines lying down - the Items glyph's
+    // own three lines, a hamburger menu. An eye pair now, open and struck
+    // through, on every row in both drawers; and the grain mark is a board
+    // with its grain drawn in it. Pinned as PIXELS: two glyphs that are
+    // supposed to differ have to render differently, and a button whose state
+    // flipped has to paint differently.
+    if (blockEnabled("the-drawer-rows-say-what-their-buttons-do")) {
+        auto glyphImage = [](const QIcon& icon, QIcon::State state = QIcon::Off) {
+            return icon.pixmap(QSize(24, 24), 1.0, QIcon::Normal, state).toImage();
+        };
+        // The OLD grain glyph, drawn here exactly as IconSet drew it, so the
+        // new one is compared with what it replaced and not only with a
+        // neighbour.
+        QImage oldGrain(24, 24, QImage::Format_ARGB32_Premultiplied);
+        oldGrain.fill(Qt::transparent);
+        {
+            QPainter p(&oldGrain);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            QPen pen(Theme::text());
+            pen.setWidthF(1.8);
+            pen.setCapStyle(Qt::RoundCap);
+            p.setPen(pen);
+            p.drawLine(5, 8, 19, 8);
+            p.drawLine(5, 12, 19, 12);
+            p.drawLine(5, 16, 19, 16);
+        }
+        const QImage eye = glyphImage(IconSet::icon(IconSet::Glyph::Eye));
+        const QImage eyeHidden = glyphImage(IconSet::icon(IconSet::Glyph::EyeHidden));
+        const QImage grainAlong = glyphImage(IconSet::icon(IconSet::Glyph::GrainAlong));
+        const QImage grainAcross = glyphImage(IconSet::icon(IconSet::Glyph::GrainAcross));
+        const QImage itemsGlyph = glyphImage(IconSet::icon(IconSet::Glyph::Items));
+        const QImage bodyGlyph = glyphImage(IconSet::icon(IconSet::Glyph::Body));
+        const QImage folderGlyph = glyphImage(IconSet::icon(IconSet::Glyph::Folder));
+        check(!eye.isNull() && eye != eyeHidden && eye != bodyGlyph && eyeHidden != bodyGlyph,
+              "row icons: the open eye and the struck-through eye are two different pictures, "
+              "and neither is the Body glyph the rows used to wear");
+        // Saved large, so the drawing itself can be looked at rather than
+        // only compared.
+        for (const auto& [glyph, name] :
+             {std::make_pair(IconSet::Glyph::Eye, "eye"),
+              std::make_pair(IconSet::Glyph::EyeHidden, "eye-hidden"),
+              std::make_pair(IconSet::Glyph::GrainAlong, "grain-along"),
+              std::make_pair(IconSet::Glyph::GrainAcross, "grain-across")}) {
+            IconSet::icon(glyph).pixmap(QSize(48, 48), 1.0).save(
+                outDir + QStringLiteral("/glyph-%1.png").arg(QString::fromLatin1(name)));
+        }
+        check(grainAlong != oldGrain.convertToFormat(grainAlong.format()) &&
+                  grainAlong != itemsGlyph && grainAcross != itemsGlyph &&
+                  grainAlong != grainAcross,
+              "row icons: the grain mark is no longer three lines lying down - not the old "
+              "glyph, not the Items glyph - and its two directions still differ");
+
+        RequiredTempDir rowDir;
+        MainWindow rw(nullptr, /*persistProgress=*/false, rowDir.path());
+        rw.setAttribute(Qt::WA_ShowWithoutActivating);
+        rw.resize(1100, 800);
+        rw.show();
+        waitFully(300);
+        rw.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(rw);
+        check(buildBody(rw, 0.30, 0.30, 0.50, 0.50, 30.0), "row icons: a body to list");
+        if (QAction* items = action(rw, QStringLiteral("Items")))
+            if (!items->isChecked()) items->trigger();
+        settle(250);
+        ItemsPanel* drawer = rw.itemsPanel();
+        QPushButton* bodyEye = firstVisibleRowToggle(drawer);
+        check(bodyEye != nullptr && bodyEye->isCheckable() && bodyEye->isChecked(),
+              "row icons: firstVisibleRowToggle() still finds the body's eye, checked");
+        if (bodyEye) {
+            check(glyphImage(bodyEye->icon(), QIcon::On) == eye &&
+                      glyphImage(bodyEye->icon(), QIcon::Off) == eyeHidden,
+                  "row icons: the body row's eye is the open eye while shown and the struck-"
+                  "through one while hidden");
+            const QImage shownPaint = bodyEye->grab().toImage();
+            clickAt(bodyEye, QPointF(bodyEye->width() / 2.0, bodyEye->height() / 2.0));
+            settle(200);
+            // The row may have been rebuilt by the click; ask again.
+            QPushButton* hiddenEye = nullptr;
+            for (QPushButton* b : drawer->findChildren<QPushButton*>())
+                if (b->parentWidget() != drawer && b->isCheckable() && b->isVisible())
+                    hiddenEye = b;
+            check(hiddenEye && !hiddenEye->isChecked() &&
+                      hiddenEye->grab().toImage() != shownPaint,
+                  "row icons: hiding the body PAINTS a different eye on its button");
+            if (hiddenEye) {
+                clickAt(hiddenEye, QPointF(hiddenEye->width() / 2.0, hiddenEye->height() / 2.0));
+                settle(200);
+            }
+        }
+        // The grain mark: the row's one NON-checkable button.
+        QPushButton* grain = nullptr;
+        for (QPushButton* b : drawer ? drawer->findChildren<QPushButton*>() : QList<QPushButton*>())
+            if (b->parentWidget() != drawer && !b->isCheckable() && b->isVisible()) grain = b;
+        check(grain && glyphImage(grain->icon()) == grainAlong && grainAlong != itemsGlyph,
+              "row icons: the body row's grain mark is the board, grain the long way");
+
+        // A FOLDER's eye, made through the title row's own + with the body
+        // selected - the same eye pair, never the New-folder glyph.
+        if (!rw.document().solids().empty())
+            rw.view()->setSelectedSolids({rw.document().solids().back().id});
+        settle(150);
+        QPushButton* plus = nullptr;
+        for (QPushButton* b : drawer ? drawer->findChildren<QPushButton*>() : QList<QPushButton*>())
+            if (b->parentWidget() == drawer) plus = b;
+        if (plus) clickAt(plus, QPointF(plus->width() / 2.0, plus->height() / 2.0));
+        settle(250);
+        QPushButton* folderEye = nullptr;
+        for (QWidget* row : drawer ? drawer->findChildren<QWidget*>() : QList<QWidget*>()) {
+            if (!row->property("groupId").isValid() || !row->isVisible()) continue;
+            for (QPushButton* b : row->findChildren<QPushButton*>())
+                if (b->isCheckable()) folderEye = b;
+        }
+        check(folderEye && glyphImage(folderEye->icon(), QIcon::On) == eye &&
+                  glyphImage(folderEye->icon(), QIcon::On) != folderGlyph,
+              "row icons: a folder's eye is the same open eye, not the New-folder glyph");
+        printWindowCapture(&rw, outDir + QStringLiteral("/drawer-row-icons.png"));
+        rw.close();
+
+        // AND THE SCENE'S PIECES CARD, which carried the Body glyph too.
+        {
+            RequiredTempDir pieceDir;
+            FurnitureStore pieceStore(pieceDir.path());
+            const QString furnitureId = pieceStore.createFurniture(QStringLiteral("Stool"));
+            DocumentModel stoolDoc;
+            stoolDoc.addSolid(BRepPrimAPI_MakeBox(300.0, 300.0, 450.0).Shape());
+            pieceStore.saveFurniture(furnitureId, stoolDoc, QImage());
+            const QString sceneId = pieceStore.createScene(QStringLiteral("Hall"));
+            SceneWindow sw(&pieceStore);
+            sw.setAttribute(Qt::WA_ShowWithoutActivating);
+            sw.resize(1100, 800);
+            sw.show();
+            settle(300);
+            sw.openScene(sceneId);
+            settle(200);
+            check(sw.addPiece(furnitureId), "row icons: a piece in the scene to list");
+            settle(250);
+            QPushButton* pieceEye = nullptr;
+            if (ScenePiecesPanel* pieces = sw.piecesPanel())
+                for (QPushButton* b : pieces->findChildren<QPushButton*>())
+                    if (b->isCheckable() && b->isVisible()) pieceEye = b;
+            check(pieceEye && glyphImage(pieceEye->icon(), QIcon::On) == eye &&
+                      glyphImage(pieceEye->icon(), QIcon::Off) == eyeHidden,
+                  "row icons: the scene's piece rows wear the same eye pair");
+            printWindowCapture(&sw, outDir + QStringLiteral("/scene-row-icons.png"));
+            sw.close();
+        }
+    }
+
+    // --- chips take no keyboard focus (F17, the user's pick: NoFocus) ----------
+    //
+    // Focus rings are gone - the user removed them, twice - so a chip that
+    // still TOOK focus held it invisibly, and a click on one took focus out of
+    // the field being typed in. Every chip-like control is Qt::NoFocus now;
+    // fields keep theirs. Swept over every visible button in the editor (with
+    // the drawer and Settings open), the hub and the scene window, and then
+    // the behaviour that matters: a click on a chip leaves a field's focus
+    // where it was.
+    if (blockEnabled("chips-take-no-keyboard-focus")) {
+        auto focusTakers = [](QWidget* root) {
+            QStringList takers;
+            int swept = 0;
+            for (QAbstractButton* b : root->findChildren<QAbstractButton*>()) {
+                if (!b->isVisible()) continue;
+                ++swept;
+                if (b->focusPolicy() != Qt::NoFocus)
+                    takers << QStringLiteral("%1 \"%2\"")
+                                  .arg(QString::fromLatin1(b->metaObject()->className()),
+                                       b->text().isEmpty() ? b->toolTip().section('\n', 0, 0)
+                                                           : b->text());
+            }
+            return std::make_pair(swept, takers);
+        };
+
+        RequiredTempDir focusDir;
+        MainWindow fw(nullptr, /*persistProgress=*/false, focusDir.path());
+        fw.setAttribute(Qt::WA_ShowWithoutActivating);
+        fw.resize(1200, 860);
+        fw.show();
+        waitFully(300);
+        fw.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(fw);
+        check(buildBody(fw, 0.30, 0.30, 0.50, 0.50, 30.0), "focus: a body, so the drawer has rows");
+        if (QAction* items = action(fw, QStringLiteral("Items")))
+            if (!items->isChecked()) items->trigger();
+        if (QAction* settings = action(fw, QStringLiteral("Settings...")))
+            if (!settings->isChecked()) settings->trigger();
+        settle(250);
+        AppearancePanel* panel = fw.findChild<AppearancePanel*>();
+        {
+            const auto [swept, takers] = focusTakers(&fw);
+            check(swept >= 20 && takers.isEmpty(),
+                  QStringLiteral("focus: every visible chip and button in the editor is NoFocus "
+                                 "(%1 swept; takers: %2)")
+                      .arg(swept)
+                      .arg(takers.isEmpty() ? QStringLiteral("none")
+                                            : takers.join(QStringLiteral(", "))));
+        }
+        // Every tab's chips, not just the page that happens to be open.
+        if (panel) {
+            QStringList tabTakers;
+            for (int i = 0; i < AppearancePanel::kTabCount; ++i) {
+                panel->setCurrentTab(static_cast<AppearancePanel::Tab>(i));
+                settle(60);
+                tabTakers << focusTakers(panel).second;
+            }
+            check(tabTakers.isEmpty(),
+                  QStringLiteral("focus: and so is every chip on every Settings tab (%1)")
+                      .arg(tabTakers.isEmpty() ? QStringLiteral("none take it")
+                                               : tabTakers.join(QStringLiteral(", "))));
+        }
+
+        // THE BEHAVIOUR: a field holds focus, a chip is clicked, the field
+        // still holds it. Asked of the window's own focusWidget() - these
+        // windows are never OS-active, so hasFocus() would answer for the
+        // wrong thing (see sendKeyTo()).
+        if (panel) {
+            panel->setCurrentTab(AppearancePanel::Tab::TextLines);
+            settle(80);
+            QSpinBox* size = panel->sizeControl();
+            if (size) size->setFocus(Qt::OtherFocusReason);
+            settle(80);
+            QWidget* typingIn = fw.focusWidget();
+            check(size && typingIn && (typingIn == size || size->isAncestorOf(typingIn)),
+                  "focus: the Text size field holds focus to start with");
+            QAbstractButton* tab = panel->tabButton(AppearancePanel::Tab::TextLines);
+            if (tab) clickAt(tab, QPointF(tab->width() / 2.0, tab->height() / 2.0));
+            ToolChip* fitAll = nullptr;
+            if (ToolCluster* views = fw.viewControls())
+                for (ToolChip* chip : views->findChildren<ToolChip*>())
+                    if (chip->action() && chip->action()->text().remove('&') ==
+                                              QStringLiteral("Fit All"))
+                        fitAll = chip;
+            check(fitAll != nullptr, "focus: the view controls' Fit All chip is there to click");
+            if (fitAll) clickAt(fitAll, QPointF(fitAll->width() / 2.0, fitAll->height() / 2.0));
+            settle(120);
+            // What this one does and does not prove, stated rather than left
+            // to be rediscovered: Qt moves focus on a click only for a
+            // SPONTANEOUS press (giveFocusAccordingToFocusPolicy), and this
+            // suite's presses are sendEvent()s by law - so it pins that no
+            // chip's own press handler takes focus. The policy that decides
+            // what a REAL click does is the sweep above, and the Tab walk
+            // below is the behaviour the policy governs that an in-process
+            // event genuinely drives.
+            check(typingIn && fw.focusWidget() == typingIn,
+                  QStringLiteral("focus: clicking a Settings tab and a view chip leaves focus in "
+                                 "the field (now %1)")
+                      .arg(fw.focusWidget() ? QString::fromLatin1(
+                                                  fw.focusWidget()->metaObject()->className())
+                                            : QStringLiteral("nothing")));
+
+            // TAB NEVER LANDS ON A CHIP. From the field, forty presses of Tab
+            // walk the window's focus chain the way a keyboard user does; a
+            // chip that took focus would be a stop on that walk, holding
+            // focus with nothing on screen to show it. Fields and the
+            // viewport may be stops - they show their focus, or own the keys.
+            QStringList chipStops;
+            QSet<QWidget*> stops;
+            for (int i = 0; i < 40; ++i) {
+                QWidget* at = fw.focusWidget();
+                if (!at) break;
+                QKeyEvent tabKey(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier);
+                QCoreApplication::sendEvent(at, &tabKey);
+                QWidget* next = fw.focusWidget();
+                if (!next || next == at) break;
+                stops.insert(next);
+                if (qobject_cast<QAbstractButton*>(next))
+                    chipStops << QStringLiteral("%1 \"%2\"")
+                                     .arg(QString::fromLatin1(next->metaObject()->className()),
+                                          static_cast<QAbstractButton*>(next)->text());
+            }
+            check(stops.size() >= 2 && chipStops.isEmpty(),
+                  QStringLiteral("focus: Tab walks %1 stops from the field and none of them is a "
+                                 "chip or a button (%2)")
+                      .arg(stops.size())
+                      .arg(chipStops.isEmpty() ? QStringLiteral("none")
+                                               : chipStops.mid(0, 6).join(QStringLiteral(", "))));
+        }
+
+        // THE HUB: its search field keeps focus through a click on a sort chip.
+        if (SelectorWindow* hub = wireSelector(fw)) {
+            const auto [swept, takers] = focusTakers(hub);
+            check(swept >= 3 && takers.isEmpty(),
+                  QStringLiteral("focus: every visible chip and button in the hub is NoFocus "
+                                 "(%1 swept; takers: %2)")
+                      .arg(swept)
+                      .arg(takers.isEmpty() ? QStringLiteral("none")
+                                            : takers.join(QStringLiteral(", "))));
+            QLineEdit* search = hub->searchField();
+            if (search) search->setFocus(Qt::OtherFocusReason);
+            settle(80);
+            QPushButton* sortChip = nullptr;
+            for (QPushButton* b : hub->findChildren<QPushButton*>())
+                if (b->isVisible() && b->isCheckable() && !b->isChecked()) sortChip = b;
+            if (sortChip)
+                clickAt(sortChip, QPointF(sortChip->width() / 2.0, sortChip->height() / 2.0));
+            settle(120);
+            check(search && sortChip && hub->focusWidget() == search,
+                  "focus: clicking a hub sort chip leaves focus in the search field");
+            hub->close();
+        }
+        fw.close();
+
+        // THE SCENE WINDOW, with a piece so its rows have buttons.
+        {
+            RequiredTempDir sceneDir;
+            FurnitureStore sceneStore(sceneDir.path());
+            const QString furnitureId = sceneStore.createFurniture(QStringLiteral("Bench"));
+            DocumentModel benchDoc;
+            benchDoc.addSolid(BRepPrimAPI_MakeBox(900.0, 300.0, 450.0).Shape());
+            sceneStore.saveFurniture(furnitureId, benchDoc, QImage());
+            const QString sceneId = sceneStore.createScene(QStringLiteral("Porch"));
+            SceneWindow sw(&sceneStore);
+            sw.setAttribute(Qt::WA_ShowWithoutActivating);
+            sw.resize(1100, 800);
+            sw.show();
+            settle(300);
+            sw.openScene(sceneId);
+            settle(200);
+            sw.addPiece(furnitureId);
+            settle(250);
+            const auto [swept, takers] = focusTakers(&sw);
+            check(swept >= 5 && takers.isEmpty(),
+                  QStringLiteral("focus: every visible chip and button in the scene window is "
+                                 "NoFocus (%1 swept; takers: %2)")
+                      .arg(swept)
+                      .arg(takers.isEmpty() ? QStringLiteral("none")
+                                            : takers.join(QStringLiteral(", "))));
+            sw.close();
+        }
+    }
+
+    // --- controls carry accessible names (F26, "the cheap version") ------------
+    //
+    // An icon-only chip paints no word, and a toast, a hint and the status line
+    // paint theirs - so assistive technology met nameless buttons and silent
+    // messages. Each chip is named from its action and described by its
+    // tooltip; the painted surfaces carry their text; a toast is ANNOUNCED.
+    // No screen reader is installed, so the announcement is pinned at Qt's own
+    // seam: QAccessible's update handler sees every event the app raises.
+    if (blockEnabled("controls-carry-accessible-names")) {
+        RequiredTempDir nameDir;
+        MainWindow aw(nullptr, /*persistProgress=*/false, nameDir.path());
+        aw.setAttribute(Qt::WA_ShowWithoutActivating);
+        aw.resize(1100, 800);
+        aw.show();
+        waitFully(300);
+        aw.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(aw);
+
+        auto unnamedChips = [](QWidget* root, int& asked) {
+            QStringList wrong;
+            for (ToolChip* chip : root->findChildren<ToolChip*>()) {
+                if (!chip->isVisible() || !chip->action()) continue;
+                ++asked;
+                const QString want = chip->action()->text().remove(QLatin1Char('&'));
+                if (want.isEmpty() || chip->accessibleName() != want ||
+                    chip->accessibleDescription() != chip->toolTip())
+                    wrong << QStringLiteral("\"%1\" named \"%2\"").arg(want, chip->accessibleName());
+            }
+            return wrong;
+        };
+        int askedEditor = 0;
+        const QStringList wrongEditor = unnamedChips(&aw, askedEditor);
+        check(askedEditor >= 10 && wrongEditor.isEmpty(),
+              QStringLiteral("names: every visible chip in the editor is named for its action "
+                             "and described by its tooltip (%1 chips; %2)")
+                  .arg(askedEditor)
+                  .arg(wrongEditor.isEmpty() ? QStringLiteral("all named")
+                                             : wrongEditor.join(QStringLiteral(", "))));
+
+        // It FOLLOWS the action: a rename reaches the chip's name.
+        if (QAction* fit = action(aw, QStringLiteral("Fit All"))) {
+            ToolChip* fitChip = nullptr;
+            for (ToolChip* chip : aw.findChildren<ToolChip*>())
+                if (chip->action() == fit) fitChip = chip;
+            const QString original = fit->text();
+            fit->setText(QStringLiteral("Fit &Everything"));
+            settle(40);
+            check(fitChip && fitChip->accessibleName() == QStringLiteral("Fit Everything"),
+                  QStringLiteral("names: and follows its action's text, mnemonic stripped "
+                                 "(\"%1\")")
+                      .arg(fitChip ? fitChip->accessibleName() : QString()));
+            fit->setText(original);
+            settle(40);
+        }
+
+        // A TOAST is its message, and is announced.
+        g_accessibleEvents.clear();
+        const QAccessible::UpdateHandler previous =
+            QAccessible::installUpdateHandler(&recordAccessibleEvent);
+        ToastHost* toasts = aw.findChild<ToastHost*>();
+        Toast* toast = aw.findChild<Toast*>();
+        const QString message = QStringLiteral("The two pieces don't meet — move them so they do");
+        if (toasts) toasts->show(message, Toast::Kind::Failure, false);
+        settle(120);
+        int alerts = 0;
+        for (const auto& event : g_accessibleEvents)
+            if (event.first == toast && event.second == QAccessible::Alert) ++alerts;
+        check(toast && toast->accessibleName() == message &&
+                  toast->accessibleDescription() == QStringLiteral("Failure"),
+              QStringLiteral("names: a toast's accessible name IS its message (\"%1\")")
+                  .arg(toast ? toast->accessibleName() : QString()));
+        check(alerts >= 1,
+              QStringLiteral("names: and showing it raises an Alert for it (%1 alerts among %2 "
+                             "events)")
+                  .arg(alerts).arg(static_cast<int>(g_accessibleEvents.size())));
+        check(toast && toast->undoControl() &&
+                  toast->undoControl()->accessibleName() == toast->paintedTexts().value(0),
+              "names: and its painted Undo pill is named Undo");
+
+        // THE STATUS LINE carries the whole sentence, never the elided cut.
+        StatusMessageLine* line = aw.statusMessageLine();
+        const QString sentence = QStringLiteral("Nothing selected — click a body, a face or an edge");
+        aw.statusBar()->showMessage(sentence);
+        settle(60);
+        check(line && line->accessibleName() == sentence,
+              QStringLiteral("names: the status line's accessible name is its whole sentence "
+                             "(\"%1\")")
+                  .arg(line ? line->accessibleName() : QString()));
+
+        // A HINT is its text, and is announced as it arrives.
+        g_accessibleEvents.clear();
+        HintBalloon* hint = aw.findChild<HintBalloon*>();
+        check(buildBody(aw, 0.30, 0.30, 0.50, 0.50, 10.0), "names: a body, so a hint has a reason");
+        settle(200);
+        int hintAlerts = 0;
+        for (const auto& event : g_accessibleEvents)
+            if (event.first == hint && event.second == QAccessible::Alert) ++hintAlerts;
+        check(hint && hint->isVisible() && !hint->currentHint().isEmpty() &&
+                  hint->accessibleName() == hint->currentHint() && hintAlerts >= 1,
+              QStringLiteral("names: a hint's accessible name is its text, announced on arrival "
+                             "(%1 alerts, \"%2\")")
+                  .arg(hintAlerts).arg(hint ? hint->accessibleName() : QString()));
+        QAccessible::installUpdateHandler(previous);
+        aw.close();
+
+        // The scene window's chips, which are built the same way.
+        {
+            RequiredTempDir sceneDir;
+            FurnitureStore sceneStore(sceneDir.path());
+            const QString sceneId = sceneStore.createScene(QStringLiteral("Named room"));
+            SceneWindow sw(&sceneStore);
+            sw.setAttribute(Qt::WA_ShowWithoutActivating);
+            sw.resize(1100, 800);
+            sw.show();
+            settle(300);
+            sw.openScene(sceneId);
+            settle(200);
+            int askedScene = 0;
+            const QStringList wrongScene = unnamedChips(&sw, askedScene);
+            check(askedScene >= 4 && wrongScene.isEmpty(),
+                  QStringLiteral("names: and every visible chip in the scene window (%1 chips; %2)")
+                      .arg(askedScene)
+                      .arg(wrongScene.isEmpty() ? QStringLiteral("all named")
+                                                : wrongScene.join(QStringLiteral(", "))));
+            sw.close();
+        }
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

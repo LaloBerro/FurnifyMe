@@ -50,6 +50,7 @@ public:
     {
         setText(QCoreApplication::translate("ShapeFlyout", spec.name));
         setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::NoFocus);   // no invisible focus - see ToolChip
         setAttribute(Qt::WA_NoSystemBackground);
         Theme::makeSurfaceTransparent(this);
         setFixedSize(Theme::wholeDevicePixels(QSize(kTileWidth, kTileHeight)));
