@@ -180,8 +180,13 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
 
     // refresh() FIRST and applyTheme() second, and the order is load-bearing
     // both ways: refresh() builds the rows applyTheme() then restyles, and
-    // applyTheme() walks myRowList, which refresh() is what fills.
+    // applyTheme() walks myRowList, which refresh() is what fills. FORCED,
+    // although a freshly constructed child is still hidden: the document is
+    // empty at this point, so the build is the empty state alone, and the
+    // card then measures right before anything has shown it.
+    myForceBuild = true;
     refresh();
+    myForceBuild = false;
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &ItemsPanel::applyTheme);
 }
@@ -207,13 +212,93 @@ int ItemsPanel::cardWidth()
     return std::max(kBaseWidth, kBaseWidth + now - atShippedScale);
 }
 
+qint64 ItemsPanel::rowKey(RowKind kind, int id)
+{
+    return (static_cast<qint64>(kind) << 32) | static_cast<quint32>(id);
+}
+
+qint64 ItemsPanel::rowKey(const Row& row)
+{
+    return rowKey(row.isGroup ? RowKind::Folder : (row.isOutline ? RowKind::Outline : RowKind::Body),
+                  row.id);
+}
+
+bool ItemsPanel::takeReusable(RowKind kind, int id, Row& out)
+{
+    if (!myReusable) return false;
+    const auto at = myReusable->find(rowKey(kind, id));
+    if (at == myReusable->end()) return false;
+    // Taken OUT of the map: what is left in it afterwards is exactly the rows
+    // whose items are gone, which is what refresh() then destroys.
+    out = at->second;
+    myReusable->erase(at);
+    return true;
+}
+
+QString ItemsPanel::nameStyle(bool onScreen)
+{
+    return QStringLiteral("background: transparent; color: %1;")
+        .arg((onScreen ? Theme::text() : Theme::textMuted()).name());
+}
+
+void ItemsPanel::setGrainLook(QPushButton* grain, bool across)
+{
+    grain->setIcon(IconSet::icon(across ? IconSet::Glyph::GrainAcross : IconSet::Glyph::GrainAlong));
+    grain->setToolTip(across ? tr("The grain runs across this body — click to turn it back")
+                             : tr("The grain runs along this body — click to turn it"));
+}
+
+void ItemsPanel::flushPendingRefresh()
+{
+    if (!myRowsDirty) return;
+    myForceBuild = true;
+    refresh();
+    myForceBuild = false;
+}
+
+void ItemsPanel::ensureFresh() const
+{
+    // The suite reads rows whether or not the drawer is open, and a closed
+    // drawer defers its rebuild (refresh()); a reader must never see a list
+    // older than the document it is asking about.
+    if (myRowsDirty) const_cast<ItemsPanel*>(this)->flushPendingRefresh();
+}
+
+void ItemsPanel::setVisible(bool visible)
+{
+    // Brought up to date BEFORE it is shown, so the overlay - which places
+    // the card from sizeHint() right after the Items action shows it - never
+    // measures a stale list.
+    if (visible) flushPendingRefresh();
+    QWidget::setVisible(visible);
+}
+
+void ItemsPanel::showEvent(QShowEvent* event)
+{
+    // The other way a closed-then-reopened drawer comes back: a parent shown
+    // (showChildren()), which does not go through setVisible().
+    flushPendingRefresh();
+    QWidget::showEvent(event);
+}
+
 const ItemsPanel::Row* ItemsPanel::visibleRow(int index) const
 {
+    ensureFresh();
     if (index < 0 || index >= static_cast<int>(myVisible.size())) return nullptr;
     return &myRowList[myVisible[static_cast<std::size_t>(index)]];
 }
 
-int ItemsPanel::rowCount() const { return static_cast<int>(myVisible.size()); }
+int ItemsPanel::rowCount() const
+{
+    ensureFresh();
+    return static_cast<int>(myVisible.size());
+}
+
+QPushButton* ItemsPanel::twistyAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row ? row->twisty : nullptr;
+}
 
 QString ItemsPanel::rowTextAt(int index) const
 {
@@ -319,10 +404,12 @@ void ItemsPanel::applyTheme()
                                    .arg(Theme::titleFont().pointSizeF()));
     }
 
-    for (const Row& row : myRowList) {
-        if (row.name)
-            row.name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
-                                        .arg(Theme::text().name()));
+    for (Row& row : myRowList) {
+        // Muted while the item is off screen, as addItemRow() built it - a
+        // reused row keeps the colour it was given, so a theme edit that
+        // painted every name in text() would leave an isolated-away body
+        // reading as on screen until its own state next changed.
+        if (row.name) row.name->setStyleSheet(nameStyle(row.isGroup || row.onScreen));
         // Rasterised out of text()/textDisabled() when it was built, so it is
         // pixels rather than a description - the same cached-appearance value
         // ToolChip::applyTheme() has to rebuild. Every eye is the same pair
@@ -435,6 +522,19 @@ void ItemsPanel::paintEvent(QPaintEvent* /*event*/)
 
 void ItemsPanel::refresh()
 {
+    // CLOSED DRAWER, NO WORK (review ruling R5a). appStateChanged fires on
+    // every edit whether or not the drawer is open, and a list nobody can see
+    // has nothing to keep up to date - so a closed drawer only remembers that
+    // it is stale, and setVisible(true) / showEvent() / any suite accessor
+    // brings it up to date before anything reads it. isHidden(), not
+    // !isVisible(): a drawer the user left OPEN inside a window that is not
+    // on screen yet is still open, and still builds.
+    if (isHidden() && !myForceBuild) {
+        myRowsDirty = true;
+        return;
+    }
+    myRowsDirty = false;
+
     // What the rows would SAY if they were rebuilt right now: id, name and
     // the eye's state, for every body in order.
     //
@@ -539,41 +639,82 @@ void ItemsPanel::refresh()
     myRowSignature = signature;
     myRowsBuilt = true;
 
-    // Rebuild wholesale: the list is short, and diffing it would be more code
-    // than it saves.
-    // Everything but the trailing stretch, which is structural and belongs to
-    // the layout rather than to any row.
-    while (myRows->count() > 1) {
-        QLayoutItem* item = myRows->takeAt(0);
-        if (QWidget* widget = item->widget()) {
-            // hide() FIRST, and it is not tidiness. deleteLater() leaves the
-            // widget alive, parented and - crucially - still visible until
-            // control returns to the event loop, so between this rebuild and
-            // that moment the card paints the previous list underneath the
-            // new one and the stale rows are still hit-test targets. Caught
-            // in a magnified render of the drawer: "Body 01" was drawn
-            // straight over the empty state's "No bodies yet" it had just
-            // replaced. deleteLater() itself stays - refresh() is reachable
-            // from an eye button's own toggled handler, so deleting these
-            // outright would destroy the widget whose signal is being
-            // emitted.
-            widget->hide();
-            widget->deleteLater();
-        }
-        delete item;
-    }
+    // REUSE, NOT REBUILD (review ruling R5a). Every row of the tree exists
+    // (folding is visibility), so a wholesale teardown cost a widget
+    // construction per row - about a millisecond each, 130 of them at the
+    // author's size - for an eye toggle that changes ONE row. The rows are
+    // keyed by kind and id instead: a row whose item is still here keeps its
+    // widget and has only what changed written into it (name, the eye, the
+    // grain mark, the indent), a new item gets a new row, and only a row
+    // whose item is GONE is destroyed. Kind is part of the key because ids
+    // restart with every furniture opened - a body 3 in one and a folder 3 in
+    // the next are different rows.
+    std::unordered_map<qint64, Row> reusable;
+    for (const Row& row : myRowList) reusable.emplace(rowKey(row), row);
     myRowList.clear();
     myVisible.clear();
-    if (!myDocument) return;
-
+    myReusable = &reusable;
     // The tree, from the root down - folders and the items inside them, to
     // any depth (improvements item 10). A flat document has no folders, so
     // this walks straight into the two item loops and builds exactly the
     // list it always did.
-    buildGroupRows(0, 0);
+    if (myDocument) buildGroupRows(0, 0);
+    myReusable = nullptr;
+
+    // What is left in the map named an item that no longer exists.
+    for (auto& entry : reusable) {
+        QWidget* widget = entry.second.widget;
+        myRows->removeWidget(widget);
+        // hide() FIRST, and it is not tidiness. deleteLater() leaves the
+        // widget alive, parented and - crucially - still visible until
+        // control returns to the event loop, so between this rebuild and
+        // that moment the card paints the previous list underneath the
+        // new one and the stale rows are still hit-test targets. Caught
+        // in a magnified render of the drawer: "Body 01" was drawn
+        // straight over the empty state's "No bodies yet" it had just
+        // replaced. deleteLater() itself stays - refresh() is reachable
+        // from an eye button's own toggled handler, so deleting these
+        // outright would destroy the widget whose signal is being
+        // emitted.
+        widget->hide();
+        widget->deleteLater();
+    }
+    // The empty state is a plain child of myRows with no entry in myRowList;
+    // it goes the moment there is a row to show, on the same hide-first terms.
+    if (myEmpty && !myRowList.empty()) {
+        myRows->removeWidget(myEmpty);
+        myEmpty->hide();
+        myEmpty->deleteLater();
+        myEmpty = nullptr;
+    }
+    // The layout in the list's own order: row i at layout index i. A row
+    // already in place is not touched, so a rebuild that reordered nothing
+    // moves nothing.
+    for (std::size_t i = 0; i < myRowList.size(); ++i) {
+        QWidget* widget = myRowList[i].widget;
+        if (myRows->indexOf(widget) == static_cast<int>(i)) continue;
+        myRows->removeWidget(widget);
+        myRows->insertWidget(static_cast<int>(i), widget);
+    }
+    // AND THE CHILD ORDER, which is not the layout's: a reused row keeps its
+    // place in its parent's children() while a new one is appended, so a row
+    // created for an item that lands mid-list would sit at the END of the
+    // widget tree - the order a screen reader walks, and the order every
+    // findChildren() scan reads. When the rows' child order no longer
+    // matches the list, raise() each in list order, which moves it to the end
+    // of its parent's children. Rows on their way to deleteLater() may sit
+    // between them; a subsequence match is all that is asked.
+    if (QWidget* host = myRows->parentWidget()) {
+        std::size_t next = 0;
+        for (QObject* child : host->children())
+            if (next < myRowList.size() && child == myRowList[next].widget) ++next;
+        if (next != myRowList.size())
+            for (const Row& row : myRowList) row.widget->raise();
+    }
+    if (!myDocument) return;
     applyRowVisibility();
 
-    if (myRowList.empty()) {
+    if (myRowList.empty() && !myEmpty) {
         auto* empty = new QLabel(tr("No bodies yet.\n\nPress Ctrl+K and click points on "
                                     "the ground to draw your first outline."),
                                  this);
@@ -599,6 +740,7 @@ void ItemsPanel::refresh()
                                  .arg(Theme::bodyFont().pointSizeF()));
         myRows->insertWidget(myRows->count() - 1, empty);
         empty->show();   // same reason as the rows above
+        myEmpty = empty;
     }
 
     // The card is as tall as its content, and the overlay places it from
@@ -622,6 +764,47 @@ void ItemsPanel::refresh()
 void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool isOutline,
                             int depth, int parentId)
 {
+    // The name reads MUTED when the item is not actually on screen -
+    // hidden by its own eye, or (a body only) by Isolate's session
+    // filter, which the eye's checked state deliberately does not
+    // reflect (the eye is the document's persisted choice; the filter
+    // is the session's). Asked of the view, the one place the composed
+    // answer lives, so the row cannot disagree with the viewport
+    // (Milestone 5 feedback: "the items list is not displaying well
+    // when an item is isolated or turned off").
+    const bool onScreen = visible && (isOutline || !myView || myView->isSolidVisible(id));
+    const bool across = !isOutline && myDocument && myDocument->bodyGrainAcross(id);
+
+    // A row this item already had: write only what changed (refresh()).
+    if (Row entry; takeReusable(isOutline ? RowKind::Outline : RowKind::Body, id, entry)) {
+        if (entry.text != itemName) {
+            entry.name->setText(itemName);
+            entry.text = itemName;
+        }
+        if (entry.onScreen != onScreen) {
+            entry.name->setStyleSheet(nameStyle(onScreen));
+            entry.onScreen = onScreen;
+        }
+        if (entry.eye->isChecked() != visible) {
+            // Blocked: this is the document's state being SHOWN, not the user
+            // asking for a change - the toggled handler writes the document.
+            const QSignalBlocker quiet(entry.eye);
+            entry.eye->setChecked(visible);
+        }
+        if (entry.grain && entry.grainAcross != across) {
+            setGrainLook(entry.grain, across);
+            entry.grainAcross = across;
+        }
+        if (entry.depth != depth) {
+            entry.widget->layout()->setContentsMargins(kRowInset + depth * kIndentPx, 4,
+                                                       kRowInset, 4);
+            entry.depth = depth;
+        }
+        entry.parentId = parentId;
+        myRowList.push_back(entry);
+        return;
+    }
+
     auto* row = new QWidget(this);
     auto* layout = new QHBoxLayout(row);
     // Indented by how deep in the folder tree it sits (improvements item 10).
@@ -632,17 +815,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     layout->setSpacing(8);
 
     auto* name = new QLabel(itemName, row);
-    // The name reads MUTED when the item is not actually on screen -
-    // hidden by its own eye, or (a body only) by Isolate's session
-    // filter, which the eye's checked state deliberately does not
-    // reflect (the eye is the document's persisted choice; the filter
-    // is the session's). Asked of the view, the one place the composed
-    // answer lives, so the row cannot disagree with the viewport
-    // (Milestone 5 feedback: "the items list is not displaying well
-    // when an item is isolated or turned off").
-    const bool onScreen = visible && (isOutline || !myView || myView->isSolidVisible(id));
-    name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
-                            .arg((onScreen ? Theme::text() : Theme::textMuted()).name()));
+    name->setStyleSheet(nameStyle(onScreen));   // muted while off screen - see above
     // Mouse-TRANSPARENT - Task 5's own fix, the same trap CLAUDE.md
     // documents for InitCardWidget: Qt delivers a click to the DEEPEST
     // widget under the cursor, not to an ancestor whose eventFilter
@@ -696,11 +869,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
         auto* grain = new QPushButton(row);
         grain->setFixedSize(kRowButtonPx, kRowButtonPx);
         grain->setFocusPolicy(Qt::NoFocus);
-        const bool across = myDocument && myDocument->bodyGrainAcross(id);
-        grain->setIcon(IconSet::icon(across ? IconSet::Glyph::GrainAcross
-                                            : IconSet::Glyph::GrainAlong));
-        grain->setToolTip(across ? tr("The grain runs across this body — click to turn it back")
-                                 : tr("The grain runs along this body — click to turn it"));
+        setGrainLook(grain, across);
         // NOT checkable, deliberately: a checked pill would say "this body is
         // special", and neither direction is. The GLYPH is the whole state,
         // which is also what makes the column readable at a glance.
@@ -740,6 +909,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     entry.depth = depth;
     entry.parentId = parentId;
     entry.onScreen = onScreen;
+    entry.grainAcross = across;
     entry.text = name->text();
     myRowList.push_back(entry);
 }
@@ -750,6 +920,42 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     // one eye that speaks for everything under it. It is the same row an item
     // gets - same height, same fill when marked, same rename gesture - because
     // it IS a row in the same list, not a header the list happens to contain.
+    //
+    // The folder's eye READS the bodies under it: on only while every one of
+    // them is on, so a folder with something hidden inside does not claim
+    // otherwise. Derived, never stored - a folder has no visibility of its
+    // own that could drift from its contents'.
+    bool allVisible = true;
+    if (myDocument) {
+        for (int bodyId : myDocument->bodiesUnderGroup(groupId)) {
+            if (!myDocument->isVisible(bodyId)) {
+                allVisible = false;
+                break;
+            }
+        }
+    }
+
+    // A row this folder already had: write only what changed (refresh()).
+    // The twisty is applyRowVisibility()'s, which runs after every build.
+    if (Row entry; takeReusable(RowKind::Folder, groupId, entry)) {
+        if (entry.text != groupName) {
+            entry.name->setText(groupName);
+            entry.text = groupName;
+        }
+        if (entry.eye->isChecked() != allVisible) {
+            const QSignalBlocker quiet(entry.eye);   // shown, not asked for
+            entry.eye->setChecked(allVisible);
+        }
+        if (entry.depth != depth) {
+            entry.widget->layout()->setContentsMargins(kRowInset + depth * kIndentPx, 4,
+                                                       kRowInset, 4);
+            entry.depth = depth;
+        }
+        entry.parentId = parentId;
+        myRowList.push_back(entry);
+        return;
+    }
+
     auto* row = new QWidget(this);
     auto* layout = new QHBoxLayout(row);
     layout->setContentsMargins(kRowInset + depth * kIndentPx, 4, kRowInset, 4);
@@ -777,20 +983,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
 
     auto* eye = new QPushButton(row);
     eye->setCheckable(true);
-    // The folder's eye READS the bodies under it: on only while every one of
-    // them is on, so a folder with something hidden inside does not claim
-    // otherwise. Derived, never stored - a folder has no visibility of its
-    // own that could drift from its contents'.
-    bool allVisible = true;
-    if (myDocument) {
-        for (int bodyId : myDocument->bodiesUnderGroup(groupId)) {
-            if (!myDocument->isVisible(bodyId)) {
-                allVisible = false;
-                break;
-            }
-        }
-    }
-    eye->setChecked(allVisible);
+    eye->setChecked(allVisible);   // read off the bodies under it - see above
     eye->setFixedSize(kRowButtonPx, kRowButtonPx);
     eye->setFocusPolicy(Qt::NoFocus);
     // The same eye every item row wears. It was the Folder glyph - the very
@@ -1236,7 +1429,21 @@ void ItemsPanel::beginRenameForGroup(int groupId)
 
 void ItemsPanel::restyleRows()
 {
-    for (const Row& row : myRowList) {
+    // The three looks a row can wear, built ONCE per call rather than once per
+    // row, and each row's stylesheet set only when its look actually CHANGED
+    // (review ruling R5a): setStyleSheet() re-polishes the whole row subtree
+    // even when handed the string it already has, which at 130 rows was the
+    // entire cost of a selection change - and of every fold, since a fold
+    // restyles too.
+    const QString dropLook = QStringLiteral("#itemsRow { background-color: %1; "
+                                            "border: 1px solid %2; "
+                                            "border-radius: 4px; }")
+                                 .arg(Theme::chipHover().name(), Theme::accent().name());
+    const QString markedLook = QStringLiteral("#itemsRow { background-color: %1; "
+                                              "border-radius: 4px; }")
+                                   .arg(Theme::chipActive().name());
+    const QString plainLook = QStringLiteral("#itemsRow { background: transparent; }");
+    for (Row& row : myRowList) {
         // Two ways a row can be marked, and which one applies depends on
         // which KIND of row it is - never on which list happens to contain
         // the number. A body row is marked when the viewport has it selected;
@@ -1265,21 +1472,15 @@ void ItemsPanel::restyleRows()
         // The folder a drag is hovering over wears the accent BORDER rather
         // than the selection fill, so "this is where it would land" cannot be
         // mistaken for "this is selected".
-        if (myDragging && row.isGroup && row.id == myDropTarget && myDropTarget != 0) {
-            row.widget->setStyleSheet(QStringLiteral("#itemsRow { background-color: %1; "
-                                                     "border: 1px solid %2; "
-                                                     "border-radius: 4px; }")
-                                          .arg(Theme::chipHover().name(),
-                                               Theme::accent().name()));
-            continue;
-        }
-        // The SAME fill a selected body row wears. One mark, one meaning -
-        // "this is the row the next thing you do will act on" - rather than a
-        // second visual language for the second kind of item.
-        row.widget->setStyleSheet(
-            marked ? QStringLiteral("#itemsRow { background-color: %1; "
-                                    "border-radius: 4px; }")
-                         .arg(Theme::chipActive().name())
-                   : QStringLiteral("#itemsRow { background: transparent; }"));
+        //
+        // Otherwise the SAME fill a selected body row wears. One mark, one
+        // meaning - "this is the row the next thing you do will act on" -
+        // rather than a second visual language for the second kind of item.
+        const bool dropTarget =
+            myDragging && row.isGroup && row.id == myDropTarget && myDropTarget != 0;
+        const QString& look = dropTarget ? dropLook : (marked ? markedLook : plainLook);
+        if (row.style == look) continue;
+        row.widget->setStyleSheet(look);
+        row.style = look;
     }
 }

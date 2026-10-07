@@ -3153,23 +3153,27 @@ bool openWithDrawer(MainWindow& probe, const QString& furnitureId)
     return probe.itemsPanel() != nullptr && probe.itemsPanel()->isVisible();
 }
 
-// THE BUDGETS for one drawer rebuild and one drawer restyle at the author's
-// size (130 rows), and why neither is the spec's 16 ms frame. MEASURED on the
-// tree that introduced them (RTX 4090 box, three filtered runs): a rename's
-// whole route - MainWindow's checkpoint, updateActions() and the drawer's
-// refresh() - 164 to 176 ms filtered and 188 to 200 inside a full run, of
-// which building the 130 rows is ~120 (roughly a
-// millisecond a row: three widgets, two stylesheets, two rasterised icons
-// each); a selection restyle 19 to 22 ms (130 setStyleSheet() calls). A
-// 16 ms bound on either would be red from the first run, so it would assert
-// nothing. These are regression bounds instead, about 1.5x and 2x what was
-// measured: a second rebuild per gesture, or a restyle that started walking
-// the tree per row, reads red. The rebuild is once per DOCUMENT change - a
-// gesture, not a frame - and a quarter second is the most it may cost. The
-// restyle's own 16 ms is Task 8's: it replaces restyleRows() with the cached
-// version and pins it under one frame.
-constexpr double kDrawerRebuildBudgetMs = 250.0;
-constexpr double kDrawerRestyleBudgetMs = 40.0;
+// THE BUDGETS at the author's size (130 rows): one frame, 16 ms, for every
+// one of them - the spec's Cost line. Each is timed as the WHOLE route the
+// user's gesture takes (MainWindow's checkpoint, updateActions() and the
+// drawer's refresh()), not the drawer alone.
+//
+// History, because the first version of this block could not have held this
+// line: when every row was torn down and rebuilt per document change, a
+// rename at 130 rows measured 164-200 ms (about a millisecond per row
+// CONSTRUCTED) and a selection restyle 19-22 ms (130 setStyleSheet() calls),
+// and the bounds here were regression bounds of 250 and 40 ms. Review ruling
+// R5a then made rows REUSED across rebuilds (a widget is built only for a new
+// item) and each row's look set only when it changed, and the same gestures
+// measured ~1 ms (eye toggle and rename, folded and open) and ~9 ms (restyle
+// of 60 newly selected rows). The folded pair is the one that matters: it is
+// how the drawer is used, and the one state in which a full rebuild cost 15x
+// what the old visible-rows-only list did. A rebuild that constructs every
+// widget again reads red on both.
+constexpr double kDrawerRebuildBudgetMs = 16.0;
+constexpr double kDrawerRestyleBudgetMs = 16.0;
+constexpr double kFoldedEyeBudgetMs = 16.0;
+constexpr double kFoldedRenameBudgetMs = 16.0;
 
 void drawerListsStoredOrderBlock()
 {
@@ -3218,15 +3222,95 @@ void drawerListsStoredOrderBlock()
     check(drawer->rowDepthAt(1) == 1 && drawer->rowDepthAt(2) == 1, "stored order: ...one level in");
     check(drawer->rowWidgetAt(0) == firstRow,
           "stored order: opening a folder rebuilt nothing - the same row widget is still there");
-    check(drawerRowOf(drawer, idNamed(probe.document(), QStringLiteral("Top"))) == 4,
+    const int topId = idNamed(probe.document(), QStringLiteral("Top"));
+    check(drawerRowOf(drawer, topId) == 4,
           "stored order: Top is the fifth VISIBLE row once Carcass is open");
+
+    // THE FOLD ITSELF (review ruling R5b): the row widget the user was
+    // looking at goes off screen, the card gets shorter, and the twisty says
+    // which way it now points. Each is read off the widget, not the index.
+    QWidget* topRow = drawer->rowWidgetAt(drawerRowOf(drawer, topId));
+    const bool topShownOpen = topRow && topRow->isVisible();
+    check(topShownOpen, "stored order: Top's row widget is on screen while Carcass is open");
+    const int openHint = static_cast<QWidget*>(drawer)->sizeHint().height();
+    QPushButton* carcassTwisty = drawer->twistyAt(0);
+    const QString openTip = carcassTwisty ? carcassTwisty->toolTip() : QString();
+    check(openTip == QStringLiteral("Close this folder"),
+          QStringLiteral("stored order: an open folder's twisty offers to close it (\"%1\")").arg(openTip));
+    drawer->setGroupExpanded(carcass, false);
+    settle(100);
+    const bool topHiddenFolded = topRow && !topRow->isVisible();
+    check(topHiddenFolded,
+          "stored order: folding Carcass takes Top's own row widget off screen");
+    const int foldedHint = static_cast<QWidget*>(drawer)->sizeHint().height();
+    check(foldedHint < openHint,
+          QStringLiteral("stored order: and the card asks for less height (%1 px open, %2 folded)")
+              .arg(openHint)
+              .arg(foldedHint));
+    const QString foldedTip = carcassTwisty ? carcassTwisty->toolTip() : QString();
+    check(foldedTip == QStringLiteral("Open this folder"),
+          QStringLiteral("stored order: a folded folder's twisty offers to open it (\"%1\")")
+              .arg(foldedTip));
+    drawer->setGroupExpanded(carcass, true);
+    settle(100);
+    const QString reopenedTip = carcassTwisty ? carcassTwisty->toolTip() : QString();
+    check(reopenedTip == QStringLiteral("Close this folder"),
+          QStringLiteral("stored order: reopened, it offers to close again (\"%1\")").arg(reopenedTip));
     drawer->setGroupExpanded(carcass, false);
     settle(100);
     const int foldedCount = drawer->rowCount();
     check(foldedCount == 5,
           QStringLiteral("stored order: folding it hides its rows again (%1 rows)").arg(foldedCount));
-    check(drawerRowOf(drawer, idNamed(probe.document(), QStringLiteral("Top"))) == -1,
+    check(drawerRowOf(drawer, topId) == -1,
           "stored order: a folded folder's body is not a visible row");
+
+    // RENAME ON A FOLDED ROW (the guard in beginRenameForItem()): Top is
+    // selected in the viewport while its folder is folded, so its row exists
+    // but is hidden - an edit opened there could never take focus.
+    QAction* renameAction = action(probe, QStringLiteral("Rename"));
+    check(renameAction != nullptr, "stored order: the Rename action exists");
+    probe.view()->setSelectedSolids({topId});
+    settle(100);
+    if (renameAction) renameAction->trigger();
+    settle(50);
+    const bool foldedEditOpened = drawer->findChild<QLineEdit*>() != nullptr;
+    check(!foldedEditOpened,
+          "stored order: Rename on a body inside a FOLDED folder opens no edit over its hidden row");
+    // ...and the same route on a row that IS on screen does open one, so the
+    // check above is about the fold rather than about a route that never opens.
+    probe.view()->setSelectedSolids({idNamed(probe.document(), QStringLiteral("Shelf"))});
+    settle(100);
+    if (renameAction) renameAction->trigger();
+    settle(50);
+    QPointer<QLineEdit> shelfEdit = drawer->findChild<QLineEdit*>();
+    check(!shelfEdit.isNull(), "stored order: ...while the same route on a visible row opens one");
+    // Enter on the unchanged name closes it (InlineRename's Escape is a
+    // QShortcut, which a sent key event never reaches).
+    if (shelfEdit) sendKeyTo(shelfEdit, Qt::Key_Return);
+    settle(50);
+    const bool editGone = shelfEdit.isNull() || !shelfEdit->isVisible();
+    check(editGone, "stored order: ...and Enter closes it again");
+
+    // A row whose item is GONE is the one row a rebuild destroys, and it goes
+    // off screen at once rather than at deleteLater() (refresh()'s hide-first
+    // rule, which the reuse made the only removal path).
+    const int backId = idNamed(probe.document(), QStringLiteral("Back"));
+    QPointer<QWidget> backRow = drawer->rowWidgetAt(drawerRowOf(drawer, backId));
+    const bool backListed = !backRow.isNull() && backRow->isVisible();
+    check(backListed, "stored order: Back's row is on screen before it is deleted");
+    probe.view()->setSelectedSolids({backId});
+    settle(100);
+    trigger(probe, QStringLiteral("Delete Selected"));
+    const bool backRowGone = backRow.isNull() || !backRow->isVisible();
+    check(backRowGone && drawerRowOf(drawer, backId) == -1,
+          "stored order: deleting Back takes its row off screen in the same rebuild");
+    trigger(probe, QStringLiteral("Undo"));
+    settle(100);
+    const int backAgain = drawerRowOf(drawer, idNamed(probe.document(), QStringLiteral("Back")));
+    check(backAgain == 4,
+          QStringLiteral("stored order: and Undo lists it again, last at the root (row %1)").arg(backAgain));
+    probe.view()->setSelectedSolids({});
+    settle(50);
 
     const bool reopened = probe.openFurniture(reordered);
     check(reopened, "stored order: the reordered cabinet opens");
@@ -3243,6 +3327,98 @@ void drawerListsStoredOrderBlock()
     const bool largeOpened = probe.openFurniture(large);
     check(largeOpened, "stored order: the 122-body cabinet opens");
     settle(400);
+
+    // THE FOLDED STATE (review ruling R5a) - how the drawer is actually used:
+    // five root folders on screen and every one of the 122 bodies' rows
+    // existing but hidden. Before rows were reused across rebuilds, an eye
+    // toggle here paid a widget construction for every row of the tree.
+    for (const DocumentModel::Group& g : probe.document().groups())
+        drawer->setGroupExpanded(g.id, false);
+    settle(150);
+    const int foldedRoots = drawer->rowCount();
+    check(foldedRoots == 5,
+          QStringLiteral("stored order: folded, the 122-body cabinet shows its 5 root folders (%1)")
+              .arg(foldedRoots));
+    QElapsedTimer clock;
+    const int carcassId = idNamed(probe.document(), QStringLiteral("Carcass"));
+    double foldedRenameMs = 1.0e9;
+    for (const char* name : {"Carcass X", "Carcass Y", "Carcass Z"}) {
+        clock.restart();
+        emit drawer->groupRenameCommitted(carcassId, QString::fromLatin1(name));
+        foldedRenameMs = std::min(foldedRenameMs, clock.nsecsElapsed() / 1.0e6);
+    }
+    const QString foldedFirst = drawer->rowTextAt(0);
+    check(foldedFirst == QStringLiteral("Carcass Z"),
+          QStringLiteral("stored order: a folded rename reaches its row (%1)").arg(foldedFirst));
+    // One body's eye: Hardware opened alone, so 20 rows are on screen and 110
+    // still hidden. The cheapest of four real clicks (off, on, off, on - it
+    // ends where it started), on the eye found as the row's one CHECKABLE
+    // button - the grain mark is deliberately not checkable.
+    const int hardwareId = idNamed(probe.document(), QStringLiteral("Hardware"));
+    drawer->setGroupExpanded(hardwareId, true);
+    settle(100);
+    const int hardwareRow = drawerRowOf(drawer, hardwareId);
+    const int boardId = drawer->rowIdAt(hardwareRow + 1);
+    QPushButton* boardEye = nullptr;
+    if (QWidget* boardRow = drawer->rowWidgetAt(hardwareRow + 1)) {
+        for (QPushButton* button :
+             boardRow->findChildren<QPushButton*>(Qt::FindDirectChildrenOnly))
+            if (button->isCheckable()) boardEye = button;
+    }
+    check(boardEye != nullptr && probe.document().contains(boardId),
+          "stored order: the first board in Hardware has an eye to click");
+    double foldedEyeMs = 1.0e9;
+    for (int i = 0; boardEye && i < 4; ++i) {
+        clock.restart();
+        boardEye->click();
+        foldedEyeMs = std::min(foldedEyeMs, clock.nsecsElapsed() / 1.0e6);
+    }
+    const bool boardBackOn = probe.document().isVisible(boardId);
+    check(boardBackOn, "stored order: four eye clicks leave the board visible, as it started");
+    const bool sameBoardRow = boardEye && drawer->rowWidgetAt(hardwareRow + 1) == boardEye->parentWidget();
+    check(sameBoardRow, "stored order: an eye click rebuilt no row - the clicked row's widget is still there");
+
+    // A CLOSED drawer does no work for an edit and is right the moment it
+    // opens (review ruling R5a). The folder row's own name label is held
+    // across the close: while closed it still reads the old name - nothing
+    // was rebuilt for a list nobody can see - and the Items action showing
+    // the drawer again brings it up to date before anything reads it.
+    QAction* itemsAction = action(probe, QStringLiteral("Items"));
+    QLabel* carcassName = nullptr;
+    if (QWidget* carcassRow = drawer->rowWidgetAt(drawerRowOf(drawer, carcassId)))
+        carcassName = carcassRow->findChild<QLabel*>();
+    if (itemsAction) itemsAction->trigger();   // closes it
+    settle(100);
+    const bool drawerClosed = drawer->isHidden();
+    check(drawerClosed, "stored order: the Items action closes the drawer");
+    emit drawer->groupRenameCommitted(carcassId, QStringLiteral("Carcass W"));
+    const QString whileClosed = carcassName ? carcassName->text() : QString();
+    check(whileClosed == QStringLiteral("Carcass Z"),
+          QStringLiteral("stored order: a rename with the drawer closed touches no row (\"%1\")")
+              .arg(whileClosed));
+    if (itemsAction) itemsAction->trigger();   // opens it again
+    settle(100);
+    const QString afterOpening = carcassName ? carcassName->text() : QString();
+    check(drawer->isVisible() && afterOpening == QStringLiteral("Carcass W"),
+          QStringLiteral("stored order: ...and opening the drawer shows the new name at once (\"%1\")")
+              .arg(afterOpening));
+    drawer->setGroupExpanded(hardwareId, false);
+    settle(100);
+    std::printf("[items-cost] folded at 130 rows: eye toggle (best of 4) = %.2f ms, rename (best of 3) "
+                "= %.2f ms (budgets %.0f / %.0f ms)\n",
+                foldedEyeMs, foldedRenameMs, kFoldedEyeBudgetMs, kFoldedRenameBudgetMs);
+    check(foldedEyeMs < kFoldedEyeBudgetMs,
+          QStringLiteral("stored order: one eye click with the folders folded stays within budget "
+                         "(%1 ms, budget %2 ms)")
+              .arg(foldedEyeMs, 0, 'f', 2)
+              .arg(kFoldedEyeBudgetMs, 0, 'f', 0));
+    check(foldedRenameMs < kFoldedRenameBudgetMs,
+          QStringLiteral("stored order: a rename with the folders folded stays within budget "
+                         "(%1 ms, budget %2 ms)")
+              .arg(foldedRenameMs, 0, 'f', 2)
+              .arg(kFoldedRenameBudgetMs, 0, 'f', 0));
+
+    // And EVERY folder open: the baseline the spec's Cost line asks for.
     for (const DocumentModel::Group& g : probe.document().groups())
         drawer->setGroupExpanded(g.id, true);
     settle(150);
@@ -3250,12 +3426,9 @@ void drawerListsStoredOrderBlock()
     check(allOpen == 130,
           QStringLiteral("stored order: 122 bodies and 8 folders list 130 rows, every folder open "
                          "(%1)").arg(allOpen));
-    // The CHEAPEST of three renames: a full suite run measured one rename at
-    // ~200 ms where filtered runs read ~170, and a minimum is what a machine
-    // busy elsewhere cannot inflate - while a second rebuild per gesture still
-    // doubles every one of the three.
-    QElapsedTimer clock;
-    const int carcassId = idNamed(probe.document(), QStringLiteral("Carcass"));
+    // The CHEAPEST of three renames, as in the folded state: a minimum is what
+    // a machine busy elsewhere cannot inflate, while a rebuild that constructs
+    // every widget again still slows every one of the three.
     double rebuildMs = 1.0e9;
     for (const char* name : {"Carcass C", "Carcass B", "Carcass A"}) {
         clock.restart();
@@ -3272,7 +3445,7 @@ void drawerListsStoredOrderBlock()
     clock.restart();
     drawer->showSelection(some);
     const double restyleMs = clock.nsecsElapsed() / 1.0e6;
-    std::printf("[items-cost] baseline at 130 rows: rename rebuild (best of 3) = %.2f ms, restyle = %.2f ms "
+    std::printf("[items-cost] every folder open at 130 rows: rename (best of 3) = %.2f ms, restyle = %.2f ms "
                 "(budgets %.0f / %.0f ms)\n",
                 rebuildMs, restyleMs, kDrawerRebuildBudgetMs, kDrawerRestyleBudgetMs);
     check(rebuildMs < kDrawerRebuildBudgetMs,
@@ -8259,12 +8432,23 @@ int main(int argc, char* argv[])
                 clickAt(rebuildEye, QPointF(rebuildEye->width() / 2.0,
                                             rebuildEye->height() / 2.0));
             settle(100);
-            check(deadRow.isNull() || !deadRow->isVisible(),
-                  QStringLiteral("and the row a rebuild replaced is hidden the instant it "
-                                 "is replaced, not merely on its way to deleteLater() "
+            // ROWS ARE REUSED ACROSS REBUILDS since review ruling R5a, so an
+            // eye click no longer replaces this row - it keeps its widget and
+            // has the new eye state written into it. What this check guards,
+            // nothing stale left on screen, therefore reads: the old widget is
+            // gone, hidden, or still THE live row the list reports. The
+            // hide-first rule for a row whose item really is removed is pinned
+            // in the-drawer-lists-the-stored-order.
+            bool stillListed = false;
+            for (int i = 0; !deadRow.isNull() && i < drawer->rowCount(); ++i)
+                if (drawer->rowWidgetAt(i) == deadRow.data()) stillListed = true;
+            check(deadRow.isNull() || !deadRow->isVisible() || stillListed,
+                  QStringLiteral("and the row a rebuild touched is either still the live row or "
+                                 "hidden the instant it is replaced, never a stale row on screen "
                                  "(%1)")
                       .arg(deadRow.isNull() ? QStringLiteral("already destroyed")
-                                            : QStringLiteral("still alive, hidden")));
+                                            : (stillListed ? QStringLiteral("reused, still listed")
+                                                           : QStringLiteral("still alive, hidden"))));
             check(drawer->rowCount() == static_cast<int>(window.document().solids().size()),
                   "and the rebuild left exactly one row per body");
             // The eye click above hid a body - put it back through the NEW

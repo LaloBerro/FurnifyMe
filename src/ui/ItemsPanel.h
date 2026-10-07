@@ -35,6 +35,7 @@
 #include <QWidget>
 
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 class DocumentModel;
@@ -74,6 +75,9 @@ public:
     bool rowIsGroupAt(int index) const;
     // How deep in the tree the row sits: 0 at the document's root.
     int rowDepthAt(int index) const;
+    // A folder row's twisty, null for any other row - for the suite, which
+    // reads its tooltip to see which way the folder currently points.
+    class QPushButton* twistyAt(int index) const;
 
     // What a row IS, handed to every gesture that acts on one.
     enum class RowKind { Body, Outline, Folder };
@@ -192,6 +196,13 @@ protected:
     // width, because the empty-state message word-wraps and a QLayout's plain
     // sizeHint does not account for that.
     QSize sizeHint() const override;
+    // A CLOSED drawer defers its rebuild (see refresh()); these two bring it
+    // up to date on the way back on screen, setVisible() before the overlay
+    // measures it and showEvent() for a parent shown with it still open.
+    void showEvent(class QShowEvent* event) override;
+
+public:
+    void setVisible(bool visible) override;
 
 private:
     // Restyles what is on screen from the live Theme - the title's stylesheet,
@@ -241,6 +252,8 @@ private:
         int parentId = 0;        // the folder it sits in, 0 at the root
         bool onScreen = true;    // its item is actually drawn (eye and Isolate)
         bool twistyOpen = false; // what the twisty currently shows
+        bool grainAcross = false; // what the grain mark currently shows
+        QString style;           // the row look restyleRows() last set
         class QPushButton* twisty = nullptr;
         QString text;      // what rowTextAt() reports
     };
@@ -280,6 +293,26 @@ private:
     // comment for why both layouts are invalidated by hand).
     void relayoutCard();
     void syncTwisty(Row& row, bool open);
+
+    // --- reuse across rebuilds (review ruling R5a) -----------------------------
+    // refresh() keys the rows it had by kind and id, and addItemRow()/
+    // addGroupRow() take a row back out of that map instead of building one
+    // whenever their item already had a row - so a rebuild writes only what
+    // changed and creates a widget only for a new item.
+    static qint64 rowKey(RowKind kind, int id);
+    static qint64 rowKey(const Row& row);
+    bool takeReusable(RowKind kind, int id, Row& out);
+    std::unordered_map<qint64, Row>* myReusable = nullptr;   // live only inside refresh()
+    static QString nameStyle(bool onScreen);
+    static void setGrainLook(class QPushButton* grain, bool across);
+    // The empty state's label, while the list is empty - null otherwise.
+    class QLabel* myEmpty = nullptr;
+    // A closed drawer marks itself stale instead of rebuilding; any reader
+    // (setVisible(true), showEvent(), a suite accessor) brings it up to date.
+    bool myRowsDirty = false;
+    bool myForceBuild = false;
+    void flushPendingRefresh();
+    void ensureFresh() const;
     // What the rows currently say, so refresh() can tell a call that would
     // rebuild them identically from one that would not. See refresh().
     QString myRowSignature;
