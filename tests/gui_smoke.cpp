@@ -1004,6 +1004,7 @@ constexpr BlockInfo kBlocks[] = {
     { "chips-take-no-keyboard-focus", false, true },
     { "controls-carry-accessible-names", false, true },
     { "the-items-order-survives-the-file-and-versions", false, true },
+    { "ctrl-d-lands-right-after-its-source", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -3007,6 +3008,89 @@ void itemsOrderFileBlock()
     settle(200);
     check(namesInOrder(probe.document(), 0) == rootOrder,
           "order file: one Undo brings the stored order back");
+    probe.close();
+}
+
+void duplicateLandsAfterSourceBlock()
+{
+    RequiredTempDir dir;
+    QString reordered;
+    QString untouched;
+    {
+        FurnitureStore store(dir.path());
+        reordered = store.createFurniture(QStringLiteral("Reordered"));
+        untouched = store.createFurniture(QStringLiteral("Untouched"));
+        for (const QString& id : {reordered, untouched}) {
+            DocumentModel doc;
+            double x = 0.0;
+            for (const char* name : {"Side left", "Top", "Back"}) {
+                const int b =
+                    doc.addSolid(ModelingOps::makeBox(gp_Pnt(x, 0.0, 0.0), 18.0, 300.0, 400.0));
+                doc.setItemName(b, name);
+                x += 400.0;
+            }
+            // Only the first furniture carries a stored root order:
+            // Back, Side left, Top.
+            if (id == reordered)
+                doc.moveItems({idNamed(doc, QStringLiteral("Back"))}, 0,
+                              idNamed(doc, QStringLiteral("Side left")));
+            store.saveFurniture(id, doc, QImage());
+        }
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.setAttribute(Qt::WA_ShowWithoutActivating);
+    probe.resize(1100, 780);
+    probe.show();
+    waitFully(300);
+    probe.view()->setAnimationsEnabled(false);
+
+    check(probe.openFurniture(reordered), "duplicate order: the reordered furniture opens");
+    settle(250);
+    const int side = idNamed(probe.document(), QStringLiteral("Side left"));
+    // SEAM, justified: the subject is where the copy lands, not how a body is
+    // picked - pickBodyOf() is pinned by the selection blocks.
+    probe.view()->setSelectedSolids({side});
+    settle(100);
+    const bool firstDone = probe.duplicateSelectedBody();
+    check(firstDone, "duplicate order: Side left duplicates");
+    settle(200);
+    const int copy = probe.document().solids().back().id;
+    const std::vector<int> root = probe.document().orderedChildren(0);
+    const auto sideAt = std::find(root.begin(), root.end(), side);
+    check(sideAt != root.end() && sideAt + 1 != root.end() && *(sideAt + 1) == copy,
+          QStringLiteral("duplicate order: the copy of Side left lands directly after it (%1)")
+              .arg(namesInOrder(probe.document(), 0).join(QStringLiteral(", "))));
+    check(namesInOrder(probe.document(), 0).first() == QStringLiteral("Back"),
+          "duplicate order: and the rest of the stored order is untouched");
+
+    // Two sources at once: each copy after its OWN source.
+    const int top = idNamed(probe.document(), QStringLiteral("Top"));
+    const int back = idNamed(probe.document(), QStringLiteral("Back"));
+    probe.view()->setSelectedSolids({back, top});
+    settle(100);
+    const bool secondDone = probe.duplicateSelectedBody();
+    check(secondDone, "duplicate order: two bodies duplicate in one gesture");
+    settle(200);
+    const std::vector<int> after = probe.document().orderedChildren(0);
+    const auto followsSource = [&after](int source) {
+        const auto at = std::find(after.begin(), after.end(), source);
+        return at != after.end() && at + 1 != after.end() && *(at + 1) > source;
+    };
+    check(followsSource(back) && followsSource(top),
+          QStringLiteral("duplicate order: each copy sits right after its own source (%1)")
+              .arg(namesInOrder(probe.document(), 0).join(QStringLiteral(", "))));
+
+    // With NO stored order the copy is unranked: the end of its parent.
+    check(probe.openFurniture(untouched), "duplicate order: the untouched furniture opens");
+    settle(250);
+    probe.view()->setSelectedSolids({idNamed(probe.document(), QStringLiteral("Side left"))});
+    settle(100);
+    const bool thirdDone = probe.duplicateSelectedBody();
+    check(thirdDone, "duplicate order: Side left duplicates there too");
+    settle(200);
+    check(probe.document().orderedChildren(0).back() == probe.document().solids().back().id &&
+              !probe.document().hasStoredOrder(0),
+          "duplicate order: with nothing stored the copy lands at the end and nothing is stored");
     probe.close();
 }
 
@@ -43136,6 +43220,7 @@ int main(int argc, char* argv[])
     }
 
     if (blockEnabled("the-items-order-survives-the-file-and-versions")) itemsOrderFileBlock();
+    if (blockEnabled("ctrl-d-lands-right-after-its-source")) duplicateLandsAfterSourceBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or

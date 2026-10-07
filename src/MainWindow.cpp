@@ -9057,6 +9057,10 @@ bool MainWindow::duplicateSelectedBody()
         // belongs in there beside it, not out at the root.
         if (sourceFolder > 0 && folder != 0) myDocument.setItemGroup(id, cloneFolder(folder));
         else if (folder != 0) myDocument.setItemGroup(id, folder);
+        // DIRECTLY AFTER ITS SOURCE (T-063, the user's rule) - when that
+        // parent has a stored order. With none, the copy is unranked and the
+        // automatic order places it, which is the end of its bodies.
+        if (sourceFolder == 0) myDocument.placeAfter(id, copy.first);
 
         // Creation-time pairing - reused VERBATIM from onExtrude()'s own
         // block rather than special-cased here (CLAUDE.md's "do not
@@ -9084,6 +9088,7 @@ bool MainWindow::duplicateSelectedBody()
                     else if (folder != 0)
                         myDocument.setItemGroup(twinId, folder);
                     ++twins;
+                    if (sourceFolder == 0) myDocument.placeAfter(twinId, id);
                     lastTwinId = twinId;
                 }
             } else {
@@ -9093,6 +9098,10 @@ bool MainWindow::duplicateSelectedBody()
         }
     }
     if (made.empty()) return false;
+
+    // A cloned folder lands beside its source the same way.
+    if (sourceFolder > 0 && cloneOf.count(sourceFolder))
+        myDocument.placeAfter(cloneOf[sourceFolder], sourceFolder);
 
     // A WHOLE-BODY selection of the COPIES - which is what makes
     // MoveTool::refresh() (an appStateChanged slot) stand the transform gizmo
