@@ -785,9 +785,10 @@ void skipByEnvironment(int checks, const QString& why)
 //
 // RE-RATCHETED (2026-10-07, the review-fixes branch): the 2026-10 whole-app
 // review's twenty-six cards, worked in six batches, each batch green on its own
-// full run. TWO consecutive unfiltered runs on the final tree measured 5925
-// checks + 1 environment skip, agreeing to the digit.
-constexpr int kCheckFloor = 5925;
+// full run. TWO consecutive unfiltered runs on the final tree measured 5927
+// checks + 1 environment skip, agreeing to the digit - after the Alert-sound
+// fix and the grey body default, both of which landed before that pair.
+constexpr int kCheckFloor = 5927;
 
 void check(bool condition, const QString& what)
 {
