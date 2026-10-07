@@ -1265,7 +1265,7 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
         // folder it is already in is a no-op there too - so this reports the
         // move and lets the one place that owns the rule answer it, rather
         // than carrying a second copy of the rule here.
-        emit itemsDropped(dragged, target);
+        emit itemsMoveRequested(dragged, target, target == 0 ? 0 : DocumentModel::kIntoFolder);
         return true;
     }
     // Double-click renames - the FIRST press above already ran the single-

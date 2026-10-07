@@ -18,6 +18,7 @@
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
+#include "ItemMoveText.h"
 #include "PanelCloseButton.h"
 #include "PullArrow.h"
 #include "ShapeFlyout.h"
@@ -1216,7 +1217,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // with two different ideas of what a click means.
     connect(myItemsPanel, &ItemsPanel::groupRenameCommitted, this,
             &MainWindow::onGroupRenameCommitted);
-    connect(myItemsPanel, &ItemsPanel::itemsDropped, this, &MainWindow::onItemsDropped);
+    connect(myItemsPanel, &ItemsPanel::itemsMoveRequested, this, &MainWindow::onItemsMoveRequested);
     // The + in the title row and the right-click menu, each landing on the
     // SAME two handlers the Model menu's own entries do.
     connect(myItemsPanel, &ItemsPanel::newFolderRequested, this,
@@ -5958,37 +5959,25 @@ void MainWindow::onGroupRenameCommitted(int groupId, QString newName)
     reportNote(message, true, myDocument.revision());
 }
 
-void MainWindow::onItemsDropped(const std::vector<int>& ids, int targetGroupId)
+void MainWindow::onItemsMoveRequested(const std::vector<int>& ids, int parent, int beforeId)
 {
-    // ONE checkpoint for the whole drag, however many rows it carried: the
-    // user made one gesture, so one Ctrl+Z takes it back.
-    bool moved = false;
-    bool checkpointed = false;
-    for (int id : ids) {
-        const bool isFolder = myDocument.groupExists(id);
-        if (myDocument.groupOf(id) == targetGroupId) continue;   // already there
-        if (!checkpointed) {
-            checkpointDocument();
-            checkpointed = true;
-        }
-        // The document owns whether a move is legal - setGroupParent()
-        // refuses a folder dropped into itself or into its own descendant,
-        // and both setters answer false for an id they do not know. A refused
-        // row is simply left where it was.
-        moved = (isFolder ? myDocument.setGroupParent(id, targetGroupId)
-                          : myDocument.setItemGroup(id, targetGroupId)) ||
-                moved;
-    }
-    if (checkpointed && !moved) {
-        // Nothing actually moved, so the checkpoint would be an undo step
-        // that undoes nothing. Taken back rather than left standing.
-        myDocument.undo();
-        updateActions();
+    if (myShowingInitScreen) return;
+    // THE DRY RUN DECIDES, before anything is pushed. The old route took a
+    // checkpoint and then undid it when nothing had moved, which left a redo
+    // entry behind and moved revision() twice for a gesture that changed
+    // nothing.
+    const DocumentModel::MoveResult dry = myDocument.checkMove(ids, parent, beforeId);
+    if (dry.check == DocumentModel::MoveCheck::NoChange) return;
+    if (dry.check != DocumentModel::MoveCheck::Moved) {
+        myToasts->show(ItemMoveText::refusal(myDocument, dry), Toast::Kind::Failure, false);
         return;
     }
-    if (!moved) return;
+    checkpointDocument();
+    const DocumentModel::MoveResult done = myDocument.moveItems(ids, parent, beforeId);
     updateActions();
     emit documentChanged();
+    reportNote(ItemMoveText::sentence(myDocument, done, ItemMoveText::Tense::Past), true,
+               myDocument.revision());
 }
 
 

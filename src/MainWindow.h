@@ -1422,7 +1422,10 @@ private slots:
     // Rows were dragged onto a folder (0 = the document's root) - every row
     // the drag was carrying, which is the whole selection when it started on
     // one of several selected rows.
-    void onItemsDropped(const std::vector<int>& ids, int targetGroupId);
+    // The Items drawer's one move route (T-063): dry run first, then one
+    // checkpoint and a Note with Undo for Moved, nothing at all for NoChange,
+    // a Failure with the reason for a refusal. Every sentence is ItemMoveText's.
+    void onItemsMoveRequested(const std::vector<int>& ids, int parent, int beforeId);
     // The folder every selected body already shares, or 0 - what Ungroup
     // acts on and what a fresh Group is created inside, so grouping two
     // bodies that sit in "Left cabinet" makes a folder INSIDE it rather than

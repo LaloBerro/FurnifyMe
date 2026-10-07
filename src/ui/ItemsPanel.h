@@ -171,11 +171,12 @@ signals:
     // always saw (see DocumentModel::Group's own comment).
     void groupActivated(int id);
     void groupRenameCommitted(int id, QString newName);
-    // A row was dragged onto a folder row (or onto empty space, which is the
-    // root): `targetGroupId` is 0 for the root. MainWindow checkpoints and
-    // performs the move - this panel only ran the gesture, exactly as it does
-    // for a rename.
-    void itemsDropped(std::vector<int> ids, int targetGroupId);
+    // EVERY route that moves rows - a drop, Alt+arrow, Move up/Move down -
+    // asks for the move this one way (T-063). `parent` 0 is the root;
+    // `beforeId` is DocumentModel's: a sibling to go in front of, 0 the end,
+    // or DocumentModel::kIntoFolder. MainWindow dry-runs it, checkpoints and
+    // reports; this panel only ran the gesture.
+    void itemsMoveRequested(std::vector<int> ids, int parent, int beforeId);
     // The + button in the title row, and the right-click menu's own entry:
     // make a folder out of whatever is selected (or an empty one when nothing
     // is).

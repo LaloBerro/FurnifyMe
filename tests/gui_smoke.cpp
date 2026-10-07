@@ -43,6 +43,7 @@
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
+#include "ItemMoveText.h"
 #include "Joinery.h"
 #include "JointChip.h"
 #include "JointsPanel.h"
@@ -1006,6 +1007,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-items-order-survives-the-file-and-versions", false, true },
     { "ctrl-d-lands-right-after-its-source", false, true },
     { "the-drawer-lists-the-stored-order", false, true },
+    { "every-move-in-the-drawer-reports", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -3458,6 +3460,145 @@ void drawerListsStoredOrderBlock()
                          "(%1 ms, budget %2 ms)")
               .arg(restyleMs, 0, 'f', 2)
               .arg(kDrawerRestyleBudgetMs, 0, 'f', 0));
+    probe.close();
+}
+
+void everyMoveReportsBlock()
+{
+    RequiredTempDir dir;
+    QString id;
+    {
+        FurnitureStore store(dir.path());
+        id = seedCabinet(store);
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    check(openWithDrawer(probe, id), "reports: the cabinet opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    ToastHost* toasts = probe.findChild<ToastHost*>();
+    check(toasts != nullptr, "reports: the window has its toast host");
+    if (!toasts) return;
+    const DocumentModel& doc = probe.document();
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int drawerFolder = idNamed(doc, QStringLiteral("Drawer"));
+    const int doors = idNamed(doc, QStringLiteral("Doors"));
+    const int side = idNamed(doc, QStringLiteral("Side left"));
+    const int sideRight = idNamed(doc, QStringLiteral("Side right"));
+    const int top = idNamed(doc, QStringLiteral("Top"));
+    const int front = idNamed(doc, QStringLiteral("Drawer front"));
+    const int shelf = idNamed(doc, QStringLiteral("Shelf"));
+    const int back = idNamed(doc, QStringLiteral("Back"));
+    QStringList spoken;
+    int requests = 0;
+
+    // Driven through the panel's own signal: the SUBJECT here is what a move
+    // reports; the drag and the keys that raise it are pinned by their blocks.
+    const auto request = [&](std::vector<int> ids, int parent, int before) {
+        emit drawer->itemsMoveRequested(ids, parent, before);
+        settle(150);
+        ++requests;
+        spoken << toasts->currentText();
+        return toasts->currentText();
+    };
+    const auto noteWithUndo = [&] {
+        return toasts->isShowing() && toasts->toast()->kind() == Toast::Kind::Note &&
+               toasts->toast()->hasUndo();
+    };
+
+    std::size_t depth = doc.undoDepth();
+    QString said = request({shelf, back, sideRight}, drawerFolder, DocumentModel::kIntoFolder);
+    check(said == QStringLiteral("Moved 3 bodies to Drawer"),
+          QStringLiteral("reports: three bodies into Drawer say so (\"%1\")").arg(said));
+    check(doc.undoDepth() == depth + 1, "reports: ...through exactly one checkpoint");
+    check(noteWithUndo(), "reports: ...as a Note that offers Undo");
+    trigger(probe, QStringLiteral("Undo"));
+    settle(150);
+    check(doc.groupOf(shelf) == 0 && doc.groupOf(sideRight) == carcass,
+          "reports: one Undo puts all three back where they were");
+
+    said = request({side}, carcass, top);
+    check(said == QStringLiteral("Moved Side left above Top"),
+          QStringLiteral("reports: a reorder names its neighbour (\"%1\")").arg(said));
+    trigger(probe, QStringLiteral("Undo"));
+    settle(150);
+
+    said = request({side, sideRight}, 0, 0);
+    check(said == QStringLiteral("Moved 2 bodies out of Carcass"),
+          QStringLiteral("reports: two bodies to the top level say where they left (\"%1\")")
+              .arg(said));
+    trigger(probe, QStringLiteral("Undo"));
+    settle(150);
+
+    said = request({drawerFolder, side}, doors, DocumentModel::kIntoFolder);
+    check(said == QStringLiteral("Moved Drawer and Side left to Doors"),
+          QStringLiteral("reports: a folder and a body together are both named (\"%1\")").arg(said));
+    trigger(probe, QStringLiteral("Undo"));
+    settle(150);
+
+    // REVIEW FOCUS 1, as the user hears it: the folder alone is named, and
+    // the body inside it stays inside it.
+    said = request({drawerFolder, front}, doors, DocumentModel::kIntoFolder);
+    check(said == QStringLiteral("Moved Drawer to Doors") && doc.groupOf(front) == drawerFolder,
+          QStringLiteral("reports: a folder carried with its own body names the folder alone and "
+                         "keeps the body in it (\"%1\")").arg(said));
+    trigger(probe, QStringLiteral("Undo"));
+    settle(150);
+
+    // NoChange: neither a checkpoint, nor a toast, nor a revision.
+    const QString standing = toasts->currentText();
+    depth = doc.undoDepth();
+    int revision = doc.revision();
+    request({top}, carcass, DocumentModel::kIntoFolder);
+    check(doc.undoDepth() == depth, "reports: a drop that changes nothing takes no checkpoint");
+    check(doc.revision() == revision, "reports: ...does not move revision()");
+    check(toasts->currentText() == standing, "reports: ...and shows no toast of its own");
+
+    // Refused: a Failure that gives its reason, and nothing written.
+    revision = doc.revision();
+    depth = doc.undoDepth();
+    said = request({carcass}, drawerFolder, DocumentModel::kIntoFolder);
+    const QString expected =
+        QStringLiteral("Carcass can't go inside a folder it holds — drop it beside it instead");
+    check(said == expected && toasts->toast()->kind() == Toast::Kind::Failure,
+          QStringLiteral("reports: a refused drop is a Failure that gives its reason (\"%1\")")
+              .arg(said));
+    check(doc.revision() == revision && doc.undoDepth() == depth,
+          "reports: ...and the refusal wrote nothing");
+    check(probe.statusBar()->currentMessage() == expected,
+          "reports: ...and the reason stays in the status bar's left channel");
+    said = request({carcass}, carcass, DocumentModel::kIntoFolder);
+    check(said == QStringLiteral("Carcass can't go inside itself — drop it beside it instead"),
+          QStringLiteral("reports: into itself has its own sentence (\"%1\")").arg(said));
+
+    // The words a twin adds, and the present tense the status line uses - one
+    // author, so the two cannot drift.
+    DocumentModel::MoveResult withTwin;
+    withTwin.check = DocumentModel::MoveCheck::Moved;
+    withTwin.carried = {side};
+    withTwin.twins = {sideRight};
+    withTwin.parent = doors;
+    withTwin.beforeId = DocumentModel::kIntoFolder;
+    withTwin.fromFolder = carcass;
+    check(ItemMoveText::sentence(doc, withTwin, ItemMoveText::Tense::Past) ==
+              QStringLiteral("Moved Side left to Doors — and 1 mirrored twin"),
+          "reports: a twin that follows is said in the Note");
+    check(ItemMoveText::dragStatus(doc, withTwin) ==
+              QStringLiteral("Drop to move Side left into Doors — Esc cancels"),
+          "reports: the present tense reads \"Drop to move ... — Esc cancels\"");
+    const int fragments = ItemMoveText::paintedTexts().size();
+    spoken << ItemMoveText::paintedTexts();
+
+    QStringList offenders;
+    for (const QString& text : spoken)
+        for (const QString& word : bannedWords())
+            if (usesBannedWord(text, word))
+                offenders << text + QStringLiteral(" [") + word + QStringLiteral("]");
+    check(requests == 8 && fragments > 0 && spoken.size() == requests + fragments &&
+              offenders.isEmpty(),
+          QStringLiteral("reports: no move sentence uses a banned word (%1 swept; %2)")
+              .arg(spoken.size())
+              .arg(offenders.isEmpty() ? QStringLiteral("clean")
+                                       : offenders.join(QStringLiteral(", "))));
     probe.close();
 }
 
@@ -43600,6 +43741,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("the-items-order-survives-the-file-and-versions")) itemsOrderFileBlock();
     if (blockEnabled("ctrl-d-lands-right-after-its-source")) duplicateLandsAfterSourceBlock();
     if (blockEnabled("the-drawer-lists-the-stored-order")) drawerListsStoredOrderBlock();
+    if (blockEnabled("every-move-in-the-drawer-reports")) everyMoveReportsBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or
