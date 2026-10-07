@@ -59,10 +59,11 @@ Spec graphite()
     s.textDisabled      = QColor("#5c5c64");
     s.border            = QColor("#3a3a40");
     s.viewport          = QColor("#45454b");
-    // A modelling body's flat colour - see Theme.h. A quiet, low-chroma
-    // wood, picked from captures against the near-black viewport, hovered,
-    // selected, under a pull preview and inside a boolean region.
-    s.body              = QColor("#a08c78");
+    // A modelling body's flat colour - see Theme.h. OCCT's GRAY70, the grey
+    // bodies always wore: a quiet tan wood (#a08c78) shipped for one commit
+    // and the user asked for the grey back. It stays a token, so the Colours
+    // tab can still tint it.
+    s.body              = QColor("#b3b3b3");
     s.gridMinor         = QColor("#3e3e44");
     s.gridMajor         = QColor("#4d4d55");
     s.axisX             = QColor("#7a4a4a");   // muted red

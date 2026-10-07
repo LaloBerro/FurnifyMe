@@ -1259,14 +1259,17 @@ wood albedos, an edge colour OCCT's signature demands for an edge it never draws
 widget may cache a colour across it — and persist **debounced** (400 ms, flushed on close),
 because a colour-wheel drag fires per mouse-move. The picker opens with `show()`, never
 `open()`: `QDialog::open()` forces window-modality regardless of `setModal(false)`, and
-nothing in this app blocks. **The modelling body is a token now** (`Theme::body()`, `#a08c78`,
+nothing in this app blocks. **The modelling body is a token now** (`Theme::body()`, `#b3b3b3`,
 "Bodies while modelling" in the Viewport group; T-039 reversed the old scope ruling that left it
-OCCT's `GRAY70`): every `displaySolid()` presentation and the modelling preview's body are
-shaded in it, in the editor and the scene's arranging view, and `applyTheme()` re-colours what
-is already on screen. A quiet low-chroma wood, picked from captures (near-black viewport,
-hovered, selected, pull preview, boolean region); `gui_smoke` pins it ≥100 RGB from hover,
-selection, outline, both boolean tokens, both sizes inks and the measuring line, and ≥2.5:1
-against the `GRAY30` face boundaries. The render-mode materials and the material tiles'
+OCCT's `GRAY70` untokenised): every `displaySolid()` presentation and the modelling preview's
+body are shaded in it, in the editor and the scene's arranging view, and `applyTheme()`
+re-colours what is already on screen. **It ships as that same grey, by the user's call** — T-039
+first shipped a quiet tan wood (`#a08c78`) and, having tried it, the user said "i prefer the
+white/grey color that was before on the model side"; the wood belongs to render mode and the
+scene. `gui_smoke` pins it neutral, ≥80 RGB from hover, selection, outline, both boolean tokens,
+both sizes inks and the measuring line (82 from the group-size ink is the closest, the separation
+the grey always had — the tan was picked against 100), and ≥2.5:1 against the `GRAY30` face
+boundaries. The render-mode materials and the material tiles'
 studio miniature stay untokenised: they depict wood and the studio, not the shell.
 
 **HISTORICAL: the AIS_Manipulator styling wall** (the class is deleted since the custom
@@ -1642,13 +1645,13 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   across — so neither lies across a board. **A grain angle or a per-body "across" flag set
   before this is now relative to the board, not the world.** Wood stays OFF in a window built
   with persistence off (the suite's), as before — the calibration probes measure the plain
-  material, which outside wood is now the `body` token on the Phong tiers. Floor blends, the
+  material, which outside wood is the `body` token on the Phong tiers. Floor blends, the
   path-traced ratio and the export did not move (Shadows Δ3/5/6, PathTracing Δ9/9/8 and
-  122/191 = 0.639, export 193 against 191 at rest). **The Shadows ratio did: 138/186 = 0.742 →
-  107/186 = 0.575**, and an A/B with the token set back to GRAY70's `#b3b3b3` read 138 again on
-  the same binary — the probe takes the darkest box anywhere in frame, and the darker body
-  token's unlit face is now that box rather than the floor's shadow. The floor and its shadow
-  are unchanged; the band 0.40–0.95 was not touched.
+  122/191 = 0.639, export 193 against 191 at rest). **The Shadows ratio is a reading of the
+  body token, not only of the shadow**: while the token was the tan `#a08c78` it read 107/186 =
+  0.575 against the grey's 138/186 = 0.742, A/B'd on one binary — the probe takes the darkest box
+  anywhere in frame, and a darker body's unlit face becomes that box. With the grey restored it
+  is 0.742 again. The band 0.40–0.95 was never touched.
 
 - **"The viewport is the furniture alone" reaches every overlay, not just the obvious ones.**
   Grid, axis-gizmo card, rail, drawers, dimension, markers, every live gizmo, and the symmetry

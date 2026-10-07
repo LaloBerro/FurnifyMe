@@ -17329,7 +17329,7 @@ int main(int argc, char* argv[])
                 // The 2026-10 review's T-039: the bodies' own flat colour
                 // while modelling, a quiet low-chroma wood in place of
                 // OCCT's GRAY70 - picked from captures, see Theme.h.
-                {QStringLiteral("body"), QStringLiteral("#a08c78")},
+                {QStringLiteral("body"), QStringLiteral("#b3b3b3")},
                 {QStringLiteral("gridMinor"), QStringLiteral("#2d2d31")},
                 {QStringLiteral("gridMajor"), QStringLiteral("#35353b")},
                 {QStringLiteral("axisX"), QStringLiteral("#7a4a4a")},
@@ -40590,15 +40590,19 @@ int main(int argc, char* argv[])
                 {"measuring line", Theme::dimensionLine()},
                 {"viewport", Theme::viewport()},
             };
+            // 80, not the 100 the tan token was picked against: the user chose
+            // the grey back, and the grey measures 82 from the group-size ink -
+            // the separation the app always shipped with. The bar now guards
+            // that it gets no closer, rather than claiming a margin it never had.
             QStringList tooClose;
             QStringList all;
             for (const auto& n : neighbours) {
                 const double d = colorDistance(body, n.colour);
                 all << QStringLiteral("%1 %2").arg(QString::fromLatin1(n.name)).arg(d, 0, 'f', 0);
-                if (d < 100.0) tooClose << QString::fromLatin1(n.name);
+                if (d < 80.0) tooClose << QString::fromLatin1(n.name);
             }
             check(tooClose.isEmpty(),
-                  QStringLiteral("oak: the body token %1 sits at least 100 from every colour "
+                  QStringLiteral("oak: the body token %1 sits at least 80 from every colour "
                                  "drawn over a body (%2)")
                       .arg(body.name(), all.join(QStringLiteral(", "))));
             const double edgeContrast = contrastRatio(body, QColor(77, 77, 77));
@@ -40606,20 +40610,20 @@ int main(int argc, char* argv[])
                   QStringLiteral("oak: and the GRAY30 face boundaries read against it "
                                  "(%1:1, at least 2.5)")
                       .arg(edgeContrast, 0, 'f', 2));
-            // QUIET: low chroma, by the token's own HSV saturation - a wood
-            // that shouted would compete with the selection for attention.
-            check(body.hsvSaturationF() > 0.1 && body.hsvSaturationF() < 0.4 &&
-                      body.red() > body.blue(),
-                  QStringLiteral("oak: and it is a warm, quiet colour - saturation %1, "
-                                 "between 0.1 and 0.4, red above blue")
-                      .arg(body.hsvSaturationF(), 0, 'f', 2));
+            // The user's call: the GREY bodies always wore, not the tan wood
+            // this token first shipped at - neutral, so a body never competes
+            // with the selection or the wood a render puts on it.
+            check(body.hsvSaturationF() < 0.05,
+                  QStringLiteral("oak: and it ships as the neutral grey the user picked - "
+                                 "%1, saturation %2")
+                      .arg(body.name()).arg(body.hsvSaturationF(), 0, 'f', 2));
         }
 
         // --- modelling: the presentation IS the token ----------------------
         check(colorDistance(ov->solidColour(longXId), Theme::body()) < 3.0 &&
                   colorDistance(ov->solidColour(longYId), Theme::body()) < 3.0,
               QStringLiteral("oak: every body's presentation is shaded in the body token "
-                             "(%1, %2 against %3) - not GRAY70")
+                             "(%1, %2 against %3)")
                   .arg(ov->solidColour(longXId).name(), ov->solidColour(longYId).name(),
                        Theme::body().name()));
         const QImage modelShot = dump(ov, QStringLiteral("oak-modelling"));
@@ -40628,10 +40632,10 @@ int main(int argc, char* argv[])
         // condition fills reports the value from before it was measured.
         QColor modelPatch;
         const bool modelSampled = patchAt(modelShot, boardTop, 6, modelPatch);
-        check(modelSampled && modelPatch.red() - modelPatch.blue() > 15 &&
+        check(modelSampled && std::abs(modelPatch.red() - modelPatch.blue()) <= 6 &&
                   colorDistance(modelPatch, Theme::viewport()) > 60.0,
-              QStringLiteral("oak: and on screen the board leans warm the way its token "
-                             "does - %1, red %2 above blue (GRAY70 shades with none)")
+              QStringLiteral("oak: and on screen the board is the neutral grey its token "
+                             "is - %1, red and blue %2 apart, clear of the viewport")
                   .arg(modelPatch.name())
                   .arg(modelPatch.red() - modelPatch.blue()));
         // A LIVE THEME EDIT moves the very same pixels the other way - the
