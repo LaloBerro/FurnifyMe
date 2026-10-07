@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
+#include <set>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <TopAbs_ShapeEnum.hxx>
@@ -129,6 +132,7 @@ void DocumentModel::clear()
     // must not survive holding ids nothing owns any more.
     myGroups.clear();
     myItemGroup.clear();
+    myOrder.clear();
     // Materials too: clear() wipes the whole document, and a look belongs to
     // the furniture that set it.
     myMaterialLooks.clear();
@@ -726,7 +730,7 @@ bool DocumentModel::contains(int id) const
 
 void DocumentModel::checkpoint()
 {
-    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup, myOrder});
     if (myUndo.size() > kMaxHistory) myUndo.erase(myUndo.begin());
 
     // Anything redoable described a future that no longer follows from here.
@@ -737,7 +741,7 @@ bool DocumentModel::undo()
 {
     if (myUndo.empty()) return false;
 
-    myRedo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup});
+    myRedo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup, myOrder});
     mySolids = myUndo.back().solids;
     myOutlines = myUndo.back().outlines;
     // symmetryOn/symmetryPlane are NOT part of State - see its own comment.
@@ -748,6 +752,7 @@ bool DocumentModel::undo()
     myJoints = myUndo.back().joints;
     myGroups = myUndo.back().groups;
     myItemGroup = myUndo.back().itemGroup;
+    myOrder = myUndo.back().order;
     myUndo.pop_back();
     ++myRevision;
     return true;
@@ -757,7 +762,7 @@ bool DocumentModel::redo()
 {
     if (myRedo.empty()) return false;
 
-    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup, myOrder});
     mySolids = myRedo.back().solids;
     myOutlines = myRedo.back().outlines;
     myTwin = myRedo.back().twin;
@@ -765,6 +770,7 @@ bool DocumentModel::redo()
     myJoints = myRedo.back().joints;
     myGroups = myRedo.back().groups;
     myItemGroup = myRedo.back().itemGroup;
+    myOrder = myRedo.back().order;
     myRedo.pop_back();
     ++myRevision;
     return true;
@@ -913,6 +919,9 @@ bool DocumentModel::removeGroup(int groupId)
             kv = kv->second == 0 ? myItemGroup.erase(kv) : std::next(kv);
         }
     }
+    // Its own sequence goes with it; its children are unranked in the parent
+    // now and read in the automatic order there.
+    myOrder.erase(groupId);
     myGroups.erase(it);
     ++myRevision;
     return true;
@@ -950,6 +959,280 @@ std::vector<int> DocumentModel::bodiesUnderGroup(int groupId) const
             ids.push_back(s.id);
     }
     return ids;
+}
+
+// --- sibling order (T-063) -----------------------------------------------------
+
+std::vector<int> DocumentModel::automaticChildren(int parent) const
+{
+    std::vector<int> ids = childGroups(parent);
+    const std::vector<int> items = itemsInGroup(parent);   // outlines first, then bodies
+    ids.insert(ids.end(), items.begin(), items.end());
+    return ids;
+}
+
+std::vector<int> DocumentModel::orderedChildren(int parent) const
+{
+    std::vector<int> automatic = automaticChildren(parent);
+    const auto stored = myOrder.find(parent);
+    if (stored == myOrder.end()) return automatic;
+
+    const std::unordered_set<int> live(automatic.begin(), automatic.end());
+    std::unordered_set<int> placed;
+    std::vector<int> result;
+    result.reserve(automatic.size());
+    // Explicit first - but only ids that are still children here. A deleted
+    // id, or one moved away by a route that never touched this sequence,
+    // drops out on read rather than being chased at every write.
+    for (int id : stored->second) {
+        if (live.count(id) && placed.insert(id).second) result.push_back(id);
+    }
+    for (int id : automatic) {
+        if (!placed.count(id)) result.push_back(id);
+    }
+    return result;
+}
+
+std::vector<int> DocumentModel::displayOrder() const
+{
+    std::vector<int> out;
+    std::function<void(int)> walk = [&](int parent) {
+        for (int id : orderedChildren(parent)) {
+            out.push_back(id);
+            if (groupExists(id)) walk(id);
+        }
+    };
+    walk(0);
+    return out;
+}
+
+std::vector<int> DocumentModel::resolvedSequence(int parent, const std::vector<int>& block,
+                                                 int before) const
+{
+    const auto inBlock = [&block](int id) {
+        return std::find(block.begin(), block.end(), id) != block.end();
+    };
+    std::vector<int> sequence = orderedChildren(parent);
+    sequence.erase(std::remove_if(sequence.begin(), sequence.end(), inBlock), sequence.end());
+    const auto at = before > 0 ? std::find(sequence.begin(), sequence.end(), before)
+                               : sequence.end();
+    sequence.insert(at, block.begin(), block.end());
+    return sequence;
+}
+
+DocumentModel::MoveResult DocumentModel::checkMove(const std::vector<int>& ids, int parent,
+                                                   int beforeId) const
+{
+    MoveResult result;
+    result.parent = parent;
+    result.beforeId = beforeId;
+
+    // Unknown: nothing to carry, a parent that is not a folder, an id nobody
+    // owns, or a position that is not a child of that parent.
+    if (ids.empty()) return result;
+    if (parent != 0 && !groupExists(parent)) return result;
+    if (beforeId < kIntoFolder) return result;
+    if (beforeId == kIntoFolder && parent == 0) return result;
+    if (beforeId > 0 && (!isKnownItem(beforeId) || groupOf(beforeId) != parent)) return result;
+    for (int id : ids) {
+        if (!isKnownItem(id)) return result;
+    }
+
+    // A folder into itself, or into a folder it holds.
+    for (int id : ids) {
+        if (parent != 0 && groupExists(id) && groupContains(id, parent)) {
+            result.check = MoveCheck::IntoItself;
+            result.offendingFolder = id;
+            return result;
+        }
+    }
+
+    // Carried: one entry per id, and nothing that already travels inside
+    // another carried folder (REVIEW FOCUS 1 - carrying it separately would
+    // detach it from that folder).
+    const auto insideCarriedFolder = [&](int id) {
+        for (int other : ids) {
+            if (other != id && groupExists(other) && groupContains(other, groupOf(id)) &&
+                groupOf(id) != 0)
+                return true;
+        }
+        return false;
+    };
+    std::vector<int> carried;
+    for (int id : ids) {
+        if (std::find(carried.begin(), carried.end(), id) != carried.end()) continue;
+        if (insideCarriedFolder(id)) continue;
+        carried.push_back(id);
+    }
+    // In the order the list shows them, never the order they were picked in.
+    const std::vector<int> order = displayOrder();
+    std::unordered_map<int, std::size_t> rank;
+    for (std::size_t i = 0; i < order.size(); ++i) rank[order[i]] = i;
+    std::sort(carried.begin(), carried.end(),
+              [&rank](int a, int b) { return rank[a] < rank[b]; });
+
+    // A mirrored twin follows its source (spec fix 2): right behind it, into
+    // the same parent - once, and only while mirroring is on.
+    std::vector<int> block;
+    for (int id : carried) {
+        block.push_back(id);
+        if (!mySymmetryOn || !contains(id)) continue;
+        const int twin = twinOf(id);
+        if (twin <= 0) continue;
+        if (std::find(ids.begin(), ids.end(), twin) != ids.end()) continue;
+        if (std::find(result.twins.begin(), result.twins.end(), twin) != result.twins.end())
+            continue;
+        if (insideCarriedFolder(twin)) continue;
+        result.twins.push_back(twin);
+        block.push_back(twin);
+    }
+
+    // A beforeId that is itself carried means "where it was": the next
+    // sibling after it that stays behind.
+    int before = beforeId;
+    if (before > 0 && std::find(block.begin(), block.end(), before) != block.end()) {
+        const std::vector<int> siblings = orderedChildren(parent);
+        auto at = std::find(siblings.begin(), siblings.end(), before);
+        before = 0;
+        if (at != siblings.end()) {
+            for (++at; at != siblings.end(); ++at) {
+                if (std::find(block.begin(), block.end(), *at) == block.end()) {
+                    before = *at;
+                    break;
+                }
+            }
+        }
+    }
+
+    result.carried = carried;
+    result.block = block;
+    result.beforeId = before;
+    result.fromFolder = groupOf(carried.front());
+    for (int id : carried) {
+        if (groupOf(id) != result.fromFolder) {
+            result.fromFolder = -1;
+            break;
+        }
+    }
+
+    bool parentChanges = false;
+    for (int id : block) {
+        if (groupOf(id) != parent) {
+            parentChanges = true;
+            break;
+        }
+    }
+    if (!parentChanges &&
+        (before == kIntoFolder || resolvedSequence(parent, block, before) == orderedChildren(parent))) {
+        result.check = MoveCheck::NoChange;
+        return result;
+    }
+    result.check = MoveCheck::Moved;
+    return result;
+}
+
+DocumentModel::MoveResult DocumentModel::moveItems(const std::vector<int>& ids, int parent,
+                                                   int beforeId)
+{
+    MoveResult result = checkMove(ids, parent, beforeId);
+    if (result.check != MoveCheck::Moved) return result;
+    const std::vector<int>& block = result.block;
+    const auto inBlock = [&block](int id) {
+        return std::find(block.begin(), block.end(), id) != block.end();
+    };
+
+    // Worked out BEFORE anything moves, so the siblings left behind keep the
+    // places the user saw them in.
+    const bool exact = result.beforeId != kIntoFolder;
+    const std::vector<int> destination =
+        exact ? resolvedSequence(parent, block, result.beforeId) : std::vector<int>();
+
+    for (auto& kv : myOrder)
+        kv.second.erase(std::remove_if(kv.second.begin(), kv.second.end(), inBlock),
+                        kv.second.end());
+    for (int id : block) {
+        if (groupExists(id)) {
+            for (Group& g : myGroups) {
+                if (g.id == id) g.parent = parent;
+            }
+        } else if (parent == 0) {
+            myItemGroup.erase(id);
+        } else {
+            myItemGroup[id] = parent;
+        }
+    }
+    if (exact) {
+        myOrder[parent] = destination;
+    } else {
+        const auto stored = myOrder.find(parent);
+        if (stored != myOrder.end())
+            stored->second.insert(stored->second.end(), block.begin(), block.end());
+    }
+    ++myRevision;
+    return result;
+}
+
+DocumentModel::MoveTarget DocumentModel::siblingStepTarget(const std::vector<int>& ids,
+                                                           int step) const
+{
+    MoveTarget target;
+    if (ids.empty() || (step != -1 && step != 1)) return target;
+    const int parent = groupOf(ids.front());
+    for (int id : ids) {
+        if (!isKnownItem(id) || groupOf(id) != parent) return target;
+    }
+    const std::vector<int> siblings = orderedChildren(parent);
+    std::vector<std::size_t> at;
+    for (std::size_t i = 0; i < siblings.size(); ++i) {
+        if (std::find(ids.begin(), ids.end(), siblings[i]) != ids.end()) at.push_back(i);
+    }
+    if (at.empty()) return target;
+    if (step < 0) {
+        if (at.front() == 0) return target;
+        target.beforeId = siblings[at.front() - 1];
+    } else {
+        const std::size_t next = at.back() + 1;
+        if (next >= siblings.size()) return target;
+        target.beforeId = next + 1 < siblings.size() ? siblings[next + 1] : 0;
+    }
+    target.parent = parent;
+    target.ok = true;
+    return target;
+}
+
+DocumentModel::MoveTarget DocumentModel::outOfFolderTarget(const std::vector<int>& ids) const
+{
+    MoveTarget target;
+    if (ids.empty()) return target;
+    const int folder = groupOf(ids.front());
+    if (folder == 0) return target;
+    for (int id : ids) {
+        if (!isKnownItem(id) || groupOf(id) != folder) return target;
+    }
+    const int grand = groupOf(folder);
+    const std::vector<int> siblings = orderedChildren(grand);
+    const auto at = std::find(siblings.begin(), siblings.end(), folder);
+    target.parent = grand;
+    target.beforeId = (at != siblings.end() && at + 1 != siblings.end()) ? *(at + 1) : 0;
+    target.ok = true;
+    return target;
+}
+
+bool DocumentModel::placeAfter(int newId, int afterId)
+{
+    if (!isKnownItem(newId) || !isKnownItem(afterId)) return false;
+    const int parent = groupOf(afterId);
+    if (groupOf(newId) != parent) return false;
+    const auto stored = myOrder.find(parent);
+    if (stored == myOrder.end()) return false;
+    std::vector<int> sequence = orderedChildren(parent);
+    sequence.erase(std::remove(sequence.begin(), sequence.end(), newId), sequence.end());
+    const auto at = std::find(sequence.begin(), sequence.end(), afterId);
+    if (at == sequence.end()) return false;
+    sequence.insert(at + 1, newId);
+    stored->second = sequence;
+    ++myRevision;
+    return true;
 }
 
 bool DocumentModel::setItemName(int id, const std::string& name)
@@ -1383,6 +1666,7 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     // and myJoints each carry just above.
     myGroups.clear();
     myItemGroup.clear();
+    myOrder.clear();
     // A second load onto the same instance must not keep the OLD furniture's
     // materials - the same reasoning every block above it carries.
     myMaterialLooks = meta.materialLooks;
@@ -1543,6 +1827,13 @@ void DocumentModel::restoreFrom(const DocumentModel& snapshot)
     // so this is what actually brings a version's own joints back into the
     // live document on Restore.
     myJoints = snapshot.myJoints;
+    // THE TREE AND ITS ORDER TRAVEL TOO. They used to be left behind, so a
+    // restored version kept the LIVE document's folders - whose ids name
+    // nothing in the snapshot's verbatim id space, or name the wrong thing.
+    // A version is a snapshot of the whole document.
+    myGroups = snapshot.myGroups;
+    myItemGroup = snapshot.myItemGroup;
+    myOrder = snapshot.myOrder;
     // Never shrink: `this`'s own counters may already be ahead of
     // `snapshot`'s (this document had more history before the restore than
     // the version ever saw), and `snapshot`'s may be ahead of `this`'s (the

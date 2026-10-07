@@ -486,6 +486,67 @@ public:
     // has to refuse the same move before it is made.
     bool groupContains(int maybeAncestor, int groupId) const;
 
+    // --- sibling order (the Items drawer, T-063) ------------------------------
+    // WHERE A ROW SITS AMONG ITS SIBLINGS. Sparse: a parent carries an explicit
+    // sequence only once the user has reordered it, and orderedChildren() is
+    // the ONE place a sequence is resolved - explicit entries first, in their
+    // stored order, then every unranked child in the automatic order (folders,
+    // outlines, bodies by creation). So a new item lands at the END of its
+    // parent with no creation route knowing order exists, and a deleted id
+    // simply drops out the next time the list is read. Undoable content, in
+    // State, like the folder tree it orders.
+    static constexpr int kIntoFolder = -1;   // a beforeId meaning "into, at no position"
+    std::vector<int> orderedChildren(int parent) const;
+    bool hasStoredOrder(int parent) const { return myOrder.count(parent) > 0; }
+    const std::map<int, std::vector<int>>& storedOrder() const { return myOrder; }
+
+    // ONE answer for every surface a move touches - the drop indicator, the
+    // ghost, the status line, the Note and the Failure all read it, the
+    // checkMitre()/checkResize() contract.
+    enum class MoveCheck { Moved, NoChange, IntoItself, Unknown };
+    struct MoveResult {
+        MoveCheck check = MoveCheck::Unknown;
+        // What is carried, deduplicated, with anything inside another carried
+        // folder dropped (it travels inside that folder), in list order.
+        std::vector<int> carried;
+        // Mirrored twins that follow their sources (symmetryOn() only).
+        std::vector<int> twins;
+        // carried with each twin right behind its source - what actually moves.
+        std::vector<int> block;
+        int parent = 0;
+        // As resolved: a carried beforeId becomes the next uncarried sibling.
+        int beforeId = 0;
+        // The folder every carried row came from, or -1 when they came from
+        // more than one place.
+        int fromFolder = -1;
+        // For IntoItself: the folder that would end up inside itself.
+        int offendingFolder = 0;
+    };
+    // `parent` 0 is the root. `beforeId` > 0 is the sibling the block goes in
+    // front of, 0 the very end of `parent`, kIntoFolder "into `parent`" with no
+    // position (appended to a stored sequence, else left to the automatic
+    // order). checkMove() is the dry run and changes nothing; moveItems() takes
+    // NO checkpoint (the caller's gesture owns one) and bumps revision() once,
+    // only when the answer is Moved.
+    MoveResult checkMove(const std::vector<int>& ids, int parent, int beforeId) const;
+    MoveResult moveItems(const std::vector<int>& ids, int parent, int beforeId);
+
+    // Where Alt+Up / Alt+Down (step -1 / +1) and Alt+Left would put `ids`.
+    // ok == false when there is nowhere to go or the ids do not share a parent.
+    struct MoveTarget {
+        bool ok = false;
+        int parent = 0;
+        int beforeId = 0;
+    };
+    MoveTarget siblingStepTarget(const std::vector<int>& ids, int step) const;
+    MoveTarget outOfFolderTarget(const std::vector<int>& ids) const;
+
+    // The duplicate route's one exception to "new items land at the end": the
+    // copy goes in directly after its source, when that parent HAS a stored
+    // sequence. False (nothing written) when it has none - the automatic order
+    // then stands - or when the two do not share a parent.
+    bool placeAfter(int newId, int afterId);
+
     // --- how each material looks (per furniture) -----------------------------
     // A material's own COLOUR and BRIGHTNESS, one record per material name -
     // "Matte", "Satin", "Metal", or a wood's own name. The render card's
@@ -809,6 +870,9 @@ private:
         // body was in.
         std::vector<Group> groups;
         std::map<int, int> itemGroup;
+        // The sibling order (T-063) rides with the tree it orders: a move is
+        // a checkpointed edit, so an undo must put every sequence back.
+        std::map<int, std::vector<int>> order;
     };
 
     // Drops `id`'s existing pairing, both directions, if it has one. The one
@@ -847,6 +911,19 @@ private:
     // and there is no second spelling of it.
     std::vector<Group> myGroups;
     std::map<int, int> myItemGroup;
+    // Parent id (0 = root) -> explicit sequence. See orderedChildren().
+    std::map<int, std::vector<int>> myOrder;
+    // Folders first, then outlines, then bodies - what a parent with no stored
+    // sequence reads, and what unranked children of one that has a sequence
+    // fall back to.
+    std::vector<int> automaticChildren(int parent) const;
+    // Every row of the whole tree in display order (depth first through
+    // orderedChildren()), used to put a carried selection in list order.
+    std::vector<int> displayOrder() const;
+    // orderedChildren(parent) with `block` taken out and put back in front of
+    // `before` (or at the end): the sequence a move would write.
+    std::vector<int> resolvedSequence(int parent, const std::vector<int>& block, int before) const;
+    bool isKnownItem(int id) const { return contains(id) || containsOutline(id) || groupExists(id); }
     // See MaterialLook. Keyed by the material's own name, and deliberately
     // not in State - presentation, persisted, never undone.
     std::vector<MaterialLook> myMaterialLooks;
