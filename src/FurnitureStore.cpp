@@ -595,6 +595,59 @@ void jsonToFolders(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
         meta.outlineGroups.push_back(value.toInt(-1));
 }
 
+// The sibling order (T-063): {"sequences": [{"parent": -1, "items": ["b2",
+// "f0", "o0"]}]}. Positional like every block here - b, o and f index the
+// bodies, the outlines and the folders arrays - because ids are never
+// persisted.
+QJsonObject orderToJson(const DocumentModel::DocumentMeta& meta)
+{
+    using Kind = DocumentModel::DocumentMeta::ItemRef::Kind;
+    QJsonArray sequences;
+    for (const DocumentModel::DocumentMeta::OrderRecord& record : meta.order) {
+        QJsonArray items;
+        for (const DocumentModel::DocumentMeta::ItemRef& ref : record.items) {
+            const QChar tag = ref.kind == Kind::Body      ? QLatin1Char('b')
+                              : ref.kind == Kind::Outline ? QLatin1Char('o')
+                                                          : QLatin1Char('f');
+            items.append(QString(tag) + QString::number(ref.index));
+        }
+        QJsonObject entry;
+        entry[QStringLiteral("parent")] = record.parentIndex;
+        entry[QStringLiteral("items")] = items;
+        sequences.append(entry);
+    }
+    QJsonObject obj;
+    obj[QStringLiteral("sequences")] = sequences;
+    return obj;
+}
+
+// The inverse. An absent key decodes to no records - the automatic order, the
+// forward-compatible rule every block here follows. A malformed entry decodes
+// to an index of -1 (or a parent of -2), which DocumentModel::fromSerialized()
+// refuses by its own range check rather than this guessing at a repair.
+void jsonToOrder(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
+{
+    using Kind = DocumentModel::DocumentMeta::ItemRef::Kind;
+    for (const QJsonValue& value : obj.value(QStringLiteral("sequences")).toArray()) {
+        const QJsonObject entry = value.toObject();
+        DocumentModel::DocumentMeta::OrderRecord record;
+        record.parentIndex = entry.value(QStringLiteral("parent")).toInt(-2);
+        for (const QJsonValue& item : entry.value(QStringLiteral("items")).toArray()) {
+            const QString text = item.toString();
+            DocumentModel::DocumentMeta::ItemRef ref;
+            bool ok = false;
+            const int index = text.mid(1).toInt(&ok);
+            ref.index = ok ? index : -1;
+            if (text.startsWith(QLatin1Char('b'))) ref.kind = Kind::Body;
+            else if (text.startsWith(QLatin1Char('o'))) ref.kind = Kind::Outline;
+            else if (text.startsWith(QLatin1Char('f'))) ref.kind = Kind::Folder;
+            else ref.index = -1;
+            record.items.push_back(ref);
+        }
+        meta.order.push_back(std::move(record));
+    }
+}
+
 QJsonObject jointsToJson(const DocumentModel::DocumentMeta& meta)
 {
     QJsonArray list;
@@ -1110,6 +1163,7 @@ bool FurnitureStore::saveFurniture(const QString& id, const DocumentModel& doc, 
     manifest[QStringLiteral("linkGroups")] = linkGroupsToJson(meta);
     manifest[QStringLiteral("joints")] = jointsToJson(meta);
     manifest[QStringLiteral("folders")] = foldersToJson(meta);
+    manifest[QStringLiteral("order")] = orderToJson(meta);
     manifest[QStringLiteral("materials")] = materialsToJson(meta);
     if (!writeManifestObject(id, manifest)) return false;
 
@@ -1173,6 +1227,8 @@ bool FurnitureStore::loadFurniture(const QString& id, DocumentModel& doc, QStrin
     jsonToJoints(manifest.value(QStringLiteral("joints")).toObject(), meta);
     // Same forward-compatibility rule for folders (improvements item 10).
     jsonToFolders(manifest.value(QStringLiteral("folders")).toObject(), meta);
+    // Same forward-compatibility rule for the sibling order (T-063).
+    jsonToOrder(manifest.value(QStringLiteral("order")).toObject(), meta);
     jsonToMaterials(manifest.value(QStringLiteral("materials")).toObject(), meta);
 
     // Scratch, then swap - never half-load, per the standing contract.
@@ -1286,6 +1342,7 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     // snapshot of the WHOLE document, and a restore that silently flattened
     // the tree would be the half-restored document that law forbids.
     entry[QStringLiteral("folders")] = foldersToJson(meta);
+    entry[QStringLiteral("order")] = orderToJson(meta);
     entry[QStringLiteral("materials")] = materialsToJson(meta);
     versionsArr.append(entry);
     manifest[QStringLiteral("versions")] = versionsArr;
@@ -1351,6 +1408,7 @@ bool FurnitureStore::loadVersion(const QString& id, const QString& name, Documen
         // joints rather than a refusal.
         jsonToJoints(entry.value(QStringLiteral("joints")).toObject(), meta);
         jsonToFolders(entry.value(QStringLiteral("folders")).toObject(), meta);
+        jsonToOrder(entry.value(QStringLiteral("order")).toObject(), meta);
         jsonToMaterials(entry.value(QStringLiteral("materials")).toObject(), meta);
 
         DocumentModel scratch;

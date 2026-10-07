@@ -1003,6 +1003,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-drawer-rows-say-what-their-buttons-do", false, true },
     { "chips-take-no-keyboard-focus", false, true },
     { "controls-carry-accessible-names", false, true },
+    { "the-items-order-survives-the-file-and-versions", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -2810,6 +2811,204 @@ static LONG CALLBACK traceStackOverflow(EXCEPTION_POINTERS* info)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 #endif
+
+// --- the Items drawer, T-063 ---------------------------------------------------
+// The names a parent's rows read, in the order DocumentModel resolves.
+QStringList namesInOrder(const DocumentModel& doc, int parent)
+{
+    QStringList names;
+    for (int id : doc.orderedChildren(parent)) {
+        if (doc.groupExists(id)) names << QString::fromStdString(doc.groupNameOf(id));
+        else if (doc.containsOutline(id)) names << QString::fromStdString(doc.outlineNameOf(id));
+        else names << QString::fromStdString(doc.nameOf(id));
+    }
+    return names;
+}
+
+// Ids are handed out afresh on every load, so the suite finds a row's id by
+// the name it seeded - folders first, then bodies, then outlines.
+int idNamed(const DocumentModel& doc, const QString& name)
+{
+    for (const DocumentModel::Group& g : doc.groups())
+        if (QString::fromStdString(g.name) == name) return g.id;
+    for (const DocumentModel::Solid& s : doc.solids())
+        if (QString::fromStdString(s.name) == name) return s.id;
+    for (const DocumentModel::Outline& o : doc.outlines())
+        if (QString::fromStdString(o.name) == name) return o.id;
+    return 0;
+}
+
+// A small cabinet written straight through the store: Carcass (holding the
+// Drawer folder, Side left, Side right and Top), Doors (Door left, Door right),
+// and Shelf and Back at the root, plus one outline, Sketch A.
+QString seedCabinet(FurnitureStore& store)
+{
+    const QString id = store.createFurniture(QStringLiteral("Cabinet"));
+    DocumentModel doc;
+    const int carcass = doc.createGroup("Carcass");
+    const int drawer = doc.createGroup("Drawer", carcass);
+    const int doors = doc.createGroup("Doors");
+    double x = 0.0;
+    const auto board = [&](const char* name, int folder) {
+        const int b = doc.addSolid(ModelingOps::makeBox(gp_Pnt(x, 0.0, 0.0), 18.0, 300.0, 400.0));
+        x += 400.0;
+        doc.setItemName(b, name);
+        if (folder != 0) doc.setItemGroup(b, folder);
+        return b;
+    };
+    board("Side left", carcass);
+    board("Side right", carcass);
+    board("Top", carcass);
+    board("Drawer front", drawer);
+    board("Door left", doors);
+    board("Door right", doors);
+    board("Shelf", 0);
+    board("Back", 0);
+    const gp_Pln ground;
+    const int sketch =
+        doc.addOutline(BRepBuilderAPI_MakeFace(ground, 0.0, 100.0, 0.0, 50.0).Face(), ground);
+    doc.setItemName(sketch, "Sketch A");
+    return store.saveFurniture(id, doc, QImage()) ? id : QString();
+}
+
+QJsonObject readManifest(const QString& root, const QString& id)
+{
+    QFile file(root + QStringLiteral("/") + id + QStringLiteral("/manifest.json"));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    return QJsonDocument::fromJson(file.readAll()).object();
+}
+
+bool writeManifest(const QString& root, const QString& id, const QJsonObject& manifest)
+{
+    QFile file(root + QStringLiteral("/") + id + QStringLiteral("/manifest.json"));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    return file.write(QJsonDocument(manifest).toJson()) > 0;
+}
+
+void itemsOrderFileBlock()
+{
+    RequiredTempDir dir;
+    FurnitureStore store(dir.path());
+    const QString id = seedCabinet(store);
+    check(!id.isEmpty(), "order file: the cabinet is seeded");
+
+    DocumentModel doc;
+    QString error;
+    const bool seededLoads = store.loadFurniture(id, doc, &error);
+    check(seededLoads, "order file: the seeded cabinet loads");
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    doc.moveItems({idNamed(doc, QStringLiteral("Shelf"))}, 0, carcass);
+    doc.moveItems({idNamed(doc, QStringLiteral("Top"))}, carcass,
+                  idNamed(doc, QStringLiteral("Drawer")));
+    const QStringList rootOrder = namesInOrder(doc, 0);
+    const QStringList carcassOrder = namesInOrder(doc, carcass);
+    check(store.saveFurniture(id, doc, QImage()), "order file: the reordered cabinet saves");
+
+    DocumentModel loaded;
+    const bool reloaded = store.loadFurniture(id, loaded, &error);
+    check(reloaded && namesInOrder(loaded, 0) == rootOrder,
+          QStringLiteral("order file: the root reads as saved (%1)")
+              .arg(namesInOrder(loaded, 0).join(QStringLiteral(", "))));
+    check(namesInOrder(loaded, idNamed(loaded, QStringLiteral("Carcass"))) == carcassOrder,
+          "order file: and so does Carcass");
+
+    QJsonObject manifest = readManifest(dir.path(), id);
+    check(manifest.value(QStringLiteral("order"))
+                  .toObject()
+                  .value(QStringLiteral("sequences"))
+                  .toArray()
+                  .size() == 2,
+          "order file: the manifest carries two sequences under its own \"order\" key");
+
+    // An OLDER file: the key gone, exactly as every furniture saved before
+    // this existed.
+    QJsonObject older = manifest;
+    older.remove(QStringLiteral("order"));
+    check(writeManifest(dir.path(), id, older), "order file: the key is removed by hand");
+    DocumentModel flat;
+    const bool flatLoads = store.loadFurniture(id, flat, &error);
+    check(flatLoads &&
+              namesInOrder(flat, 0) ==
+                  QStringList({QStringLiteral("Carcass"), QStringLiteral("Doors"),
+                               QStringLiteral("Sketch A"), QStringLiteral("Shelf"),
+                               QStringLiteral("Back")}),
+          QStringLiteral("order file: a manifest with no order block loads in the automatic "
+                         "order (%1)")
+              .arg(namesInOrder(flat, 0).join(QStringLiteral(", "))));
+
+    // A reference to a body that does not exist: refused, with a reason.
+    QJsonObject corrupt = manifest;
+    QJsonObject badOrder;
+    QJsonObject badSequence;
+    badSequence[QStringLiteral("parent")] = -1;
+    badSequence[QStringLiteral("items")] = QJsonArray({QStringLiteral("b99")});
+    badOrder[QStringLiteral("sequences")] = QJsonArray({badSequence});
+    corrupt[QStringLiteral("order")] = badOrder;
+    check(writeManifest(dir.path(), id, corrupt), "order file: a corrupt order is written by hand");
+    DocumentModel refused;
+    error.clear();
+    const bool refusedLoad = store.loadFurniture(id, refused, &error);
+    check(!refusedLoad && !error.isEmpty(),
+          QStringLiteral("order file: a sequence naming a body that does not exist is refused "
+                         "with a reason (\"%1\")").arg(error));
+
+    // Versions carry it.
+    check(store.saveFurniture(id, doc, QImage()), "order file: the good manifest is written back");
+    check(store.saveVersion(id, QStringLiteral("Reordered"), doc, QString()),
+          "order file: a version of the reordered cabinet is saved");
+    DocumentModel fromVersion;
+    const bool versionLoads = store.loadVersion(id, QStringLiteral("Reordered"), fromVersion);
+    check(versionLoads && namesInOrder(fromVersion, 0) == rootOrder,
+          "order file: the version reads back in the order it was saved");
+
+    // REVIEW FOCUS 5: a version saved BEFORE the order existed - its entry
+    // has no "order" key - restored over the reordered document.
+    check(store.saveVersion(id, QStringLiteral("Before order"), doc, QString()),
+          "order file: a second version is saved");
+    QJsonObject withVersions = readManifest(dir.path(), id);
+    QJsonArray versions = withVersions.value(QStringLiteral("versions")).toArray();
+    for (int i = 0; i < versions.size(); ++i) {
+        QJsonObject entry = versions.at(i).toObject();
+        if (entry.value(QStringLiteral("name")).toString() != QStringLiteral("Before order"))
+            continue;
+        entry.remove(QStringLiteral("order"));
+        versions.replace(i, entry);
+    }
+    withVersions[QStringLiteral("versions")] = versions;
+    check(writeManifest(dir.path(), id, withVersions),
+          "order file: that version's order key is removed, as an older build wrote it");
+
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.setAttribute(Qt::WA_ShowWithoutActivating);
+    probe.resize(1100, 780);
+    probe.show();
+    waitFully(300);
+    probe.view()->setAnimationsEnabled(false);
+    check(probe.openFurniture(id), "order file: the editor opens the cabinet");
+    settle(250);
+    check(namesInOrder(probe.document(), 0) == rootOrder,
+          "order file: the editor opens it in its stored order");
+    check(probe.restoreVersion(QStringLiteral("Before order")),
+          "order file: the old version restores");
+    settle(200);
+    check(namesInOrder(probe.document(), 0) ==
+              QStringList({QStringLiteral("Carcass"), QStringLiteral("Doors"),
+                           QStringLiteral("Sketch A"), QStringLiteral("Shelf"),
+                           QStringLiteral("Back")}),
+          QStringLiteral("order file: restoring a version saved before the order existed puts the "
+                         "automatic order back (%1)")
+              .arg(namesInOrder(probe.document(), 0).join(QStringLiteral(", "))));
+    const int restoredCarcass = idNamed(probe.document(), QStringLiteral("Carcass"));
+    check(restoredCarcass > 0 &&
+              probe.document().groupOf(idNamed(probe.document(), QStringLiteral("Top"))) ==
+                  restoredCarcass,
+          "order file: the restore brought the version's FOLDERS back, Top inside Carcass");
+    trigger(probe, QStringLiteral("Undo"));
+    settle(200);
+    check(namesInOrder(probe.document(), 0) == rootOrder,
+          "order file: one Undo brings the stored order back");
+    probe.close();
+}
 
 int main(int argc, char* argv[])
 {
@@ -42935,6 +43134,8 @@ int main(int argc, char* argv[])
             sw.close();
         }
     }
+
+    if (blockEnabled("the-items-order-survives-the-file-and-versions")) itemsOrderFileBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or
