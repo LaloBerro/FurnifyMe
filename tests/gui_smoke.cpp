@@ -782,7 +782,12 @@ void skipByEnvironment(int checks, const QString& why)
 // added, 5278 after, measured at every stage rather than reasoned about. A
 // speed pass is exactly the change this floor exists to police, because every
 // wait it shortens is a chance for a check to stop being reached.
-constexpr int kCheckFloor = 5374;
+//
+// RE-RATCHETED (2026-10-07, the review-fixes branch): the 2026-10 whole-app
+// review's twenty-six cards, worked in six batches, each batch green on its own
+// full run. TWO consecutive unfiltered runs on the final tree measured 5925
+// checks + 1 environment skip, agreeing to the digit.
+constexpr int kCheckFloor = 5925;
 
 void check(bool condition, const QString& what)
 {
@@ -42848,17 +42853,25 @@ int main(int argc, char* argv[])
         const QString message = QStringLiteral("The two pieces don't meet — move them so they do");
         if (toasts) toasts->show(message, Toast::Kind::Failure, false);
         settle(120);
-        int alerts = 0;
-        for (const auto& event : g_accessibleEvents)
-            if (event.first == toast && event.second == QAccessible::Alert) ++alerts;
+        int announcements = 0, alerts = 0;
+        for (const auto& event : g_accessibleEvents) {
+            if (event.first == toast && event.second == QAccessible::Announcement) ++announcements;
+            if (event.second == QAccessible::Alert) ++alerts;
+        }
         check(toast && toast->accessibleName() == message &&
                   toast->accessibleDescription() == QStringLiteral("Failure"),
               QStringLiteral("names: a toast's accessible name IS its message (\"%1\")")
                   .arg(toast ? toast->accessibleName() : QString()));
-        check(alerts >= 1,
-              QStringLiteral("names: and showing it raises an Alert for it (%1 alerts among %2 "
+        check(announcements >= 1,
+              QStringLiteral("names: and showing it raises an announcement for it (%1 among %2 "
                              "events)")
-                  .arg(alerts).arg(static_cast<int>(g_accessibleEvents.size())));
+                  .arg(announcements).arg(static_cast<int>(g_accessibleEvents.size())));
+        // Qt's Windows plugin answers an Alert with a SYSTEM SOUND - every toast
+        // chimed, and a full run of this suite chimed on a loop. Never again.
+        check(alerts == 0,
+              QStringLiteral("names: and NO Alert is raised - Windows plays a sound for one "
+                             "(%1 alerts)")
+                  .arg(alerts));
         check(toast && toast->undoControl() &&
                   toast->undoControl()->accessibleName() == toast->paintedTexts().value(0),
               "names: and its painted Undo pill is named Undo");
@@ -42878,14 +42891,20 @@ int main(int argc, char* argv[])
         HintBalloon* hint = aw.findChild<HintBalloon*>();
         check(buildBody(aw, 0.30, 0.30, 0.50, 0.50, 10.0), "names: a body, so a hint has a reason");
         settle(200);
-        int hintAlerts = 0;
-        for (const auto& event : g_accessibleEvents)
-            if (event.first == hint && event.second == QAccessible::Alert) ++hintAlerts;
+        int hintAnnouncements = 0, anyAlerts = 0;
+        for (const auto& event : g_accessibleEvents) {
+            if (event.first == hint && event.second == QAccessible::Announcement)
+                ++hintAnnouncements;
+            if (event.second == QAccessible::Alert) ++anyAlerts;
+        }
         check(hint && hint->isVisible() && !hint->currentHint().isEmpty() &&
-                  hint->accessibleName() == hint->currentHint() && hintAlerts >= 1,
+                  hint->accessibleName() == hint->currentHint() && hintAnnouncements >= 1,
               QStringLiteral("names: a hint's accessible name is its text, announced on arrival "
-                             "(%1 alerts, \"%2\")")
-                  .arg(hintAlerts).arg(hint ? hint->accessibleName() : QString()));
+                             "(%1 announcements, \"%2\")")
+                  .arg(hintAnnouncements).arg(hint ? hint->accessibleName() : QString()));
+        check(anyAlerts == 0,
+              QStringLiteral("names: and building a body raised NO Alert anywhere (%1)")
+                  .arg(anyAlerts));
         QAccessible::installUpdateHandler(previous);
         aw.close();
 

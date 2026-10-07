@@ -477,11 +477,18 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int docum
     myToast->raise();
     if (myToast->undoControl()) myToast->undoControl()->raise();
     // ANNOUNCED, not merely shown: a toast arrives without focus and says its
-    // piece in paint, so an Alert is the only way assistive technology hears
-    // it - a Failure's reason above all. updateAccessibility() is a no-op with
-    // nothing listening, so it needs no isActive() guard.
-    QAccessibleEvent alert(myToast, QAccessible::Alert);
-    QAccessible::updateAccessibility(&alert);
+    // piece in paint, so an announcement is the only way assistive technology
+    // hears it - a Failure's reason above all, which is why that one is
+    // Assertive. NEVER QAccessible::Alert: Qt's Windows plugin answers an
+    // Alert with a SYSTEM SOUND, so every toast the app showed played the
+    // error chime - and the suite, which shows hundreds, played it on a loop.
+    // updateAccessibility() is a no-op with nothing listening, so it needs no
+    // isActive() guard.
+    QAccessibleAnnouncementEvent announcement(myToast, text);
+    announcement.setPoliteness(kind == Toast::Kind::Failure
+                                   ? QAccessible::AnnouncementPoliteness::Assertive
+                                   : QAccessible::AnnouncementPoliteness::Polite);
+    QAccessible::updateAccessibility(&announcement);
 
     // fadeTo() stops whatever fade is already running before doing anything
     // else, so this is correct whether the toast was hidden (a real fade-in

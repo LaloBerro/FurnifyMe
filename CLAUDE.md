@@ -182,15 +182,16 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 5374, measured twice on the tree that carries it.** Two consecutive
-unfiltered runs measured **5374 checks + 1 environment skip**, agreeing to the digit, against
+**`kCheckFloor` is 5925, measured twice on the tree that carries it.** Two consecutive
+unfiltered runs measured **5925 checks + 1 environment skip**, agreeing to the digit, against
 the binary this tree ships. The one environment skip is the RayTracing floor-blend
 measurement, which does not apply when PathTracing is the session's tier.
 
 The history, since each step was itself a measured pair: **4782** at the improvements merge,
 **4873** after the boolean rework's block and repairs, **4914** after the UI-review branch's
 alignment sweep and folder-duplicate block, **5278** after the scene editor and its snapping
-phase, and **5374** after the board sweep that worked every open card to a close. The floor
+phase, **5374** after the board sweep that worked every open card to a close, and **5925**
+after the review-fixes branch worked the 2026-10 whole-app review's 26 cards. The floor
 has never been computed from a predicted delta at any of those steps, which is the whole
 point of the paragraph below.
 
@@ -682,9 +683,14 @@ stripped) and its `accessibleDescription` from its composed tooltip, on every
 `QAction::changed`; a `Toast` is named by its message and described as a Note or a Failure,
 its painted Undo pill is named Undo, `HintBalloon` by its hint, `StatusMessageLine` by its
 WHOLE sentence (never the elided cut, with a `NameChanged`). `ToastHost::show()` and
-`HintBalloon::showHint()` raise a `QAccessible::Alert` — `updateAccessibility()` is a no-op
-with nothing listening. No screen reader is installed, so `controls-carry-accessible-names`
-pins the announcement at Qt's own seam, `QAccessible::installUpdateHandler()`. The banned-word
+`HintBalloon::showHint()` raise a `QAccessibleAnnouncementEvent` (Assertive for a Failure,
+Polite otherwise) — `updateAccessibility()` is a no-op with nothing listening. **Never a
+`QAccessible::Alert`**: Qt's Windows plugin answers an Alert with a SYSTEM SOUND (it imports
+`PlaySoundW` and `MessageBeep`), so the first version of this made every toast in the app play
+the error chime, and a full `gui_smoke` run — hundreds of toasts — played it on a loop until
+the user had to kill the session. No screen reader is installed, so
+`controls-carry-accessible-names` pins the announcement at Qt's own seam,
+`QAccessible::installUpdateHandler()`, and pins that NO Alert is raised. The banned-word
 sweep reads action text, so the names it is derived from are already swept.
 
 **The status bar has two channels, one job each** (F9, the user's ruling). The LEFT

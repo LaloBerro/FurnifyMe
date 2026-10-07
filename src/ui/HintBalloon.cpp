@@ -396,8 +396,10 @@ void HintBalloon::showHint(const QString& event)
     show();
     raise();
     update();
-    QAccessibleEvent alert(this, QAccessible::Alert);
-    QAccessible::updateAccessibility(&alert);
+    // An announcement, never an Alert - Qt's Windows plugin plays a system
+    // sound for an Alert (see ToastHost::show()).
+    QAccessibleAnnouncementEvent announcement(this, myText);
+    QAccessible::updateAccessibility(&announcement);
 }
 
 void HintBalloon::dismiss()
