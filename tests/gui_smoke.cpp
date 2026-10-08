@@ -115,6 +115,7 @@
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QMenuBar>
 #include <QMouseEvent>
@@ -1015,6 +1016,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-viewport-pick-reveals-its-row", false, true },
     { "a-drag-shows-one-target-and-lands-there", false, true },
     { "a-drag-reads-and-cancels", false, true },
+    { "a-drag-opens-folders-and-scrolls", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -4827,6 +4829,216 @@ void dragReadsAndCancelsBlock(const QString& outDir)
               "lost release: ...and the Escape claim went with it (drawer back up, Escape unclaimed)");
     }
     closing.close();
+}
+
+// Task 11: spring-loaded folders, auto-scroll, and a drag that survives a
+// refresh. Self-contained: its own store, its own window.
+void dragOpensFoldersAndScrollsBlock()
+{
+    RequiredTempDir dir;
+    QString cabinet;
+    QString large;
+    {
+        FurnitureStore store(dir.path());
+        cabinet = seedCabinet(store);
+        large = seedLargeFurniture(store, 122);
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    const bool opened = openWithDrawer(probe, cabinet);
+    check(opened, "spring: the cabinet opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    const DocumentModel& doc = probe.document();
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int doors = idNamed(doc, QStringLiteral("Doors"));
+    const int shelf = idNamed(doc, QStringLiteral("Shelf"));
+    const int back = idNamed(doc, QStringLiteral("Back"));
+
+    // Spring-loading: a folded folder hovered for 700 ms opens and stays open.
+    {
+        DrawerDrag drag(drawer, shelf);
+        drag.moveTo(drawerRowPixel(drawer, carcass, drawerRowHeight(drawer, carcass) / 2));
+        waitFully(300);
+        drag.moveTo(drawerRowPixel(drawer, back, 3));
+        waitFully(700);
+        check(!drawer->isGroupExpanded(carcass),
+              "spring: a folder the hand left after 300 ms does not open");
+        drag.moveTo(drawerRowPixel(drawer, doors, drawerRowHeight(drawer, doors) / 2));
+        waitFully(900);
+        check(drawer->isGroupExpanded(doors),
+              "spring: a folded folder hovered for 700 ms opens - and the open is the user's to keep");
+        check(drag.row() != nullptr && drag.row()->isVisible() && drawer->dragActive(),
+              "spring: the row the drag was pressed on survived the folder opening under it");
+        check(drawer->dropKind() == ItemsPanel::DropKind::Into && drawer->dropParent() == doors,
+              "spring: after the folder opens under a still hand the ring is on it again");
+
+        // REVIEW FOCUS 3: the drawer is asked to refresh mid-drag - a plain
+        // appStateChanged, a save, and Isolate (which DOES change what the
+        // rows show, so it would rebuild them).
+        probe.view()->setSelectedSolids({back});   // Isolate needs a selection
+        settle(50);
+        emit probe.appStateChanged();
+        probe.saveCurrentFurniture();
+        trigger(probe, QStringLiteral("Isolate"));
+        settle(150);
+        QAction* isolate = action(probe, QStringLiteral("Isolate"));
+        check(isolate && isolate->isChecked(),
+              "spring: Isolate really ran mid-drag (the refresh this section is about was asked for)");
+        check(drag.row() != nullptr && drag.row()->isVisible() && drawer->dragActive(),
+              "spring: a refresh during the drag leaves the pressed row alive and the drag live");
+        // A rebuild renumbers the rows and forgets the target - the ring
+        // under a still hand would vanish. Deferred, it stays.
+        check(drawer->dropKind() == ItemsPanel::DropKind::Into && drawer->dropParent() == doors &&
+                  drawer->dropIndicator() && drawer->dropIndicator()->isVisible(),
+              "spring: a refresh during the drag leaves the ring on Doors under the still hand");
+        drag.moveTo(drawerRowPixel(drawer, doors, drawerRowHeight(drawer, doors) / 2));
+        drag.release();
+    }
+    check(doc.groupOf(shelf) == doors,
+          "spring: ...and the release still lands - Shelf is in Doors");
+    trigger(probe, QStringLiteral("Isolate"));
+    settle(150);
+    check(drawerRowOf(drawer, shelf) >= 0,
+          "spring: the deferred refresh ran after the drop - Shelf's row is under Doors");
+
+    // The held refresh runs when a drag ends WITHOUT a drop too: nothing
+    // else is going to ask for one. Undo takes Shelf back out of Doors
+    // mid-drag; the rows hold still until the drag is cancelled.
+    {
+        DrawerDrag drag(drawer, back);
+        drag.moveTo(drawerRowPixel(drawer, carcass, 3));
+        trigger(probe, QStringLiteral("Undo"));
+        settle(50);
+        const bool undone = doc.groupOf(shelf) == 0;
+        check(undone, "spring: Undo mid-drag took Shelf back out of Doors in the document");
+        const int heldRow = drawerRowOf(drawer, shelf);
+        check(heldRow >= 0 && drawer->rowDepthAt(heldRow) == 1 && drawer->dragActive(),
+              "spring: ...while the drag lasts the rows hold still (Shelf still drawn inside Doors)");
+        // The two row WIDGETS, read directly from here on: every row accessor
+        // brings a stale list up to date itself (ensureFresh()), so asking
+        // one would answer for the reader, not for the drag's own end. The
+        // indent is the row's left margin; Back sits at the top level.
+        QPointer<QWidget> shelfRow = heldRow >= 0 ? drawer->rowWidgetAt(heldRow) : nullptr;
+        const int backAt = drawerRowOf(drawer, back);
+        QPointer<QWidget> backRow = backAt >= 0 ? drawer->rowWidgetAt(backAt) : nullptr;
+        const auto indent = [](QWidget* w) {
+            return (w && w->layout()) ? w->layout()->contentsMargins().left() : -1;
+        };
+        const int heldIndent = indent(shelfRow);
+        const int rootIndent = indent(backRow);
+        check(rootIndent >= 0 && heldIndent > rootIndent,
+              QStringLiteral("spring: ...Shelf's row widget is still indented under Doors (%1 px against %2)")
+                  .arg(heldIndent).arg(rootIndent));
+        drawer->cancelDrag();
+        const int freshIndent = indent(shelfRow);
+        check(rootIndent >= 0 && freshIndent == rootIndent,
+              QStringLiteral("spring: ...and the held refresh runs the moment the drag is cancelled "
+                             "(Shelf's row at the top level's %1 px, now %2)")
+                  .arg(rootIndent).arg(freshIndent));
+        drag.release();
+    }
+
+    // Auto-scroll, at the author's size.
+    probe.resize(1100, 520);
+    const bool largeOpened = probe.openFurniture(large);
+    check(largeOpened, "spring: the 122-body cabinet opens");
+    settle(400);
+    for (const DocumentModel::Group& g : probe.document().groups())
+        drawer->setGroupExpanded(g.id, true);
+    settle(150);
+    QScrollArea* scroll = drawer->scrollArea();
+    scroll->verticalScrollBar()->setValue(0);
+    settle(50);
+    // The first BODY row on screen - a body, so no target near the bottom can
+    // be a folder it holds.
+    int board = 0;
+    for (int i = 0; i < drawer->rowCount() && board == 0; ++i)
+        if (!drawer->rowIsGroupAt(i)) board = drawer->rowIdAt(i);
+    check(board != 0, "spring: a body row is on screen at the top of the list to carry");
+    {
+        DrawerDrag drag(drawer, board);
+        const QPoint nearBottom =
+            scroll->viewport()->mapTo(drawer, QPoint(scroll->viewport()->width() / 3,
+                                                     scroll->viewport()->height() - 5));
+        drag.moveTo(nearBottom);
+        waitFully(400);
+        const int scrolled = scroll->verticalScrollBar()->value();
+        check(scrolled > 0,
+              QStringLiteral("spring: holding near the list's bottom edge scrolls it (%1 px)").arg(scrolled));
+        const int parent = drawer->dropParent();
+        const int before = drawer->dropBeforeId();
+        const ItemsPanel::DropKind kind = drawer->dropKind();
+        check(kind != ItemsPanel::DropKind::None,
+              "spring: after scrolling the hand is over a target (a row scrolled in under it)");
+        drag.release();
+        // The release ends the scroll: nothing moves under a hand that let go.
+        const int afterRelease = scroll->verticalScrollBar()->value();
+        waitFully(200);
+        const int later = scroll->verticalScrollBar()->value();
+        check(later == afterRelease,
+              QStringLiteral("spring: the release stops the scroll (%1 -> %2 px)").arg(afterRelease).arg(later));
+        const std::vector<int> siblings = probe.document().orderedChildren(parent);
+        const auto at = std::find(siblings.begin(), siblings.end(), board);
+        const bool landed =
+            kind == ItemsPanel::DropKind::Into
+                ? probe.document().groupOf(board) == parent
+                : (at != siblings.end() &&
+                   (before == 0 ? at + 1 == siblings.end() : (at + 1 != siblings.end() && *(at + 1) == before)));
+        check(landed, "spring: after scrolling, the drop lands exactly where the indicator stood");
+    }
+    // Held in the TOP band it scrolls back up; Escape stops it there.
+    {
+        scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum() / 2);
+        settle(50);
+        const int start = scroll->verticalScrollBar()->value();
+        int carry = 0;
+        for (int i = 0; i < drawer->rowCount() && carry == 0; ++i) {
+            QWidget* w = drawer->rowWidgetAt(i);
+            const QPoint inView = w->mapTo(scroll->viewport(), QPoint(0, w->height() / 2));
+            if (!drawer->rowIsGroupAt(i) && inView.y() > 60 &&
+                inView.y() < scroll->viewport()->height() - 60)
+                carry = drawer->rowIdAt(i);
+        }
+        check(carry != 0, "spring: a body row mid-list to carry upward");
+        DrawerDrag drag(drawer, carry);
+        drag.moveTo(scroll->viewport()->mapTo(drawer, QPoint(scroll->viewport()->width() / 3, 4)));
+        waitFully(300);
+        const int up = scroll->verticalScrollBar()->value();
+        check(up < start, QStringLiteral("spring: holding near the list's top edge scrolls it up (%1 -> %2 px)")
+                              .arg(start).arg(up));
+        drawer->cancelDrag();
+        const int stopped = scroll->verticalScrollBar()->value();
+        waitFully(200);
+        const int still = scroll->verticalScrollBar()->value();
+        check(still == stopped,
+              QStringLiteral("spring: a cancelled drag stops the scroll (%1 -> %2 px)").arg(stopped).arg(still));
+        drag.release();
+    }
+
+    // One drag-target change at 130 rows, inside one frame.
+    double worst = 0.0;
+    {
+        scroll->verticalScrollBar()->setValue(0);
+        settle(50);
+        const int first = drawer->rowIdAt(2);
+        const int second = drawer->rowIdAt(4);
+        DrawerDrag drag(drawer, board);
+        drag.moveTo(drawerRowPixel(drawer, first, 3));
+        for (int i = 0; i < 10; ++i) {
+            const QPoint to = drawerRowPixel(drawer, i % 2 ? first : second, 3);
+            QElapsedTimer clock;
+            clock.start();
+            drag.moveOnce(to);
+            worst = std::max(worst, clock.nsecsElapsed() / 1.0e6);
+        }
+        drawer->cancelDrag();
+        drag.release();
+    }
+    std::printf("[items-cost] worst drag-target change at 130 rows = %.2f ms\n", worst);
+    check(worst < 16.0,
+          QStringLiteral("spring: one drag-target change at 130 rows costs under 16 ms (worst %1 ms)")
+              .arg(worst, 0, 'f', 2));
+    probe.close();
 }
 
 int main(int argc, char* argv[])
@@ -44973,6 +45185,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("a-viewport-pick-reveals-its-row")) viewportPickRevealsBlock();
     if (blockEnabled("a-drag-shows-one-target-and-lands-there")) dragShowsOneTargetBlock();
     if (blockEnabled("a-drag-reads-and-cancels")) dragReadsAndCancelsBlock(outDir);
+    if (blockEnabled("a-drag-opens-folders-and-scrolls")) dragOpensFoldersAndScrollsBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or

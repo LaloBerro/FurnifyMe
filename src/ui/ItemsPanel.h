@@ -413,6 +413,8 @@ private:
     class QLabel* myEmpty = nullptr;
     // A closed drawer marks itself stale instead of rebuilding; any reader
     // (setVisible(true), showEvent(), a suite accessor) brings it up to date.
+    // A live DRAG marks it stale too, and nothing brings it up to date until
+    // the drag ends (finishDrag()): the rows hold still under the hand.
     bool myRowsDirty = false;
     bool myForceBuild = false;
     void flushPendingRefresh();
@@ -512,4 +514,21 @@ private:
     void setDragStatus(const QString& text);
     // A row this drag carries, or one inside a folder it carries.
     bool isCarried(const Row& row) const;
+    // Spring-loading: a folded folder hovered for 700 ms opens (and stays
+    // open). Auto-scroll: a hand held in the list's top or bottom band
+    // scrolls it. Both re-aim the drag from where the hand last was. Both
+    // timers stop on every route a drag ends by (finishDrag()).
+    class QTimer* mySpringTimer = nullptr;
+    int mySpringFolder = 0;
+    class QTimer* myAutoScrollTimer = nullptr;
+    int myAutoScrollStep = 0;
+    QPoint myLastDragPos;
+    QPoint myLastDragGlobal;
+    void springOpen();
+    void updateAutoScroll(const QPoint& panelPos);
+    void autoScrollTick();
+    // A refresh asked for mid-drag is DEFERRED to the drag's end, through the
+    // same myRowsDirty flag a closed drawer uses - one pending mark, not two.
+    // A rebuild under a live drag renumbers the rows and forgets the target,
+    // so the ring under a still hand would vanish; finishDrag() runs it.
 };

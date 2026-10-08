@@ -29,6 +29,7 @@
 #include <QScrollArea>
 #include <QScopedValueRollback>
 #include <QScrollBar>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -73,6 +74,16 @@ constexpr int kDragThresholdPx = 6;
 // How far the hand must travel past a zone's edge before the target flips
 // back - a resting hand must not flicker between "above" and "into".
 constexpr int kZoneHysteresisPx = 4;
+// Spring-loading (T-063): a folded folder the hand rests on for this long
+// opens, the Finder's own delay - long enough that sweeping across a folder
+// on the way somewhere else never opens it.
+constexpr int kSpringLoadMs = 700;
+// Auto-scroll: a hand held within this band of the list's top or bottom edge
+// scrolls it by a step per tick - about 270 px a second, slow enough to stop
+// on the row wanted.
+constexpr int kAutoScrollBandPx = 20;
+constexpr int kAutoScrollStepPx = 8;
+constexpr int kAutoScrollTickMs = 30;
 // What a row keeps between its own rounded background and the content inside
 // it - and therefore what the TITLE row must keep too, or the title and its
 // button do not line up with the list below (see the titleRow margins).
@@ -360,6 +371,12 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
         // destructor must not reach a ghost that is already gone.
         connect(myGhost, &QObject::destroyed, this, [this] { myGhost = nullptr; });
     }
+    mySpringTimer = new QTimer(this);
+    mySpringTimer->setSingleShot(true);
+    connect(mySpringTimer, &QTimer::timeout, this, &ItemsPanel::springOpen);
+    myAutoScrollTimer = new QTimer(this);
+    myAutoScrollTimer->setInterval(kAutoScrollTickMs);
+    connect(myAutoScrollTimer, &QTimer::timeout, this, &ItemsPanel::autoScrollTick);
     myOuter->addWidget(myScroll, 1);
 
     // What the filter says when it matches nothing. PLAIN text: the query in
@@ -560,7 +577,9 @@ void ItemsPanel::ensureFresh() const
 {
     // The suite reads rows whether or not the drawer is open, and a closed
     // drawer defers its rebuild (refresh()); a reader must never see a list
-    // older than the document it is asking about.
+    // older than the document it is asking about - except while a drag is
+    // live, which holds the rows still until it ends (refresh() defers even a
+    // forced build then): a reader mid-drag sees the list the hand is over.
     if (myRowsDirty) const_cast<ItemsPanel*>(this)->flushPendingRefresh();
     // ...nor a row whose words are still waiting for the event loop (see
     // applyRowVisibility()).
@@ -602,6 +621,9 @@ ItemsPanel::~ItemsPanel()
     // No signal leaves a dying panel: MainWindow may be mid-teardown itself,
     // and the drag line it would refresh belongs to a window going away.
     const QSignalBlocker quiet(this);
+    // Nor does a held refresh run here: the document and the viewport it
+    // reads may already be gone.
+    myRowsDirty = false;
     cancelDrag();
 }
 
@@ -1009,6 +1031,16 @@ void ItemsPanel::paintEvent(QPaintEvent* /*event*/)
 
 void ItemsPanel::refresh()
 {
+    // A LIVE DRAG HOLDS THE ROWS STILL (T-063, Task 11). A rebuild renumbers
+    // the rows the drag's target names by index and forgets that target, so
+    // the ring or line under a still hand would vanish - and a row whose item
+    // went away mid-drag (an Undo) would take the grab with it. The rebuild
+    // is only postponed: the same stale mark a closed drawer keeps, which
+    // finishDrag() honours on every route a drag ends by.
+    if (myDragging) {
+        myRowsDirty = true;
+        return;
+    }
     // CLOSED DRAWER, NO WORK (review ruling R5a). appStateChanged fires on
     // every edit whether or not the drawer is open, and a list nobody can see
     // has nothing to keep up to date - so a closed drawer only remembers that
@@ -1138,12 +1170,8 @@ void ItemsPanel::refresh()
     // the next are different rows.
     std::unordered_map<qint64, Row> reusable;
     for (const Row& row : myRowList) reusable.emplace(rowKey(row), row);
-    // A live drag's target names a row by its INDEX, which this rebuild
-    // renumbers: forget it (and its mark), and the next move finds it again.
-    if (myDragging) {
-        myDropTarget = DropTarget{};
-        showDropTarget(myDropTarget);
-    }
+    // No live drag reaches this line (see the top of this function), so no
+    // drag target names a row index this rebuild renumbers.
     myRowList.clear();
     myVisible.clear();
     myReusable = &reusable;
@@ -1840,6 +1868,11 @@ void ItemsPanel::beginDrag(const QPoint& /*panelPos*/, const QPoint& globalPos)
 void ItemsPanel::updateDrag(const QPoint& panelPos, const QPoint& globalPos)
 {
     if (myGhost && myView) myGhost->follow(myView->mapFromGlobal(globalPos));
+    // Where the hand IS, for the two timers that re-aim the drag without a
+    // move of their own (a folder springing open, the list scrolling).
+    myLastDragPos = panelPos;
+    myLastDragGlobal = globalPos;
+    updateAutoScroll(panelPos);
     // OUTSIDE THE CARD there is no target at all, whatever the geometry
     // reads: a release there cancels.
     const bool outside = !rect().contains(panelPos);
@@ -1866,6 +1899,19 @@ void ItemsPanel::updateDrag(const QPoint& panelPos, const QPoint& globalPos)
                                 : ItemMoveText::dragStatus(*myDocument, dry);
     }
     myDropTarget = target;
+    // A folded folder the hand rests on (into, not refused, not while the
+    // filter holds the folds) starts the spring; any other target stops it.
+    // The SAME folder keeps its running timer - a hand wobbling inside the
+    // into band is still resting there.
+    const bool springs = target.kind == DropKind::Into && !target.refused && !filterActive() &&
+                         !isGroupExpanded(target.parent);
+    if (!springs) {
+        mySpringFolder = 0;
+        mySpringTimer->stop();
+    } else if (mySpringFolder != target.parent) {
+        mySpringFolder = target.parent;
+        mySpringTimer->start(kSpringLoadMs);
+    }
     showDropTarget(target);
     if (myGhost)
         myGhost->setVariant(outside          ? DragGhost::Variant::Cancel
@@ -1885,6 +1931,13 @@ void ItemsPanel::finishDrag(bool commit)
     myDragOutside = false;
     myDragIds.clear();
     myDropTarget = DropTarget{};
+    // Both timers end with the drag, whichever way it ended - a spring firing
+    // after the drop would open a folder nobody is hovering, and a scroll
+    // would move the list under a hand that has let go.
+    mySpringFolder = 0;
+    mySpringTimer->stop();
+    myAutoScrollStep = 0;
+    myAutoScrollTimer->stop();
     if (wasDragging) {
         // Everything beginDrag() put up comes down, whichever way it ended.
         if (myKeyClaim) QCoreApplication::instance()->removeEventFilter(myKeyClaim);
@@ -1894,6 +1947,9 @@ void ItemsPanel::finishDrag(bool commit)
     showDropTarget(DropTarget{});
     restyleRows();   // the carried rows come back to full ink
     setDragStatus(QString());
+    // The refresh the drag held back (see refresh()). Not forced: a drawer
+    // the drag ended BY closing keeps the mark for its next showing.
+    if (myRowsDirty) refresh();
     // A release with no target - outside the card, or over blank space -
     // cancels. A refused target still asks, so MainWindow's Failure says why.
     // DocumentModel's own rules answer it (a folder into its own subtree, a
@@ -1925,6 +1981,57 @@ bool ItemsPanel::isCarried(const Row& row) const
 void ItemsPanel::cancelDrag()
 {
     if (myDragging || myPressArmed) finishDrag(/*commit=*/false);
+}
+
+void ItemsPanel::springOpen()
+{
+    if (!myDragging || mySpringFolder == 0) return;
+    const int folder = mySpringFolder;
+    mySpringFolder = 0;
+    // Written into myExpanded, so it STAYS open after the drop - the Finder's
+    // rule, and the user's to fold again. Visibility only (every row of the
+    // tree exists), so the row the drag was pressed on is never destroyed.
+    setGroupExpanded(folder, true);
+    myDropTarget = DropTarget{};   // the rows moved under a still hand
+    updateDrag(myLastDragPos, myLastDragGlobal);
+}
+
+void ItemsPanel::updateAutoScroll(const QPoint& panelPos)
+{
+    int step = 0;
+    if (myScroll && rect().contains(panelPos)) {
+        const QWidget* list = myScroll->viewport();
+        const QPoint inList = list->mapFrom(this, panelPos);
+        const int height = list->height();
+        if (inList.x() >= 0 && inList.x() < list->width()) {
+            if (inList.y() >= 0 && inList.y() < kAutoScrollBandPx)
+                step = -kAutoScrollStepPx;
+            else if (inList.y() < height && inList.y() >= height - kAutoScrollBandPx)
+                step = kAutoScrollStepPx;
+        }
+    }
+    myAutoScrollStep = step;
+    if (step == 0) myAutoScrollTimer->stop();
+    else if (!myAutoScrollTimer->isActive()) myAutoScrollTimer->start();
+}
+
+void ItemsPanel::autoScrollTick()
+{
+    if (!myDragging || myAutoScrollStep == 0 || !myScroll) {
+        myAutoScrollTimer->stop();
+        return;
+    }
+    QScrollBar* bar = myScroll->verticalScrollBar();
+    const int before = bar->value();
+    bar->setValue(before + myAutoScrollStep);
+    // At either end there is nothing left to scroll: stop ticking rather than
+    // re-aim the drag thirty times a second over a list that is not moving.
+    if (bar->value() == before) {
+        myAutoScrollTimer->stop();
+        return;
+    }
+    // The rows moved under a still hand: re-aim from where it rests.
+    updateDrag(myLastDragPos, myLastDragGlobal);
 }
 
 bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
