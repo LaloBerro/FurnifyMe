@@ -143,6 +143,16 @@ public:
     // enabled state, so the three cannot disagree (T-063). Called once.
     void setNewFolderAction(class QAction* action);
     class ToolChip* newFolderChip() const { return myNewFolderChip; }
+    // Whether the window allows a folder to be made or removed right now (not
+    // sketching, not in render mode, not at the library) - pushed in from
+    // MainWindow::updateActions(), the single place availability is decided,
+    // exactly as showPendingOutline() is. The row menu's folder-row entries
+    // read it, so an entry is enabled exactly when its handler would act.
+    void setFolderEditsAllowed(bool allowed) { myFolderEditsAllowed = allowed; }
+    // A furniture swap (MainWindow::openFurniture()/showInitScreen()): the
+    // filter is the last furniture's query, so it goes - a new furniture
+    // never opens filtered (M2). Not on undo or redo, which keep the query.
+    void forgetFurniture();
 
     // Highlights the rows for these solids. Called when the viewport selection
     // changes, so the two views of the document never disagree.
@@ -247,9 +257,21 @@ signals:
     // refuses an empty selection even when this arrives past a disabled
     // entry. (The title row's chip triggers MainWindow's action directly.)
     void newFolderRequested();
-    // The right-click menu's other two, each the same route the Model menu
-    // takes rather than a second implementation.
-    void ungroupRequested();
+    // The same entry over a FOLDER row (ruling RF2): put THAT folder inside a
+    // new one, made in its place - same parent, same position - so it acts on
+    // what was right-clicked rather than on the bodies a right press happened
+    // to select. Over an outline row the entry is disabled outright.
+    void wrapFolderRequested(int folderId);
+    // The right-click menu's "Remove folder, keep contents", carrying the
+    // folder it names (ruling RF1): the right-clicked folder row's own id, or
+    // a body row's own folder. Never the selection's shared folder - that is
+    // the Model menu's Ctrl+Shift+G, which keeps its selection meaning. The
+    // same handler the Model menu's entry ends in, so one author writes the Note.
+    void removeFolderRequested(int folderId);
+    // A move the list will not make, with the reason for the status bar's left
+    // channel - a quiet refusal, not a Failure (ruling RF3: Alt+Up/Down while
+    // the filter hides where the row would land).
+    void moveRefused(QString reason);
     // The folder row's own Delete: the folder AND every body in it, which is
     // the one thing Ungroup deliberately does not do. Reported rather than
     // performed - MainWindow owns the checkpoint and the toast that carries
@@ -361,6 +383,9 @@ private:
     class QHBoxLayout* myTitleRow = nullptr;
     class ToolChip* myNewFolderChip = nullptr;
     class QAction* myNewFolderAction = nullptr;
+    // See setFolderEditsAllowed(). True until told otherwise, so a panel built
+    // without a window (none ships) still offers what its document allows.
+    bool myFolderEditsAllowed = true;
     // The tallest the card may grow before the rows start scrolling: a share
     // of the VIEWPORT's own height, read live, so the answer follows the
     // window rather than a number picked on one screen. Zero until the card

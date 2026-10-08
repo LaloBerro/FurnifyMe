@@ -66,6 +66,12 @@ public:
     // already established for QSettings.
     explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true,
                         const QString& libraryRoot = defaultLibraryRoot());
+    // Not = default (M1): a drawer drag still live when the window dies is
+    // ended HERE, while the document and every member it reads are alive.
+    // Left to member order, ~QWidget's own hide would reach
+    // ItemsPanel::hideEvent() -> cancelDrag() after the DocumentModel was
+    // gone, and announce the ended drag into this half-destroyed window.
+    ~MainWindow() override;
 
     // Operations, split from the dialogs that ask for their parameters. The GUI
     // smoke test drives these directly; a modal QInputDialog cannot be answered
@@ -1414,6 +1420,17 @@ private slots:
     // moc refuses a data member inside a slots section.)
     void onGroupSelection();
     void onUngroupSelection();
+    // THE one handler that removes a folder and keeps its contents, with the
+    // one Note that names it - the Model menu's entry hands it the
+    // selection's shared folder, the drawer's row menu the right-clicked
+    // folder (ruling RF1). A no-op for 0, an unknown folder, or a window that
+    // does not allow folder edits right now (folderEditsAllowed()).
+    void removeFolderKeepContents(int folderId);
+    // The row menu's "New folder with these" over a FOLDER row (ruling RF2):
+    // a new folder made in that folder's place - same parent, same position -
+    // holding it, subfolders and all; one checkpoint, a Note, and the rename
+    // opened over the new row.
+    void onWrapFolder(int folderId);
     // A folder row was clicked: select every body under it, so everything
     // downstream sees the ordinary body selection it always saw.
     void onGroupActivated(int groupId);
@@ -1433,6 +1450,11 @@ private slots:
     // bodies that sit in "Left cabinet" makes a folder INSIDE it rather than
     // pulling them out to the root.
     int folderOfSelection() const;
+    // Whether a folder may be made or removed right now - not sketching, not
+    // at the library or the close question, not in render mode. The two
+    // folder actions' environment terms, pushed onto the drawer by
+    // updateActions() and re-asked by each folder handler.
+    bool folderEditsAllowed() const;
 
     void onExportStep();
     void onSelectionChanged();

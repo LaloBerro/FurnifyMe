@@ -1744,8 +1744,9 @@ void ItemsPanel::populateRowMenu(QMenu& menu, int rowId, RowKind kind)
     QAction* rename = menu.addAction(tr("Rename"));
     QAction* up = menu.addAction(tr("Move up"));
     QAction* down = menu.addAction(tr("Move down"));
-    // Never "group" for a folder (ruling P6): this dissolves the folder the
-    // selection sits in and keeps every piece of wood in it.
+    // Never "group" for a folder (ruling P6): this dissolves a folder and keeps
+    // every piece of wood in it - the right-clicked folder, or a body row's
+    // own folder (ruling RF1).
     QAction* ungroup = menu.addAction(tr("Remove folder, keep contents"));
     // Only over a FOLDER, and worded so the two cannot be confused: the entry
     // above keeps the wood, this one takes it too.
@@ -1763,40 +1764,81 @@ void ItemsPanel::populateRowMenu(QMenu& menu, int rowId, RowKind kind)
         upTarget = myDocument->siblingStepTarget(ids, -1);
         downTarget = myDocument->siblingStepTarget(ids, +1);
     }
-    // The action's own answer when there is one (whole bodies selected -
-    // MainWindow::updateActions()), so the title chip, the Model menu and
+    // EACH ENTRY ACTS ON WHAT WAS RIGHT-CLICKED (rulings RF1, RF2). Over a
+    // body row "New folder with these" files the selection - which a right
+    // press has just made that row, or a selection it belongs to (R9a) - so
+    // it reads the action's own answer (whole bodies selected -
+    // MainWindow::updateActions()), and the title chip, the Model menu and
     // this entry cannot disagree; a picked FACE reports its body in
     // mySelectedIds, and filing that body would file nothing the user chose.
-    folder->setEnabled(myNewFolderAction ? myNewFolderAction->isEnabled()
-                                         : !mySelectedIds.empty());
+    // Over a FOLDER row it wraps that folder, which needs only the folder.
+    // Over an OUTLINE row it is never offered: it filed the viewport's body
+    // selection, which is not the outline that was pointed at.
+    const bool folderRow = kind == RowKind::Folder;
+    const bool liveFolder = folderRow && myDocument && myDocument->groupExists(rowId);
+    if (kind == RowKind::Outline)
+        folder->setEnabled(false);
+    else if (folderRow)
+        folder->setEnabled(myFolderEditsAllowed && liveFolder);
+    else
+        folder->setEnabled(myNewFolderAction ? myNewFolderAction->isEnabled()
+                                             : !mySelectedIds.empty());
     // Every kind of row renames - an outline row passed id 0 here once, so
     // its Rename sat disabled while a double-click on the same row worked.
     rename->setEnabled(rowId != 0);
-    up->setEnabled(upTarget.ok);
-    down->setEnabled(downTarget.ok);
-    // NEVER on an outline row (review R12c): the route dissolves the folder
-    // the BODY selection shares (MainWindow::folderOfSelection()), which is
-    // not the outline's own folder - so offering it there would remove a
-    // folder the user did not point at.
-    ungroup->setEnabled(myDocument && kind != RowKind::Outline &&
-                        (kind == RowKind::Folder
-                             ? myDocument->groupExists(rowId)
-                             : (rowId != 0 && myDocument->groupOf(rowId) != 0)));
+    // A STEP AMONG SIBLINGS IS REFUSED WHILE FILTERED (ruling RF3): the filter
+    // hides some of those siblings, so "one place up" would land beside rows
+    // nobody can see - the same reason a reorder drop is not offered then.
+    // Disabled with the reason, never silently.
+    const bool filtering = filterActive();
+    up->setEnabled(upTarget.ok && !filtering);
+    down->setEnabled(downTarget.ok && !filtering);
+    if (filtering) {
+        up->setToolTip(ItemMoveText::filteredReorderRefusal());
+        down->setToolTip(ItemMoveText::filteredReorderRefusal());
+        menu.setToolTipsVisible(true);
+    }
+    // The folder it removes is the right-clicked one (ruling RF1): a folder
+    // row's own id, a body row's own folder - never the selection's shared
+    // folder, which could be a different one or none at all. Removing an
+    // existing folder always does something (an empty one simply goes), so
+    // "the folder exists" is the whole of the enabled state. NEVER on an
+    // outline row (review R12c, kept).
+    const int removeTarget =
+        !myDocument || kind == RowKind::Outline || rowId == 0
+            ? 0
+            : (folderRow ? (liveFolder ? rowId : 0) : myDocument->groupOf(rowId));
+    ungroup->setEnabled(myFolderEditsAllowed && removeTarget != 0);
 
-    connect(folder, &QAction::triggered, this, [this] { emit newFolderRequested(); });
+    if (folderRow)
+        connect(folder, &QAction::triggered, this, [this, rowId] { emit wrapFolderRequested(rowId); });
+    else if (kind == RowKind::Body)
+        connect(folder, &QAction::triggered, this, [this] { emit newFolderRequested(); });
     connect(rename, &QAction::triggered, this, [this, rowId, kind] {
         if (kind == RowKind::Folder) beginRenameForGroup(rowId);
         else beginRenameForItem(rowId, kind == RowKind::Outline);
     });
     // The non-drag route (WCAG 2.5.7): the same moveItems() a drop takes, so
     // MainWindow checkpoints and reports it exactly as it reports a drop.
+    // A trigger() past the disabled state (QAction runs it regardless) is
+    // refused here too, while filtered, rather than moving blind.
     connect(up, &QAction::triggered, this, [this, ids, upTarget] {
+        if (filterActive()) {
+            emit moveRefused(ItemMoveText::filteredReorderRefusal());
+            return;
+        }
         emit itemsMoveRequested(ids, upTarget.parent, upTarget.beforeId);
     });
     connect(down, &QAction::triggered, this, [this, ids, downTarget] {
+        if (filterActive()) {
+            emit moveRefused(ItemMoveText::filteredReorderRefusal());
+            return;
+        }
         emit itemsMoveRequested(ids, downTarget.parent, downTarget.beforeId);
     });
-    connect(ungroup, &QAction::triggered, this, [this] { emit ungroupRequested(); });
+    if (removeTarget != 0)
+        connect(ungroup, &QAction::triggered, this,
+                [this, removeTarget] { emit removeFolderRequested(removeTarget); });
     if (remove)
         connect(remove, &QAction::triggered, this, [this, rowId] { emit deleteGroupRequested(rowId); });
 }
@@ -1955,6 +1997,17 @@ void ItemsPanel::moveByKey(int key)
     if (!myDocument) return;
     const std::vector<int> ids = movableIds();
     if (ids.empty()) return;
+    // Alt+Up/Down WHILE FILTERED is refused (ruling RF3): "one place up"
+    // counts siblings the filter is hiding, so the row would land beside
+    // something nobody can see. Quiet - no checkpoint, no toast - and never
+    // silent: the reason goes to the status bar's left channel. Alt+Left is
+    // NOT refused: "just after its folder" names a place the user can see
+    // (the folder row is on screen as the row's ancestor), whatever siblings
+    // the filter hides after it.
+    if (key != Qt::Key_Left && filterActive()) {
+        emit moveRefused(ItemMoveText::filteredReorderRefusal());
+        return;
+    }
     const DocumentModel::MoveTarget target =
         key == Qt::Key_Left ? myDocument->outOfFolderTarget(ids)
                             : myDocument->siblingStepTarget(ids, key == Qt::Key_Up ? -1 : +1);
@@ -2521,6 +2574,16 @@ void ItemsPanel::resetPick()
     hideHiddenPick();
 }
 
+void ItemsPanel::forgetFurniture()
+{
+    // The query was typed against the furniture that just closed. Cleared
+    // through the field itself, so setFilter("") runs the one route every
+    // other clear takes - and with it every folder the filter was holding
+    // open lets go, since that hold is derived from the query (R7a), never
+    // written into myExpanded.
+    if (myFilter && !myFilter->text().isEmpty()) myFilter->clear();
+}
+
 void ItemsPanel::applySelection(const std::vector<int>& ids)
 {
     mySelectedIds = ids;
@@ -2667,6 +2730,9 @@ void ItemsPanel::beginRenameForItem(int id, bool isOutline)
         // "text cell" InlineRename opens over. Not the whole row: the eye
         // button beside it is its own control.
         const QRect cellRect = row.name->geometry();
+        // On screen first (ruling RF4): an editor opened over a row scrolled
+        // out of the list is typed into blind.
+        scrollToRow(id);
         InlineRename::beginRename(row.widget, cellRect, current,
                                   [this, id, isOutline](QString newName) {
                                       emit renameCommitted(id, isOutline, newName);
@@ -2688,6 +2754,7 @@ void ItemsPanel::beginRenameForGroup(int groupId)
         if (!row.isGroup || row.id != groupId) continue;
         // Hidden inside a folded parent - see beginRenameForItem().
         if (!row.name || row.widget->isHidden()) return;
+        scrollToRow(groupId);   // on screen first - see beginRenameForItem()
         InlineRename::beginRename(
             row.widget, row.name->geometry(), row.text,   // plain - ruling P5
             [this, groupId](QString newName) { emit groupRenameCommitted(groupId, newName); });

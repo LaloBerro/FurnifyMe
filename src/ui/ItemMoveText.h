@@ -29,6 +29,10 @@ QString escHint();
 QString releaseToCancel();
 QString filteredDropHint();
 QString noTargetHint();
+// Move up / Move down and Alt+Up/Down while the filter is active (ruling RF3):
+// a step among siblings would land beside rows the filter is hiding. The menu
+// entries' tooltip and the status bar's left channel both read this.
+QString filteredReorderRefusal();
 // Every fixed fragment above, for the vocabulary sweep.
 QStringList paintedTexts();
 

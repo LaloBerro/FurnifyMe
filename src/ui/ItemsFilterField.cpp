@@ -83,8 +83,10 @@ void ItemsFilterField::releaseFocus()
     // window that is not the active one, and the focus it would leave parked
     // here is still the window's.
     if (window()->focusWidget() != this) return;
-    // Back to the nearest enclosing widget that takes focus - the viewport,
-    // which hosts the drawer - so the keys go where the work is.
+    // Back to the nearest enclosing widget that takes focus. That is the
+    // Items list itself (ItemsPanel, Qt::ClickFocus), not the viewport: the
+    // list holds the keys a moment after, and Escape - which this field did
+    // not claim - goes on to the shortcut map and whatever owns it there.
     for (QWidget* up = parentWidget(); up; up = up->parentWidget()) {
         if (up->focusPolicy() != Qt::NoFocus && up->isEnabled() && up->isVisible()) {
             up->setFocus(Qt::OtherFocusReason);

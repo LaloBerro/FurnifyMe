@@ -1225,8 +1225,16 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // action itself - see buildOverlay()).
     connect(myItemsPanel, &ItemsPanel::newFolderRequested, this,
             &MainWindow::onGroupSelection);
-    connect(myItemsPanel, &ItemsPanel::ungroupRequested, this,
-            &MainWindow::onUngroupSelection);
+    // A folder row's own two (rulings RF1, RF2): each carries the folder it
+    // names, because the selection a right press leaves behind is that
+    // folder's BODIES, and the bodies' shared folder can be a different one.
+    connect(myItemsPanel, &ItemsPanel::removeFolderRequested, this,
+            &MainWindow::removeFolderKeepContents);
+    connect(myItemsPanel, &ItemsPanel::wrapFolderRequested, this, &MainWindow::onWrapFolder);
+    // A move the list refused (Alt+Up/Down while filtered): quiet, so the
+    // status bar's left channel, never a Failure toast.
+    connect(myItemsPanel, &ItemsPanel::moveRefused, this,
+            [this](const QString& reason) { statusBar()->showMessage(reason); });
     connect(myItemsPanel, &ItemsPanel::deleteGroupRequested, this,
             &MainWindow::onDeleteGroup);
 
@@ -1337,6 +1345,22 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // constructor - main.cpp's own handoff wiring is what actually shows
     // SelectorWindow, unconditionally, as the real app's boot state.
     showInitScreen();
+}
+
+MainWindow::~MainWindow()
+{
+    // A DRAWER DRAG ENDS WHILE THIS WINDOW IS STILL WHOLE (M1). The route that
+    // needs it: Alt+F4 mid-drag, the close accepted, the app quits, and this
+    // window is destroyed while visible - ~QWidget then hides every child,
+    // ItemsPanel::hideEvent() cancels the drag, and the cancel's refresh()
+    // and dragStatusChanged() would reach a DocumentModel and a status line
+    // that member destruction had already taken. Ended here instead, with
+    // the document alive, and silently: the line it would announce belongs
+    // to a window going away. The later hide then finds nothing to cancel.
+    if (myItemsPanel) {
+        const QSignalBlocker quiet(myItemsPanel);
+        myItemsPanel->cancelDrag();
+    }
 }
 
 void MainWindow::buildActions()
@@ -3512,6 +3536,11 @@ void MainWindow::updateActions()
     // rather than at the click, so an undo or a redo that moves the pending
     // outline moves the highlight with it.
     if (myItemsPanel) myItemsPanel->showPendingOutline(pendingOutlineId());
+    // ...and whether a folder may be made or removed at all, which the row
+    // menu's folder-row entries read (rulings RF1, RF2): decided here, with
+    // the same terms the two Model menu entries carry, so none of them can be
+    // enabled over a handler that would refuse.
+    if (myItemsPanel) myItemsPanel->setFolderEditsAllowed(folderEditsAllowed());
     myRedoAction->setEnabled(!mySketching && !atInit && myDocument.canRedo());
 
     // Not a slot on appStateChanged - part of updateActions() itself, same
@@ -4172,6 +4201,10 @@ void MainWindow::showInitScreen()
     myView->clearPreview();
     myView->clearSelection();
     resyncView();
+    // The drawer's filter was typed against the furniture that just closed
+    // (M2) - here and in openFurniture(), the two furniture swaps, and never
+    // in resyncView(), which undo and redo go through too.
+    if (myItemsPanel) myItemsPanel->forgetFurniture();
 
     updateActions();
     statusBar()->showMessage(tr("Choose a furniture to open, or start a new one"));
@@ -4264,6 +4297,8 @@ bool MainWindow::openFurniture(const QString& id)
         myLoadingCard->step(tr("Putting the bodies on screen"));
     }
     resyncView();
+    // A new furniture never opens filtered (M2) - see showInitScreen().
+    if (myItemsPanel) myItemsPanel->forgetFurniture();
 
     myView->fitAll();
     closeCard();
@@ -5804,11 +5839,32 @@ void MainWindow::onGroupSelection()
     // grouping two bodies that sit in "Left cabinet" makes a folder inside it
     // rather than pulling them out to the root.
     const int parent = folderOfSelection();
+    // WHERE THE FIRST FILED BODY SAT (ruling RF4) - the first of the parent's
+    // children, in the list's own order, that is a filed body or holds one -
+    // when that parent carries a stored order. Otherwise the folder would land
+    // at the END of a long reordered parent, far from the rows that went into
+    // it. A parent with no stored order keeps the automatic order (folders
+    // first), the rule placeAfter() keeps for Ctrl+D.
+    int anchor = 0;
+    if (myDocument.hasStoredOrder(parent)) {
+        for (int child : myDocument.orderedChildren(parent)) {
+            const bool holdsOne = std::any_of(ids.begin(), ids.end(), [&](int id) {
+                return id == child || (myDocument.groupExists(child) &&
+                                       myDocument.groupOf(id) != 0 &&
+                                       myDocument.groupContains(child, myDocument.groupOf(id)));
+            });
+            if (holdsOne) {
+                anchor = child;
+                break;
+            }
+        }
+    }
     const int folder = myDocument.createGroup(tr("Folder").toStdString(), parent);
     if (folder == 0) {
         updateActions();
         return;
     }
+    if (anchor != 0) myDocument.moveItems({folder}, parent, anchor);
     for (int id : ids) myDocument.setItemGroup(id, folder);
 
     updateActions();
@@ -5830,8 +5886,24 @@ void MainWindow::onGroupSelection()
 
 void MainWindow::onUngroupSelection()
 {
-    const int folder = folderOfSelection();
-    if (folder == 0) return;
+    // The Model menu's entry (Ctrl+Shift+G) keeps its SELECTION meaning: the
+    // folder the selected bodies share. The drawer's row menu names its
+    // folder outright (removeFolderRequested()); both end in the one handler
+    // below, so there is one author of what a removal does and says.
+    removeFolderKeepContents(folderOfSelection());
+}
+
+bool MainWindow::folderEditsAllowed() const
+{
+    // updateActions()' own terms for the two folder actions, less their
+    // selection term: the drawer's folder rows name their folder outright.
+    return !mySketching && !myShowingInitScreen && !isAskingBeforeClose() && !myRenderModeOn;
+}
+
+void MainWindow::removeFolderKeepContents(int folder)
+{
+    if (folder == 0 || !myDocument.groupExists(folder) || !folderEditsAllowed()) return;
+    const QString name = QString::fromStdString(myDocument.groupNameOf(folder));
 
     checkpointDocument();
     // removeGroup() moves everything inside up to ITS parent - nothing is
@@ -5843,8 +5915,43 @@ void MainWindow::onUngroupSelection()
     }
     updateActions();
     emit documentChanged();
-    const QString message = tr("Folder dissolved");
+    // Named (ruling RF1): the row menu and the Model menu can now remove two
+    // different folders from one selection, so the Note says which went.
+    const QString message = tr("Removed folder %1 — contents kept").arg(name);
     reportNote(message, true, myDocument.revision());
+}
+
+void MainWindow::onWrapFolder(int folderId)
+{
+    if (!myDocument.groupExists(folderId) || !folderEditsAllowed()) return;
+    const QString name = QString::fromStdString(myDocument.groupNameOf(folderId));
+    const int parent = myDocument.groupOf(folderId);
+
+    checkpointDocument();
+    const int made = myDocument.createGroup(tr("Folder").toStdString(), parent);
+    if (made == 0) {
+        updateActions();
+        return;
+    }
+    // IN THE WRAPPED FOLDER'S PLACE (ruling RF2): in front of it first, then
+    // the folder goes inside - so the new one takes exactly the slot it left,
+    // writing a stored order if the parent had none (a folder that jumped to
+    // the end of its parent's folders would read as a different row). Moved
+    // WHOLE through moveItems(), so what is inside it stays inside it: its
+    // subfolders are carried, never flattened.
+    myDocument.moveItems({made}, parent, folderId);
+    myDocument.moveItems({folderId}, made, DocumentModel::kIntoFolder);
+
+    updateActions();
+    emit documentChanged();
+    const QString message = tr("%1 put in a new folder").arg(name);
+    reportNote(message, true, myDocument.revision());
+    // Straight into the rename, as New Folder with These does - opened, so
+    // the folder it swallowed is still in sight.
+    if (myItemsPanel && myItemsPanel->isVisible()) {
+        myItemsPanel->setGroupExpanded(made, true);
+        myItemsPanel->beginRenameForGroup(made);
+    }
 }
 
 QString MainWindow::activeMaterialName() const
@@ -9073,11 +9180,16 @@ bool MainWindow::duplicateSelectedBody()
     made.reserve(copies.size());
     int twins = 0;
     int lastTwinId = 0;
+    // Source body -> its copy, and copy -> the fresh twin mirroring gave it:
+    // what a cloned folder's order is translated through (M5, below).
+    std::map<int, int> copyOf;
+    std::map<int, int> twinOfCopy;
     for (const auto& copy : copies) {
         const int id = myDocument.addSolid(copy.second);
         if (id <= 0) continue;
         myView->displaySolid(id, copy.second);
         made.push_back(id);
+        copyOf[copy.first] = id;
         // The copy joins whatever folder its source is in (improvements item
         // 10): a duplicate of something inside "Left cabinet" belongs in
         // there beside it, not out at the root.
@@ -9121,6 +9233,7 @@ bool MainWindow::duplicateSelectedBody()
                     ++twins;
                     if (sourceFolder == 0) myDocument.placeAfter(twinId, id);
                     lastTwinId = twinId;
+                    twinOfCopy[id] = twinId;
                 }
             } else {
                 qWarning("Symmetry: creation-pair mirror failed on duplicate: %s",
@@ -9133,6 +9246,30 @@ bool MainWindow::duplicateSelectedBody()
     // A cloned folder lands beside its source the same way.
     if (sourceFolder > 0 && cloneOf.count(sourceFolder))
         myDocument.placeAfter(cloneOf[sourceFolder], sourceFolder);
+    // ...and READS IN ITS SOURCE'S ORDER (M5). A folder the user reordered
+    // carries a stored sequence; its clone, built child by child above, would
+    // otherwise read in the automatic order (folders, then bodies by
+    // creation) - the same folder, shuffled. Each source child is translated
+    // to its copy (a folder through cloneOf, a body through copyOf, with a
+    // fresh twin right behind its copy), and each is moved to the END of the
+    // clone in turn, so the clone ends up reading exactly that sequence. One
+    // at a time, because a single moveItems() call puts what it carries in
+    // the list's CURRENT order - the order this is replacing.
+    for (const auto& [source, clone] : cloneOf) {
+        if (!myDocument.hasStoredOrder(source)) continue;
+        std::vector<int> sequence;
+        for (int child : myDocument.orderedChildren(source)) {
+            if (const auto folder = cloneOf.find(child); folder != cloneOf.end()) {
+                sequence.push_back(folder->second);
+            } else if (const auto body = copyOf.find(child); body != copyOf.end()) {
+                sequence.push_back(body->second);
+                if (const auto twin = twinOfCopy.find(body->second); twin != twinOfCopy.end() &&
+                                                                    myDocument.groupOf(twin->second) == clone)
+                    sequence.push_back(twin->second);
+            }
+        }
+        for (int id : sequence) myDocument.moveItems({id}, clone, 0);
+    }
 
     // A WHOLE-BODY selection of the COPIES - which is what makes
     // MoveTool::refresh() (an appStateChanged slot) stand the transform gizmo

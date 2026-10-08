@@ -34,7 +34,8 @@ protected:
 private:
     bool inUse() const { return hasFocus() || !text().isEmpty(); }
     // Escape on an EMPTY field: focus goes back to the nearest enclosing
-    // widget that takes it (the viewport), never stays parked here.
+    // widget that takes it (the Items list, which is Qt::ClickFocus), never
+    // stays parked here.
     void releaseFocus();
     bool myInUse = false;
 };

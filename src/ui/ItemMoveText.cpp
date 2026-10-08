@@ -96,6 +96,10 @@ QString escHint() { return t("Esc cancels"); }
 QString releaseToCancel() { return t("Release to cancel"); }
 QString filteredDropHint() { return t("Drop on a folder while the list is filtered — Esc cancels"); }
 QString noTargetHint() { return t("Drop on a row, a folder or the Items title — Esc cancels"); }
+QString filteredReorderRefusal()
+{
+    return t("Clear the filter to move rows up or down — it is hiding where they would land");
+}
 
 QStringList paintedTexts()
 {
@@ -107,7 +111,7 @@ QStringList paintedTexts()
             t("%1 can't go inside itself — drop it beside it instead"),
             t("%1 can't go inside a folder it holds — drop it beside it instead"),
             t("That row is no longer in the list — nothing was moved"), escHint(),
-            releaseToCancel(), filteredDropHint(), noTargetHint()};
+            releaseToCancel(), filteredDropHint(), noTargetHint(), filteredReorderRefusal()};
 }
 
 }  // namespace ItemMoveText

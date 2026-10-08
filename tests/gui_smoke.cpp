@@ -1031,6 +1031,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-drag-opens-folders-and-scrolls", false, true },
     { "the-drawer-walks-and-moves-with-the-keys", false, true },
     { "the-drawer-tells-the-truth-at-its-edges", false, true },
+    { "the-row-menu-acts-on-what-was-right-clicked", false, true },
     { "the-items-drawer-evidence", false, true },
 };
 
@@ -5485,9 +5486,9 @@ void drawerKeyboardBlock()
               .arg(QString::fromStdString(doc.outlineNameOf(sketch)))
               .arg(editorGone ? QStringLiteral("gone") : QStringLiteral("still open")));
 
-    // "Remove folder, keep contents" is never offered on an OUTLINE row (R12c):
-    // the route dissolves the folder the body selection shares, not the
-    // outline's own. Put Sketch A in Carcass first, so the row HAS a folder.
+    // "Remove folder, keep contents" is never offered on an OUTLINE row (R12c,
+    // kept after RF1 made the folder and body rows name their folder outright).
+    // Put Sketch A in Carcass first, so the row HAS a folder.
     emit drawer->itemsMoveRequested({sketch}, carcass, DocumentModel::kIntoFolder);
     settle(100);
     const bool sketchInCarcass = doc.groupOf(sketch) == carcass;
@@ -6392,6 +6393,387 @@ void itemsEvidenceBlock(const QString& outDir)
     else
         check(libraryAfter == libraryBefore,
               "C4: the author's real library did not move while the block ran");
+}
+
+// --- the final review's fix wave (RF1-RF4, M1, M2, M5) -----------------------
+// A nest written straight through the store: Outer holds ONLY the folder
+// Inner, which holds Plank A, B and C (stored order C, A, B); Empty is a folder
+// with nothing in it; Loose is a body and Sketch N an outline at the root,
+// whose stored order is Loose, Outer, Empty, Sketch N. Outer is the case the
+// final review found: a right press on it selects Plank A-C, whose SHARED
+// folder is Inner - so a route that read the selection acted on Inner.
+QString seedNest(FurnitureStore& store)
+{
+    const QString id = store.createFurniture(QStringLiteral("Nest"));
+    DocumentModel doc;
+    const int outer = doc.createGroup("Outer");
+    const int inner = doc.createGroup("Inner", outer);
+    doc.createGroup("Empty");
+    double x = 0.0;
+    const auto board = [&](const char* name, int folder) {
+        const int b = doc.addSolid(ModelingOps::makeBox(gp_Pnt(x, 0.0, 0.0), 18.0, 300.0, 400.0));
+        x += 400.0;
+        doc.setItemName(b, name);
+        if (folder != 0) doc.setItemGroup(b, folder);
+        return b;
+    };
+    const int a = board("Plank A", inner);
+    board("Plank B", inner);
+    const int c = board("Plank C", inner);
+    const int loose = board("Loose", 0);
+    const gp_Pln ground;
+    const int sketch =
+        doc.addOutline(BRepBuilderAPI_MakeFace(ground, 0.0, 100.0, 0.0, 50.0).Face(), ground);
+    doc.setItemName(sketch, "Sketch N");
+    doc.moveItems({c}, inner, a);       // Inner: Plank C, Plank A, Plank B
+    doc.moveItems({loose}, 0, outer);   // root: Loose, Outer, Empty, Sketch N
+    return store.saveFurniture(id, doc, QImage()) ? id : QString();
+}
+
+// Where a body's wood starts along X - what tells a copy's source apart, since
+// a Ctrl+D copy lands exactly where its source is.
+double woodStartX(const DocumentModel& doc, int id)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(doc.shapeOf(id), box);
+    if (box.IsVoid()) return -1.0e9;
+    double x0 = 0.0, y0 = 0.0, z0 = 0.0, x1 = 0.0, y1 = 0.0, z1 = 0.0;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    return x0;
+}
+
+// A right press and release on `id`'s row - what a real right-click does
+// before its menu opens (R9a selects the row). Never a ContextMenu event,
+// which would exec() a menu.
+void rightPressRow(ItemsPanel* drawer, int id)
+{
+    QWidget* row = drawer->rowWidgetAt(drawerRowOf(drawer, id));
+    if (!row) return;
+    const QPointF at(row->width() / 3.0, row->height() / 2.0);
+    pressThenReleaseAt(row, at, at, Qt::RightButton);
+}
+
+// Cancels an open inline rename the way a real Escape does: InlineRename's
+// Escape is a QShortcut, which a sent key event never reaches, so its own
+// shortcut is fired - from the event loop, as a real one is.
+void cancelOpenRename(ItemsPanel* drawer)
+{
+    QLineEdit* editor = drawer->openRenameEditor();
+    QShortcut* escape = editor ? editor->findChild<QShortcut*>() : nullptr;
+    if (!escape) return;
+    QPointer<QShortcut> firing = escape;
+    QTimer::singleShot(0, [firing] {
+        if (firing) emit firing->activated();
+    });
+    settle(80);
+}
+
+void rowMenuActsOnWhatWasClickedBlock()
+{
+    RequiredTempDir dir;
+    QString nest;
+    QString large;
+    QString cabinet;
+    QString rack;
+    {
+        FurnitureStore store(dir.path());
+        nest = seedNest(store);
+        large = seedLargeFurniture(store, 122);
+        cabinet = seedCabinet(store);
+        rack = store.createFurniture(QStringLiteral("Rack"));
+        DocumentModel doc;
+        const int folder = doc.createGroup("Rack");
+        std::vector<int> planks;
+        for (int i = 0; i < 3; ++i) {
+            planks.push_back(doc.addSolid(
+                ModelingOps::makeBox(gp_Pnt(400.0 * i, 0.0, 0.0), 18.0, 300.0, 400.0)));
+            doc.setItemName(planks.back(), std::string("Plank ") + char('A' + i));
+            doc.setItemGroup(planks.back(), folder);
+        }
+        doc.moveItems({planks[2]}, folder, planks[0]);   // Rack: Plank C, Plank A, Plank B
+        store.saveFurniture(rack, doc, QImage());
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    check(openWithDrawer(probe, nest), "row menu: the nest opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    ToastHost* toasts = probe.findChild<ToastHost*>();
+    const DocumentModel& doc = probe.document();
+    QAction* undo = action(probe, QStringLiteral("Undo"));
+    const int outer = idNamed(doc, QStringLiteral("Outer"));
+    const int inner = idNamed(doc, QStringLiteral("Inner"));
+    const int empty = idNamed(doc, QStringLiteral("Empty"));
+    const int plankA = idNamed(doc, QStringLiteral("Plank A"));
+    const int loose = idNamed(doc, QStringLiteral("Loose"));
+    const int sketch = idNamed(doc, QStringLiteral("Sketch N"));
+    const auto toastSays = [&](const QString& text) {
+        return toasts && toasts->currentText() == text;
+    };
+
+    // RF1: "Remove folder, keep contents" on a FOLDER row removes exactly that
+    // folder. Outer holds only Inner, so the right press leaves Plank A-C
+    // selected - whose shared folder is INNER, the folder the old route took.
+    rightPressRow(drawer, outer);
+    std::vector<int> picked = probe.view()->selectedSolidIds();
+    std::sort(picked.begin(), picked.end());
+    std::vector<int> underOuter = doc.bodiesUnderGroup(outer);
+    std::sort(underOuter.begin(), underOuter.end());
+    check(!picked.empty() && picked == underOuter &&
+              std::all_of(picked.begin(), picked.end(), [&](int id) { return doc.groupOf(id) == inner; }),
+          "RF1: a right press on Outer selects its bodies - whose shared folder is Inner, not Outer");
+    {
+        QMenu menu;
+        drawer->populateRowMenu(menu, outer, ItemsPanel::RowKind::Folder);
+        QAction* remove = menuAction(menu, QStringLiteral("Remove folder, keep contents"));
+        check(remove && remove->isEnabled(), "RF1: Remove folder, keep contents is offered on Outer");
+        const std::size_t depth = doc.undoDepth();
+        if (remove) remove->trigger();
+        settle(150);
+        const bool exactlyOuter = !doc.groupExists(outer) && doc.groupExists(inner) &&
+                                  doc.groupOf(inner) == 0 && doc.groupOf(plankA) == inner;
+        check(exactlyOuter && doc.undoDepth() == depth + 1,
+              "RF1: it removes exactly the right-clicked Outer in one checkpoint - Inner survives, "
+              "moved up to the root with its planks");
+        check(toastSays(QStringLiteral("Removed folder Outer — contents kept")),
+              QStringLiteral("RF1: the Note names the folder that went (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+    }
+    if (undo) undo->trigger();
+    settle(150);
+    check(doc.groupExists(outer) && doc.groupOf(inner) == outer,
+          "RF1: one Undo puts Outer back around Inner");
+
+    // ...and on an EMPTY folder, which no selection can name at all.
+    rightPressRow(drawer, empty);
+    {
+        QMenu menu;
+        drawer->populateRowMenu(menu, empty, ItemsPanel::RowKind::Folder);
+        QAction* remove = menuAction(menu, QStringLiteral("Remove folder, keep contents"));
+        const bool offered = remove && remove->isEnabled();
+        const std::size_t depth = doc.undoDepth();
+        if (remove) remove->trigger();
+        settle(150);
+        check(offered && !doc.groupExists(empty) && doc.undoDepth() == depth + 1 &&
+                  toastSays(QStringLiteral("Removed folder Empty — contents kept")),
+              "RF1: on the empty folder it is offered, and removes Empty in one checkpoint");
+    }
+    if (undo) undo->trigger();
+    settle(150);
+    check(doc.groupExists(empty), "RF1: one Undo brings Empty back");
+
+    // RF2: "New folder with these" is DISABLED on an outline row - with a
+    // whole body selected, so the action it used to read is enabled.
+    probe.view()->setSelectedSolids({loose});   // SEAM: the subject is the menu, not the pick
+    settle(100);
+    {
+        QMenu menu;
+        drawer->populateRowMenu(menu, sketch, ItemsPanel::RowKind::Outline);
+        QAction* entry = menuAction(menu, QStringLiteral("New folder with these"));
+        QAction* modelEntry = action(probe, QStringLiteral("New Folder with These"));
+        check(modelEntry && modelEntry->isEnabled() && entry && !entry->isEnabled(),
+              "RF2: New folder with these is disabled on an outline row, while the Model menu's "
+              "entry is enabled for the selected body");
+    }
+
+    // RF2: on a FOLDER row it WRAPS that folder, in its place.
+    rightPressRow(drawer, outer);
+    const std::vector<int> rootBefore = doc.orderedChildren(0);
+    const auto outerSlot = std::find(rootBefore.begin(), rootBefore.end(), outer) - rootBefore.begin();
+    {
+        QMenu menu;
+        drawer->populateRowMenu(menu, outer, ItemsPanel::RowKind::Folder);
+        QAction* wrap = menuAction(menu, QStringLiteral("New folder with these"));
+        check(wrap && wrap->isEnabled(), "RF2: New folder with these is offered on the folder row Outer");
+        const std::size_t depth = doc.undoDepth();
+        if (wrap) wrap->trigger();
+        settle(200);
+        const int made = doc.groupOf(outer);
+        const std::vector<int> root = doc.orderedChildren(0);
+        check(made != 0 && doc.groupOf(made) == 0 && root.size() == rootBefore.size() &&
+                  static_cast<std::size_t>(outerSlot) < root.size() && root[outerSlot] == made,
+              QStringLiteral("RF2: it wraps Outer - a new folder at the root, in Outer's own place "
+                             "(%1), holds it")
+                  .arg(namesInOrder(doc, 0).join(QStringLiteral(", "))));
+        check(doc.childGroups(made) == std::vector<int>{outer} && doc.groupOf(inner) == outer &&
+                  doc.groupOf(plankA) == inner && doc.undoDepth() == depth + 1,
+              "RF2: in one checkpoint, and nothing inside is flattened - Inner is still in Outer, "
+              "Plank A still in Inner");
+        QLineEdit* editor = drawer->openRenameEditor();
+        QWidget* madeRow = drawer->rowWidgetAt(drawerRowOf(drawer, made));
+        check(editor && madeRow && editor->parentWidget() == madeRow &&
+                  toastSays(QStringLiteral("Outer put in a new folder")),
+              QStringLiteral("RF2: the rename opens over the new folder, and the Note says what was "
+                             "wrapped (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+        cancelOpenRename(drawer);
+        if (undo) undo->trigger();
+        settle(150);
+        check(made != 0 && !doc.groupExists(made) && doc.groupOf(outer) == 0 &&
+                  doc.orderedChildren(0) == rootBefore,
+              "RF2: one Undo takes the wrap back - Outer at the root, in its place");
+    }
+
+    // RF3: a step among siblings is refused while the filter is active.
+    const double ignored = typeInto(drawer->filterField(), QStringLiteral("Plank"));
+    (void)ignored;
+    QWidget* plankRow = drawer->rowWidgetAt(drawerRowOf(drawer, plankA));
+    if (plankRow) clickAt(plankRow, QPointF(plankRow->width() / 3.0, plankRow->height() / 2.0));
+    const std::vector<int> innerBefore = doc.orderedChildren(inner);
+    const std::size_t beforeKey = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Down, Qt::AltModifier);
+    const QString refusal = ItemMoveText::filteredReorderRefusal();
+    const bool keyRefused = doc.undoDepth() == beforeKey && doc.orderedChildren(inner) == innerBefore;
+    check(drawer->filterActive() && plankRow && probe.focusWidget() == drawer &&
+              drawer->currentRowId() == plankA && keyRefused &&
+              probe.statusBar()->currentMessage() == refusal,
+          QStringLiteral("RF3: Alt+Down while filtered moves nothing, takes no checkpoint and says "
+                         "why in the status bar (\"%1\")")
+              .arg(probe.statusBar()->currentMessage()));
+    {
+        QMenu menu;
+        drawer->populateRowMenu(menu, plankA, ItemsPanel::RowKind::Body);
+        QAction* up = menuAction(menu, QStringLiteral("Move up"));
+        QAction* down = menuAction(menu, QStringLiteral("Move down"));
+        check(up && down && !up->isEnabled() && !down->isEnabled() && up->toolTip() == refusal &&
+                  down->toolTip() == refusal && menu.toolTipsVisible(),
+              "RF3: the menu's Move up and Move down are disabled while filtered, and say why");
+        const std::size_t beforeMenu = doc.undoDepth();
+        if (down) down->trigger();   // QAction runs trigger() past a disabled state
+        settle(100);
+        check(doc.undoDepth() == beforeMenu && doc.orderedChildren(inner) == innerBefore,
+              "RF3: ...and a Move down triggered anyway still moves nothing");
+    }
+    // Alt+Left is NOT refused: just after its folder is a place on screen.
+    const std::size_t beforeOut = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Left, Qt::AltModifier);
+    check(doc.groupOf(plankA) == outer && doc.undoDepth() == beforeOut + 1 &&
+              toastSays(QStringLiteral("Moved Plank A out of Inner")),
+          "RF3: Alt+Left still moves Plank A out of Inner while filtered");
+    if (undo) undo->trigger();
+    settle(150);
+
+    // M2: a furniture swap clears the filter - the large cabinet holds no
+    // "Plank", so a carried-over query would show it as an empty list.
+    const bool filteredBefore = drawer->filterActive();
+    const bool largeOpened = probe.openFurniture(large);
+    settle(250);
+    check(filteredBefore && largeOpened && drawer->filterField()->text().isEmpty() &&
+              !drawer->filterActive() && drawer->rowCount() > 0 &&
+              !(drawer->noMatchLabel() && drawer->noMatchLabel()->isVisible()),
+          QStringLiteral("M2: opening another furniture clears the filter - it never opens filtered "
+                         "(field \"%1\", %2 rows)")
+              .arg(drawer->filterField()->text())
+              .arg(drawer->rowCount()));
+
+    // RF4: a new folder lands where its first body sat, and its rename is on
+    // screen. Carcass is reordered (Board 016 in front of Board 000), every
+    // top folder opened, the list scrolled to its far end, then Board 000
+    // and Board 008 - near the TOP - are filed.
+    const DocumentModel& big = probe.document();
+    const int carcass = idNamed(big, QStringLiteral("Carcass"));
+    const int b000 = idNamed(big, QStringLiteral("Board 000"));
+    const int b008 = idNamed(big, QStringLiteral("Board 008"));
+    const int b016 = idNamed(big, QStringLiteral("Board 016"));
+    emit drawer->itemsMoveRequested({b016}, carcass, b000);
+    settle(150);
+    for (const DocumentModel::Group& g : big.groups())
+        if (g.parent == 0) drawer->setGroupExpanded(g.id, true);
+    settle(150);
+    probe.view()->setSelectedSolids({b000, b008});   // SEAM: the subject is where the folder lands
+    settle(150);
+    const std::vector<int> carcassBefore = big.orderedChildren(carcass);
+    const auto slot = std::find(carcassBefore.begin(), carcassBefore.end(), b000) - carcassBefore.begin();
+    QScrollArea* rowsArea = drawer->scrollArea();
+    QScrollBar* bar = rowsArea ? rowsArea->verticalScrollBar() : nullptr;
+    if (bar) bar->setValue(bar->maximum());
+    settle(80);
+    const bool scrolledAway = bar && bar->value() > 0;
+    if (QAction* newFolder = action(probe, QStringLiteral("New Folder with These"))) newFolder->trigger();
+    settle(200);
+    const int made = big.groupOf(b000);
+    const std::vector<int> carcassAfter = big.orderedChildren(carcass);
+    check(big.hasStoredOrder(carcass) && made != 0 && big.groupOf(b008) == made &&
+              static_cast<std::size_t>(slot) < carcassAfter.size() && carcassAfter[slot] == made,
+          QStringLiteral("RF4: the new folder lands where Board 000 sat in Carcass (place %1), not "
+                         "at its end (it is at %2 of %3)")
+              .arg(slot)
+              .arg(std::find(carcassAfter.begin(), carcassAfter.end(), made) - carcassAfter.begin())
+              .arg(carcassAfter.size()));
+    QLineEdit* editor = drawer->openRenameEditor();
+    QWidget* editorRow = editor ? editor->parentWidget() : nullptr;
+    QWidget* visibleArea = rowsArea ? rowsArea->viewport() : nullptr;
+    const QRect inViewport = editorRow && visibleArea
+                                 ? QRect(editorRow->mapTo(visibleArea, QPoint(0, 0)), editorRow->size())
+                                 : QRect();
+    check(scrolledAway && editorRow && editorRow == drawer->rowWidgetAt(drawerRowOf(drawer, made)) &&
+              visibleArea->rect().contains(inViewport),
+          QStringLiteral("RF4: the rename opens over the new folder's row INSIDE the list's visible "
+                         "area - row at (%1, %2) %3x%4 in the scroll viewport's coordinates, "
+                         "viewport %5x%6")
+              .arg(inViewport.x())
+              .arg(inViewport.y())
+              .arg(inViewport.width())
+              .arg(inViewport.height())
+              .arg(visibleArea ? visibleArea->width() : 0)
+              .arg(visibleArea ? visibleArea->height() : 0));
+    cancelOpenRename(drawer);
+
+    // M5: Ctrl+D on a folder copies its STORED order into the clone. Rack
+    // reads Plank C, Plank A, Plank B; its copies must too (told apart by
+    // where their wood starts: a copy lands exactly on its source). A
+    // furniture of its own, with no outline: a waiting outline shuts Ctrl+D.
+    check(probe.openFurniture(rack), "M5: the rack opens");
+    settle(250);
+    {
+        const DocumentModel& racked = probe.document();
+        const int rackFolder = idNamed(racked, QStringLiteral("Rack"));
+        std::vector<double> want;
+        for (int id : racked.orderedChildren(rackFolder)) want.push_back(woodStartX(racked, id));
+        probe.view()->setSelectedSolids(racked.bodiesUnderGroup(rackFolder));   // SEAM: see the duplicate-order block
+        settle(100);
+        const bool done = probe.duplicateSelectedBody();
+        settle(200);
+        int clone = 0;
+        for (const DocumentModel::Group& g : racked.groups())
+            if (g.name == "Rack copy") clone = g.id;
+        std::vector<double> got;
+        for (int id : clone ? racked.orderedChildren(clone) : std::vector<int>())
+            got.push_back(woodStartX(racked, id));
+        QStringList read;
+        for (double x : got) read << QString::number(x);
+        check(done && clone != 0 && want.size() == 3 && want[0] > want[2] && want[2] > want[1] &&
+                  got == want,
+              QStringLiteral("M5: Ctrl+D on Rack gives Rack copy its source's order - C, A, B "
+                             "(wood starts at %1)")
+                  .arg(read.join(QStringLiteral(", "))));
+    }
+    probe.close();
+
+    // M1: a window DELETED while a drawer drag is live (the Alt+F4 route,
+    // reached directly) ends the drag inside its own destructor, silently,
+    // while the document is alive - no drag line announced into the dying
+    // window from ~QWidget's hide, and the closed hand put back.
+    {
+        auto* doomed = new MainWindow(nullptr, /*persistProgress=*/false, dir.path());
+        doomed->resize(1100, 780);
+        const bool up = openWithDrawer(*doomed, cabinet);
+        ItemsPanel* doomedDrawer = doomed->itemsPanel();
+        const int shelf = idNamed(doomed->document(), QStringLiteral("Shelf"));
+        const int back = idNamed(doomed->document(), QStringLiteral("Back"));
+        DrawerDrag drag(doomedDrawer, shelf);
+        drag.moveTo(drawerRowPixel(doomedDrawer, back, drawerRowHeight(doomedDrawer, back) / 2));
+        const bool live = doomedDrawer->dragActive() && QGuiApplication::overrideCursor() != nullptr;
+        int announced = 0;
+        QObject witness;
+        QObject::connect(doomedDrawer, &ItemsPanel::dragStatusChanged, &witness,
+                         [&announced] { ++announced; });
+        delete doomed;
+        settle(50);
+        check(up && live && announced == 0 && QGuiApplication::overrideCursor() == nullptr,
+              QStringLiteral("M1: a window deleted mid-drag ends the drag in its own destructor - "
+                             "nothing announced while it is torn down (%1), the hand put back")
+                  .arg(announced));
+    }
 }
 
 int main(int argc, char* argv[])
@@ -46570,6 +46952,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("a-drag-opens-folders-and-scrolls")) dragOpensFoldersAndScrollsBlock();
     if (blockEnabled("the-drawer-walks-and-moves-with-the-keys")) drawerKeyboardBlock();
     if (blockEnabled("the-drawer-tells-the-truth-at-its-edges")) drawerEdgeStatesBlock();
+    if (blockEnabled("the-row-menu-acts-on-what-was-right-clicked")) rowMenuActsOnWhatWasClickedBlock();
     if (blockEnabled("the-items-drawer-evidence")) itemsEvidenceBlock(outDir);
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
