@@ -29,6 +29,7 @@
 // Its visibility is DERIVED from MainWindow's existing Items action and never
 // set from anywhere else; see MainWindow's constructor.
 #include <QColor>
+#include <QIcon>
 #include <QPoint>
 #include <QSize>
 #include <QString>
@@ -266,6 +267,7 @@ private:
         int parentId = 0;        // the folder it sits in, 0 at the root
         bool onScreen = true;    // its item is actually drawn (eye and Isolate)
         bool twistyOpen = false; // what the twisty currently shows
+        bool twistyHeld = false; // ...and whether the filter is holding it open
         bool grainAcross = false; // what the grain mark currently shows
         QString style;           // the row look restyleRows() last set
         class QPushButton* twisty = nullptr;
@@ -309,7 +311,15 @@ private:
     // Re-measures the card after its visible rows changed (see refresh()'s
     // comment for why both layouts are invalidated by hand).
     void relayoutCard();
-    void syncTwisty(Row& row, bool open);
+    // `heldByFilter`: the filter is holding the folder open, so the twisty
+    // is inert and its tooltip says so (ruling R7a).
+    void syncTwisty(Row& row, bool open, bool heldByFilter = false);
+    static QString filterHeldTip();
+    // The twisty's two chevrons, rasterised once per theme (applyTheme()
+    // drops them) rather than once per twisty that changes.
+    const QIcon& chevron(bool open);
+    QIcon myChevronOpen;
+    QIcon myChevronClosed;
 
     // --- the filter (T-063) ---------------------------------------------------
     class ItemsFilterField* myFilter = nullptr;
@@ -318,10 +328,18 @@ private:
     QString myFilterText;
     void setFilter(const QString& text);
     bool rowMatches(const Row& row) const;
-    // The ONE place a row's name is coloured and worded - plain text, or the
-    // filter's escaped highlight - with a cache so an unchanged row costs
-    // nothing on a keystroke.
-    void styleName(Row& row);
+    // The ONE place a row's name is coloured (this) and worded (the next) -
+    // plain text, or the filter's escaped highlight - each a no-op for a row
+    // that already reads right, so an unchanged row costs nothing.
+    void styleNameColour(Row& row);
+    // The words half: plain name or escaped highlight. Returns whether the
+    // label still differs from what it should say; writes it only if `apply`.
+    bool styleNameWords(Row& row, bool apply);
+    // Writes the words applyRowVisibility() left for the event loop (rows
+    // that could not be on screen at the next paint). ensureFresh() runs it
+    // too, so no reader ever sees them stale.
+    void flushNameWords();
+    bool myWordsPending = false;
     QColor nameColour(const Row& row) const;
 
     // --- reuse across rebuilds (review ruling R5a) -----------------------------

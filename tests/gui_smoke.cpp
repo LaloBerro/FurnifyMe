@@ -3633,6 +3633,23 @@ int accentPixelsOnBottomRow(QWidget* field)
     return count;
 }
 
+// Pixels of a 1:1 render that are `colour` (each channel within a few levels,
+// nearly opaque) - a glyph's fully covered core, which antialiasing leaves
+// exactly the ink it was drawn in.
+int countColorPixels(const QImage& image, const QColor& colour)
+{
+    int count = 0;
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x) {
+            const QColor c = QColor::fromRgba(image.pixel(x, y));
+            if (c.alpha() >= 230 && std::abs(c.red() - colour.red()) <= 12 &&
+                std::abs(c.green() - colour.green()) <= 12 &&
+                std::abs(c.blue() - colour.blue()) <= 12)
+                ++count;
+        }
+    return count;
+}
+
 void drawerFiltersByNameBlock()
 {
     RequiredTempDir dir;
@@ -3706,6 +3723,36 @@ void drawerFiltersByNameBlock()
     check(ancestorName &&
               ancestorName->styleSheet().contains(Theme::textMuted().name(QColor::HexArgb)),
           "filter: an ancestor's name is drawn in textMuted");
+    // Ruling R7b: the highlight's RENDERED form, not only its text(). A label
+    // left in PlainText would paint the <span> markup itself, and text()
+    // alone cannot tell the two apart.
+    const bool matchIsRich = matchName && matchName->textFormat() == Qt::RichText;
+    check(matchIsRich, "filter: the match's label renders its highlight as rich text");
+    const int matchInk = matchName ? countColorPixels(renderExact(matchName), Theme::accentText()) : 0;
+    const int ancestorInk =
+        ancestorName ? countColorPixels(renderExact(ancestorName), Theme::accentText()) : -1;
+    check(matchInk > 0 && ancestorInk == 0,
+          QStringLiteral("filter: accentText ink is painted on the match and not on a muted "
+                         "ancestor (%1 and %2 pixels)").arg(matchInk).arg(ancestorInk));
+
+    // Ruling R7a: a held-open folder's twisty is inert. A real click on
+    // Carcass's chevron while the filter holds it open records nothing, so
+    // clearing the filter cannot open a fold the user never saw.
+    QPushButton* heldTwisty = drawer->twistyAt(0);
+    const QString heldTip = heldTwisty ? heldTwisty->toolTip() : QString();
+    check(heldTip == QStringLiteral("Shown open by the filter — clear the filter to fold it"),
+          QStringLiteral("filter: a held-open folder's twisty says the filter holds it (\"%1\")")
+              .arg(heldTip));
+    const QPoint twistyCentre =
+        heldTwisty ? heldTwisty->mapTo(drawer, heldTwisty->rect().center()) : QPoint();
+    check(heldTwisty && drawer->childAt(twistyCentre) == heldTwisty,
+          "filter: the held twisty is reachable by a real click (childAt)");
+    if (heldTwisty) clickAt(heldTwisty, QPointF(heldTwisty->rect().center()));
+    const bool carcassStillFoldedWhileHeld = !drawer->isGroupExpanded(carcass);
+    const QStringList afterTwistyNames = drawerRowNames(drawer);
+    check(carcassStillFoldedWhileHeld && afterTwistyNames == filteredNames,
+          QStringLiteral("filter: clicking a held twisty records no fold and changes no row (%1)")
+              .arg(afterTwistyNames.join(QStringLiteral(", "))));
     std::printf("[items-cost] worst filter keystroke at 130 rows = %.2f ms\n", worstKeystroke);
     check(worstKeystroke < 16.0,
           QStringLiteral("filter: one keystroke at 130 rows costs under 16 ms (worst %1 ms)")
@@ -3727,9 +3774,35 @@ void drawerFiltersByNameBlock()
               drawer->isGroupExpanded(doors) && !drawer->isGroupExpanded(carcass),
           QStringLiteral("filter: Escape clears it and the fold state is the user's own again "
                          "(%1 rows, %2 before)").arg(clearedRows).arg(restingRows));
+    const bool carcassFoldedAfterClear = !drawer->isGroupExpanded(carcass);
+    check(carcassFoldedAfterClear,
+          "filter: after the held twisty was clicked, clearing the filter leaves Carcass folded");
     field->clearFocus();
     settle(50);
     check(accentPixelsOnBottomRow(field) == 0, "filter: an empty field wears no accent at all");
+
+    // Ruling R7c: Escape in an EMPTY field is not claimed, and the field
+    // lets go of the focus - the window's focusWidget(), never hasFocus(),
+    // which is false in a window that is not the active one.
+    field->setFocus();
+    settle(50);
+    const bool fieldHeldFocus = probe.focusWidget() == field;
+    QKeyEvent emptyEscapeOver(QEvent::ShortcutOverride, Qt::Key_Escape, Qt::NoModifier);
+    QCoreApplication::sendEvent(field, &emptyEscapeOver);
+    const bool emptyEscapeClaimed = emptyEscapeOver.isAccepted();
+    if (!emptyEscapeClaimed) {
+        QKeyEvent emptyEscape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(field, &emptyEscape);
+    }
+    settle(50);
+    QWidget* focusAfterEscape = probe.focusWidget();
+    check(fieldHeldFocus && !emptyEscapeClaimed && focusAfterEscape != field,
+          QStringLiteral("filter: Escape in an empty field is not claimed and hands the focus "
+                         "back (held %1, claimed %2, now on %3)")
+              .arg(fieldHeldFocus)
+              .arg(emptyEscapeClaimed)
+              .arg(focusAfterEscape ? QString::fromLatin1(focusAfterEscape->metaObject()->className())
+                                    : QStringLiteral("nothing")));
 
     typeInto(field, QStringLiteral("zzz"));
     check(drawer->rowCount() == 0 && drawer->noMatchLabel() && drawer->noMatchLabel()->isVisible() &&
@@ -3739,6 +3812,29 @@ void drawerFiltersByNameBlock()
     settle(80);
     check(!drawer->noMatchLabel()->isVisible() && drawer->rowCount() == restingRows,
           "filter: Clear filter brings every row back");
+
+    // The keystroke writes the highlight of every row that can be on screen
+    // AT ONCE - only rows past the card's reach are left for the event loop.
+    // Labels found by their plain text BEFORE the key, and read straight
+    // after it with no event processed and no drawer accessor called (an
+    // accessor would flush the rest itself).
+    QLabel* nearLabel = nullptr;   // Drawer 1's first board: row 3 under "b"
+    QLabel* farLabel = nullptr;    // a Hardware board: near the end of the list
+    for (QLabel* label : drawer->findChildren<QLabel*>()) {
+        if (label->text() == QStringLiteral("Board 002")) nearLabel = label;
+        if (label->text() == QStringLiteral("Board 119")) farLabel = label;
+    }
+    QKeyEvent firstLetter(QEvent::KeyPress, Qt::Key_B, Qt::NoModifier, QStringLiteral("b"));
+    QCoreApplication::sendEvent(field, &firstLetter);
+    const bool nearRichAtOnce = nearLabel && nearLabel->textFormat() == Qt::RichText;
+    check(nearRichAtOnce,
+          "filter: a row that can be on screen is highlighted within the keystroke itself");
+    settle(80);
+    const bool farRichAfter = farLabel && farLabel->textFormat() == Qt::RichText &&
+                              farLabel->text().contains(Theme::accentText().name());
+    check(farRichAfter, "filter: ...and a row past the card's reach is highlighted a moment later");
+    drawer->clearFilterAction()->trigger();
+    settle(80);
 
     // REVIEW FOCUS 2: markup and specials in user names are shown, never run.
     const bool oddOpened = probe.openFurniture(odd);

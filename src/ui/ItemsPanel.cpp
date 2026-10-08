@@ -21,6 +21,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -365,7 +366,7 @@ QColor ItemsPanel::nameColour(const Row& row) const
     return (row.muted || !row.onScreen) ? Theme::textMuted() : Theme::text();
 }
 
-void ItemsPanel::styleName(Row& row)
+void ItemsPanel::styleNameColour(Row& row)
 {
     if (!row.name) return;
     const QString sheet = QStringLiteral("background: transparent; color: %1;")
@@ -374,13 +375,36 @@ void ItemsPanel::styleName(Row& row)
         row.name->setStyleSheet(sheet);
         row.nameSheet = sheet;
     }
-    // Every row's name is a RowNameLabel (addItemRow()/addGroupRow()).
+}
+
+bool ItemsPanel::styleNameWords(Row& row, bool apply)
+{
+    if (!row.name) return false;
+    // Every row's name is a RowNameLabel (addItemRow()/addGroupRow()), which
+    // measures itself from the plain name - so what this writes never moves
+    // a row, and writing it a moment later moves nothing either.
     static_cast<RowNameLabel*>(row.name)->setPlainName(row.text);
     const bool highlight = row.matched && filterActive();
     const Qt::TextFormat format = highlight ? Qt::RichText : Qt::PlainText;
-    if (row.name->textFormat() != format) row.name->setTextFormat(format);
     const QString text = highlight ? highlighted(row.text, myFilterText) : row.text;
+    if (row.name->textFormat() == format && row.name->text() == text) return false;
+    if (!apply) return true;
+    if (row.name->textFormat() != format) {
+        // Emptied first: QLabel::setTextFormat() re-sets whatever text the
+        // label holds in the NEW format, which for a plain name going rich
+        // would be the user's own text parsed, for a moment, as markup.
+        row.name->clear();
+        row.name->setTextFormat(format);
+    }
     if (row.name->text() != text) row.name->setText(text);
+    return false;
+}
+
+void ItemsPanel::flushNameWords()
+{
+    if (!myWordsPending) return;
+    myWordsPending = false;
+    for (Row& row : myRowList) styleNameWords(row, /*apply=*/true);
 }
 
 void ItemsPanel::setFilter(const QString& text)
@@ -417,6 +441,9 @@ void ItemsPanel::ensureFresh() const
     // drawer defers its rebuild (refresh()); a reader must never see a list
     // older than the document it is asking about.
     if (myRowsDirty) const_cast<ItemsPanel*>(this)->flushPendingRefresh();
+    // ...nor a row whose words are still waiting for the event loop (see
+    // applyRowVisibility()).
+    if (myWordsPending) const_cast<ItemsPanel*>(this)->flushNameWords();
 }
 
 void ItemsPanel::setVisible(bool visible)
@@ -510,13 +537,33 @@ void ItemsPanel::relayoutCard()
     adjustSize();
 }
 
-void ItemsPanel::syncTwisty(Row& row, bool open)
+void ItemsPanel::syncTwisty(Row& row, bool open, bool heldByFilter)
 {
-    if (!row.twisty || row.twistyOpen == open) return;
+    if (!row.twisty || (row.twistyOpen == open && row.twistyHeld == heldByFilter)) return;
+    // The two chevrons are rasterised ONCE per theme (chevron()), not per
+    // call: IconSet::icon() renders eight pixmaps, and the filter's first
+    // letter can force-open every folder in one keystroke.
+    if (row.twistyOpen != open) row.twisty->setIcon(chevron(open));
     row.twistyOpen = open;
-    row.twisty->setIcon(
-        IconSet::icon(open ? IconSet::Glyph::ChevronDown : IconSet::Glyph::ChevronRight));
-    row.twisty->setToolTip(open ? tr("Close this folder") : tr("Open this folder"));
+    row.twistyHeld = heldByFilter;
+    // While the filter holds it the twisty does nothing (see addGroupRow()),
+    // and says why rather than looking like a control that is broken.
+    row.twisty->setToolTip(heldByFilter ? filterHeldTip()
+                                        : (open ? tr("Close this folder") : tr("Open this folder")));
+    row.twisty->setCursor(heldByFilter ? Qt::ArrowCursor : Qt::PointingHandCursor);
+}
+
+const QIcon& ItemsPanel::chevron(bool open)
+{
+    QIcon& slot = open ? myChevronOpen : myChevronClosed;
+    if (slot.isNull())
+        slot = IconSet::icon(open ? IconSet::Glyph::ChevronDown : IconSet::Glyph::ChevronRight);
+    return slot;
+}
+
+QString ItemsPanel::filterHeldTip()
+{
+    return tr("Shown open by the filter — clear the filter to fold it");
 }
 
 void ItemsPanel::applyRowVisibility()
@@ -559,7 +606,7 @@ void ItemsPanel::applyRowVisibility()
             shown = row.matched || kept;
             // Muted: on screen only because a match lies beneath it.
             row.muted = shown && !row.matched;
-            if (row.isGroup) syncTwisty(row, kept);
+            if (row.isGroup) syncTwisty(row, kept, /*heldByFilter=*/true);
         } else {
             row.matched = false;
             row.muted = false;
@@ -575,10 +622,45 @@ void ItemsPanel::applyRowVisibility()
         // a row already in that state still costs a layout request.
         if (row.widget->isHidden() == shown) row.widget->setVisible(shown);
         if (shown) myVisible.push_back(i);
-        styleName(row);
+        styleNameColour(row);
     }
     myRows->setEnabled(true);
     myRows->activate();
+    // THE WORDS, NOW FOR WHAT CAN BE SEEN AND A MOMENT LATER FOR THE REST.
+    // A highlight is a rich-text label, and turning a plain label rich builds
+    // a text control per label: at the filter's first letter that is a
+    // hundred of them, each announcing half a dozen child objects to every
+    // application event filter - the largest single share of the keystroke.
+    // Only rows that can be on screen at the next paint need theirs now:
+    // anything from the list's top down to the current scroll offset plus the
+    // tallest the card may be (rowsHeightCap()). The rest are written by
+    // flushNameWords() from the event loop, and any reader asking first
+    // (ensureFresh()) flushes them itself. Safe to split because a row's
+    // name measures itself from its plain name (RowNameLabel): the deferred
+    // words cannot move a single row.
+    const int cap = rowsHeightCap();
+    const int bandBottom =
+        cap > 0 ? (myScroll ? myScroll->verticalScrollBar()->value() : 0) + cap : -1;
+    // Where each row will SIT is added up from the rows' own hints, never
+    // read off their geometry: the row host is resized to the new list only
+    // when the scroll area next lays it out, so right now a hundred rows can
+    // be squeezed into the old height and every one of them reads as "near
+    // the top".
+    bool deferred = false;
+    int top = 0;
+    for (Row& row : myRowList) {
+        bool inBand = bandBottom < 0;
+        if (!inBand && !row.widget->isHidden()) {
+            inBand = top < bandBottom;
+            top += row.widget->sizeHint().height() + myRows->spacing();
+        }
+        if (inBand) styleNameWords(row, /*apply=*/true);
+        else if (styleNameWords(row, /*apply=*/false)) deferred = true;
+    }
+    if (deferred && !myWordsPending) {
+        myWordsPending = true;
+        QMetaObject::invokeMethod(this, &ItemsPanel::flushNameWords, Qt::QueuedConnection);
+    }
     // Nothing matched: one line says so, rather than a card with no rows in
     // it and no reason. Only when there ARE rows to match - an empty document
     // keeps its own empty state.
@@ -617,8 +699,13 @@ void ItemsPanel::applyTheme()
                                    .arg(Theme::titleFont().pointSizeF()));
     }
 
+    // The chevrons are pixels rasterised from text(): re-rasterised from the
+    // new tokens and handed to every twisty.
+    myChevronOpen = QIcon();
+    myChevronClosed = QIcon();
     for (Row& row : myRowList) {
-        // The name's colour is styleName()'s, re-run below: its cache is
+        if (row.twisty) row.twisty->setIcon(chevron(row.twistyOpen));
+        // The name's colour is styleNameColour()'s, re-run below: its cache is
         // dropped here so every name is re-read from the new tokens (muted
         // while off screen or kept only by the filter, text() otherwise).
         row.nameSheet.clear();
@@ -646,7 +733,7 @@ void ItemsPanel::applyTheme()
     if (myEmpty) myEmpty->setStyleSheet(quietLine);
     if (myNoMatch) myNoMatch->setStyleSheet(quietLine);
     if (myFilter) myFilter->applyTheme();
-    // Every name re-styled (styleName(), from the dropped caches above) and
+    // Every name re-styled (styleNameColour() and styleNameWords(), from the dropped caches above) and
     // the no-match line re-measured at the new type size - one pass, the
     // same one a fold or a keystroke takes.
     applyRowVisibility();
@@ -995,11 +1082,11 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
 
     // A row this item already had: write only what changed (refresh()).
     if (Row entry; takeReusable(isOutline ? RowKind::Outline : RowKind::Body, id, entry)) {
-        // The label's words are styleName()'s (applyRowVisibility() runs after
+        // The label's words are styleNameWords()'s (applyRowVisibility() runs after
         // every build): writing the name straight in here would hand a label
         // that may be in RichText - the filter's highlight - unescaped markup.
         entry.text = itemName;
-        entry.onScreen = onScreen;   // its colour is styleName()'s, in applyRowVisibility()
+        entry.onScreen = onScreen;   // its colour is styleNameColour()'s, in applyRowVisibility()
         if (entry.eye->isChecked() != visible) {
             // Blocked: this is the document's state being SHOWN, not the user
             // asking for a change - the toggled handler writes the document.
@@ -1032,7 +1119,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     auto* name = new RowNameLabel(itemName, row);
     // PLAIN text (RowNameLabel sets it): a name is the user's own, and
     // "<b>Top</b>" reads as typed. Its colour - muted while off screen, see
-    // above - is styleName()'s, applied by applyRowVisibility() after every
+    // above - is styleNameColour()'s, applied by applyRowVisibility() after every
     // build.
     // Mouse-TRANSPARENT - Task 5's own fix, the same trap CLAUDE.md
     // documents for InitCardWidget: Qt delivers a click to the DEEPEST
@@ -1156,7 +1243,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     // A row this folder already had: write only what changed (refresh()).
     // The twisty is applyRowVisibility()'s, which runs after every build.
     if (Row entry; takeReusable(RowKind::Folder, groupId, entry)) {
-        entry.text = groupName;   // the label follows in styleName() - see addItemRow()
+        entry.text = groupName;   // the label follows in styleNameWords() - see addItemRow()
         if (entry.eye->isChecked() != allVisible) {
             const QSignalBlocker quiet(entry.eye);   // shown, not asked for
             entry.eye->setChecked(allVisible);
@@ -1182,15 +1269,20 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     twisty->setCursor(Qt::PointingHandCursor);
     twisty->setFocusPolicy(Qt::NoFocus);
     const bool open = isGroupExpanded(groupId);
-    twisty->setIcon(
-        IconSet::icon(open ? IconSet::Glyph::ChevronDown : IconSet::Glyph::ChevronRight));
+    twisty->setIcon(chevron(open));
     twisty->setToolTip(open ? tr("Close this folder") : tr("Open this folder"));
     twisty->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
-    connect(twisty, &QPushButton::clicked, this,
-            [this, groupId] { setGroupExpanded(groupId, !isGroupExpanded(groupId)); });
+    connect(twisty, &QPushButton::clicked, this, [this, groupId] {
+        // INERT while the filter holds the folder open (ruling R7a): the
+        // filter ignores myExpanded, so a click here would change nothing on
+        // screen and still record a fold the user never saw - which the
+        // drawer would then act on the moment the filter cleared.
+        if (filterActive()) return;
+        setGroupExpanded(groupId, !isGroupExpanded(groupId));
+    });
     layout->addWidget(twisty);
 
-    // PLAIN text, the user's word (RowNameLabel); coloured by styleName().
+    // PLAIN text, the user's word (RowNameLabel); coloured by styleNameColour().
     auto* name = new RowNameLabel(groupName, row);
     name->setAttribute(Qt::WA_TransparentForMouseEvents);
     layout->addWidget(name, 1);
@@ -1547,7 +1639,8 @@ QStringList ItemsPanel::paintedTexts() const
     return {tr("Items"), tr("Show or hide this body"), tr("Show or hide this outline"),
             tr("No bodies yet.\n\nPress Ctrl+K and click points on "
                "the ground to draw your first outline."),
-            ItemsFilterField::placeholder(), tr("Clear filter"), tr("Nothing matches \"%1\"")};
+            ItemsFilterField::placeholder(), tr("Clear filter"), tr("Nothing matches \"%1\""),
+            filterHeldTip()};
 }
 
 void ItemsPanel::showSelection(const std::vector<int>& ids)

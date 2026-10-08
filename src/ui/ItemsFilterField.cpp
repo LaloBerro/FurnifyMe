@@ -45,8 +45,16 @@ bool ItemsFilterField::event(QEvent* event)
         auto* key = static_cast<QKeyEvent*>(event);
         if (key->key() == Qt::Key_Escape &&
             (key->modifiers() & ~Qt::KeypadModifier) == Qt::NoModifier) {
-            event->accept();
-            return true;
+            // A query to clear: Escape is the field's.
+            if (!text().isEmpty()) {
+                event->accept();
+                return true;
+            }
+            // Nothing to clear (ruling R7c): the field lets go of the focus
+            // and does NOT claim the key, so whatever owns Escape elsewhere -
+            // Cancel Sketch, a live gesture - still gets it. An empty field
+            // that swallowed Escape would leave the keyboard parked in it.
+            releaseFocus();
         }
     }
     return QLineEdit::event(event);
@@ -55,11 +63,35 @@ bool ItemsFilterField::event(QEvent* event)
 void ItemsFilterField::keyPressEvent(QKeyEvent* event)
 {
     if (event->key() == Qt::Key_Escape) {
+        if (text().isEmpty()) {
+            // Reached only when no shortcut took the key: let go of the focus
+            // and let the press travel on to the widgets behind this one.
+            releaseFocus();
+            event->ignore();
+            return;
+        }
         emit escapePressed();
         event->accept();
         return;
     }
     QLineEdit::keyPressEvent(event);
+}
+
+void ItemsFilterField::releaseFocus()
+{
+    // The WINDOW's focus widget, not hasFocus(): hasFocus() is false in any
+    // window that is not the active one, and the focus it would leave parked
+    // here is still the window's.
+    if (window()->focusWidget() != this) return;
+    // Back to the nearest enclosing widget that takes focus - the viewport,
+    // which hosts the drawer - so the keys go where the work is.
+    for (QWidget* up = parentWidget(); up; up = up->parentWidget()) {
+        if (up->focusPolicy() != Qt::NoFocus && up->isEnabled() && up->isVisible()) {
+            up->setFocus(Qt::OtherFocusReason);
+            return;
+        }
+    }
+    clearFocus();
 }
 
 void ItemsFilterField::focusInEvent(QFocusEvent* event)
