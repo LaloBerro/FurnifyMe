@@ -1680,6 +1680,20 @@ void ItemsPanel::activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods)
     if (!(mods & Qt::ShiftModifier)) myAnchorRowId = id;
 }
 
+bool ItemsPanel::rowInSelection(int id, RowKind kind) const
+{
+    const auto selected = [this](int body) {
+        return std::find(mySelectedIds.begin(), mySelectedIds.end(), body) != mySelectedIds.end();
+    };
+    if (kind == RowKind::Body) return selected(id);
+    if (kind == RowKind::Outline) return myPendingOutlineId != 0 && id == myPendingOutlineId;
+    // A folder is part of the selection when every body under it is - the
+    // same answer its own fill gives (restyleRows()).
+    const std::vector<int> under =
+        myDocument ? myDocument->bodiesUnderGroup(id) : std::vector<int>();
+    return !under.empty() && std::all_of(under.begin(), under.end(), selected);
+}
+
 void ItemsPanel::beginDrag(const QPoint& /*panelPos*/, const QPoint& /*globalPos*/)
 {
     myPressArmed = false;
@@ -1754,7 +1768,20 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
     switch (event->type()) {
     case QEvent::MouseButtonPress: {
         auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() == Qt::RightButton) {
+            // THE MENU ACTS ON THE SELECTION (ruling R9a): "New folder with
+            // these" and "Ungroup" read the current selection, so a right
+            // press selects its row first - unless the row is already part of
+            // the selection, which a multi-row menu gesture must keep.
+            if (!rowInSelection(rowId, kind))
+                activateRow(rowId, kind, Qt::NoModifier);
+            return true;
+        }
         if (mouse->button() != Qt::LeftButton) return true;
+        // A drag whose release never arrived (its row destroyed under the
+        // held button, capture lost) must not turn THIS click into a move of
+        // what it carried (ruling R9b).
+        if (myDragging) finishDrag(/*commit=*/false);
         // ARMED, not acted on: the press changes nothing. A release that
         // never travelled is a click (activateRow); one that did is a drop.
         myPressId = rowId;
@@ -1767,6 +1794,8 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
     case QEvent::MouseMove: {
         if (!myPressArmed && !myDragging) return true;
         auto* mouse = static_cast<QMouseEvent*>(event);
+        // Only a move with the left button HELD carries a drag.
+        if (!(mouse->buttons() & Qt::LeftButton)) return true;
         // Qt's implicit grab delivers every move to the pressed row, inside
         // the card or out of it, which is what lets "outside" be read off
         // this card's own rect.

@@ -4399,6 +4399,89 @@ void dragShowsOneTargetBlock()
     drawer->clearFilterAction()->trigger();
     settle(80);
 
+    // THE MODIFIER CLICKS, which select-on-release moved from the press to
+    // the release: Ctrl adds a row, Shift takes the run of body rows.
+    const int top2 = idNamed(probe.document(), QStringLiteral("Top"));
+    const int shelf2 = idNamed(probe.document(), QStringLiteral("Shelf"));
+    const auto sortedSelection = [&] {
+        std::vector<int> ids = probe.view()->selectedSolidIds();
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    const auto sortedIds = [](std::vector<int> ids) {
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    const auto clickRow = [&](int rowId, Qt::KeyboardModifiers mods) {
+        const int row = drawerRowOf(drawer, rowId);
+        if (QWidget* w = row >= 0 ? drawer->rowWidgetAt(row) : nullptr)
+            clickAt(w, QPointF(w->width() / 3.0, w->height() / 2.0), mods);
+    };
+    clickRow(side2, Qt::NoModifier);
+    clickRow(sideRight2, Qt::ControlModifier);
+    const std::vector<int> afterCtrl = sortedSelection();
+    check(afterCtrl == sortedIds({side2, sideRight2}),
+          QStringLiteral("drag: a Ctrl-click's release adds its row to the selection (%1 selected)")
+              .arg(afterCtrl.size()));
+    clickRow(side2, Qt::NoModifier);
+    clickRow(top2, Qt::ShiftModifier);
+    const std::vector<int> afterShift = sortedSelection();
+    check(afterShift == sortedIds({side2, sideRight2, shelf2, top2}),
+          QStringLiteral("drag: a Shift-click's release takes the body rows from the anchor down to "
+                         "it - Side left, Side right, Shelf, Top (%1 selected)")
+              .arg(afterShift.size()));
+
+    // A RIGHT press selects its row first (ruling R9a): the row menu acts on
+    // the selection. A press and release only - a ContextMenu event would
+    // open the real menu, whose exec() blocks.
+    const auto rightClickRow = [&](int rowId) {
+        const int row = drawerRowOf(drawer, rowId);
+        QWidget* w = row >= 0 ? drawer->rowWidgetAt(row) : nullptr;
+        if (!w) return;
+        const QPointF at(w->width() / 3.0, w->height() / 2.0);
+        QMouseEvent down(QEvent::MouseButtonPress, at, w->mapToGlobal(at), Qt::RightButton,
+                         Qt::RightButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(w, &down);
+        QMouseEvent up(QEvent::MouseButtonRelease, at, w->mapToGlobal(at), Qt::RightButton,
+                       Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(w, &up);
+        settle(80);
+    };
+    probe.view()->setSelectedSolids({back2});   // SEAM: the subject is the right press
+    settle(80);
+    rightClickRow(top2);
+    check(probe.view()->selectedSolidIds() == std::vector<int>{top2},
+          "drag: right-pressing an unselected row selects exactly that row");
+    probe.view()->setSelectedSolids({side2, sideRight2});
+    settle(80);
+    rightClickRow(side2);
+    const std::vector<int> afterRight = sortedSelection();
+    check(afterRight == sortedIds({side2, sideRight2}),
+          QStringLiteral("drag: right-pressing a row inside a two-row selection keeps both (%1 "
+                         "selected)").arg(afterRight.size()));
+
+    // A DRAG WHOSE RELEASE NEVER CAME (ruling R9b) must not turn the next
+    // click into a move of what it carried.
+    probe.view()->setSelectedSolids({back2});
+    settle(80);
+    int movesAsked = 0;
+    const QMetaObject::Connection counting =
+        QObject::connect(drawer, &ItemsPanel::itemsMoveRequested, [&movesAsked] { ++movesAsked; });
+    {
+        DrawerDrag stale(drawer, shelf2);
+        stale.moveTo(drawerRowPixel(drawer, side2, 2));
+        check(stale.row() && drawer->dragActive(),
+              "drag: a drag is live, and its release will never be sent");
+    }
+    const int revisionStale = probe.document().revision();
+    clickRow(top2, Qt::NoModifier);
+    QObject::disconnect(counting);
+    check(movesAsked == 0 && probe.document().revision() == revisionStale,
+          QStringLiteral("drag: the next plain click asks for no move and writes nothing (%1 moves "
+                         "asked)").arg(movesAsked));
+    check(probe.view()->selectedSolidIds() == std::vector<int>{top2} && !drawer->dragActive(),
+          "drag: ...it is a click - it selected its row, and the stale drag is gone");
+
     // THE HAND IS READ ONLY WHERE THE LIST IS SEEN (ruling P10). A row
     // scrolled up out of sight keeps its geometry - under the filter field,
     // under the gap above the list - and a drop there must not land on a row

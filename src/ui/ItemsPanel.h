@@ -480,6 +480,9 @@ private:
     void setTitleLit(bool lit, bool refused);
     void styleTitle();
     void activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods);
+    // Whether the row is already part of what is selected - a body selected,
+    // the pending outline, a folder whose every body is selected.
+    bool rowInSelection(int id, RowKind kind) const;
     void beginDrag(const QPoint& panelPos, const QPoint& globalPos);
     void updateDrag(const QPoint& panelPos, const QPoint& globalPos);
     void finishDrag(bool commit);
