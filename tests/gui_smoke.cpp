@@ -1010,6 +1010,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-drawer-lists-the-stored-order", false, true },
     { "every-move-in-the-drawer-reports", false, true },
     { "the-drawer-filters-by-name", false, true },
+    { "a-viewport-pick-reveals-its-row", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -3275,6 +3276,10 @@ void drawerListsStoredOrderBlock()
     check(renameAction != nullptr, "stored order: the Rename action exists");
     probe.view()->setSelectedSolids({topId});
     settle(100);
+    // A pick from outside the drawer now REVEALS its row (T-063), opening the
+    // folder; fold it again so the row is hidden while the body stays selected.
+    drawer->setGroupExpanded(carcass, false);
+    settle(50);
     if (renameAction) renameAction->trigger();
     settle(50);
     const bool foldedEditOpened = drawer->openRenameEditor() != nullptr;
@@ -3875,6 +3880,158 @@ void drawerFiltersByNameBlock()
           "filter: a query holding a percent sign is matched literally");
     drawer->clearFilterAction()->trigger();
     settle(80);
+    probe.close();
+}
+
+// The pixel closest to `token` inside `area` of `image`, and its distance
+// (sum of channel differences). Antialiased text rarely lands exactly on a
+// token, so a painted-ink contrast check measures the nearest real pixel.
+QColor nearestPixel(const QImage& image, const QRect& area, const QColor& token, int& distance)
+{
+    distance = 1 << 30;
+    QColor best;
+    const QRect clipped = area.intersected(image.rect());
+    for (int y = clipped.top(); y <= clipped.bottom(); ++y) {
+        for (int x = clipped.left(); x <= clipped.right(); ++x) {
+            const QColor c(image.pixel(x, y));
+            const int d = std::abs(c.red() - token.red()) + std::abs(c.green() - token.green()) +
+                          std::abs(c.blue() - token.blue());
+            if (d < distance) {
+                distance = d;
+                best = c;
+            }
+        }
+    }
+    return best;
+}
+
+void viewportPickRevealsBlock()
+{
+    RequiredTempDir dir;
+    QString large;
+    {
+        FurnitureStore store(dir.path());
+        large = seedLargeFurniture(store, 122);
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    // SHORT on purpose, so the revealed row lies below the scroll cap.
+    probe.resize(1100, 520);
+    check(openWithDrawer(probe, large), "reveal: the 122-body cabinet opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    const DocumentModel& doc = probe.document();
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int drawers = idNamed(doc, QStringLiteral("Drawers"));
+    const int doors = idNamed(doc, QStringLiteral("Doors"));
+    const int target = idNamed(doc, QStringLiteral("Board 121"));   // Carcass > Drawers
+    check(!drawer->isGroupExpanded(carcass) && !drawer->isGroupExpanded(drawers) &&
+              drawerRowOf(drawer, target) < 0,
+          "reveal: Board 121 starts two folded folders deep, with no row on screen");
+
+    probe.view()->fitAll();
+    settle(150);
+    check(pickBodyOf(probe, target), "reveal: Board 121 is picked in the viewport");
+    settle(150);
+    check(drawer->isGroupExpanded(carcass) && drawer->isGroupExpanded(drawers),
+          "reveal: both ancestors of Board 121 are open after the pick");
+    const int row = drawerRowOf(drawer, target);
+    QWidget* rowWidget = row >= 0 ? drawer->rowWidgetAt(row) : nullptr;
+    QScrollArea* scroll = drawer->scrollArea();
+    check(rowWidget != nullptr && scroll != nullptr, "reveal: the row exists and the list scrolls");
+    if (!rowWidget || !scroll) return;
+    check(rowWidget->y() + rowWidget->height() > scroll->viewport()->height(),
+          QStringLiteral("reveal: the row lies below the scroll cap, so this is not vacuous "
+                         "(row bottom %1, viewport %2)")
+              .arg(rowWidget->y() + rowWidget->height()).arg(scroll->viewport()->height()));
+    const QRect inViewport(rowWidget->mapTo(scroll->viewport(), QPoint(0, 0)), rowWidget->size());
+    check(scroll->viewport()->rect().contains(inViewport),
+          "reveal: ...and the pick scrolled it fully into view");
+
+    // A's rule: what a reveal opened stays open.
+    // Any Doors board the viewport can reach (the cabinet's rows overlap in depth).
+    bool pickedDoor = false;
+    for (int candidate : doc.bodiesUnderGroup(doors))
+        if ((pickedDoor = pickBodyOf(probe, candidate))) break;
+    check(pickedDoor, "reveal: a body in Doors is picked");
+    settle(150);
+    check(drawer->isGroupExpanded(carcass) && drawer->isGroupExpanded(doors),
+          "reveal: Carcass stays open after a pick elsewhere, and Doors opened");
+
+    // A click IN the drawer is not a reveal: it never scrolls the list.
+    scroll->verticalScrollBar()->setValue(0);
+    settle(50);
+    if (QWidget* first = drawer->rowWidgetAt(1))
+        clickAt(first, QPointF(first->width() / 3.0, first->height() / 2.0));
+    check(scroll->verticalScrollBar()->value() == 0,
+          "reveal: a click in the drawer does not scroll it");
+
+    // A partly selected folder: a count in accentText; a full one: the fill.
+    const std::vector<int> inDoors = doc.bodiesUnderGroup(doors);
+    probe.view()->setSelectedSolids({inDoors[0], inDoors[1]});   // SEAM: the subject is the mark
+    settle(100);
+    const int doorsRow = drawerRowOf(drawer, doors);
+    const QString expected = QStringLiteral("2/%1").arg(inDoors.size());
+    const QString gotCount = drawer->partialCountAt(doorsRow);
+    check(gotCount == expected,
+          QStringLiteral("reveal: Doors, two of its bodies selected, reads %1 (\"%2\")")
+              .arg(expected, gotCount));
+    check(contrastRatio(Theme::accentText(), Theme::panel()) >= 3.0,
+          QStringLiteral("reveal: the count's accentText is 3:1 or better on the panel (%1:1)")
+              .arg(contrastRatio(Theme::accentText(), Theme::panel()), 0, 'f', 2));
+    QWidget* doorsWidget = drawer->rowWidgetAt(doorsRow);
+    QLabel* countLabel = nullptr;
+    for (QLabel* label : doorsWidget ? doorsWidget->findChildren<QLabel*>() : QList<QLabel*>())
+        if (label->text() == expected) countLabel = label;
+    check(countLabel != nullptr && countLabel->isVisible(), "reveal: the count label is on the Doors row");
+    if (countLabel) {
+        const QImage painted = renderExact(drawer);
+        const QRect area(countLabel->mapTo(drawer, QPoint(0, 0)), countLabel->size());
+        int distance = 0;
+        const QColor ink = nearestPixel(painted, area, Theme::accentText(), distance);
+        check(distance <= 60 && contrastRatio(ink, Theme::panel()) >= 3.0,
+              QStringLiteral("reveal: the painted count reads 3:1 or better (%1:1, %2 from the "
+                             "token)").arg(contrastRatio(ink, Theme::panel()), 0, 'f', 2).arg(distance));
+    }
+    probe.view()->setSelectedSolids(inDoors);
+    settle(100);
+    const QString fullCount = drawer->partialCountAt(doorsRow);
+    check(fullCount.isEmpty() && doorsWidget &&
+              doorsWidget->styleSheet().contains(Theme::chipActive().name()),
+          "reveal: a fully selected folder wears the selection fill and no count");
+
+    // restyleRows() at the author's size, inside one frame.
+    std::vector<int> many;
+    for (std::size_t i = 0; i < 60; ++i) many.push_back(doc.solids()[i].id);
+    QElapsedTimer clock;
+    clock.start();
+    drawer->showSelection(many);
+    const double restyleMs = clock.nsecsElapsed() / 1.0e6;
+    std::printf("[items-cost] restyle at 130 rows = %.2f ms\n", restyleMs);
+    check(restyleMs < 16.0,
+          QStringLiteral("reveal: restyling 130 rows for a new selection costs under 16 ms (%1 ms)")
+              .arg(restyleMs, 0, 'f', 2));
+
+    // The filter hides the pick: the card foot says so, and Clear filter shows it.
+    typeInto(drawer->filterField(), QStringLiteral("Slat"));
+    check(pickBodyOf(probe, target), "reveal: Board 121 is picked again with the list filtered to Slat");
+    settle(150);
+    QWidget* foot = drawer->hiddenPickLine();
+    check(foot && foot->isVisible(), "reveal: the card foot appears");
+    QLabel* footText = foot ? foot->findChild<QLabel*>() : nullptr;
+    const QString footWords = footText ? footText->text() : QString();
+    check(footText && footWords == QStringLiteral("Board 121 is hidden by the filter —"),
+          QStringLiteral("reveal: it reads \"Board 121 is hidden by the filter —\" (\"%1\")")
+              .arg(footWords));
+    QPushButton* clear = foot ? foot->findChild<QPushButton*>() : nullptr;
+    if (clear) {
+        const QPoint centre =
+            clear->mapTo(probe.view(), QPoint(clear->width() / 2, clear->height() / 2));
+        check(probe.view()->childAt(centre) == clear, "reveal: Clear filter is a real click target");
+        clickAt(clear, QPointF(clear->width() / 2.0, clear->height() / 2.0));
+        settle(150);
+    }
+    check(clear && clear->text() == QStringLiteral("Clear filter") && !drawer->filterActive() &&
+              !foot->isVisible() && drawerRowOf(drawer, target) >= 0,
+          "reveal: Clear filter empties the field, the foot goes, and Board 121's row is there");
     probe.close();
 }
 
@@ -44019,6 +44176,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("the-drawer-lists-the-stored-order")) drawerListsStoredOrderBlock();
     if (blockEnabled("every-move-in-the-drawer-reports")) everyMoveReportsBlock();
     if (blockEnabled("the-drawer-filters-by-name")) drawerFiltersByNameBlock();
+    if (blockEnabled("a-viewport-pick-reveals-its-row")) viewportPickRevealsBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or

@@ -89,6 +89,12 @@ public:
     // The inline rename editor open over a row, or null - never the filter
     // field, which is always there.
     class QLineEdit* openRenameEditor() const;
+    // Reveal and the partial mark (T-063).
+    class QScrollArea* scrollArea() const { return myScroll; }
+    // "2/5" on a folder row whose subtree is PARTLY selected; empty otherwise.
+    QString partialCountAt(int index) const;
+    // The card foot that says a pick is hidden by the filter.
+    QWidget* hiddenPickLine() const { return myFoot; }
     // A folder row's twisty, null for any other row - for the suite, which
     // reads its tooltip to see which way the folder currently points.
     class QPushButton* twistyAt(int index) const;
@@ -270,6 +276,7 @@ private:
         bool twistyHeld = false; // ...and whether the filter is holding it open
         bool grainAcross = false; // what the grain mark currently shows
         QString style;           // the row look restyleRows() last set
+        class QLabel* count = nullptr;   // folder rows: "2/5" while partly selected
         class QPushButton* twisty = nullptr;
         QString text;      // what rowTextAt() reports
         bool matched = false;   // its name holds the filter's query
@@ -341,6 +348,23 @@ private:
     void flushNameWords();
     bool myWordsPending = false;
     QColor nameColour(const Row& row) const;
+
+    // A pick that did NOT come from this drawer reveals its row; one that did
+    // must not scroll the list under the hand that made it.
+    bool myRequestingSelection = false;
+    // The selection the last showSelection() saw; a reveal is for a body that
+    // is new against THIS, never against what a rebuild re-applied.
+    std::vector<int> myPickBaseline;
+    void requestSelection(const std::vector<int>& ids);
+    void applySelection(const std::vector<int>& ids);
+    void reveal(int bodyId);
+    void scrollToRow(int id);
+    QWidget* myFoot = nullptr;
+    class QLabel* myFootText = nullptr;
+    class QPushButton* myFootClear = nullptr;
+    int myHiddenPickId = 0;
+    void showHiddenPick(int bodyId);
+    void hideHiddenPick();
 
     // --- reuse across rebuilds (review ruling R5a) -----------------------------
     // refresh() keys the rows it had by kind and id, and addItemRow()/

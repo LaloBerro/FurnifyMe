@@ -21,6 +21,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QVBoxLayout>
 
@@ -226,7 +227,12 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myOuter->addWidget(myFilter);
     myFilter->show();
     myClearFilterAction = new QAction(tr("Clear filter"), this);
-    connect(myClearFilterAction, &QAction::triggered, this, [this] { myFilter->clear(); });
+    connect(myClearFilterAction, &QAction::triggered, this, [this] {
+        const int pending = myHiddenPickId;
+        myFilter->clear();
+        hideHiddenPick();
+        if (pending != 0) reveal(pending);
+    });
     connect(myFilter, &QLineEdit::textChanged, this, &ItemsPanel::setFilter);
     connect(myFilter, &ItemsFilterField::escapePressed, myClearFilterAction, &QAction::trigger);
 
@@ -277,6 +283,28 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myNoMatch->setWordWrap(true);
     myNoMatch->hide();
     myOuter->addWidget(myNoMatch);
+
+    // The hidden-pick foot: "Board 121 is hidden by the filter —" and a Clear
+    // filter control that triggers the one action and holds no state.
+    myFoot = new QWidget(this);
+    myFoot->setAttribute(Qt::WA_NoSystemBackground);
+    myFoot->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* footRow = new QHBoxLayout(myFoot);
+    footRow->setContentsMargins(kRowInset, 0, kRowInset, 0);
+    footRow->setSpacing(4);
+    myFootText = new QLabel(myFoot);
+    myFootText->setTextFormat(Qt::PlainText);
+    myFootText->setWordWrap(true);
+    myFootClear = new QPushButton(myClearFilterAction->text(), myFoot);
+    myFootClear->setFlat(true);
+    myFootClear->setFocusPolicy(Qt::NoFocus);
+    myFootClear->setCursor(Qt::PointingHandCursor);
+    myFootClear->setAccessibleName(myClearFilterAction->text());
+    connect(myFootClear, &QPushButton::clicked, myClearFilterAction, &QAction::trigger);
+    footRow->addWidget(myFootText, 1);
+    footRow->addWidget(myFootClear, 0, Qt::AlignBottom);
+    myFoot->hide();
+    myOuter->addWidget(myFoot);
 
     // refresh() FIRST and applyTheme() second, and the order is load-bearing
     // both ways: refresh() builds the rows applyTheme() then restyles, and
@@ -412,6 +440,9 @@ void ItemsPanel::setFilter(const QString& text)
     const QString query = text.trimmed();
     if (query == myFilterText) return;
     myFilterText = query;
+    // Any edit to the query retires a standing hidden-pick notice.
+    myHiddenPickId = 0;
+    if (myFoot && !myFoot->isHidden()) myFoot->hide();
     // Built and up to date first: a closed drawer defers its rebuild, and a
     // filter applied to a stale list would be applied to rows that are gone.
     ensureFresh();
@@ -732,6 +763,23 @@ void ItemsPanel::applyTheme()
                                   .arg(Theme::bodyFont().pointSizeF());
     if (myEmpty) myEmpty->setStyleSheet(quietLine);
     if (myNoMatch) myNoMatch->setStyleSheet(quietLine);
+    if (myFootText)
+        myFootText->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+                                      .arg(Theme::textMuted().name())
+                                      .arg(Theme::labelFont().pointSizeF()));
+    if (myFootClear)
+        myFootClear->setStyleSheet(
+            QStringLiteral("QPushButton { background: transparent; border: none; color: %1; "
+                           "font-size: %2pt; padding: 0px; }")
+                .arg(Theme::accentText().name())
+                .arg(Theme::labelFont().pointSizeF()));
+    for (Row& row : myRowList) {
+        if (row.count)
+            row.count->setStyleSheet(
+                QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+                    .arg(Theme::accentText().name())
+                    .arg(Theme::labelFont().pointSizeF()));
+    }
     if (myFilter) myFilter->applyTheme();
     // Every name re-styled (styleNameColour() and styleNameWords(), from the dropped caches above) and
     // the no-match line re-measured at the new type size - one pass, the
@@ -748,7 +796,7 @@ void ItemsPanel::applyTheme()
     updateGeometry();
     adjustSize();
 
-    if (myView) showSelection(myView->selectedSolidIds());
+    if (myView) applySelection(myView->selectedSolidIds());
 }
 
 int ItemsPanel::rowsHeightCap() const
@@ -803,6 +851,7 @@ QSize ItemsPanel::sizeHint() const
     // its own hint plus the gap the layout puts above it.
     if (myFilter) wanted += myFilter->sizeHint().height() + gap;
     if (myNoMatch && !myNoMatch->isHidden()) wanted += myNoMatch->height() + gap;
+    if (myFoot && !myFoot->isHidden()) wanted += myFoot->sizeHint().height() + gap;
     wanted = std::max(wanted, kMinHeight);
     // CAPPED (improvements item 12): past this the rows scroll inside the
     // card rather than the card running off the bottom of the viewport, which
@@ -938,7 +987,7 @@ void ItemsPanel::refresh()
         // Selection is NOT part of the signature - it changes far more often
         // than the list does and is a stylesheet swap rather than a rebuild -
         // so it is applied on this path too.
-        if (myView) showSelection(myView->selectedSolidIds());
+        if (myView) applySelection(myView->selectedSolidIds());
         return;
     }
     myRowSignature = signature;
@@ -1063,7 +1112,7 @@ void ItemsPanel::refresh()
     // sizeHint() reported 325 while the widget sat at 176.
     relayoutCard();
 
-    if (myView) showSelection(myView->selectedSolidIds());
+    if (myView) applySelection(myView->selectedSolidIds());
 }
 
 void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool isOutline,
@@ -1287,6 +1336,18 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     name->setAttribute(Qt::WA_TransparentForMouseEvents);
     layout->addWidget(name, 1);
 
+    // "2/5" while the folder's subtree is PARTLY selected (T-063): words, so
+    // accentText - a mark distinct from the full selection fill and from the
+    // pending outline's.
+    auto* count = new QLabel(row);
+    count->setTextFormat(Qt::PlainText);
+    count->setAttribute(Qt::WA_TransparentForMouseEvents);
+    count->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+                             .arg(Theme::accentText().name())
+                             .arg(Theme::labelFont().pointSizeF()));
+    count->hide();
+    layout->addWidget(count);
+
     auto* eye = new QPushButton(row);
     eye->setCheckable(true);
     eye->setChecked(allVisible);   // read off the bodies under it - see above
@@ -1321,6 +1382,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     entry.name = name;
     entry.eye = eye;
     entry.twisty = twisty;
+    entry.count = count;
     entry.id = groupId;
     entry.isGroup = true;
     entry.depth = depth;
@@ -1509,7 +1571,7 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
                 }
                 ids.swap(merged);
             }
-            emit selectionRequested(ids);
+            requestSelection(ids);
             return true;
         }
         if (outlineProperty.isValid()) {
@@ -1533,7 +1595,7 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
                 return true;
             }
             myDragIds = {id};
-            emit selectionRequested(selectionFor(id, mods));
+            requestSelection(selectionFor(id, mods));
             if (!(mods & Qt::ShiftModifier)) myAnchorRowId = id;
             return true;
         }
@@ -1640,13 +1702,100 @@ QStringList ItemsPanel::paintedTexts() const
             tr("No bodies yet.\n\nPress Ctrl+K and click points on "
                "the ground to draw your first outline."),
             ItemsFilterField::placeholder(), tr("Clear filter"), tr("Nothing matches \"%1\""),
-            filterHeldTip()};
+            filterHeldTip(), tr("%1 is hidden by the filter —")};
 }
 
 void ItemsPanel::showSelection(const std::vector<int>& ids)
 {
+    // The newest body in the selection that was not there before - an
+    // additive pick appends - is the one to reveal, unless this drawer asked
+    // for the selection itself.
+    //
+    // "Was not there before" is measured against what the last PICK left, not
+    // mySelectedIds: a rebuild (refresh(), applyTheme()) re-applies the
+    // viewport's selection through applySelection() and can run before this
+    // slot does, which would leave nothing new to see.
+    int revealId = 0;
+    if (!myRequestingSelection) {
+        for (int id : ids)
+            if (std::find(myPickBaseline.begin(), myPickBaseline.end(), id) == myPickBaseline.end())
+                revealId = id;
+    }
+    myPickBaseline = ids;
+    applySelection(ids);
+    if (revealId != 0) reveal(revealId);
+}
+
+void ItemsPanel::applySelection(const std::vector<int>& ids)
+{
     mySelectedIds = ids;
     restyleRows();
+}
+
+void ItemsPanel::requestSelection(const std::vector<int>& ids)
+{
+    const QScopedValueRollback<bool> guard(myRequestingSelection, true);
+    emit selectionRequested(ids);
+}
+
+void ItemsPanel::reveal(int bodyId)
+{
+    if (!myDocument || !myDocument->contains(bodyId)) return;
+    // A closed drawer defers its rebuild; walk only an up-to-date list.
+    ensureFresh();
+    // A's rule: every ancestor opens and STAYS open - written into
+    // myExpanded, the same set the twisty writes.
+    bool opened = false;
+    for (int folder = myDocument->groupOf(bodyId); folder > 0; folder = myDocument->groupOf(folder))
+        opened = myExpanded.insert(folder).second || opened;
+    if (opened) {
+        applyRowVisibility();
+        relayoutCard();
+        restyleRows();
+    }
+    // A reveal never fails silently: hidden by the filter, the foot says so.
+    if (filterActive() && !QString::fromStdString(myDocument->nameOf(bodyId))
+                               .contains(myFilterText, Qt::CaseInsensitive)) {
+        showHiddenPick(bodyId);
+        return;
+    }
+    hideHiddenPick();
+    scrollToRow(bodyId);
+}
+
+void ItemsPanel::scrollToRow(int id)
+{
+    for (std::size_t i : myVisible) {
+        const Row& row = myRowList[i];
+        if (row.id != id) continue;
+        if (QWidget* host = myScroll->widget())
+            if (host->layout()) host->layout()->activate();
+        myScroll->ensureWidgetVisible(row.widget, 0, 8);
+        return;
+    }
+}
+
+void ItemsPanel::showHiddenPick(int bodyId)
+{
+    myHiddenPickId = bodyId;
+    myFootText->setText(tr("%1 is hidden by the filter —")
+                            .arg(QString::fromStdString(myDocument->nameOf(bodyId))));
+    myFoot->show();
+    relayoutCard();
+}
+
+void ItemsPanel::hideHiddenPick()
+{
+    myHiddenPickId = 0;
+    if (!myFoot || myFoot->isHidden()) return;
+    myFoot->hide();
+    relayoutCard();
+}
+
+QString ItemsPanel::partialCountAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row && row->count && !row->count->isHidden() ? row->count->text() : QString();
 }
 
 void ItemsPanel::showPendingOutline(int id)
@@ -1754,6 +1903,8 @@ void ItemsPanel::restyleRows()
                                               "border-radius: 4px; }")
                                    .arg(Theme::chipActive().name());
     const QString plainLook = QStringLiteral("#itemsRow { background: transparent; }");
+    // One set lookup per body instead of a linear find per row per body.
+    const std::unordered_set<int> selected(mySelectedIds.begin(), mySelectedIds.end());
     for (Row& row : myRowList) {
         // Two ways a row can be marked, and which one applies depends on
         // which KIND of row it is - never on which list happens to contain
@@ -1770,15 +1921,20 @@ void ItemsPanel::restyleRows()
         if (row.isGroup) {
             const std::vector<int> under =
                 myDocument ? myDocument->bodiesUnderGroup(row.id) : std::vector<int>();
-            marked = !under.empty() && std::all_of(under.begin(), under.end(), [this](int id) {
-                         return std::find(mySelectedIds.begin(), mySelectedIds.end(), id) !=
-                                mySelectedIds.end();
-                     });
+            int chosen = 0;
+            for (int id : under) chosen += selected.count(id) ? 1 : 0;
+            marked = !under.empty() && chosen == static_cast<int>(under.size());
+            // PARTLY selected: a count instead of the fill.
+            const bool partial = chosen > 0 && !marked;
+            if (row.count) {
+                const QString text =
+                    partial ? tr("%1/%2").arg(chosen).arg(static_cast<int>(under.size())) : QString();
+                if (row.count->text() != text) row.count->setText(text);
+                if (row.count->isHidden() == partial) row.count->setVisible(partial);
+            }
         } else {
-            marked = row.isOutline
-                         ? (myPendingOutlineId != 0 && row.id == myPendingOutlineId)
-                         : std::find(mySelectedIds.begin(), mySelectedIds.end(), row.id) !=
-                               mySelectedIds.end();
+            marked = row.isOutline ? (myPendingOutlineId != 0 && row.id == myPendingOutlineId)
+                                   : selected.count(row.id) > 0;
         }
         // The folder a drag is hovering over wears the accent BORDER rather
         // than the selection fill, so "this is where it would land" cannot be
