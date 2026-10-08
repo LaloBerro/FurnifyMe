@@ -5115,6 +5115,55 @@ QAction* menuAction(QMenu& menu, const QString& text)
     return nullptr;
 }
 
+// A FOCUS RING CAN ONLY BE CAUGHT WHERE QT WOULD PAINT ONE (review ruling
+// R14a). Every window this suite shows carries WA_ShowWithoutActivating and is
+// never the OS-active one, so QApplication::focusWidget() stays null and
+// hasFocus() - what a style's State_HasFocus and a stylesheet's :focus both
+// read - is false however often setFocus() is called. A render "with focus"
+// and one without were therefore always the same picture, and a ring keyed on
+// hasFocus() went straight past both checks that claimed to forbid it.
+//
+// QApplication::setActiveWindow() moves Qt's OWN record of the active window
+// (deprecated since 6.5 in favour of activateWindow(), which asks the OS - the
+// one thing this suite must never do). It is restored when the probe ends,
+// and FocusRingProbe::osUntouched pins that the OS was not asked: the
+// foreground window is never the suite's own.
+struct FocusRingProbe {
+    bool focusedForPaint = false;     // hasFocus() true AND Qt's focus widget is the list
+    bool unfocusedForPaint = false;   // hasFocus() false after clearFocus()
+    bool osUntouched = true;          // the OS foreground window is not the suite's
+    QImage focused;
+    QImage unfocused;
+};
+
+FocusRingProbe probeFocusRing(QWidget* list)
+{
+    FocusRingProbe probe;
+    QWidget* const previous = QApplication::activeWindow();
+    QT_WARNING_PUSH
+    QT_WARNING_DISABLE_DEPRECATED
+    QApplication::setActiveWindow(list->window());
+    QT_WARNING_POP
+    list->setFocus(Qt::OtherFocusReason);
+    settle(30);
+    probe.focusedForPaint = list->hasFocus() && QApplication::focusWidget() == list;
+    probe.focused = renderExact(list);
+    list->clearFocus();
+    settle(30);
+    probe.unfocusedForPaint = !list->hasFocus();
+    probe.unfocused = renderExact(list);
+#ifdef _WIN32
+    probe.osUntouched =
+        GetForegroundWindow() != reinterpret_cast<HWND>(list->window()->winId());
+#endif
+    QT_WARNING_PUSH
+    QT_WARNING_DISABLE_DEPRECATED
+    QApplication::setActiveWindow(previous);
+    QT_WARNING_POP
+    settle(30);
+    return probe;
+}
+
 void drawerKeyboardBlock()
 {
     RequiredTempDir dir;
@@ -5189,11 +5238,13 @@ void drawerKeyboardBlock()
               .arg(wrongOwners.isEmpty() ? QStringLiteral("all reach the list")
                                          : wrongOwners.join(QStringLiteral(", "))));
 
-    const QImage focused = renderExact(drawer);
-    drawer->clearFocus();
-    settle(30);
-    const QImage unfocused = renderExact(drawer);
-    check(focused == unfocused,
+    // R14a: the focus Qt would PAINT with, not merely the window's focus
+    // child - see probeFocusRing().
+    const FocusRingProbe ring = probeFocusRing(drawer);
+    check(ring.focusedForPaint && ring.unfocusedForPaint && ring.osUntouched,
+          "keys: the list really holds focus as a style or stylesheet reads it, and loses it "
+          "again - without the OS being asked to activate anything");
+    check(ring.focused == ring.unfocused,
           "keys: holding focus paints nothing - no focus ring; the selection fill is the cue");
     drawer->setFocus();
     settle(30);
@@ -5765,6 +5816,10 @@ void drawerEdgeStatesBlock()
     probe.close();
 }
 
+// The size C4 is about: "a large list". The author's room is 122 bodies; a
+// library edited below this falls back to the 122-body stand-in.
+constexpr int kC4RoomBodies = 100;
+
 // Where the author's real library lives on this machine: FURNIFY_REAL_LIB when
 // it is set, otherwise the app's own Documents/FurnifyMe. Only a path - nothing
 // here opens it.
@@ -5873,6 +5928,89 @@ bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& sou
            store.saveFurniture(furnitureId, room, QImage());
 }
 
+// THE WORD C4 TYPES, DERIVED FROM THE ROOM rather than written down: the
+// author renames boards and edits scenes, and a query fixed to today's names
+// is a check that goes red on a library edit with no code change. The word
+// must let the ANCESTOR rule be tested, so it is a token of some body's name
+// (split on spaces, hyphens and underscores, three characters or more) that
+// - appears in NO folder's name: a folder that matches is a match, not an
+//   ancestor the filter keeps, and every matching body's folder must be one
+//   the filter keeps only for what lies beneath it;
+// - matches at least one body inside a folder, and not every body - so the
+//   filter has something to keep above a match, and something to narrow.
+// Of the words that qualify, the one matching the most bodies (ties to the
+// alphabetically first, so a run is repeatable). Empty when none qualifies.
+QString derivedFilterQuery(const DocumentModel& doc, int* matching = nullptr)
+{
+    QStringList folderNames;
+    for (const DocumentModel::Group& g : doc.groups())
+        folderNames << QString::fromStdString(g.name);
+    QMap<QString, QString> candidates;   // lowercased -> as first spelled
+    static const QRegularExpression separators(QStringLiteral("[\\s_-]+"));
+    for (const DocumentModel::Solid& s : doc.solids())
+        for (const QString& token :
+             QString::fromStdString(s.name).split(separators, Qt::SkipEmptyParts))
+            if (token.size() >= 3 && !candidates.contains(token.toLower()))
+                candidates.insert(token.toLower(), token);
+    QString best;
+    int bestCount = 0;
+    const int total = static_cast<int>(doc.solids().size());
+    for (auto it = candidates.cbegin(); it != candidates.cend(); ++it) {
+        const QString& word = it.value();
+        bool inAFolderName = false;
+        for (const QString& folder : folderNames)
+            if (folder.contains(word, Qt::CaseInsensitive)) inAFolderName = true;
+        if (inAFolderName) continue;
+        int count = 0;
+        bool oneInAFolder = false;
+        for (const DocumentModel::Solid& s : doc.solids())
+            if (QString::fromStdString(s.name).contains(word, Qt::CaseInsensitive)) {
+                ++count;
+                if (doc.groupOf(s.id) != 0) oneInAFolder = true;
+            }
+        if (!oneInAFolder || count >= total || count <= bestCount) continue;
+        best = word;   // QMap iterates in key order: a tie keeps the first
+        bestCount = count;
+    }
+    if (matching) *matching = bestCount;
+    return best;
+}
+
+// Whether the furniture `id` under `root` can carry C4 at the size it is
+// about, and the word to type there; `why` names what it lacks when it
+// cannot. Read through a FurnitureStore on `root`, which is only ever a copy.
+bool roomCarriesC4(const QString& root, const QString& id, QString& query, int& bodies,
+                   QString& why)
+{
+    FurnitureStore store(root);
+    DocumentModel doc;
+    QString error;
+    if (id.isEmpty() || !store.loadFurniture(id, doc, &error)) {
+        why = QStringLiteral("the composed room did not load (%1)").arg(error);
+        return false;
+    }
+    bodies = static_cast<int>(doc.count());
+    if (bodies < kC4RoomBodies) {
+        why = QStringLiteral("it holds %1 bodies, fewer than the %2 C4 is about")
+                  .arg(bodies)
+                  .arg(kC4RoomBodies);
+        return false;
+    }
+    int folders = 0;
+    for (const DocumentModel::Group& g : doc.groups())
+        if (g.parent == 0) ++folders;
+    if (folders == 0) {
+        why = QStringLiteral("it has no top-level folder to fold and unfold");
+        return false;
+    }
+    query = derivedFilterQuery(doc);
+    if (query.isEmpty()) {
+        why = QStringLiteral("no body's name holds a word that no folder's name holds");
+        return false;
+    }
+    return true;
+}
+
 // THE EVIDENCE (spec "Evidence", C5's captures): eleven composited window
 // captures of the drawer in every state the spec names, written so a person
 // LOOKS at them - driving a window is not looking at it. Then C4 on the
@@ -5947,8 +6085,8 @@ void itemsEvidenceBlock(const QString& outDir)
         check(drawer->titleLit(), "evidence: the top-level capture shows the title lit");
         capture(probe, QStringLiteral("items-drag-top-level"));
         drag.moveTo(QPoint(drawer->width() + 60, drawer->height() / 2));
-        check(drawer->dropKind() == ItemsPanel::DropKind::None,
-              "evidence: the outside capture shows no drop target");
+        check(drawer->dragActive() && drawer->dropKind() == ItemsPanel::DropKind::None,
+              "evidence: the outside capture shows a live drag with no drop target");
         capture(probe, QStringLiteral("items-drag-outside-cancel"));
         drag.release();
     }
@@ -6010,15 +6148,29 @@ void itemsEvidenceBlock(const QString& outDir)
     RequiredTempDir realCopy;
     QString roomId;
     QString source;
-    const bool real = composeRealRoom(realCopy.path(), roomId, source);
+    QString query;
+    int roomBodies = 0;
+    QString why;
+    // The real room is used only when it can express what C4 checks; every
+    // threshold below follows from the room itself (its derived word, its own
+    // body count, its own rows), so the checks and their count are the same
+    // on either source.
+    bool real = composeRealRoom(realCopy.path(), roomId, source);
+    if (!real) why = QStringLiteral("no library to copy and compose at ") + source;
+    real = real && roomCarriesC4(realCopy.path(), roomId, query, roomBodies, why);
     if (!real) {
-        FurnitureStore store(realCopy.path());
-        roomId = seedLargeFurniture(store, 122);
+        {
+            FurnitureStore store(realCopy.path());
+            roomId = seedLargeFurniture(store, 122);
+        }
+        QString standInWhy;
+        roomCarriesC4(realCopy.path(), roomId, query, roomBodies, standInWhy);
     }
-    std::printf("[items-c4] room source: %s\n",
+    std::printf("[items-c4] room source: %s - filter word \"%s\"\n",
                 real ? qPrintable(source + QStringLiteral(" (copied, composed)"))
-                     : qPrintable(QStringLiteral("synthetic 122-body stand-in (no usable library at ") +
-                                  source + QStringLiteral(")")));
+                     : qPrintable(QStringLiteral("synthetic 122-body stand-in, because the real room "
+                                                 "cannot carry C4: ") + why),
+                qPrintable(query));
     {
         MainWindow room(nullptr, /*persistProgress=*/false, realCopy.path());
         room.resize(1100, 780);
@@ -6026,17 +6178,16 @@ void itemsEvidenceBlock(const QString& outDir)
         ItemsPanel* roomDrawer = room.itemsPanel();
         const DocumentModel& roomDoc = room.document();
         const int bodies = static_cast<int>(roomDoc.count());
-        check(bodies >= 100,
-              QStringLiteral("C4: the room holds the author's scale of boards (%1 bodies)").arg(bodies));
+        check(bodies >= kC4RoomBodies && bodies == roomBodies && !query.isEmpty(),
+              QStringLiteral("C4: the room holds a large list - %1 bodies, every one composed - and a "
+                             "word to filter it by (\"%2\")")
+                  .arg(bodies)
+                  .arg(query));
         const int resting = roomDrawer->rowCount();
 
-        // "Slat 0" rather than "Slat": both rooms keep their slats in folders
-        // NAMED Slats, and a folder whose own name matches is a match, not an
-        // ancestor - so "Slat" leaves no folder on screen BECAUSE of a match
-        // beneath it, and the ancestor rule would go untested. "Slat 0" hits
-        // the bodies (the author's Slat 01-09, the stand-in's Slat 005-093)
-        // and no folder.
-        const QString query = QStringLiteral("Slat 0");
+        // The word is derived (derivedFilterQuery()): it hits bodies and no
+        // folder, so every folder on screen while it stands is there only for
+        // a match beneath it - which is exactly what the ancestor rule needs.
         const double worst = typeInto(roomDrawer->filterField(), query);
         const auto rowMatches = [&](int i) {
             return roomDrawer->rowTextAt(i).contains(query, Qt::CaseInsensitive);
@@ -6111,27 +6262,38 @@ void itemsEvidenceBlock(const QString& outDir)
                   .arg(afterEscape)
                   .arg(resting));
 
+        // The walk and the fold follow the room's own rows: as many Downs as
+        // it has rows after the first (three at most), and the fold on the
+        // first top-level row that is a folded folder.
         roomDrawer->setFocus();
         settle(30);
         sendKeyTo(&room, Qt::Key_Home);
         bool walked = roomDrawer->currentRowId() == roomDrawer->rowIdAt(0);
-        for (int i = 1; i <= 3; ++i) {
+        const int downs = std::min(3, resting - 1);
+        for (int i = 1; i <= downs; ++i) {
             sendKeyTo(&room, Qt::Key_Down);
             walked = walked && roomDrawer->currentRowId() == roomDrawer->rowIdAt(i);
         }
-        check(resting >= 4 && walked, "C4: Down walks the selection through the visible rows, one at a time");
+        check(downs > 0 && walked,
+              QStringLiteral("C4: Down walks the selection through the visible rows, one at a time "
+                             "(%1 steps)").arg(downs));
+        int foldRow = -1;
+        for (int i = 0; i < roomDrawer->rowCount() && foldRow < 0; ++i)
+            if (roomDrawer->rowIsGroupAt(i) && !roomDrawer->isGroupExpanded(roomDrawer->rowIdAt(i)))
+                foldRow = i;
+        const int folded = foldRow >= 0 ? roomDrawer->rowIdAt(foldRow) : 0;
         sendKeyTo(&room, Qt::Key_Home);
-        const int firstFolder = roomDrawer->rowIdAt(0);
-        const bool firstIsFolder = roomDrawer->rowIsGroupAt(0) && !roomDrawer->isGroupExpanded(firstFolder);
+        for (int i = 0; i < foldRow; ++i) sendKeyTo(&room, Qt::Key_Down);
+        const bool onIt = foldRow >= 0 && roomDrawer->currentRowId() == folded;
         sendKeyTo(&room, Qt::Key_Right);
-        const bool opened = roomDrawer->isGroupExpanded(firstFolder);
+        const bool opened = foldRow >= 0 && roomDrawer->isGroupExpanded(folded);
         sendKeyTo(&room, Qt::Key_Left);
-        check(firstIsFolder && opened && !roomDrawer->isGroupExpanded(firstFolder),
-              "C4: Right unfolds the first folder and Left folds it again");
-        const QImage focused = renderExact(roomDrawer);
-        roomDrawer->clearFocus();
-        settle(30);
-        check(renderExact(roomDrawer) == focused, "C4: no focus ring is painted");
+        check(onIt && opened && !roomDrawer->isGroupExpanded(folded),
+              "C4: Right unfolds a folded folder and Left folds it again");
+        const FocusRingProbe ring = probeFocusRing(roomDrawer);
+        check(ring.focusedForPaint && ring.unfocusedForPaint && ring.osUntouched,
+              "C4: the room's list really holds focus as a style reads it, and loses it again");
+        check(ring.focused == ring.unfocused, "C4: no focus ring is painted");
         room.close();
     }
     probe.close();
