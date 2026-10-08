@@ -19,6 +19,7 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHideEvent>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QContextMenuEvent>
 #include <QMenu>
@@ -266,6 +267,10 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     // See Theme::makeSurfaceTransparent()'s own comment.
     Theme::makeSurfaceTransparent(this);
     setFixedWidth(cardWidth());
+    // ClickFocus: a click on a row gives the list the keys; Tab never stops
+    // here. It paints no ring - the selection fill is the focus cue (WCAG
+    // 2.4.7), because the focused row IS the selected row.
+    setFocusPolicy(Qt::ClickFocus);
 
     myOuter = new QVBoxLayout(this);
     myOuter->setContentsMargins(kPad, kPad, kPad, kPad);
@@ -1641,34 +1646,219 @@ std::vector<int> ItemsPanel::selectionFor(int id, Qt::KeyboardModifiers mods) co
     return {id};
 }
 
-void ItemsPanel::showRowMenu(const QPoint& globalPos, int rowId, bool isGroupRow)
+std::vector<int> ItemsPanel::idsForMenu(int rowId, RowKind kind) const
 {
-    QMenu menu(this);
+    // A selected body row carries the whole selection, exactly as a drag
+    // from it does; any other row carries itself.
+    if (kind == RowKind::Body &&
+        std::find(mySelectedIds.begin(), mySelectedIds.end(), rowId) != mySelectedIds.end())
+        return mySelectedIds;
+    return {rowId};
+}
+
+void ItemsPanel::populateRowMenu(QMenu& menu, int rowId, RowKind kind)
+{
     QAction* folder = menu.addAction(tr("New folder with these"));
     QAction* rename = menu.addAction(tr("Rename"));
-    QAction* ungroup = menu.addAction(tr("Ungroup"));
-    // Only over a FOLDER, and worded so the two cannot be confused: Ungroup
-    // dissolves the folder and keeps the wood, Delete takes both.
-    QAction* remove = isGroupRow ? menu.addAction(tr("Delete folder and its contents")) : nullptr;
-    // Availability, derived: a folder needs something to put in it, a rename
-    // needs a row to open over, and Ungroup needs the row to BE in a folder.
-    folder->setEnabled(!mySelectedIds.empty());
-    rename->setEnabled(rowId != 0);
-    ungroup->setEnabled(myDocument &&
-                        (isGroupRow ? myDocument->groupExists(rowId)
-                                    : (rowId != 0 && myDocument->groupOf(rowId) != 0)));
+    QAction* up = menu.addAction(tr("Move up"));
+    QAction* down = menu.addAction(tr("Move down"));
+    // Never "group" for a folder (ruling P6): this dissolves the folder the
+    // selection sits in and keeps every piece of wood in it.
+    QAction* ungroup = menu.addAction(tr("Remove folder, keep contents"));
+    // Only over a FOLDER, and worded so the two cannot be confused: the entry
+    // above keeps the wood, this one takes it too.
+    QAction* remove =
+        kind == RowKind::Folder ? menu.addAction(tr("Delete folder and its contents")) : nullptr;
 
-    const QAction* chosen = menu.exec(globalPos);
-    if (chosen == folder) {
-        emit newFolderRequested();
-    } else if (chosen == rename && rowId != 0) {
-        if (isGroupRow) beginRenameForGroup(rowId);
-        else beginRenameForItem(rowId, /*isOutline=*/false);
-    } else if (chosen == ungroup) {
-        emit ungroupRequested();
-    } else if (remove && chosen == remove) {
-        emit deleteGroupRequested(rowId);
+    // Availability, derived: a folder needs something to put in it, a rename
+    // needs a row to open over, a move needs somewhere to go (the same
+    // DocumentModel answer Alt+arrows read), and removing a folder needs the
+    // row to BE one or to sit in one.
+    const std::vector<int> ids = idsForMenu(rowId, kind);
+    DocumentModel::MoveTarget upTarget;
+    DocumentModel::MoveTarget downTarget;
+    if (myDocument) {
+        upTarget = myDocument->siblingStepTarget(ids, -1);
+        downTarget = myDocument->siblingStepTarget(ids, +1);
     }
+    folder->setEnabled(!mySelectedIds.empty());
+    // Every kind of row renames - an outline row passed id 0 here once, so
+    // its Rename sat disabled while a double-click on the same row worked.
+    rename->setEnabled(rowId != 0);
+    up->setEnabled(upTarget.ok);
+    down->setEnabled(downTarget.ok);
+    ungroup->setEnabled(myDocument && (kind == RowKind::Folder
+                                           ? myDocument->groupExists(rowId)
+                                           : (rowId != 0 && myDocument->groupOf(rowId) != 0)));
+
+    connect(folder, &QAction::triggered, this, [this] { emit newFolderRequested(); });
+    connect(rename, &QAction::triggered, this, [this, rowId, kind] {
+        if (kind == RowKind::Folder) beginRenameForGroup(rowId);
+        else beginRenameForItem(rowId, kind == RowKind::Outline);
+    });
+    // The non-drag route (WCAG 2.5.7): the same moveItems() a drop takes, so
+    // MainWindow checkpoints and reports it exactly as it reports a drop.
+    connect(up, &QAction::triggered, this, [this, ids, upTarget] {
+        emit itemsMoveRequested(ids, upTarget.parent, upTarget.beforeId);
+    });
+    connect(down, &QAction::triggered, this, [this, ids, downTarget] {
+        emit itemsMoveRequested(ids, downTarget.parent, downTarget.beforeId);
+    });
+    connect(ungroup, &QAction::triggered, this, [this] { emit ungroupRequested(); });
+    if (remove)
+        connect(remove, &QAction::triggered, this, [this, rowId] { emit deleteGroupRequested(rowId); });
+}
+
+void ItemsPanel::showRowMenu(const QPoint& globalPos, int rowId, RowKind kind)
+{
+    QMenu menu(this);
+    populateRowMenu(menu, rowId, kind);
+    menu.exec(globalPos);
+}
+
+// --- the keyboard (T-063) ------------------------------------------------------
+
+bool ItemsPanel::holdsFocus() const
+{
+    const QWidget* top = window();
+    return top && top->focusWidget() == this;
+}
+
+bool ItemsPanel::claimsKey(const QKeyEvent* key) const
+{
+    // Only while the list itself holds focus: a key the filter field or a
+    // rename editor ignored propagates up here, and Down typed into a rename
+    // must not walk the rows out from under it. Nor during a drag, whose own
+    // Escape claim is the only key it has (ruling R10a).
+    if (!holdsFocus() || myDragging) return false;
+    const Qt::KeyboardModifiers mods = key->modifiers() & ~Qt::KeypadModifier;
+    switch (key->key()) {
+    case Qt::Key_Up:
+    case Qt::Key_Down:
+        return mods == Qt::NoModifier || mods == Qt::ShiftModifier || mods == Qt::AltModifier;
+    case Qt::Key_Left:
+        return mods == Qt::NoModifier || mods == Qt::AltModifier;
+    case Qt::Key_Right:
+    case Qt::Key_Home:
+    case Qt::Key_End:
+    case Qt::Key_F2:
+        return mods == Qt::NoModifier;
+    default:
+        return false;   // letters are never the list's - E stays Extrude
+    }
+}
+
+bool ItemsPanel::event(QEvent* event)
+{
+    // The keys the list claims are taken back from the shortcut map: F2's
+    // action renames a body or an outline only, never a focused folder row.
+    if (event->type() == QEvent::ShortcutOverride && claimsKey(static_cast<QKeyEvent*>(event))) {
+        event->accept();
+        return true;
+    }
+    return QWidget::event(event);
+}
+
+void ItemsPanel::keyPressEvent(QKeyEvent* event)
+{
+    if (!claimsKey(event) || rowCount() == 0) {
+        QWidget::keyPressEvent(event);
+        return;
+    }
+    const Qt::KeyboardModifiers mods = event->modifiers() & ~Qt::KeypadModifier;
+    if (mods == Qt::AltModifier) {
+        moveByKey(event->key());
+        event->accept();
+        return;
+    }
+    const int at = visibleIndexOf(myCurrentId);
+    const int last = rowCount() - 1;
+    switch (event->key()) {
+    case Qt::Key_Up: stepTo(at <= 0 ? 0 : at - 1, mods); break;
+    case Qt::Key_Down: stepTo(at < 0 ? 0 : std::min(at + 1, last), mods); break;
+    case Qt::Key_Home: stepTo(0, Qt::NoModifier); break;
+    case Qt::Key_End: stepTo(last, Qt::NoModifier); break;
+    case Qt::Key_Left: foldOrParent(); break;
+    case Qt::Key_Right: unfoldOrChild(); break;
+    case Qt::Key_F2: renameCurrent(); break;
+    default: break;
+    }
+    event->accept();
+}
+
+int ItemsPanel::visibleIndexOf(int id) const
+{
+    // One id space for bodies, outlines and folders (DocumentModel::Group),
+    // so the id alone names the row.
+    if (id == 0) return -1;
+    const int count = rowCount();
+    for (int v = 0; v < count; ++v)
+        if (visibleRow(v)->id == id) return v;
+    return -1;
+}
+
+void ItemsPanel::stepTo(int visibleIndex, Qt::KeyboardModifiers mods)
+{
+    const Row* row = visibleRow(visibleIndex);
+    if (!row) return;
+    const int id = row->id;
+    const RowKind kind =
+        row->isGroup ? RowKind::Folder : (row->isOutline ? RowKind::Outline : RowKind::Body);
+    // Focus IS selection: stepping selects, exactly as a click on the row.
+    activateRow(id, kind, (mods & Qt::ShiftModifier) ? Qt::KeyboardModifiers(Qt::ShiftModifier)
+                                                    : Qt::KeyboardModifiers(Qt::NoModifier));
+    scrollToRow(id);
+}
+
+void ItemsPanel::foldOrParent()
+{
+    const Row* row = visibleRow(visibleIndexOf(myCurrentId));
+    if (!row) return;
+    // A folder the filter holds open is not the user's to fold (ruling R7a).
+    if (row->isGroup && isGroupExpanded(row->id) && !filterActive()) {
+        setGroupExpanded(row->id, false);
+        return;
+    }
+    if (row->parentId != 0) stepTo(visibleIndexOf(row->parentId), Qt::NoModifier);
+}
+
+void ItemsPanel::unfoldOrChild()
+{
+    const int at = visibleIndexOf(myCurrentId);
+    const Row* row = visibleRow(at);
+    if (!row || !row->isGroup) return;
+    const int folderId = row->id;
+    if (!isGroupExpanded(folderId) && !filterActive()) {
+        setGroupExpanded(folderId, true);
+        return;
+    }
+    const Row* next = visibleRow(at + 1);
+    if (next && next->parentId == folderId) stepTo(at + 1, Qt::NoModifier);
+}
+
+void ItemsPanel::renameCurrent()
+{
+    if (visibleIndexOf(myCurrentId) < 0) return;
+    if (myCurrentKind == RowKind::Folder) beginRenameForGroup(myCurrentId);
+    else beginRenameForItem(myCurrentId, myCurrentKind == RowKind::Outline);
+}
+
+std::vector<int> ItemsPanel::movableIds() const
+{
+    if (myCurrentId == 0) return {};
+    return idsForMenu(myCurrentId, myCurrentKind);
+}
+
+void ItemsPanel::moveByKey(int key)
+{
+    if (!myDocument) return;
+    const std::vector<int> ids = movableIds();
+    if (ids.empty()) return;
+    const DocumentModel::MoveTarget target =
+        key == Qt::Key_Left ? myDocument->outOfFolderTarget(ids)
+                            : myDocument->siblingStepTarget(ids, key == Qt::Key_Up ? -1 : +1);
+    // Nowhere to go is not a move: nothing is asked, nothing is reported.
+    if (target.ok) emit itemsMoveRequested(ids, target.parent, target.beforeId);
 }
 
 ItemsPanel::DropTarget ItemsPanel::dropTargetAt(const QPoint& pos) const
@@ -1786,6 +1976,9 @@ void ItemsPanel::showDropTarget(const DropTarget& target)
 
 void ItemsPanel::activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods)
 {
+    // The row the keys continue from - whichever route selected it.
+    myCurrentId = id;
+    myCurrentKind = kind;
     if (kind == RowKind::Folder) {
         // A folder row selects the BODIES under it, and Ctrl ADDS them to
         // what is already selected - which is how two folders, or a folder
@@ -2062,7 +2255,8 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
         auto* mouse = static_cast<QMouseEvent*>(event);
         if (mouse->button() == Qt::RightButton) {
             // THE MENU ACTS ON THE SELECTION (ruling R9a): "New folder with
-            // these" and "Ungroup" read the current selection, so a right
+            // these" and "Remove folder, keep contents" read the current
+            // selection, so a right
             // press selects its row first - unless the row is already part of
             // the selection, which a multi-row menu gesture must keep.
             if (!rowInSelection(rowId, kind))
@@ -2080,6 +2274,10 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
         myPressKind = kind;
         myPressMods = mouse->modifiers();
         myPressArmed = true;
+        // The keys follow the click. Set here rather than left to Qt's
+        // click-focus, which only acts on a SPONTANEOUS press and never sees
+        // one the suite sends.
+        setFocus(Qt::MouseFocusReason);
         myDragStart = rowWidget->mapTo(this, mouse->position().toPoint());
         return true;
     }
@@ -2127,8 +2325,7 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
         // The right button, over any row: the folder gestures, as a menu -
         // a second ROUTE to the Model menu's actions, never a second
         // implementation (MainWindow answers both).
-        showRowMenu(static_cast<QContextMenuEvent*>(event)->globalPos(),
-                    kind == RowKind::Outline ? 0 : rowId, kind == RowKind::Folder);
+        showRowMenu(static_cast<QContextMenuEvent*>(event)->globalPos(), rowId, kind);
         return true;
     default:
         break;
@@ -2179,6 +2376,8 @@ void ItemsPanel::resetPick()
     // Body ids restart per document, so a baseline from the last one could
     // swallow a reveal; a notice for its body is meaningless too.
     myPickBaseline.clear();
+    myCurrentId = 0;
+    myCurrentKind = RowKind::Body;
     hideHiddenPick();
 }
 
@@ -2197,6 +2396,9 @@ void ItemsPanel::requestSelection(const std::vector<int>& ids)
 void ItemsPanel::reveal(int bodyId)
 {
     if (!myDocument || !myDocument->contains(bodyId)) return;
+    // A pick in the viewport moves the keys' row too: Down goes on from it.
+    myCurrentId = bodyId;
+    myCurrentKind = RowKind::Body;
     // A closed drawer defers its rebuild; walk only an up-to-date list.
     ensureFresh();
     // A's rule: every ancestor opens and STAYS open - written into

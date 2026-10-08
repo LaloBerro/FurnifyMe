@@ -117,6 +117,7 @@
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QOpenGLContext>
@@ -1017,6 +1018,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-drag-shows-one-target-and-lands-there", false, true },
     { "a-drag-reads-and-cancels", false, true },
     { "a-drag-opens-folders-and-scrolls", false, true },
+    { "the-drawer-walks-and-moves-with-the-keys", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -5094,6 +5096,242 @@ void dragOpensFoldersAndScrollsBlock()
     check(worst < 16.0,
           QStringLiteral("spring: one drag-target change at 130 rows costs under 16 ms (worst %1 ms)")
               .arg(worst, 0, 'f', 2));
+    probe.close();
+}
+
+// --- the keyboard and the row menu (T-063, plan Task 12) ----------------------
+// An entry of a menu built by ItemsPanel::populateRowMenu(), by its words. The
+// suite never exec()s a QMenu (a modal loop sendEvent cannot drive); it builds
+// the menu and triggers the entry, which is the same QAction a click would.
+QAction* menuAction(QMenu& menu, const QString& text)
+{
+    for (QAction* a : menu.actions())
+        if (a->text().remove(QLatin1Char('&')) == text) return a;
+    return nullptr;
+}
+
+void drawerKeyboardBlock()
+{
+    RequiredTempDir dir;
+    QString id;
+    {
+        FurnitureStore store(dir.path());
+        id = seedCabinet(store);
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    check(openWithDrawer(probe, id), "keys: the cabinet opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    ToastHost* toasts = probe.findChild<ToastHost*>();
+    const DocumentModel& doc = probe.document();
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int drawerFolder = idNamed(doc, QStringLiteral("Drawer"));
+    const int side = idNamed(doc, QStringLiteral("Side left"));
+    const int shelf = idNamed(doc, QStringLiteral("Shelf"));
+    const int back = idNamed(doc, QStringLiteral("Back"));
+    const int sketch = idNamed(doc, QStringLiteral("Sketch A"));
+    const auto selected = [&] {
+        std::vector<int> ids = probe.view()->selectedSolidIds();
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    const auto sorted = [](std::vector<int> ids) {
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+
+    check(drawer->focusPolicy() == Qt::ClickFocus, "keys: the list takes focus on a click, never by Tab");
+    QWidget* shelfRow = drawer->rowWidgetAt(drawerRowOf(drawer, shelf));
+    if (shelfRow) clickAt(shelfRow, QPointF(shelfRow->width() / 3.0, shelfRow->height() / 2.0));
+    check(shelfRow && probe.focusWidget() == drawer && drawer->currentRowId() == shelf &&
+              selected() == std::vector<int>{shelf},
+          "keys: a click on Shelf focuses the list and selects Shelf");
+
+    const QImage focused = renderExact(drawer);
+    drawer->clearFocus();
+    settle(30);
+    const QImage unfocused = renderExact(drawer);
+    check(focused == unfocused,
+          "keys: holding focus paints nothing - no focus ring; the selection fill is the cue");
+    drawer->setFocus();
+    settle(30);
+
+    // Visible rows: Carcass, Doors, Sketch A, Shelf, Back.
+    sendKeyTo(&probe, Qt::Key_Down);
+    check(drawer->currentRowId() == back && selected() == std::vector<int>{back},
+          "keys: Down selects the next visible row - focus IS the selection");
+    sendKeyTo(&probe, Qt::Key_Up);
+    check(drawer->currentRowId() == shelf && selected() == std::vector<int>{shelf}, "keys: Up goes back");
+    sendKeyTo(&probe, Qt::Key_Down, Qt::ShiftModifier);
+    check(selected() == sorted({shelf, back}), "keys: Shift+Down extends the selection");
+    check(sorted(drawer->movableIds()) == sorted({shelf, back}),
+          "keys: a move from a selected body row carries the whole selection");
+    sendKeyTo(&probe, Qt::Key_Home);
+    check(drawer->currentRowId() == carcass && selected() == sorted(doc.bodiesUnderGroup(carcass)),
+          "keys: Home goes to the first row - a folder row selects its bodies");
+    sendKeyTo(&probe, Qt::Key_Right);
+    check(drawer->isGroupExpanded(carcass) && drawer->currentRowId() == carcass,
+          "keys: Right unfolds a folded folder");
+    sendKeyTo(&probe, Qt::Key_Right);
+    check(drawer->currentRowId() == drawerFolder, "keys: Right on an open folder steps into its first child");
+    sendKeyTo(&probe, Qt::Key_Left);
+    check(drawer->currentRowId() == carcass, "keys: Left on a child steps to its parent");
+    sendKeyTo(&probe, Qt::Key_Left);
+    check(!drawer->isGroupExpanded(carcass), "keys: Left on an open folder folds it");
+    sendKeyTo(&probe, Qt::Key_End);
+    check(drawer->currentRowId() == back, "keys: End goes to the last row");
+
+    // F2 on a FOLDER row - the Rename action alone only reaches a body or an outline.
+    sendKeyTo(&probe, Qt::Key_Home);
+    QKeyEvent f2Over(QEvent::ShortcutOverride, Qt::Key_F2, Qt::NoModifier);
+    QCoreApplication::sendEvent(drawer, &f2Over);
+    check(f2Over.isAccepted(), "keys: with the list focused, F2 belongs to the list");
+    sendKeyTo(&probe, Qt::Key_F2);
+    QPointer<QLineEdit> editor = drawer->openRenameEditor();
+    check(editor != nullptr, "keys: F2 opens the rename over the focused folder row");
+    if (editor) {
+        // A key typed INTO the editor must not walk or move rows under it.
+        // (The rows' QScrollArea already takes a propagated plain arrow on
+        // the way up, so this pins the outcome; the filter-field check below
+        // is the one the list's own focus guard answers for.)
+        const std::size_t before = doc.undoDepth();
+        QKeyEvent down(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+        QCoreApplication::sendEvent(editor, &down);
+        QKeyEvent altDown(QEvent::KeyPress, Qt::Key_Down, Qt::AltModifier);
+        if (editor) QCoreApplication::sendEvent(editor, &altDown);
+        settle(80);
+        const bool held = editor && drawer->openRenameEditor() == editor &&
+                          drawer->currentRowId() == carcass && doc.undoDepth() == before;
+        check(held,
+              "keys: Down and Alt+Down typed in the rename editor stay the editor's - the list "
+              "neither walks nor moves");
+    }
+    // Enter on the unchanged name closes it (InlineRename's Escape is a
+    // QShortcut, which a sent key event never reaches).
+    if (editor) sendKeyTo(editor, Qt::Key_Return);
+    settle(50);
+    check(drawer->openRenameEditor() == nullptr, "keys: ...and Enter closes the folder's rename again");
+    drawer->setFocus();
+    settle(30);
+    // A letter is never the list's (E stays Extrude), nor is any key the rest
+    // of the app answers while the list happens to hold focus.
+    struct Unclaimed {
+        int key;
+        Qt::KeyboardModifiers mods;
+        const char* text;
+    };
+    const Unclaimed unclaimed[] = {
+        {Qt::Key_E, Qt::NoModifier, "e"},     {Qt::Key_W, Qt::NoModifier, "w"},
+        {Qt::Key_1, Qt::NoModifier, "1"},     {Qt::Key_Escape, Qt::NoModifier, ""},
+        {Qt::Key_Delete, Qt::NoModifier, ""}, {Qt::Key_Z, Qt::ControlModifier, ""},
+        {Qt::Key_Right, Qt::AltModifier, ""},
+    };
+    QStringList claimed;
+    for (const Unclaimed& u : unclaimed) {
+        QKeyEvent over(QEvent::ShortcutOverride, u.key, u.mods, QString::fromLatin1(u.text));
+        QCoreApplication::sendEvent(drawer, &over);
+        if (over.isAccepted()) claimed << QKeySequence(QKeyCombination(u.mods, Qt::Key(u.key))).toString();
+    }
+    check(claimed.isEmpty(),
+          QStringLiteral("keys: letters, digits, Escape, Delete and Ctrl+Z are never claimed by the "
+                         "list (claimed: %1)")
+              .arg(claimed.isEmpty() ? QStringLiteral("none") : claimed.join(QStringLiteral(", "))));
+
+    // The filter field sits OUTSIDE the scroll area, so a key it ignores
+    // propagates straight up to the list. The list's keys are the list's only
+    // while the list ITSELF holds focus: an arrow typed in the field neither
+    // walks the rows nor moves one.
+    QLineEdit* field = drawer->filterField();
+    if (field) field->setFocus();
+    settle(30);
+    const int currentBefore = drawer->currentRowId();
+    const std::vector<int> selectionBefore = selected();
+    const std::size_t depthBefore = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Down);
+    sendKeyTo(&probe, Qt::Key_Down, Qt::AltModifier);
+    const bool fieldKept = field && probe.focusWidget() == field &&
+                           drawer->currentRowId() == currentBefore &&
+                           selected() == selectionBefore && doc.undoDepth() == depthBefore;
+    check(fieldKept,
+          "keys: Down and Alt+Down typed in the filter field stay the field's - the list "
+          "neither walks nor moves");
+    drawer->setFocus();
+    settle(30);
+
+    // Alt+arrows move through moveItems() and report like a drop.
+    drawer->setGroupExpanded(carcass, true);
+    settle(80);
+    QWidget* sideRow = drawer->rowWidgetAt(drawerRowOf(drawer, side));
+    if (sideRow) clickAt(sideRow, QPointF(sideRow->width() / 3.0, sideRow->height() / 2.0));
+    std::size_t depth = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Down, Qt::AltModifier);
+    check(toasts && toasts->currentText() == QStringLiteral("Moved Side left above Top") &&
+              doc.undoDepth() == depth + 1,
+          "keys: Alt+Down moves Side left one place and reports it like a drop");
+    check(probe.focusWidget() == drawer && drawer->currentRowId() == side &&
+              selected() == std::vector<int>{side},
+          "keys: after a move the list keeps focus and Side left stays the focused, selected row");
+    sendKeyTo(&probe, Qt::Key_Up, Qt::AltModifier);
+    check(namesInOrder(doc, carcass) == QStringList({QStringLiteral("Drawer"), QStringLiteral("Side left"),
+                                                     QStringLiteral("Side right"), QStringLiteral("Top")}),
+          QStringLiteral("keys: Alt+Up moves it back (%1)")
+              .arg(namesInOrder(doc, carcass).join(QStringLiteral(", "))));
+    sendKeyTo(&probe, Qt::Key_Up, Qt::AltModifier);   // above Drawer: now first
+    depth = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Up, Qt::AltModifier);
+    check(doc.undoDepth() == depth, "keys: Alt+Up on the first row changes nothing and takes no checkpoint");
+    sendKeyTo(&probe, Qt::Key_Left, Qt::AltModifier);
+    const std::vector<int> root = doc.orderedChildren(0);
+    const auto carcassAt = std::find(root.begin(), root.end(), carcass);
+    check(doc.groupOf(side) == 0 && carcassAt != root.end() && carcassAt + 1 != root.end() &&
+              *(carcassAt + 1) == side && toasts &&
+              toasts->currentText() == QStringLiteral("Moved Side left out of Carcass"),
+          "keys: Alt+Left moves it out of its folder, to just after it");
+
+    // The context menu's Move down: the same move, the same report. Root order
+    // is now Carcass, Side left, Doors, Sketch A, Shelf, Back - one step down
+    // passes Doors and lands in front of Sketch A (ruling P2: the step rule
+    // Task 1 pinned, worded by ItemMoveText alone).
+    QMenu menu;
+    drawer->populateRowMenu(menu, side, ItemsPanel::RowKind::Body);
+    QAction* moveDown = menuAction(menu, QStringLiteral("Move down"));
+    QAction* moveUp = menuAction(menu, QStringLiteral("Move up"));
+    check(moveDown && moveUp && moveDown->isEnabled() && moveUp->isEnabled(),
+          "keys: the row menu offers Move up and Move down");
+    // Ruling P6: a folder is never called a group, in the menu either.
+    QStringList menuWords;
+    for (QAction* a : menu.actions()) menuWords << a->text().remove(QLatin1Char('&'));
+    const bool saysGroup =
+        menuWords.join(QLatin1Char('|')).contains(QStringLiteral("group"), Qt::CaseInsensitive);
+    check(menuAction(menu, QStringLiteral("Remove folder, keep contents")) != nullptr && !saysGroup,
+          QStringLiteral("keys: the menu says \"Remove folder, keep contents\" and never \"group\" (%1)")
+              .arg(menuWords.join(QStringLiteral(" | "))));
+    depth = doc.undoDepth();
+    if (moveDown) moveDown->trigger();
+    settle(150);
+    check(toasts && toasts->currentText() == QStringLiteral("Moved Side left above Sketch A") &&
+              doc.undoDepth() == depth + 1,
+          "keys: Move down moves through moveItems() and reports");
+    QMenu firstMenu;
+    drawer->populateRowMenu(firstMenu, carcass, ItemsPanel::RowKind::Folder);
+    QAction* firstUp = menuAction(firstMenu, QStringLiteral("Move up"));
+    QAction* firstDown = menuAction(firstMenu, QStringLiteral("Move down"));
+    check(firstUp && !firstUp->isEnabled() && firstDown && firstDown->isEnabled(),
+          "keys: Move up is disabled on the first row - its enabled state matches what it does");
+
+    // Rename on an OUTLINE row's menu: the rowId-0 bug, fixed.
+    QMenu outlineMenu;
+    drawer->populateRowMenu(outlineMenu, sketch, ItemsPanel::RowKind::Outline);
+    QAction* rename = menuAction(outlineMenu, QStringLiteral("Rename"));
+    check(rename && rename->isEnabled(), "keys: Rename is enabled on an outline row's menu");
+    if (rename) rename->trigger();
+    settle(100);
+    QLineEdit* outlineEditor = drawer->openRenameEditor();
+    QWidget* outlineRow = drawer->rowWidgetAt(drawerRowOf(drawer, sketch));
+    check(outlineEditor && outlineRow && outlineEditor->parentWidget() == outlineRow,
+          "keys: ...and it opens the rename over the outline's own row");
+    if (outlineEditor) sendKeyTo(outlineEditor, Qt::Key_Return);
+    settle(50);
     probe.close();
 }
 
@@ -45242,6 +45480,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("a-drag-shows-one-target-and-lands-there")) dragShowsOneTargetBlock();
     if (blockEnabled("a-drag-reads-and-cancels")) dragReadsAndCancelsBlock(outDir);
     if (blockEnabled("a-drag-opens-folders-and-scrolls")) dragOpensFoldersAndScrollsBlock();
+    if (blockEnabled("the-drawer-walks-and-moves-with-the-keys")) drawerKeyboardBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or

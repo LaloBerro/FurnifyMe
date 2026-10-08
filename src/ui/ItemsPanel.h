@@ -42,6 +42,7 @@
 
 class DocumentModel;
 class OcctViewWidget;
+class QKeyEvent;
 class QVBoxLayout;
 
 class ItemsPanel : public QWidget {
@@ -116,6 +117,12 @@ public:
     // status bar's RIGHT channel (mode and next step, the F9 ruling).
     QString dragStatusText() const { return myDragStatus; }
     class DragGhost* dragGhost() const { return myGhost; }
+    // The keyboard (T-063). The focused row IS the selected row - there is no
+    // focus-only cursor to lose, because no ring may show it.
+    int currentRowId() const { return myCurrentId; }
+    // What a keyboard move or Move up/down carries: the focused folder or
+    // outline, or the selected bodies when the focused row is one of them.
+    std::vector<int> movableIds() const;
     // A document swap: forget what the last pick left (ids restart per document).
     void resetPick();
     // A folder row's twisty, null for any other row - for the suite, which
@@ -124,6 +131,11 @@ public:
 
     // What a row IS, handed to every gesture that acts on one.
     enum class RowKind { Body, Outline, Folder };
+
+    // Builds the row's right-click menu into `menu`, every entry already
+    // wired to the move, rename or folder route it names - showRowMenu()
+    // only exec()s it, and the suite triggers entries without a modal loop.
+    void populateRowMenu(class QMenu& menu, int rowId, RowKind kind);
 
     // Highlights the rows for these solids. Called when the viewport selection
     // changes, so the two views of the document never disagree.
@@ -237,6 +249,10 @@ signals:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    // The list's keys (T-063): claimed from the shortcut map through
+    // ShortcutOverride, and acted on, only while the list ITSELF holds focus.
+    bool event(QEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     // Out of line: it asks the layout for a height at this card's fixed
     // width, because the empty-state message word-wraps and a QLayout's plain
@@ -444,8 +460,33 @@ private:
     int myAnchorRowId = 0;
     // The selection a click asks for, from the modifiers it was made with.
     std::vector<int> selectionFor(int id, Qt::KeyboardModifiers mods) const;
-    // The context menu the right button opens over the rows.
-    void showRowMenu(const QPoint& globalPos, int rowId, bool isGroupRow);
+    // The context menu the right button opens over the rows: populateRowMenu()
+    // then exec(). Every kind of row passes its own id - an outline row once
+    // passed 0, which left its Rename disabled.
+    void showRowMenu(const QPoint& globalPos, int rowId, RowKind kind);
+    // What the menu's moves carry for this row: the selection when the row is
+    // a selected body, the row alone otherwise.
+    std::vector<int> idsForMenu(int rowId, RowKind kind) const;
+
+    // --- the keyboard (T-063) -------------------------------------------------
+    // The focused row. Set by every route that selects a row from this list
+    // (activateRow()) and by a viewport pick the list reveals.
+    int myCurrentId = 0;
+    RowKind myCurrentKind = RowKind::Body;
+    // Whether the list itself - not a child such as the filter field or a
+    // rename editor, whose ignored keys propagate up here - holds focus. Read
+    // off the window rather than hasFocus(), which is false in any window
+    // that is not the OS-active one.
+    bool holdsFocus() const;
+    // The keys the list owns while it holds focus: arrows, Shift+Up/Down,
+    // Alt+Up/Down/Left, Home, End, F2. Never a letter.
+    bool claimsKey(const QKeyEvent* key) const;
+    int visibleIndexOf(int id) const;
+    void stepTo(int visibleIndex, Qt::KeyboardModifiers mods);
+    void foldOrParent();
+    void unfoldOrChild();
+    void renameCurrent();
+    void moveByKey(int key);
     // Builds `groupId`'s children into the rows, depth first. Recursive: the
     // tree nests to any depth, and a loop with an explicit stack would be the
     // same thing written longer.
