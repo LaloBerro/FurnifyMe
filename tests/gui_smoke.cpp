@@ -137,6 +137,8 @@
 #include <QStatusBar>
 #include <QSurfaceFormat>
 #include <QString>
+#include <QStandardPaths>
+#include <QMap>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QWheelEvent>
@@ -1021,6 +1023,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-drag-opens-folders-and-scrolls", false, true },
     { "the-drawer-walks-and-moves-with-the-keys", false, true },
     { "the-drawer-tells-the-truth-at-its-edges", false, true },
+    { "the-items-drawer-evidence", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -5760,6 +5763,383 @@ void drawerEdgeStatesBlock()
               .arg(copy.size())
               .arg(offenders.isEmpty() ? QStringLiteral("clean") : offenders.join(QStringLiteral(", "))));
     probe.close();
+}
+
+// Where the author's real library lives on this machine: FURNIFY_REAL_LIB when
+// it is set, otherwise the app's own Documents/FurnifyMe. Only a path - nothing
+// here opens it.
+QString realLibraryPath()
+{
+    const QString fromEnv = qEnvironmentVariable("FURNIFY_REAL_LIB");
+    if (!fromEnv.isEmpty()) return fromEnv;
+    return QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) +
+           QStringLiteral("/FurnifyMe");
+}
+
+// What a write to the library would move: how many files and folders it holds,
+// their total size and the newest modification time, read with QFileInfo
+// alone. "absent" when there is no library, so a machine without one compares
+// equal to itself.
+QString librarySnapshot(const QString& root)
+{
+    if (!QDir(root).exists()) return QStringLiteral("absent");
+    int entries = 0;
+    qint64 bytes = 0;
+    qint64 newest = 0;
+    QDirIterator it(root, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        const QFileInfo info = it.fileInfo();
+        ++entries;
+        if (info.isFile()) bytes += info.size();
+        newest = std::max(newest, info.lastModified().toMSecsSinceEpoch());
+    }
+    return QStringLiteral("%1 entries, %2 bytes, newest %3").arg(entries).arg(bytes).arg(newest);
+}
+
+// THE AUTHOR'S REAL ROOM, composed in a COPY (T-063's C4). No one furniture in
+// the library holds the 122 boards the spec names: its scene does, five pieces
+// of four furniture. So the library is copied, file by file, into `copyRoot` -
+// the source is only ever opened by QFile::copy(), which reads it - and the
+// largest scene's pieces are composed, each under a top folder named after its
+// furniture, into one furniture "Whole room" saved in the COPY. No
+// FurnitureStore is ever constructed on the source path. False when there is
+// no library on this machine or any file fails to copy; `source` names where
+// it looked either way.
+bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& source)
+{
+    source = realLibraryPath();
+    const QDir from(source);
+    if (!from.exists()) return false;
+    QDirIterator files(source, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+    while (files.hasNext()) {
+        const QString path = files.next();
+        const QString target = copyRoot + QLatin1Char('/') + from.relativeFilePath(path);
+        QDir().mkpath(QFileInfo(target).absolutePath());
+        if (!QFile::copy(path, target)) return false;
+    }
+
+    FurnitureStore store(copyRoot);
+    SceneModel best;
+    int bestPieces = -1;
+    for (const FurnitureStore::SceneInfo& info : store.listScenes()) {
+        SceneModel scene;
+        QString error;
+        if (store.loadScene(info.id, scene, &error) &&
+            static_cast<int>(scene.pieces().size()) > bestPieces) {
+            best = scene;
+            bestPieces = static_cast<int>(scene.pieces().size());
+        }
+    }
+    if (bestPieces <= 0) return false;
+    QMap<QString, QString> furnitureNames;
+    for (const FurnitureStore::FurnitureInfo& info : store.listFurniture())
+        furnitureNames[info.id] = info.name;
+
+    DocumentModel room;
+    QMap<QString, int> seen;
+    for (const SceneModel::Piece& piece : best.pieces()) {
+        const QString pieceId = QString::fromStdString(piece.furnitureId);
+        DocumentModel part;
+        QString error;
+        if (!store.loadFurniture(pieceId, part, &error)) continue;
+        QString name = furnitureNames.value(pieceId, QStringLiteral("Piece"));
+        const int nth = ++seen[name];
+        if (nth > 1) name += QStringLiteral(" %1").arg(nth);
+        const int topFolder = room.createGroup(name.toStdString());
+        std::map<int, int> folderOf;
+        bool progressed = true;
+        while (progressed) {   // parents first, whatever order they were made in
+            progressed = false;
+            for (const DocumentModel::Group& g : part.groups()) {
+                if (folderOf.count(g.id)) continue;
+                const int parent = g.parent == 0 ? topFolder
+                                                 : (folderOf.count(g.parent) ? folderOf[g.parent] : -1);
+                if (parent < 0) continue;
+                folderOf[g.id] = room.createGroup(g.name, parent);
+                progressed = true;
+            }
+        }
+        for (const DocumentModel::Solid& solid : part.solids()) {
+            const int id = room.addSolid(solid.shape);
+            room.setItemName(id, solid.name);
+            const int folder = part.groupOf(solid.id);
+            room.setItemGroup(id, folder == 0 ? topFolder : folderOf[folder]);
+        }
+    }
+    furnitureId = store.createFurniture(QStringLiteral("Whole room"));
+    return !furnitureId.isEmpty() && room.count() > 0 &&
+           store.saveFurniture(furnitureId, room, QImage());
+}
+
+// THE EVIDENCE (spec "Evidence", C5's captures): eleven composited window
+// captures of the drawer in every state the spec names, written so a person
+// LOOKS at them - driving a window is not looking at it. Then C4 on the
+// author's own room, in a copy.
+void itemsEvidenceBlock(const QString& outDir)
+{
+    const auto capture = [&](MainWindow& window, const QString& name) {
+        const QString path = outDir + QStringLiteral("/") + name + QStringLiteral(".png");
+        const QImage shot = printWindowCapture(&window, path);
+        check(!shot.isNull() && QFileInfo::exists(path),
+              QStringLiteral("evidence: %1.png was written - look at it").arg(name));
+    };
+
+    RequiredTempDir dir;
+    QString cabinet;
+    QString large;
+    {
+        FurnitureStore store(dir.path());
+        cabinet = seedCabinet(store);
+        large = seedLargeFurniture(store, 122);
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    probe.setAttribute(Qt::WA_ShowWithoutActivating);
+    probe.show();
+    waitFully(300);
+    probe.view()->setAnimationsEnabled(false);
+    enterFreshFurniture(probe);
+    if (QAction* items = action(probe, QStringLiteral("Items")))
+        if (!items->isChecked()) items->trigger();
+    settle(250);
+    ItemsPanel* drawer = probe.itemsPanel();
+    check(drawer && drawer->isVisible() && drawer->rowCount() == 0,
+          "evidence: a fresh furniture's drawer is up and holds no rows");
+    if (!drawer) return;
+    capture(probe, QStringLiteral("items-empty"));
+
+    const bool cabinetOpened = probe.openFurniture(cabinet);
+    check(cabinetOpened, "evidence: the cabinet opens");
+    settle(250);
+    const DocumentModel& doc = probe.document();
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int drawerFolder = idNamed(doc, QStringLiteral("Drawer"));
+    const int doors = idNamed(doc, QStringLiteral("Doors"));
+    const int top = idNamed(doc, QStringLiteral("Top"));
+    const int side = idNamed(doc, QStringLiteral("Side left"));
+    const int shelf = idNamed(doc, QStringLiteral("Shelf"));
+    drawer->setGroupExpanded(carcass, true);
+    drawer->setGroupExpanded(drawerFolder, true);
+    drawer->setGroupExpanded(doors, true);
+    probe.view()->setSelectedSolids({side, top});   // two of Carcass's bodies: a partial count
+    settle(150);
+    const QString partial = drawer->partialCountAt(drawerRowOf(drawer, carcass));
+    check(!partial.isEmpty(),
+          QStringLiteral("evidence: the populated capture carries a partial count on Carcass (%1)")
+              .arg(partial));
+    capture(probe, QStringLiteral("items-populated"));
+
+    probe.view()->setSelectedSolids({});
+    settle(80);
+    {
+        DrawerDrag drag(drawer, shelf);
+        drag.moveTo(drawerRowPixel(drawer, top, 2));
+        check(drawer->dragActive() && drawer->dropKind() == ItemsPanel::DropKind::Line,
+              "evidence: the line capture shows an insertion line");
+        capture(probe, QStringLiteral("items-drag-line"));
+        drag.moveTo(drawerRowPixel(drawer, doors, drawerRowHeight(drawer, doors) / 2));
+        check(drawer->dropKind() == ItemsPanel::DropKind::Into && !drawer->dropRefused(),
+              "evidence: the into-folder capture shows Doors ringed");
+        capture(probe, QStringLiteral("items-drag-into-folder"));
+        drag.moveTo(drawer->titleRowRect().center());
+        check(drawer->titleLit(), "evidence: the top-level capture shows the title lit");
+        capture(probe, QStringLiteral("items-drag-top-level"));
+        drag.moveTo(QPoint(drawer->width() + 60, drawer->height() / 2));
+        check(drawer->dropKind() == ItemsPanel::DropKind::None,
+              "evidence: the outside capture shows no drop target");
+        capture(probe, QStringLiteral("items-drag-outside-cancel"));
+        drag.release();
+    }
+    {
+        DrawerDrag drag(drawer, carcass);
+        drag.moveTo(drawerRowPixel(drawer, drawerFolder, drawerRowHeight(drawer, drawerFolder) / 2));
+        check(drawer->dropRefused(), "evidence: the refused capture shows a refusal");
+        capture(probe, QStringLiteral("items-drag-refused"));
+        drawer->cancelDrag();
+        drag.release();
+    }
+    QWidget* sideRow = drawer->rowWidgetAt(drawerRowOf(drawer, side));
+    if (sideRow) clickAt(sideRow, QPointF(sideRow->width() / 3.0, sideRow->height() / 2.0));
+    const int sideBefore = drawerRowOf(drawer, side);
+    sendKeyTo(&probe, Qt::Key_Down, Qt::AltModifier);
+    const int sideAfter = drawerRowOf(drawer, side);
+    check(sideRow && sideAfter == sideBefore + 1,
+          QStringLiteral("evidence: Alt+Down moved Side left one row down (row %1 -> %2)")
+              .arg(sideBefore)
+              .arg(sideAfter));
+    capture(probe, QStringLiteral("items-keyboard-moved"));
+
+    probe.resize(1100, 520);
+    const bool largeOpened = probe.openFurniture(large);
+    check(largeOpened, "evidence: the 122-body cabinet opens");
+    settle(400);
+    typeInto(drawer->filterField(), QStringLiteral("Board 12"));
+    check(drawer->rowCount() > 0 && drawer->noMatchLabel() && !drawer->noMatchLabel()->isVisible(),
+          "evidence: the filtered capture shows matches");
+    capture(probe, QStringLiteral("items-filtered"));
+    drawer->clearFilterAction()->trigger();
+    typeInto(drawer->filterField(), QStringLiteral("zzz"));
+    check(drawer->rowCount() == 0 && drawer->noMatchLabel() && drawer->noMatchLabel()->isVisible(),
+          "evidence: the no-match capture shows the no-match line");
+    capture(probe, QStringLiteral("items-filter-no-match"));
+    drawer->clearFilterAction()->trigger();
+    settle(80);
+    probe.view()->fitAll();
+    settle(150);
+    const int board121 = idNamed(probe.document(), QStringLiteral("Board 121"));
+    const bool picked = pickBodyOf(probe, board121);
+    check(picked, "evidence: Board 121 is picked two folded folders deep");
+    settle(150);
+    const int revealedRow = drawerRowOf(drawer, board121);
+    QWidget* revealed = revealedRow >= 0 ? drawer->rowWidgetAt(revealedRow) : nullptr;
+    QScrollArea* rowsArea = drawer->scrollArea();
+    const QRect inArea = revealed && rowsArea
+                             ? QRect(revealed->mapTo(rowsArea->viewport(), QPoint(0, 0)), revealed->size())
+                             : QRect();
+    check(revealed && rowsArea && rowsArea->viewport()->rect().contains(inArea),
+          "evidence: the revealed capture shows Board 121's row inside the list's visible area");
+    capture(probe, QStringLiteral("items-revealed"));
+
+    // --- C4, on a copy of the author's real room ----------------------------
+    // The real library is READ and nothing more. Its snapshot is taken before
+    // the copy and again after every window on the copy is gone; a write
+    // anywhere in it would move the count, the size or the newest time.
+    const QString libraryBefore = librarySnapshot(realLibraryPath());
+    RequiredTempDir realCopy;
+    QString roomId;
+    QString source;
+    const bool real = composeRealRoom(realCopy.path(), roomId, source);
+    if (!real) {
+        FurnitureStore store(realCopy.path());
+        roomId = seedLargeFurniture(store, 122);
+    }
+    std::printf("[items-c4] room source: %s\n",
+                real ? qPrintable(source + QStringLiteral(" (copied, composed)"))
+                     : qPrintable(QStringLiteral("synthetic 122-body stand-in (no usable library at ") +
+                                  source + QStringLiteral(")")));
+    {
+        MainWindow room(nullptr, /*persistProgress=*/false, realCopy.path());
+        room.resize(1100, 780);
+        check(openWithDrawer(room, roomId), "C4: the room opens with the drawer up");
+        ItemsPanel* roomDrawer = room.itemsPanel();
+        const DocumentModel& roomDoc = room.document();
+        const int bodies = static_cast<int>(roomDoc.count());
+        check(bodies >= 100,
+              QStringLiteral("C4: the room holds the author's scale of boards (%1 bodies)").arg(bodies));
+        const int resting = roomDrawer->rowCount();
+
+        // "Slat 0" rather than "Slat": both rooms keep their slats in folders
+        // NAMED Slats, and a folder whose own name matches is a match, not an
+        // ancestor - so "Slat" leaves no folder on screen BECAUSE of a match
+        // beneath it, and the ancestor rule would go untested. "Slat 0" hits
+        // the bodies (the author's Slat 01-09, the stand-in's Slat 005-093)
+        // and no folder.
+        const QString query = QStringLiteral("Slat 0");
+        const double worst = typeInto(roomDrawer->filterField(), query);
+        const auto rowMatches = [&](int i) {
+            return roomDrawer->rowTextAt(i).contains(query, Qt::CaseInsensitive);
+        };
+        int matches = 0;
+        bool explained = roomDrawer->rowCount() > 0;
+        for (int i = 0; i < roomDrawer->rowCount(); ++i) {
+            const bool match = rowMatches(i);
+            if (match && !roomDrawer->rowIsGroupAt(i)) ++matches;
+            if (!match && !(roomDrawer->rowIsGroupAt(i) && roomDrawer->rowIsMutedAt(i))) explained = false;
+        }
+        const int shownRows = roomDrawer->rowCount();
+        check(matches > 0 && explained,
+              QStringLiteral("C4: the filter narrows the rows to matches plus their ancestor folders "
+                             "(%1 matching bodies in %2 rows)").arg(matches).arg(shownRows));
+
+        // RULING P3: every row above says only that nothing ELSE is on screen;
+        // this says the ancestors ARE. Each matching body's own folder (read
+        // off the document, not off the drawer) is a visible folder row above
+        // it, and it is drawn muted - unless its own name matches too.
+        int parentsAsked = 0;
+        QStringList orphans;
+        int firstMutedParentRow = -1;
+        for (int i = 0; i < roomDrawer->rowCount(); ++i) {
+            if (roomDrawer->rowIsGroupAt(i) || !rowMatches(i)) continue;
+            const int parent = roomDoc.groupOf(roomDrawer->rowIdAt(i));
+            if (parent == 0) continue;
+            ++parentsAsked;
+            int at = -1;
+            for (int j = 0; j < i; ++j)
+                if (roomDrawer->rowIsGroupAt(j) && roomDrawer->rowIdAt(j) == parent) at = j;
+            const bool muted = at >= 0 && roomDrawer->rowIsMutedAt(at);
+            if (at < 0 || !(muted || rowMatches(at))) orphans << roomDrawer->rowTextAt(i);
+            if (muted && firstMutedParentRow < 0) firstMutedParentRow = at;
+        }
+        check(parentsAsked > 0 && orphans.isEmpty() && firstMutedParentRow >= 0,
+              QStringLiteral("C4: each matching body's own folder is on screen above it, drawn muted "
+                             "(%1 asked; %2)")
+                  .arg(parentsAsked)
+                  .arg(orphans.isEmpty() ? QStringLiteral("none missing")
+                                         : QStringLiteral("missing above: ") +
+                                               orphans.join(QStringLiteral(", "))));
+        // ...and "drawn" is pixels: the muted folder's NAME is painted in
+        // textMuted() and not one pixel of it in the ordinary text ink.
+        int mutedInk = 0;
+        int plainInk = -1;
+        if (firstMutedParentRow >= 0) {
+            QWidget* parentRow = roomDrawer->rowWidgetAt(firstMutedParentRow);
+            const QString parentName = roomDrawer->rowTextAt(firstMutedParentRow);
+            for (QLabel* label : parentRow->findChildren<QLabel*>())
+                if (label->text() == parentName) {
+                    const QImage ink = renderExact(label);
+                    mutedInk = countColorPixels(ink, Theme::textMuted());
+                    plainInk = countColorPixels(ink, Theme::text());
+                }
+        }
+        check(mutedInk > 0 && plainInk == 0,
+              QStringLiteral("C4: that folder's name is painted in the muted ink (%1 muted pixels, "
+                             "%2 in the ordinary text ink)")
+                  .arg(mutedInk)
+                  .arg(plainInk));
+
+        std::printf("[items-cost] worst filter keystroke on the room = %.2f ms\n", worst);
+        check(worst < 16.0, QStringLiteral("C4: one filter keystroke on the room costs under 16 ms (%1 ms)")
+                                .arg(worst, 0, 'f', 2));
+        QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(roomDrawer->filterField(), &escape);
+        settle(80);
+        const int afterEscape = roomDrawer->rowCount();
+        check(roomDrawer->filterField()->text().isEmpty() && afterEscape == resting,
+              QStringLiteral("C4: Escape clears the filter and every row comes back (%1 of %2)")
+                  .arg(afterEscape)
+                  .arg(resting));
+
+        roomDrawer->setFocus();
+        settle(30);
+        sendKeyTo(&room, Qt::Key_Home);
+        bool walked = roomDrawer->currentRowId() == roomDrawer->rowIdAt(0);
+        for (int i = 1; i <= 3; ++i) {
+            sendKeyTo(&room, Qt::Key_Down);
+            walked = walked && roomDrawer->currentRowId() == roomDrawer->rowIdAt(i);
+        }
+        check(resting >= 4 && walked, "C4: Down walks the selection through the visible rows, one at a time");
+        sendKeyTo(&room, Qt::Key_Home);
+        const int firstFolder = roomDrawer->rowIdAt(0);
+        const bool firstIsFolder = roomDrawer->rowIsGroupAt(0) && !roomDrawer->isGroupExpanded(firstFolder);
+        sendKeyTo(&room, Qt::Key_Right);
+        const bool opened = roomDrawer->isGroupExpanded(firstFolder);
+        sendKeyTo(&room, Qt::Key_Left);
+        check(firstIsFolder && opened && !roomDrawer->isGroupExpanded(firstFolder),
+              "C4: Right unfolds the first folder and Left folds it again");
+        const QImage focused = renderExact(roomDrawer);
+        roomDrawer->clearFocus();
+        settle(30);
+        check(renderExact(roomDrawer) == focused, "C4: no focus ring is painted");
+        room.close();
+    }
+    probe.close();
+    const QString libraryAfter = librarySnapshot(realLibraryPath());
+    std::printf("[items-c4] real library before: %s\n[items-c4] real library after:  %s\n",
+                qPrintable(libraryBefore), qPrintable(libraryAfter));
+    check(libraryAfter == libraryBefore,
+          "C4: the author's real library was only read - not one entry, byte or time moved");
 }
 
 int main(int argc, char* argv[])
@@ -45938,6 +46318,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("a-drag-opens-folders-and-scrolls")) dragOpensFoldersAndScrollsBlock();
     if (blockEnabled("the-drawer-walks-and-moves-with-the-keys")) drawerKeyboardBlock();
     if (blockEnabled("the-drawer-tells-the-truth-at-its-edges")) drawerEdgeStatesBlock();
+    if (blockEnabled("the-items-drawer-evidence")) itemsEvidenceBlock(outDir);
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or
