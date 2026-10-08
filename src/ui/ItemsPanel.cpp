@@ -3,16 +3,20 @@
 #include <cstdio>
 
 #include "DocumentModel.h"
+#include "DragGhost.h"
 #include "DropIndicator.h"
 #include "IconSet.h"
 #include "InlineRename.h"
+#include "ItemMoveText.h"
 #include "ItemsFilterField.h"
+#include "KeyClaim.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 
 #include <QAction>
 #include <QEvent>
 #include <QFontMetrics>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QContextMenuEvent>
@@ -80,6 +84,9 @@ constexpr int kRowButtonPx = 24;
 // ViewportOverlay::kEdgeMargin plus a hair, so a full-height list still reads
 // as a floating card rather than as something wedged into the corner.
 constexpr int kBottomClearance = 16;
+// The ink a row a drag carries is dimmed to (T-063) - an alpha on the name's
+// own token, so it still reads as that row while showing it is in the hand.
+constexpr double kCarriedAlpha = 0.45;
 // The eye every visibility button in this drawer wears: open while the
 // thing is on screen (the button checked), struck through while it is hidden.
 // The 2026-10 review's F14 - these rows wore the Body glyph, which said
@@ -168,6 +175,30 @@ QString highlighted(const QString& name, const QString& query)
 }
 
 }  // namespace
+
+// Escape, claimed application-wide while - and ONLY while - a drag is live:
+// beginDrag() installs it and finishDrag() removes it, so the mitre, re-measure,
+// boolean and joint chips keep their own Escape the rest of the time. A press
+// starting the drag went to a row, never to a field, so any focus may hold
+// the key; the claim follows KeyClaim's one implementation.
+class ItemsPanel::DragKeyClaim : public QObject {
+public:
+    explicit DragKeyClaim(ItemsPanel* panel) : QObject(panel), myPanel(panel) {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        int key = 0;
+        if (!KeyClaim::claim(myPanel, watched, event, /*wantEnter=*/false,
+                             /*exemptLineEdits=*/false, &key))
+            return false;
+        if (key == Qt::Key_Escape) myPanel->cancelDrag();
+        return true;
+    }
+
+private:
+    ItemsPanel* myPanel;
+};
 
 ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* parent)
     : QWidget(parent)
@@ -281,6 +312,9 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     // Where a drag will land (T-063): one mark, inside the scrolling content
     // so it moves with the rows it points between.
     myIndicator = new DropIndicator(rowHost);
+    // ...and what the drag carries, over the VIEWPORT so it can follow the
+    // hand out of this card (where a release cancels).
+    if (myView) myGhost = new DragGhost(myView);
     myOuter->addWidget(myScroll, 1);
 
     // What the filter says when it matches nothing. PLAIN text: the query in
@@ -398,7 +432,11 @@ QColor ItemsPanel::nameColour(const Row& row) const
 {
     // Muted for two reasons, one look: kept on screen only by the filter, or
     // the item itself is not drawn (its eye, or Isolate).
-    return (row.muted || !row.onScreen) ? Theme::textMuted() : Theme::text();
+    QColor colour = (row.muted || !row.onScreen) ? Theme::textMuted() : Theme::text();
+    // The rows a drag carries dim to 45% - an alpha on the ink, never a
+    // QGraphicsOpacityEffect, which crashes over the viewport's GL surface.
+    if (isCarried(row)) colour.setAlphaF(kCarriedAlpha);
+    return colour;
 }
 
 void ItemsPanel::styleNameColour(Row& row)
@@ -1694,10 +1732,11 @@ bool ItemsPanel::rowInSelection(int id, RowKind kind) const
     return !under.empty() && std::all_of(under.begin(), under.end(), selected);
 }
 
-void ItemsPanel::beginDrag(const QPoint& /*panelPos*/, const QPoint& /*globalPos*/)
+void ItemsPanel::beginDrag(const QPoint& /*panelPos*/, const QPoint& globalPos)
 {
     myPressArmed = false;
     myDragging = true;
+    myDragOutside = false;
     // A press on a row that is ALREADY part of a multiple selection carries
     // the whole of it - "grab them and insert them into a folder" - and one
     // anywhere else carries just that row.
@@ -1709,21 +1748,68 @@ void ItemsPanel::beginDrag(const QPoint& /*panelPos*/, const QPoint& /*globalPos
     else
         myDragIds = {myPressId};
     myDropTarget = DropTarget{};
+
+    // Escape is this gesture's for exactly as long as it lasts.
+    if (!myKeyClaim) myKeyClaim = new DragKeyClaim(this);
+    QCoreApplication::instance()->installEventFilter(myKeyClaim);
+    QGuiApplication::setOverrideCursor(Qt::ClosedHandCursor);
+    if (myGhost && myDocument) {
+        // The ghost names the first carried row in LIST order - the order
+        // the user sees - never the selection's, which is the order picked.
+        int first = myDragIds.front();
+        for (std::size_t i : myVisible) {
+            const int id = myRowList[i].id;
+            if (std::find(myDragIds.begin(), myDragIds.end(), id) != myDragIds.end()) {
+                first = id;
+                break;
+            }
+        }
+        const IconSet::Glyph glyph = myDocument->groupExists(first)       ? IconSet::Glyph::Folder
+                                     : myDocument->containsOutline(first) ? IconSet::Glyph::Sketch
+                                                                          : IconSet::Glyph::Body;
+        myGhost->begin(glyph, ItemMoveText::nameOf(*myDocument, first),
+                       static_cast<int>(myDragIds.size()) - 1);
+        if (myView) myGhost->follow(myView->mapFromGlobal(globalPos));
+    }
+    restyleRows();   // dims what is carried
 }
 
-void ItemsPanel::updateDrag(const QPoint& panelPos, const QPoint& /*globalPos*/)
+void ItemsPanel::updateDrag(const QPoint& panelPos, const QPoint& globalPos)
 {
-    DropTarget target = dropTargetAt(panelPos);
-    if (target.sameSpot(myDropTarget)) return;
-    // THE DRY RUN decides the refusal - the same answer the release will get.
-    if (target.kind != DropKind::None && myDocument) {
+    if (myGhost && myView) myGhost->follow(myView->mapFromGlobal(globalPos));
+    // OUTSIDE THE CARD there is no target at all, whatever the geometry
+    // reads: a release there cancels.
+    const bool outside = !rect().contains(panelPos);
+    DropTarget target = outside ? DropTarget{} : dropTargetAt(panelPos);
+    // Nothing to re-say while the hand stays over the same spot - but the
+    // first move of a drag always says something, even over blank space.
+    if (target.sameSpot(myDropTarget) && outside == myDragOutside && !myDragStatus.isEmpty())
+        return;
+    myDragOutside = outside;
+
+    QString status;
+    if (outside) {
+        status = ItemMoveText::releaseToCancel();
+    } else if (target.kind == DropKind::None) {
+        status = filterActive() ? ItemMoveText::filteredDropHint() : ItemMoveText::noTargetHint();
+    } else if (myDocument) {
+        // THE DRY RUN decides the refusal and the words - the same answer the
+        // release, the Note and the Failure will read.
         const DocumentModel::MoveResult dry =
             myDocument->checkMove(myDragIds, target.parent, target.beforeId);
         target.refused = dry.check == DocumentModel::MoveCheck::IntoItself ||
                          dry.check == DocumentModel::MoveCheck::Unknown;
+        status = target.refused ? ItemMoveText::refusal(*myDocument, dry)
+                                : ItemMoveText::dragStatus(*myDocument, dry);
     }
     myDropTarget = target;
     showDropTarget(target);
+    if (myGhost)
+        myGhost->setVariant(outside          ? DragGhost::Variant::Cancel
+                            : target.refused ? DragGhost::Variant::Refused
+                                             : DragGhost::Variant::Live);
+    QGuiApplication::changeOverrideCursor(target.refused ? Qt::ForbiddenCursor : Qt::ClosedHandCursor);
+    setDragStatus(status);
 }
 
 void ItemsPanel::finishDrag(bool commit)
@@ -1733,15 +1819,44 @@ void ItemsPanel::finishDrag(bool commit)
     const std::vector<int> carried = myDragIds;
     myDragging = false;
     myPressArmed = false;
+    myDragOutside = false;
     myDragIds.clear();
     myDropTarget = DropTarget{};
+    if (wasDragging) {
+        // Everything beginDrag() put up comes down, whichever way it ended.
+        if (myKeyClaim) QCoreApplication::instance()->removeEventFilter(myKeyClaim);
+        QGuiApplication::restoreOverrideCursor();
+        if (myGhost) myGhost->end();
+    }
     showDropTarget(DropTarget{});
+    restyleRows();   // the carried rows come back to full ink
+    setDragStatus(QString());
     // A release with no target - outside the card, or over blank space -
     // cancels. A refused target still asks, so MainWindow's Failure says why.
     // DocumentModel's own rules answer it (a folder into its own subtree, a
     // row onto where it already is) - this panel carries no second copy.
     if (commit && wasDragging && target.kind != DropKind::None)
         emit itemsMoveRequested(carried, target.parent, target.beforeId);
+}
+
+void ItemsPanel::setDragStatus(const QString& text)
+{
+    if (text == myDragStatus) return;
+    myDragStatus = text;
+    emit dragStatusChanged();
+}
+
+bool ItemsPanel::isCarried(const Row& row) const
+{
+    if (!myDragging || !myDocument) return false;
+    for (int id : myDragIds) {
+        if (id == row.id) return true;
+        // Inside a carried folder, at any depth.
+        if (row.parentId != 0 && myDocument->groupExists(id) &&
+            myDocument->groupContains(id, row.parentId))
+            return true;
+    }
+    return false;
 }
 
 void ItemsPanel::cancelDrag()
@@ -2107,6 +2222,14 @@ void ItemsPanel::restyleRows()
             marked = row.isOutline ? (myPendingOutlineId != 0 && row.id == myPendingOutlineId)
                                    : selected.count(row.id) > 0;
         }
+        // WHAT A DRAG CARRIES (T-063): its name at 45% (nameColour()), and its
+        // buttons out of reach for as long as the hand holds it. Each set only
+        // when it changes, by the same rule as the look below - a drag begins
+        // and ends with one restyle, never one per move.
+        const bool carried = isCarried(row);
+        if (row.eye && row.eye->isEnabled() == carried) row.eye->setEnabled(!carried);
+        if (row.grain && row.grain->isEnabled() == carried) row.grain->setEnabled(!carried);
+        styleNameColour(row);
         // The SAME fill a selected body row wears. One mark, one meaning -
         // "this is the row the next thing you do will act on" - rather than a
         // second visual language for the second kind of item.

@@ -43,6 +43,7 @@
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "DropIndicator.h"
+#include "DragGhost.h"
 #include "ItemsFilterField.h"
 #include "ItemsPanel.h"
 #include "ItemMoveText.h"
@@ -1013,6 +1014,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-drawer-filters-by-name", false, true },
     { "a-viewport-pick-reveals-its-row", false, true },
     { "a-drag-shows-one-target-and-lands-there", false, true },
+    { "a-drag-reads-and-cancels", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -4541,6 +4543,206 @@ void dragShowsOneTargetBlock()
     }
     check(probe.document().revision() == revisionScrolled && shown() == 0 && !drawer->dragActive(),
           "drag: released over the filter field, nothing moved and nothing is left showing");
+    probe.close();
+}
+
+// What one repaint of `card` costs, averaged over 40 renders into an offscreen
+// image - the orbit-pacing block's pricing, for a free function. -1 when the
+// card is not on screen (nothing to price).
+double priceOverlayCard(QWidget* card)
+{
+    if (!card || !card->isVisible() || card->size().isEmpty()) return -1.0;
+    QImage into(card->size() * card->devicePixelRatioF(), QImage::Format_ARGB32_Premultiplied);
+    if (into.isNull()) return -1.0;
+    into.setDevicePixelRatio(card->devicePixelRatioF());
+    QElapsedTimer clock;
+    clock.start();
+    constexpr int kPasses = 40;
+    for (int i = 0; i < kPasses; ++i) {
+        into.fill(Qt::transparent);
+        card->render(&into, QPoint(), QRegion(), QWidget::DrawWindowBackground | QWidget::DrawChildren);
+    }
+    return clock.nsecsElapsed() / 1.0e6 / kPasses;
+}
+
+// `outDir` takes three composited captures of the ghost, one per variant, so
+// what the hand carries is LOOKED at on every run rather than only asserted.
+void dragReadsAndCancelsBlock(const QString& outDir)
+{
+    RequiredTempDir dir;
+    QString id;
+    {
+        FurnitureStore store(dir.path());
+        id = seedCabinet(store);
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1200, 780);
+    check(openWithDrawer(probe, id), "feedback: the cabinet opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    ToastHost* toasts = probe.findChild<ToastHost*>();
+    const DocumentModel& doc = probe.document();
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int drawerFolder = idNamed(doc, QStringLiteral("Drawer"));
+    const int doors = idNamed(doc, QStringLiteral("Doors"));
+    const int side = idNamed(doc, QStringLiteral("Side left"));
+    const int sideRight = idNamed(doc, QStringLiteral("Side right"));
+    const int top = idNamed(doc, QStringLiteral("Top"));
+    const int shelf = idNamed(doc, QStringLiteral("Shelf"));
+    const int back = idNamed(doc, QStringLiteral("Back"));
+    drawer->setGroupExpanded(carcass, true);
+    drawer->setGroupExpanded(doors, true);
+    settle(100);
+    DragGhost* ghost = drawer->dragGhost();
+    check(ghost && ghost->parentWidget() == probe.view() && !ghost->isVisible(),
+          "feedback: the ghost lives over the viewport and is hidden at rest");
+    if (!ghost) return;
+
+    probe.view()->setSelectedSolids({back});   // SEAM: the subject is the drag's feedback
+    settle(80);
+    const int revisionAtStart = doc.revision();
+    const std::size_t depthAtStart = doc.undoDepth();
+    {
+        DrawerDrag drag(drawer, shelf);
+        drag.moveTo(drawerRowPixel(drawer, top, 2));
+        check(ghost->isVisible() && ghost->variant() == DragGhost::Variant::Live &&
+                  ghost->labelText() == QStringLiteral("Shelf"),
+              QStringLiteral("feedback: past the threshold the ghost shows the row it carries (\"%1\")")
+                  .arg(ghost->labelText()));
+        check(QGuiApplication::overrideCursor() &&
+                  QGuiApplication::overrideCursor()->shape() == Qt::ClosedHandCursor,
+              "feedback: the cursor is a closed hand");
+        check(drawer->dragStatusText() == QStringLiteral("Drop to move Shelf above Top — Esc cancels"),
+              QStringLiteral("feedback: the status line says what the drop will do, in the present "
+                             "tense (\"%1\")").arg(drawer->dragStatusText()));
+        check(stateLabelText(probe) == drawer->dragStatusText(),
+              "feedback: ...in the status bar's RIGHT channel (mode and next step)");
+        QWidget* shelfRow = drawer->rowWidgetAt(drawerRowOf(drawer, shelf));
+        QLabel* shelfName = shelfRow ? shelfRow->findChild<QLabel*>() : nullptr;
+        QColor dim = Theme::text();
+        dim.setAlphaF(0.45);
+        check(shelfName && shelfName->styleSheet().contains(dim.name(QColor::HexArgb)),
+              "feedback: the carried row dims to 45%");
+        for (int i = 0; i < 20; ++i)
+            drag.moveTo(drawerRowPixel(drawer, i % 2 ? top : sideRight, 3), 1);
+        check(ghost->rasterCount() == 3,
+              QStringLiteral("feedback: twenty moves later the ghost was rasterised exactly three "
+                             "times (%1)").arg(ghost->rasterCount()));
+        printWindowCapture(&probe, outDir + QStringLiteral("/drag-ghost-live.png"));
+
+        // THE PER-MOVE PAINT COST. The ghost is a raster child of the viewport
+        // that moves on every drag event, so it dirties the overlay tree on
+        // every move - and one dirty card repaints all of them (CLAUDE.md).
+        // So what a drag move costs is the whole visible tree, ghost included,
+        // priced exactly as the orbit-pacing block prices it.
+        const double ghostMs = priceOverlayCard(ghost);
+        double treeMs = 0.0;
+        int priced = 0;
+        const QObjectList cards = probe.view()->children();   // a COPY - see the orbit block
+        for (QObject* child : cards) {
+            const double ms = priceOverlayCard(qobject_cast<QWidget*>(child));
+            if (ms < 0.0) continue;
+            treeMs += ms;
+            ++priced;
+        }
+        // ...and the synchronous half: what the drawer does with one move
+        // event (target, dry run, ghost move) before any paint runs.
+        QElapsedTimer sendClock;
+        sendClock.start();
+        constexpr int kTimedMoves = 20;
+        for (int i = 0; i < kTimedMoves; ++i)
+            drag.moveOnce(drawerRowPixel(drawer, i % 2 ? top : sideRight, 3 + (i % 3)));
+        const double sendMs = sendClock.nsecsElapsed() / 1.0e6 / kTimedMoves;
+        settle(30);
+        std::printf("[drag-feedback] ghost repaint = %.3f ms | overlay tree (%d cards, ghost "
+                    "included) = %.3f ms | per-move send = %.3f ms\n",
+                    ghostMs, priced, treeMs, sendMs);
+        check(ghostMs >= 0.0 && ghostMs < 1.0,
+              QStringLiteral("feedback: one ghost repaint is a cached pixmap, well under a "
+                             "millisecond (%1 ms)").arg(ghostMs, 0, 'f', 3));
+        // 8 ms: half a 60 Hz frame, the orbit block's bound for the same tree.
+        check(treeMs > 0.0 && treeMs < 8.0,
+              QStringLiteral("feedback: the whole overlay tree a drag move dirties repaints inside "
+                             "half a 60 Hz frame (%1 ms)").arg(treeMs, 0, 'f', 3));
+        check(ghost->rasterCount() == 3,
+              "feedback: ...and pricing it built no new pixmap - paintEvent only draws the cache");
+
+        drag.moveTo(QPoint(drawer->width() + 60, drawer->height() / 2));
+        check(ghost->variant() == DragGhost::Variant::Cancel && !drawer->dropIndicator()->isVisible() &&
+                  !drawer->titleLit(),
+              "feedback: outside the card the indicators hide and the ghost reads Release to cancel");
+        check(drawer->dragStatusText() == QStringLiteral("Release to cancel"),
+              "feedback: ...and so does the status line");
+        printWindowCapture(&probe, outDir + QStringLiteral("/drag-ghost-cancel.png"));
+        drag.release();
+    }
+    check(doc.revision() == revisionAtStart && doc.undoDepth() == depthAtStart &&
+              doc.groupOf(shelf) == 0,
+          "feedback: a release outside the card cancels - revision() unchanged, nothing moved");
+    check(!ghost->isVisible() && QGuiApplication::overrideCursor() == nullptr &&
+              drawer->dragStatusText().isEmpty() &&
+              !stateLabelText(probe).startsWith(QStringLiteral("Drop to move")),
+          "feedback: ...and the ghost, the cursor and the status line are all put back");
+    check(probe.view()->selectedSolidIds() == std::vector<int>{back},
+          "feedback: the selection survived the whole gesture");
+
+    // The refusal, then Escape.
+    const int drawerHeight = drawerRowHeight(drawer, drawerFolder);
+    {
+        DrawerDrag drag(drawer, carcass);
+        drag.moveTo(drawerRowPixel(drawer, drawerFolder, drawerHeight / 2));
+        check(ghost->variant() == DragGhost::Variant::Refused && QGuiApplication::overrideCursor() &&
+                  QGuiApplication::overrideCursor()->shape() == Qt::ForbiddenCursor,
+              "feedback: over a folder it holds, the ghost and the cursor show the refusal");
+        printWindowCapture(&probe, outDir + QStringLiteral("/drag-ghost-refused.png"));
+        check(drawer->dragStatusText() ==
+                  QStringLiteral("Carcass can't go inside a folder it holds — drop it beside it instead"),
+              QStringLiteral("feedback: ...and the status line gives the reason (\"%1\")")
+                  .arg(drawer->dragStatusText()));
+        QWidget* focus = probe.focusWidget() ? probe.focusWidget() : static_cast<QWidget*>(&probe);
+        QKeyEvent over(QEvent::ShortcutOverride, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(focus, &over);
+        check(over.isAccepted(), "feedback: while dragging, Escape is claimed from the shortcut map");
+        sendKeyTo(&probe, Qt::Key_Escape);
+        check(!drawer->dragActive(), "feedback: Escape, while dragging, cancels the drag");
+        drag.release();
+    }
+    check(doc.revision() == revisionAtStart && doc.undoDepth() == depthAtStart,
+          "feedback: ...and the release after Escape changes nothing");
+    {
+        QWidget* focus = probe.focusWidget() ? probe.focusWidget() : static_cast<QWidget*>(&probe);
+        QKeyEvent over(QEvent::ShortcutOverride, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(focus, &over);
+        check(!over.isAccepted(), "feedback: the Escape claim exists only while a drag is live");
+    }
+
+    // One dry run, two tenses.
+    {
+        DrawerDrag drag(drawer, shelf);
+        drag.moveTo(drawerRowPixel(drawer, top, 2));
+        const QString present = drawer->dragStatusText();
+        drag.release();
+        check(present == QStringLiteral("Drop to move Shelf above Top — Esc cancels") && toasts &&
+                  toasts->currentText() == QStringLiteral("Moved Shelf above Top"),
+              "feedback: the status line and the Note use the same words, present then past");
+    }
+
+    // Three rows: the ghost names the first in LIST order and counts the rest.
+    probe.view()->setSelectedSolids({top, side, sideRight});
+    settle(80);
+    const int doorsHeight = drawerRowHeight(drawer, doors);
+    {
+        DrawerDrag drag(drawer, top);
+        drag.moveTo(drawerRowPixel(drawer, doors, doorsHeight / 2));
+        check(ghost->labelText() == QStringLiteral("Side left +2"),
+              QStringLiteral("feedback: carrying three rows the ghost reads \"Side left +2\" (\"%1\")")
+                  .arg(ghost->labelText()));
+        check(drawer->dragStatusText() == QStringLiteral("Drop to move 3 bodies into Doors — Esc cancels"),
+              QStringLiteral("feedback: \"Drop to move 3 bodies into Doors — Esc cancels\" (\"%1\")")
+                  .arg(drawer->dragStatusText()));
+        drag.release();
+    }
+    check(toasts && toasts->currentText() == QStringLiteral("Moved 3 bodies to Doors"),
+          "feedback: and the Note says the same move in the past tense");
     probe.close();
 }
 
@@ -44687,6 +44889,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("the-drawer-filters-by-name")) drawerFiltersByNameBlock();
     if (blockEnabled("a-viewport-pick-reveals-its-row")) viewportPickRevealsBlock();
     if (blockEnabled("a-drag-shows-one-target-and-lands-there")) dragShowsOneTargetBlock();
+    if (blockEnabled("a-drag-reads-and-cancels")) dragReadsAndCancelsBlock(outDir);
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or

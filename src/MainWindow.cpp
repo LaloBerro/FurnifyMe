@@ -1218,6 +1218,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(myItemsPanel, &ItemsPanel::groupRenameCommitted, this,
             &MainWindow::onGroupRenameCommitted);
     connect(myItemsPanel, &ItemsPanel::itemsMoveRequested, this, &MainWindow::onItemsMoveRequested);
+    // The drag's present-tense line takes the right channel while it lasts.
+    connect(myItemsPanel, &ItemsPanel::dragStatusChanged, this, &MainWindow::updateStateLabel);
     // The + in the title row and the right-click menu, each landing on the
     // SAME two handlers the Model menu's own entries do.
     connect(myItemsPanel, &ItemsPanel::newFolderRequested, this,
@@ -5052,6 +5054,13 @@ void MainWindow::updateStateLabel()
 {
     if (!myStateLabel) return;
 
+    // A LIVE DRAG IN THE ITEMS DRAWER owns the right channel while it lasts
+    // (F9: mode and next step), in the same words its Note will use.
+    if (myItemsPanel && !myItemsPanel->dragStatusText().isEmpty()) {
+        showStateLine(myItemsPanel->dragStatusText());
+        return;
+    }
+
     QString state;
     if (mySketching) {
         const int placed = static_cast<int>(mySketch.pointCount());
@@ -5205,6 +5214,11 @@ void MainWindow::updateStateLabel()
     //
     // The full sentence goes to the tooltip, so nothing is lost: the label is
     // narrowed to what fits and the rest is one hover away.
+    showStateLine(state);
+}
+
+void MainWindow::showStateLine(const QString& state)
+{
     myStateLabel->setToolTip(state);
     // Elided against a cap derived from the WINDOW, never against the label's
     // own width: the label is sized from its sizeHint, which is sized from

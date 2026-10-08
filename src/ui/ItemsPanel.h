@@ -111,6 +111,11 @@ public:
     QRect titleRowRect() const;
     // Ends a live drag (or an armed press) without moving anything.
     void cancelDrag();
+    // The live drag's status line - present tense, the same words its Note
+    // will use - or empty when no drag is live. MainWindow puts it in the
+    // status bar's RIGHT channel (mode and next step, the F9 ruling).
+    QString dragStatusText() const { return myDragStatus; }
+    class DragGhost* dragGhost() const { return myGhost; }
     // A document swap: forget what the last pick left (ids restart per document).
     void resetPick();
     // A folder row's twisty, null for any other row - for the suite, which
@@ -215,6 +220,8 @@ signals:
     // or DocumentModel::kIntoFolder. MainWindow dry-runs it, checkpoints and
     // reports; this panel only ran the gesture.
     void itemsMoveRequested(std::vector<int> ids, int parent, int beforeId);
+    // dragStatusText() changed - a drag began, moved to a new target, or ended.
+    void dragStatusChanged();
     // The + button in the title row, and the right-click menu's own entry:
     // make a folder out of whatever is selected (or an empty one when nothing
     // is).
@@ -486,4 +493,15 @@ private:
     void beginDrag(const QPoint& panelPos, const QPoint& globalPos);
     void updateDrag(const QPoint& panelPos, const QPoint& globalPos);
     void finishDrag(bool commit);
+    // The app-wide Escape claim, installed ONLY while a drag is live
+    // (ExtrudePreview's shape through KeyClaim). Its own object, so the
+    // app-wide filter never runs this panel's row filter a second time.
+    class DragKeyClaim;
+    DragKeyClaim* myKeyClaim = nullptr;
+    class DragGhost* myGhost = nullptr;
+    QString myDragStatus;
+    bool myDragOutside = false;
+    void setDragStatus(const QString& text);
+    // A row this drag carries, or one inside a folder it carries.
+    bool isCarried(const Row& row) const;
 };

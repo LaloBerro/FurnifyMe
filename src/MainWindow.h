@@ -1511,6 +1511,10 @@ private:
     void syncSketchConstraints();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
+    // Writes `state` into the right channel, elided to half the window with
+    // the whole sentence in the tooltip - the tail updateStateLabel() always
+    // ended with, now shared with the drawer's drag line.
+    void showStateLine(const QString& state);
     // The label's own word for a vertical face-on plane's normal -
     // "Front" for a Y-normal (world XZ - Front and Back share this plane,
     // so a plane already pinned to a sketch has no way to tell the two
