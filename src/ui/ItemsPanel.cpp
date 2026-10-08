@@ -5,9 +5,11 @@
 #include "DocumentModel.h"
 #include "IconSet.h"
 #include "InlineRename.h"
+#include "ItemsFilterField.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 
+#include <QAction>
 #include <QEvent>
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -23,6 +25,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace {
 // The card's width AT THE SHIPPED TYPE SCALE. Fixed rather than
@@ -78,6 +81,84 @@ constexpr int kBottomClearance = 16;
 QIcon eyeIcon()
 {
     return IconSet::toggleIcon(IconSet::Glyph::Eye, IconSet::Glyph::EyeHidden);
+}
+
+// A row's name. A QLabel that answers its size from the PLAIN name in either
+// format, measured exactly as QLabel measures plain text: the filter's
+// highlight is the same words in the same font with one run recoloured, so
+// it is the same size - but a rich-text QLabel works that out by laying out
+// a QTextDocument, three times per hint, and at the filter's first letter
+// that ran for a hundred rows per keystroke (measured at about 0.08 ms a row,
+// most of the keystroke budget). The plain answer is a font-metrics call.
+class RowNameLabel : public QLabel {
+public:
+    RowNameLabel(const QString& name, QWidget* parent) : QLabel(name, parent), myPlain(name)
+    {
+        setTextFormat(Qt::PlainText);
+    }
+    // What the row is CALLED - the text the hint is measured from, whatever
+    // the label is currently showing.
+    void setPlainName(const QString& name)
+    {
+        if (name == myPlain) return;
+        myPlain = name;
+        myHint = QSize();
+        updateGeometry();
+    }
+    QSize sizeHint() const override
+    {
+        if (textFormat() == Qt::PlainText) return QLabel::sizeHint();
+        return plainHint();
+    }
+    QSize minimumSizeHint() const override
+    {
+        if (textFormat() == Qt::PlainText) return QLabel::minimumSizeHint();
+        // QLabel's own minimum for unwrapped plain text is its single line.
+        return plainHint();
+    }
+
+protected:
+    void changeEvent(QEvent* event) override
+    {
+        if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
+            myHint = QSize();
+        QLabel::changeEvent(event);
+    }
+
+private:
+    // QLabelPrivate::sizeForWidth(-1) for a plain, unwrapped, unindented
+    // label: the text's bounding box with the label's alignment less its
+    // centring, plus the margins.
+    QSize plainHint() const
+    {
+        if (myHint.isValid()) return myHint;
+        ensurePolished();
+        const int flags = int((alignment() & ~(Qt::AlignVCenter | Qt::AlignHCenter)) |
+                              Qt::TextExpandTabs);
+        const QRect box = fontMetrics().boundingRect(0, 0, -1, 2000, flags, myPlain);
+        const QMargins m = contentsMargins();
+        myHint = QSize(box.width() + 2 * margin() + m.left() + m.right(),
+                       box.height() + 2 * margin() + m.top() + m.bottom())
+                     .expandedTo(minimumSize());
+        return myHint;
+    }
+    QString myPlain;
+    mutable QSize myHint;
+};
+
+// The filter's highlight: the matched run in accentText, every part ESCAPED
+// first - a user name is data, and "<b>Top</b>" must read as typed (REVIEW
+// FOCUS 2). white-space:pre keeps a name's own double spaces.
+QString highlighted(const QString& name, const QString& query)
+{
+    const int at = query.isEmpty() ? -1 : name.indexOf(query, 0, Qt::CaseInsensitive);
+    if (at < 0)
+        return QStringLiteral("<span style=\"white-space:pre\">%1</span>").arg(name.toHtmlEscaped());
+    return QStringLiteral(
+               "<span style=\"white-space:pre\">%1<span style=\"color:%2\">%3</span>%4</span>")
+        .arg(name.left(at).toHtmlEscaped(), Theme::accentText().name(),
+             name.mid(at, query.size()).toHtmlEscaped(),
+             name.mid(at + query.size()).toHtmlEscaped());
 }
 
 }  // namespace
@@ -138,6 +219,16 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myTitle->show();   // measured immediately, same reason as the rows in refresh()
     myNewFolder->show();
 
+    // The filter (T-063): permanent, under the title. Escape in it, and the
+    // hidden-pick line's Clear filter (Task 8), trigger ONE action.
+    myFilter = new ItemsFilterField(this);
+    myOuter->addWidget(myFilter);
+    myFilter->show();
+    myClearFilterAction = new QAction(tr("Clear filter"), this);
+    connect(myClearFilterAction, &QAction::triggered, this, [this] { myFilter->clear(); });
+    connect(myFilter, &QLineEdit::textChanged, this, &ItemsPanel::setFilter);
+    connect(myFilter, &ItemsFilterField::escapePressed, myClearFilterAction, &QAction::trigger);
+
     // The rows live inside a scroll area now (improvements item 12: "the items
     // list is too long and it does not have a scroll bar, can you add an
     // invisible scroll bar?"). Invisible is literal - both bars are off, so
@@ -177,6 +268,14 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myRows->addStretch(1);
     myScroll->setWidget(rowHost);
     myOuter->addWidget(myScroll, 1);
+
+    // What the filter says when it matches nothing. PLAIN text: the query in
+    // it is the user's own, and a "<b>" typed there must read as typed.
+    myNoMatch = new QLabel(this);
+    myNoMatch->setTextFormat(Qt::PlainText);
+    myNoMatch->setWordWrap(true);
+    myNoMatch->hide();
+    myOuter->addWidget(myNoMatch);
 
     // refresh() FIRST and applyTheme() second, and the order is load-bearing
     // both ways: refresh() builds the rows applyTheme() then restyles, and
@@ -235,10 +334,66 @@ bool ItemsPanel::takeReusable(RowKind kind, int id, Row& out)
     return true;
 }
 
-QString ItemsPanel::nameStyle(bool onScreen)
+QLineEdit* ItemsPanel::filterField() const { return myFilter; }
+
+bool ItemsPanel::rowIsMutedAt(int index) const
 {
-    return QStringLiteral("background: transparent; color: %1;")
-        .arg((onScreen ? Theme::text() : Theme::textMuted()).name());
+    const Row* row = visibleRow(index);
+    return row && row->muted;
+}
+
+QLineEdit* ItemsPanel::openRenameEditor() const
+{
+    // Every QLineEdit under this card that is not the filter: InlineRename
+    // opens its edit as a child of the row it renames.
+    for (QLineEdit* edit : findChildren<QLineEdit*>())
+        if (edit != myFilter) return edit;
+    return nullptr;
+}
+
+bool ItemsPanel::rowMatches(const Row& row) const
+{
+    // A LITERAL, case-blind substring - never a pattern, so "(l" and "50%"
+    // find the names that hold them.
+    return row.text.contains(myFilterText, Qt::CaseInsensitive);
+}
+
+QColor ItemsPanel::nameColour(const Row& row) const
+{
+    // Muted for two reasons, one look: kept on screen only by the filter, or
+    // the item itself is not drawn (its eye, or Isolate).
+    return (row.muted || !row.onScreen) ? Theme::textMuted() : Theme::text();
+}
+
+void ItemsPanel::styleName(Row& row)
+{
+    if (!row.name) return;
+    const QString sheet = QStringLiteral("background: transparent; color: %1;")
+                              .arg(nameColour(row).name(QColor::HexArgb));
+    if (row.nameSheet != sheet) {
+        row.name->setStyleSheet(sheet);
+        row.nameSheet = sheet;
+    }
+    // Every row's name is a RowNameLabel (addItemRow()/addGroupRow()).
+    static_cast<RowNameLabel*>(row.name)->setPlainName(row.text);
+    const bool highlight = row.matched && filterActive();
+    const Qt::TextFormat format = highlight ? Qt::RichText : Qt::PlainText;
+    if (row.name->textFormat() != format) row.name->setTextFormat(format);
+    const QString text = highlight ? highlighted(row.text, myFilterText) : row.text;
+    if (row.name->text() != text) row.name->setText(text);
+}
+
+void ItemsPanel::setFilter(const QString& text)
+{
+    const QString query = text.trimmed();
+    if (query == myFilterText) return;
+    myFilterText = query;
+    // Built and up to date first: a closed drawer defers its rebuild, and a
+    // filter applied to a stale list would be applied to rows that are gone.
+    ensureFresh();
+    applyRowVisibility();
+    relayoutCard();
+    restyleRows();
 }
 
 void ItemsPanel::setGrainLook(QPushButton* grain, bool across)
@@ -367,15 +522,52 @@ void ItemsPanel::syncTwisty(Row& row, bool open)
 void ItemsPanel::applyRowVisibility()
 {
     myVisible.clear();
+    const bool filtering = filterActive();
+    // THE FILTER (T-063) is a second answer to the same question - which rows
+    // are on screen - so it lives here rather than in a visibility mechanism
+    // of its own. While it holds a query a row shows when its name matches,
+    // or when it is a folder a match lies beneath: those folders are
+    // FORCE-OPENED for as long as the query stands, without a word written to
+    // myExpanded, so emptying the field puts back exactly the folds the user
+    // had.
+    std::unordered_set<int> keepFolders;
+    if (filtering && myDocument) {
+        for (Row& row : myRowList) {
+            row.matched = rowMatches(row);
+            if (!row.matched) continue;
+            for (int folder = row.parentId; folder > 0; folder = myDocument->groupOf(folder))
+                keepFolders.insert(folder);
+        }
+    }
     // folder id -> its row is shown AND it is open. The tree is built depth
     // first, so a folder's entry exists before any of its children ask.
     std::unordered_map<int, bool> openFolder;
+    // ONE layout pass for the whole batch, not one per row shown. Qt's
+    // QWidget::setVisible(true) activates the parent's layout before the
+    // child appears, so showing a hundred rows (the filter's first letter at
+    // 130 rows) laid the whole list out a hundred times - measured at about a
+    // quarter of a millisecond per row. QLayout::activate() is a no-op while
+    // its layout is disabled, so the batch runs disabled and is activated
+    // once, synchronously, below - nothing that reads a row's geometry
+    // straight after a fold sees it stale.
+    myRows->setEnabled(false);
     for (std::size_t i = 0; i < myRowList.size(); ++i) {
         Row& row = myRowList[i];
-        const bool shown = row.parentId == 0 || openFolder[row.parentId];
-        if (row.isGroup) {
-            openFolder[row.id] = shown && isGroupExpanded(row.id);
-            syncTwisty(row, isGroupExpanded(row.id));
+        bool shown = false;
+        if (filtering) {
+            const bool kept = row.isGroup && keepFolders.count(row.id) > 0;
+            shown = row.matched || kept;
+            // Muted: on screen only because a match lies beneath it.
+            row.muted = shown && !row.matched;
+            if (row.isGroup) syncTwisty(row, kept);
+        } else {
+            row.matched = false;
+            row.muted = false;
+            shown = row.parentId == 0 || openFolder[row.parentId];
+            if (row.isGroup) {
+                openFolder[row.id] = shown && isGroupExpanded(row.id);
+                syncTwisty(row, isGroupExpanded(row.id));
+            }
         }
         // A HIDDEN row is QWidgetItem::isEmpty(), so it contributes nothing
         // to myRows' sizeHint() and the card is measured from the visible
@@ -383,6 +575,27 @@ void ItemsPanel::applyRowVisibility()
         // a row already in that state still costs a layout request.
         if (row.widget->isHidden() == shown) row.widget->setVisible(shown);
         if (shown) myVisible.push_back(i);
+        styleName(row);
+    }
+    myRows->setEnabled(true);
+    myRows->activate();
+    // Nothing matched: one line says so, rather than a card with no rows in
+    // it and no reason. Only when there ARE rows to match - an empty document
+    // keeps its own empty state.
+    if (myNoMatch) {
+        const bool none = filtering && myVisible.empty() && !myRowList.empty();
+        if (none) {
+            myNoMatch->setText(tr("Nothing matches \"%1\"").arg(myFilterText));
+            // Measured and pinned here, at the width it will have, for the
+            // reason the empty state's label is (see sizeHint()).
+            const int width = std::max(1, cardWidth() - kPad * 2);
+            myNoMatch->setFixedWidth(width);
+            myNoMatch->setFixedHeight(QFontMetrics(Theme::bodyFont())
+                                          .boundingRect(QRect(0, 0, width, 10000),
+                                                        Qt::TextWordWrap, myNoMatch->text())
+                                          .height());
+        }
+        if (myNoMatch->isHidden() == none) myNoMatch->setVisible(none);
     }
 }
 
@@ -405,11 +618,10 @@ void ItemsPanel::applyTheme()
     }
 
     for (Row& row : myRowList) {
-        // Muted while the item is off screen, as addItemRow() built it - a
-        // reused row keeps the colour it was given, so a theme edit that
-        // painted every name in text() would leave an isolated-away body
-        // reading as on screen until its own state next changed.
-        if (row.name) row.name->setStyleSheet(nameStyle(row.isGroup || row.onScreen));
+        // The name's colour is styleName()'s, re-run below: its cache is
+        // dropped here so every name is re-read from the new tokens (muted
+        // while off screen or kept only by the filter, text() otherwise).
+        row.nameSheet.clear();
         // Rasterised out of text()/textDisabled() when it was built, so it is
         // pixels rather than a description - the same cached-appearance value
         // ToolChip::applyTheme() has to rebuild. Every eye is the same pair
@@ -423,20 +635,21 @@ void ItemsPanel::applyTheme()
                                                  : IconSet::Glyph::GrainAlong));
     }
 
-    // The empty state's message is a plain child of myRows with no entry in
-    // myRowList; it reads bodyFont() through its own stylesheet, so it is
-    // restyled by the same walk the rows would need. Found rather than
-    // stored: it exists only while the list is empty, and a pointer to it
-    // would be a fifth thing to keep in step.
-    if (myRowList.empty()) {
-        for (QLabel* empty : findChildren<QLabel*>()) {
-            if (empty == myTitle) continue;
-            empty->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                                "font-size: %2pt;")
-                                     .arg(Theme::textMuted().name())
-                                     .arg(Theme::bodyFont().pointSizeF()));
-        }
-    }
+    // The empty state's message and the filter's no-match line read
+    // bodyFont() through their own stylesheets, so both are restyled here by
+    // name - never by a sweep over every QLabel, which would now reach the
+    // rows' names too.
+    const QString quietLine = QStringLiteral("background: transparent; color: %1; "
+                                             "font-size: %2pt;")
+                                  .arg(Theme::textMuted().name())
+                                  .arg(Theme::bodyFont().pointSizeF());
+    if (myEmpty) myEmpty->setStyleSheet(quietLine);
+    if (myNoMatch) myNoMatch->setStyleSheet(quietLine);
+    if (myFilter) myFilter->applyTheme();
+    // Every name re-styled (styleName(), from the dropped caches above) and
+    // the no-match line re-measured at the new type size - one pass, the
+    // same one a fold or a keystroke takes.
+    applyRowVisibility();
 
     // The type scale moved, so both of this card's dimensions have to be
     // re-derived: its width from cardWidth(), its height from the layout that
@@ -497,7 +710,12 @@ QSize ItemsPanel::sizeHint() const
     // item in this layout reports a plain, width-independent hint.
     const int rows = myRows->sizeHint().height();
     const int title = myTitle ? myTitle->sizeHint().height() : 0;
-    int wanted = kPad * 2 + title + myOuter->spacing() + rows;
+    const int gap = myOuter->spacing();
+    int wanted = kPad * 2 + title + gap + rows;
+    // The filter field always, and the no-match line while it shows - each
+    // its own hint plus the gap the layout puts above it.
+    if (myFilter) wanted += myFilter->sizeHint().height() + gap;
+    if (myNoMatch && !myNoMatch->isHidden()) wanted += myNoMatch->height() + gap;
     wanted = std::max(wanted, kMinHeight);
     // CAPPED (improvements item 12): past this the rows scroll inside the
     // card rather than the card running off the bottom of the viewport, which
@@ -777,14 +995,11 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
 
     // A row this item already had: write only what changed (refresh()).
     if (Row entry; takeReusable(isOutline ? RowKind::Outline : RowKind::Body, id, entry)) {
-        if (entry.text != itemName) {
-            entry.name->setText(itemName);
-            entry.text = itemName;
-        }
-        if (entry.onScreen != onScreen) {
-            entry.name->setStyleSheet(nameStyle(onScreen));
-            entry.onScreen = onScreen;
-        }
+        // The label's words are styleName()'s (applyRowVisibility() runs after
+        // every build): writing the name straight in here would hand a label
+        // that may be in RichText - the filter's highlight - unescaped markup.
+        entry.text = itemName;
+        entry.onScreen = onScreen;   // its colour is styleName()'s, in applyRowVisibility()
         if (entry.eye->isChecked() != visible) {
             // Blocked: this is the document's state being SHOWN, not the user
             // asking for a change - the toggled handler writes the document.
@@ -814,8 +1029,11 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     layout->setContentsMargins(kRowInset + depth * kIndentPx, 4, kRowInset, 4);
     layout->setSpacing(8);
 
-    auto* name = new QLabel(itemName, row);
-    name->setStyleSheet(nameStyle(onScreen));   // muted while off screen - see above
+    auto* name = new RowNameLabel(itemName, row);
+    // PLAIN text (RowNameLabel sets it): a name is the user's own, and
+    // "<b>Top</b>" reads as typed. Its colour - muted while off screen, see
+    // above - is styleName()'s, applied by applyRowVisibility() after every
+    // build.
     // Mouse-TRANSPARENT - Task 5's own fix, the same trap CLAUDE.md
     // documents for InitCardWidget: Qt delivers a click to the DEEPEST
     // widget under the cursor, not to an ancestor whose eventFilter
@@ -938,10 +1156,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     // A row this folder already had: write only what changed (refresh()).
     // The twisty is applyRowVisibility()'s, which runs after every build.
     if (Row entry; takeReusable(RowKind::Folder, groupId, entry)) {
-        if (entry.text != groupName) {
-            entry.name->setText(groupName);
-            entry.text = groupName;
-        }
+        entry.text = groupName;   // the label follows in styleName() - see addItemRow()
         if (entry.eye->isChecked() != allVisible) {
             const QSignalBlocker quiet(entry.eye);   // shown, not asked for
             entry.eye->setChecked(allVisible);
@@ -975,9 +1190,8 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
             [this, groupId] { setGroupExpanded(groupId, !isGroupExpanded(groupId)); });
     layout->addWidget(twisty);
 
-    auto* name = new QLabel(groupName, row);
-    name->setStyleSheet(
-        QStringLiteral("background: transparent; color: %1;").arg(Theme::text().name()));
+    // PLAIN text, the user's word (RowNameLabel); coloured by styleName().
+    auto* name = new RowNameLabel(groupName, row);
     name->setAttribute(Qt::WA_TransparentForMouseEvents);
     layout->addWidget(name, 1);
 
@@ -1332,7 +1546,8 @@ QStringList ItemsPanel::paintedTexts() const
     // names.
     return {tr("Items"), tr("Show or hide this body"), tr("Show or hide this outline"),
             tr("No bodies yet.\n\nPress Ctrl+K and click points on "
-               "the ground to draw your first outline.")};
+               "the ground to draw your first outline."),
+            ItemsFilterField::placeholder(), tr("Clear filter"), tr("Nothing matches \"%1\"")};
 }
 
 void ItemsPanel::showSelection(const std::vector<int>& ids)
@@ -1384,8 +1599,9 @@ void ItemsPanel::beginRenameForItem(int id, bool isOutline)
     // F2 pressed twice - or F2 then a double-click on the same row - stacks a
     // SECOND independent QLineEdit on top of the first, each with its own
     // commit callback racing the other's. One rename gesture live on this
-    // panel at a time, full stop.
-    if (findChild<QLineEdit*>()) return;
+    // panel at a time, full stop. openRenameEditor(), not a bare QLineEdit
+    // lookup: the filter field is a QLineEdit that is always there.
+    if (openRenameEditor()) return;
 
     for (const Row& row : myRowList) {
         if (row.id != id || row.isOutline != isOutline) continue;
@@ -1394,7 +1610,9 @@ void ItemsPanel::beginRenameForItem(int id, bool isOutline)
         // it could never take focus. Before every row was built this row
         // simply did not exist and the call fell through to nothing - kept.
         if (!row.name || row.widget->isHidden()) return;
-        const QString current = row.name->text();
+        // Row::text, the PLAIN name (ruling P5): while the filter holds a
+        // query the label carries escaped rich text, which is not the name.
+        const QString current = row.text;
         // The name label's own geometry, in row.widget's coordinates - the
         // "text cell" InlineRename opens over. Not the whole row: the eye
         // button beside it is its own control.
@@ -1414,14 +1632,14 @@ void ItemsPanel::beginRenameForGroup(int groupId)
     // whichever kind of row it is over.
     if (!isVisible()) return;
     if (myView && myView->mirrorPlacementActive()) return;
-    if (findChild<QLineEdit*>()) return;
+    if (openRenameEditor()) return;
 
     for (const Row& row : myRowList) {
         if (!row.isGroup || row.id != groupId) continue;
         // Hidden inside a folded parent - see beginRenameForItem().
         if (!row.name || row.widget->isHidden()) return;
         InlineRename::beginRename(
-            row.widget, row.name->geometry(), row.name->text(),
+            row.widget, row.name->geometry(), row.text,   // plain - ruling P5
             [this, groupId](QString newName) { emit groupRenameCommitted(groupId, newName); });
         return;
     }

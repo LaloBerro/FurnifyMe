@@ -28,6 +28,7 @@
 //
 // Its visibility is DERIVED from MainWindow's existing Items action and never
 // set from anywhere else; see MainWindow's constructor.
+#include <QColor>
 #include <QPoint>
 #include <QSize>
 #include <QString>
@@ -75,6 +76,18 @@ public:
     bool rowIsGroupAt(int index) const;
     // How deep in the tree the row sits: 0 at the document's root.
     int rowDepthAt(int index) const;
+    // The filter (T-063). Rows narrow to matches plus the folders above them;
+    // those folders are force-opened without touching the user's own fold
+    // state and drawn muted. Empty text restores everything as it was.
+    class QLineEdit* filterField() const;
+    bool filterActive() const { return !myFilterText.isEmpty(); }
+    class QAction* clearFilterAction() const { return myClearFilterAction; }
+    class QLabel* noMatchLabel() const { return myNoMatch; }
+    // A visible row shown only because a match lies beneath it.
+    bool rowIsMutedAt(int index) const;
+    // The inline rename editor open over a row, or null - never the filter
+    // field, which is always there.
+    class QLineEdit* openRenameEditor() const;
     // A folder row's twisty, null for any other row - for the suite, which
     // reads its tooltip to see which way the folder currently points.
     class QPushButton* twistyAt(int index) const;
@@ -257,6 +270,9 @@ private:
         QString style;           // the row look restyleRows() last set
         class QPushButton* twisty = nullptr;
         QString text;      // what rowTextAt() reports
+        bool matched = false;   // its name holds the filter's query
+        bool muted = false;     // shown only because a match lies beneath it
+        QString nameSheet;      // the stylesheet last applied to `name`
     };
 
     DocumentModel* myDocument = nullptr;
@@ -295,6 +311,19 @@ private:
     void relayoutCard();
     void syncTwisty(Row& row, bool open);
 
+    // --- the filter (T-063) ---------------------------------------------------
+    class ItemsFilterField* myFilter = nullptr;
+    class QAction* myClearFilterAction = nullptr;
+    class QLabel* myNoMatch = nullptr;
+    QString myFilterText;
+    void setFilter(const QString& text);
+    bool rowMatches(const Row& row) const;
+    // The ONE place a row's name is coloured and worded - plain text, or the
+    // filter's escaped highlight - with a cache so an unchanged row costs
+    // nothing on a keystroke.
+    void styleName(Row& row);
+    QColor nameColour(const Row& row) const;
+
     // --- reuse across rebuilds (review ruling R5a) -----------------------------
     // refresh() keys the rows it had by kind and id, and addItemRow()/
     // addGroupRow() take a row back out of that map instead of building one
@@ -304,7 +333,6 @@ private:
     static qint64 rowKey(const Row& row);
     bool takeReusable(RowKind kind, int id, Row& out);
     std::unordered_map<qint64, Row>* myReusable = nullptr;   // live only inside refresh()
-    static QString nameStyle(bool onScreen);
     static void setGrainLook(class QPushButton* grain, bool across);
     // The empty state's label, while the list is empty - null otherwise.
     class QLabel* myEmpty = nullptr;

@@ -42,6 +42,7 @@
 #include "GridRenderer.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
+#include "ItemsFilterField.h"
 #include "ItemsPanel.h"
 #include "ItemMoveText.h"
 #include "Joinery.h"
@@ -1008,6 +1009,7 @@ constexpr BlockInfo kBlocks[] = {
     { "ctrl-d-lands-right-after-its-source", false, true },
     { "the-drawer-lists-the-stored-order", false, true },
     { "every-move-in-the-drawer-reports", false, true },
+    { "the-drawer-filters-by-name", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -3275,7 +3277,7 @@ void drawerListsStoredOrderBlock()
     settle(100);
     if (renameAction) renameAction->trigger();
     settle(50);
-    const bool foldedEditOpened = drawer->findChild<QLineEdit*>() != nullptr;
+    const bool foldedEditOpened = drawer->openRenameEditor() != nullptr;
     check(!foldedEditOpened,
           "stored order: Rename on a body inside a FOLDED folder opens no edit over its hidden row");
     // ...and the same route on a row that IS on screen does open one, so the
@@ -3284,7 +3286,7 @@ void drawerListsStoredOrderBlock()
     settle(100);
     if (renameAction) renameAction->trigger();
     settle(50);
-    QPointer<QLineEdit> shelfEdit = drawer->findChild<QLineEdit*>();
+    QPointer<QLineEdit> shelfEdit = drawer->openRenameEditor();
     check(!shelfEdit.isNull(), "stored order: ...while the same route on a visible row opens one");
     // Enter on the unchanged name closes it (InlineRename's Escape is a
     // QShortcut, which a sent key event never reaches).
@@ -3599,6 +3601,184 @@ void everyMoveReportsBlock()
               .arg(spoken.size())
               .arg(offenders.isEmpty() ? QStringLiteral("clean")
                                        : offenders.join(QStringLiteral(", "))));
+    probe.close();
+}
+
+// Types `text` into the field one key at a time, the way a keyboard does, and
+// returns the WORST single keystroke's synchronous cost in milliseconds.
+double typeInto(QLineEdit* field, const QString& text)
+{
+    double worst = 0.0;
+    for (const QChar c : text) {
+        const int key = c == QLatin1Char(' ') ? int(Qt::Key_Space) : int(c.toUpper().unicode());
+        QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier, QString(c));
+        QElapsedTimer clock;
+        clock.start();
+        QCoreApplication::sendEvent(field, &press);
+        worst = std::max(worst, clock.nsecsElapsed() / 1.0e6);
+    }
+    settle(80);
+    return worst;
+}
+
+// The field's editing underline is a thin stroke that marks a WORD-bearing
+// control, so it wears accentText() (Global Constraint 21, ruling P7) - the
+// bottom row of a 1:1 render is that stroke.
+int accentPixelsOnBottomRow(QWidget* field)
+{
+    const QImage image = renderExact(field);
+    int count = 0;
+    for (int x = 0; x < image.width(); ++x)
+        if (QColor(image.pixel(x, image.height() - 1)) == Theme::accentText()) ++count;
+    return count;
+}
+
+void drawerFiltersByNameBlock()
+{
+    RequiredTempDir dir;
+    QString large;
+    QString odd;
+    {
+        FurnitureStore store(dir.path());
+        large = seedLargeFurniture(store, 122);
+        // REVIEW FOCUS 2: names a rich-text label would otherwise interpret.
+        odd = store.createFurniture(QStringLiteral("Odd names"));
+        DocumentModel doc;
+        const int folder = doc.createGroup("Odd [names]");
+        double x = 0.0;
+        for (const char* name : {"<b>Top</b>", "Side (L)", "50% rail", "a&b  wide"}) {
+            const int b =
+                doc.addSolid(ModelingOps::makeBox(gp_Pnt(x, 0.0, 0.0), 18.0, 300.0, 400.0));
+            x += 400.0;
+            doc.setItemName(b, name);
+            doc.setItemGroup(b, folder);
+        }
+        store.saveFurniture(odd, doc, QImage());
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    check(openWithDrawer(probe, large), "filter: the 122-body cabinet opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    QLineEdit* field = drawer->filterField();
+    check(field != nullptr && field->isVisible() &&
+              field->placeholderText() == QStringLiteral("Filter by name"),
+          "filter: a permanent field under the title reads \"Filter by name\"");
+    if (!field) return;
+    const DocumentModel& doc = probe.document();
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int drawers = idNamed(doc, QStringLiteral("Drawers"));
+    const int doors = idNamed(doc, QStringLiteral("Doors"));
+    drawer->setGroupExpanded(doors, true);   // the user's own fold state
+    settle(100);
+    const int restingRows = drawer->rowCount();
+
+    field->setFocus();
+    settle(50);
+    // Letters never leave the field for the app's single-letter shortcuts:
+    // the field claims each key's ShortcutOverride, so QShortcutMap never
+    // fires E (Extrude), S (Mirror), L (Lock to Face) or M (Mitre) from it.
+    bool allClaimed = true;
+    for (const int key : {int(Qt::Key_E), int(Qt::Key_S), int(Qt::Key_L), int(Qt::Key_M)}) {
+        QKeyEvent over(QEvent::ShortcutOverride, key, Qt::NoModifier,
+                       QString(QChar(key)).toLower());
+        QCoreApplication::sendEvent(field, &over);
+        allClaimed = allClaimed && over.isAccepted();
+    }
+    check(allClaimed, "filter: letters typed in the field are claimed back from the shortcut map");
+
+    // Ancestors force-opened, muted, without touching the user's fold state.
+    const double worstKeystroke = typeInto(field, QStringLiteral("Board 121"));
+    const QStringList filteredNames = drawerRowNames(drawer);
+    check(filteredNames == QStringList({QStringLiteral("Carcass"), QStringLiteral("Drawers"),
+                                        QStringLiteral("Board 121")}),
+          QStringLiteral("filter: Carcass and Drawers stay on screen, muted, above Board 121 (%1)")
+              .arg(filteredNames.join(QStringLiteral(", "))));
+    check(drawer->rowIsMutedAt(0) && drawer->rowIsMutedAt(1) && !drawer->rowIsMutedAt(2),
+          "filter: the two ancestors are muted and the match is not");
+    check(!drawer->isGroupExpanded(carcass) && !drawer->isGroupExpanded(drawers),
+          "filter: filtering force-opens Carcass WITHOUT touching the user's own fold state");
+    QWidget* matchRow = drawer->rowWidgetAt(2);
+    QLabel* matchName = matchRow ? matchRow->findChild<QLabel*>() : nullptr;
+    check(matchName && matchName->text().contains(Theme::accentText().name()),
+          "filter: the matched text is drawn in accentText");
+    QWidget* ancestorRow = drawer->rowWidgetAt(0);
+    QLabel* ancestorName = ancestorRow ? ancestorRow->findChild<QLabel*>() : nullptr;
+    check(ancestorName &&
+              ancestorName->styleSheet().contains(Theme::textMuted().name(QColor::HexArgb)),
+          "filter: an ancestor's name is drawn in textMuted");
+    std::printf("[items-cost] worst filter keystroke at 130 rows = %.2f ms\n", worstKeystroke);
+    check(worstKeystroke < 16.0,
+          QStringLiteral("filter: one keystroke at 130 rows costs under 16 ms (worst %1 ms)")
+              .arg(worstKeystroke, 0, 'f', 2));
+    const int typedAccent = accentPixelsOnBottomRow(field);
+    check(typedAccent > field->width() / 2,
+          QStringLiteral("filter: while it holds a query the field wears the accentText underline "
+                         "(%1 of %2 pixels)").arg(typedAccent).arg(field->width()));
+
+    // Escape clears, and the user's own fold state comes back untouched.
+    QKeyEvent escapeOver(QEvent::ShortcutOverride, Qt::Key_Escape, Qt::NoModifier);
+    QCoreApplication::sendEvent(field, &escapeOver);
+    check(escapeOver.isAccepted(), "filter: the field claims Escape from the shortcut map");
+    QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QCoreApplication::sendEvent(field, &escape);
+    settle(80);
+    const int clearedRows = drawer->rowCount();
+    check(field->text().isEmpty() && clearedRows == restingRows &&
+              drawer->isGroupExpanded(doors) && !drawer->isGroupExpanded(carcass),
+          QStringLiteral("filter: Escape clears it and the fold state is the user's own again "
+                         "(%1 rows, %2 before)").arg(clearedRows).arg(restingRows));
+    field->clearFocus();
+    settle(50);
+    check(accentPixelsOnBottomRow(field) == 0, "filter: an empty field wears no accent at all");
+
+    typeInto(field, QStringLiteral("zzz"));
+    check(drawer->rowCount() == 0 && drawer->noMatchLabel() && drawer->noMatchLabel()->isVisible() &&
+              drawer->noMatchLabel()->text() == QStringLiteral("Nothing matches \"zzz\""),
+          "filter: no match says Nothing matches \"zzz\"");
+    drawer->clearFilterAction()->trigger();
+    settle(80);
+    check(!drawer->noMatchLabel()->isVisible() && drawer->rowCount() == restingRows,
+          "filter: Clear filter brings every row back");
+
+    // REVIEW FOCUS 2: markup and specials in user names are shown, never run.
+    const bool oddOpened = probe.openFurniture(odd);
+    check(oddOpened, "filter: the odd-names furniture opens");
+    settle(250);
+    typeInto(field, QStringLiteral("top"));
+    const int topId = idNamed(probe.document(), QStringLiteral("<b>Top</b>"));
+    QWidget* topRow = drawer->rowWidgetAt(drawerRowOf(drawer, topId));
+    QLabel* topName = topRow ? topRow->findChild<QLabel*>() : nullptr;
+    check(topName && topName->text().contains(QStringLiteral("&lt;b&gt;")) &&
+              !topName->text().contains(QStringLiteral("<b>")),
+          QStringLiteral("filter: a name holding <b> is escaped in the highlight (%1)")
+              .arg(topName ? topName->text() : QString()));
+    // Ruling P5: a rename opened WHILE filtered starts from the plain name,
+    // never from the label's highlighted rich text.
+    check(drawer->openRenameEditor() == nullptr,
+          "filter: the filter field itself is not an open rename editor");
+    drawer->beginRenameForItem(topId, /*isOutline=*/false);
+    settle(50);
+    QPointer<QLineEdit> filteredEdit = drawer->openRenameEditor();
+    const QString seeded = filteredEdit ? filteredEdit->text() : QStringLiteral("<no editor>");
+    check(seeded == QStringLiteral("<b>Top</b>"),
+          QStringLiteral("filter: a rename opened while filtered starts from the plain name (%1)")
+              .arg(seeded));
+    if (filteredEdit) sendKeyTo(filteredEdit, Qt::Key_Return);
+    settle(80);
+    drawer->clearFilterAction()->trigger();
+    settle(80);
+    check(topName && topName->textFormat() == Qt::PlainText &&
+              topName->text() == QStringLiteral("<b>Top</b>"),
+          "filter: with no query the label is plain text again and reads the raw name");
+    typeInto(field, QStringLiteral("(l"));
+    check(drawerRowNames(drawer).contains(QStringLiteral("Side (L)")),
+          "filter: a query holding a bracket is matched literally, never as a pattern");
+    drawer->clearFilterAction()->trigger();
+    typeInto(field, QStringLiteral("50%"));
+    check(drawerRowNames(drawer).contains(QStringLiteral("50% rail")),
+          "filter: a query holding a percent sign is matched literally");
+    drawer->clearFilterAction()->trigger();
+    settle(80);
     probe.close();
 }
 
@@ -21377,7 +21557,7 @@ int main(int argc, char* argv[])
         // would.
         if (renameAction) renameAction->trigger();
         settle(150);
-        check(items != nullptr && items->findChild<QLineEdit*>() == nullptr,
+        check(items != nullptr && items->openRenameEditor() == nullptr,
               "no stray QLineEdit was created in the hidden hierarchy - the wedge this fix "
               "round closes");
 
@@ -24673,7 +24853,7 @@ int main(int argc, char* argv[])
             // trusting the action's enabled state alone.
             placementItems->beginRenameForItem(bodyAId, false);
             waitFully(120);
-            check(placementItems->findChild<QLineEdit*>() == nullptr,
+            check(placementItems->openRenameEditor() == nullptr,
                   "...and beginRenameForItem() itself refuses to open one");
         }
         // With no rename field ever able to open, Y still reaches the
@@ -43742,6 +43922,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("ctrl-d-lands-right-after-its-source")) duplicateLandsAfterSourceBlock();
     if (blockEnabled("the-drawer-lists-the-stored-order")) drawerListsStoredOrderBlock();
     if (blockEnabled("every-move-in-the-drawer-reports")) everyMoveReportsBlock();
+    if (blockEnabled("the-drawer-filters-by-name")) drawerFiltersByNameBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or
