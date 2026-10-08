@@ -101,6 +101,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QSpinBox>
+#include <QShortcut>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QThread>
@@ -5147,6 +5148,43 @@ void drawerKeyboardBlock()
               selected() == std::vector<int>{shelf},
           "keys: a click on Shelf focuses the list and selects Shelf");
 
+    // A REAL click is spontaneous, and Qt then walks up from the widget under
+    // the pointer to the first one whose policy takes click focus
+    // (giveFocusAccordingToFocusPolicy). The suite's sent presses never take
+    // that walk, so it is asked here structurally: from a twisty, a grain
+    // mark and a row's blank space, the first click-focus ancestor must be
+    // the LIST itself - never the scroll area the rows sit in (R12b).
+    const auto clickFocusOwner = [](QWidget* from) -> QWidget* {
+        for (QWidget* w = from; w; w = w->parentWidget()) {
+            if (w->isEnabled() && (w->focusPolicy() & Qt::ClickFocus)) return w;
+            if (w->isWindow()) return nullptr;
+        }
+        return nullptr;
+    };
+    QScrollArea* rowsArea = drawer->scrollArea();
+    QStringList wrongOwners;
+    QWidget* const starts[] = {drawer->twistyAt(drawerRowOf(drawer, carcass)),
+                               drawer->grainMarkAt(drawerRowOf(drawer, shelf)), shelfRow,
+                               rowsArea ? rowsArea->viewport() : nullptr};
+    int asked = 0;
+    for (QWidget* start : starts) {
+        if (!start) continue;
+        ++asked;
+        QWidget* owner = clickFocusOwner(start);
+        if (owner != drawer)
+            wrongOwners << QStringLiteral("%1 -> %2")
+                               .arg(QString::fromLatin1(start->metaObject()->className()),
+                                    owner ? QString::fromLatin1(owner->metaObject()->className())
+                                          : QStringLiteral("nothing"));
+    }
+    check(rowsArea && rowsArea->focusPolicy() == Qt::NoFocus &&
+              rowsArea->viewport()->focusPolicy() == Qt::NoFocus && asked == 4 &&
+              wrongOwners.isEmpty(),
+          QStringLiteral("keys: a real click on a twisty, a grain mark or blank row space focuses "
+                         "the list, never its scroll area (%1)")
+              .arg(wrongOwners.isEmpty() ? QStringLiteral("all reach the list")
+                                         : wrongOwners.join(QStringLiteral(", "))));
+
     const QImage focused = renderExact(drawer);
     drawer->clearFocus();
     settle(30);
@@ -5206,11 +5244,16 @@ void drawerKeyboardBlock()
               "keys: Down and Alt+Down typed in the rename editor stay the editor's - the list "
               "neither walks nor moves");
     }
-    // Enter on the unchanged name closes it (InlineRename's Escape is a
-    // QShortcut, which a sent key event never reaches).
+    // Enter on the unchanged name closes it - and the same name back is not a
+    // change: no checkpoint, no "Renamed to" Note (fix round 1, item 5).
+    const std::size_t beforeEnter = doc.undoDepth();
     if (editor) sendKeyTo(editor, Qt::Key_Return);
     settle(50);
-    check(drawer->openRenameEditor() == nullptr, "keys: ...and Enter closes the folder's rename again");
+    const bool closedClean =
+        drawer->openRenameEditor() == nullptr && doc.undoDepth() == beforeEnter &&
+        !(toasts && toasts->currentText().startsWith(QStringLiteral("Renamed")));
+    check(closedClean,
+          "keys: ...and Enter on the unchanged name closes it with no checkpoint and no Note");
     drawer->setFocus();
     settle(30);
     // A letter is never the list's (E stays Extrude), nor is any key the rest
@@ -5288,6 +5331,17 @@ void drawerKeyboardBlock()
               toasts->currentText() == QStringLiteral("Moved Side left out of Carcass"),
           "keys: Alt+Left moves it out of its folder, to just after it");
 
+    // A RIGHT press gives the list the keys too (fix round 1, item 4), so they
+    // work straight after the menu's Move down.
+    if (QLineEdit* field2 = drawer->filterField()) field2->setFocus();
+    settle(30);
+    QWidget* sideRoot = drawer->rowWidgetAt(drawerRowOf(drawer, side));
+    const QPointF sideAt(sideRoot ? sideRoot->width() / 3.0 : 0.0,
+                         sideRoot ? sideRoot->height() / 2.0 : 0.0);
+    if (sideRoot) pressThenReleaseAt(sideRoot, sideAt, sideAt, Qt::RightButton);
+    check(sideRoot && probe.focusWidget() == drawer && drawer->currentRowId() == side,
+          "keys: a right press on Side left gives the list focus, with Side left the current row");
+
     // The context menu's Move down: the same move, the same report. Root order
     // is now Carcass, Side left, Doors, Sketch A, Shelf, Back - one step down
     // passes Doors and lands in front of Sketch A (ruling P2: the step rule
@@ -5312,6 +5366,12 @@ void drawerKeyboardBlock()
     check(toasts && toasts->currentText() == QStringLiteral("Moved Side left above Sketch A") &&
               doc.undoDepth() == depth + 1,
           "keys: Move down moves through moveItems() and reports");
+    // Root: Carcass (open: Drawer, Side right, Top), Doors, Side left, Sketch A...
+    sendKeyTo(&probe, Qt::Key_Down);
+    check(drawer->currentRowId() == sketch,
+          QStringLiteral("keys: after the menu's Move down the arrows still walk on from Side left "
+                         "(current %1)")
+              .arg(drawer->currentRowId()));
     QMenu firstMenu;
     drawer->populateRowMenu(firstMenu, carcass, ItemsPanel::RowKind::Folder);
     QAction* firstUp = menuAction(firstMenu, QStringLiteral("Move up"));
@@ -5330,8 +5390,100 @@ void drawerKeyboardBlock()
     QWidget* outlineRow = drawer->rowWidgetAt(drawerRowOf(drawer, sketch));
     check(outlineEditor && outlineRow && outlineEditor->parentWidget() == outlineRow,
           "keys: ...and it opens the rename over the outline's own row");
-    if (outlineEditor) sendKeyTo(outlineEditor, Qt::Key_Return);
+    // ESCAPE CANCELS (fix round 1, item 6). InlineRename's Escape is a
+    // QShortcut, which a sent key event never reaches, so its own shortcut is
+    // activated - the very object a real Escape fires. A changed name typed
+    // first, so a cancel that committed would show.
+    const std::size_t beforeEscape = doc.undoDepth();
+    QShortcut* escape = outlineEditor ? outlineEditor->findChild<QShortcut*>() : nullptr;
+    check(escape != nullptr && escape->key() == QKeySequence(Qt::Key_Escape),
+          "keys: the outline's rename editor carries its Escape shortcut");
+    if (outlineEditor) outlineEditor->setText(QStringLiteral("Sketch renamed"));
+    // Fired from the event loop, as a real shortcut is: a deleteLater() run
+    // from main() itself, outside any event, is held until a loop that never
+    // comes, and the editor would read as still open.
+    if (escape) {
+        QPointer<QShortcut> firing = escape;
+        QTimer::singleShot(0, [firing] {
+            if (firing) emit firing->activated();
+        });
+    }
+    settle(80);
+    const bool editorGone = drawer->openRenameEditor() == nullptr;
+    const bool cancelled = editorGone &&
+                           doc.outlineNameOf(sketch) == "Sketch A" &&
+                           doc.undoDepth() == beforeEscape;
+    check(cancelled,
+          QStringLiteral("keys: Escape cancels the rename - the name stays (%1), no checkpoint is "
+                         "taken and the editor is gone (%2)")
+              .arg(QString::fromStdString(doc.outlineNameOf(sketch)))
+              .arg(editorGone ? QStringLiteral("gone") : QStringLiteral("still open")));
+
+    // "Remove folder, keep contents" is never offered on an OUTLINE row (R12c):
+    // the route dissolves the folder the body selection shares, not the
+    // outline's own. Put Sketch A in Carcass first, so the row HAS a folder.
+    emit drawer->itemsMoveRequested({sketch}, carcass, DocumentModel::kIntoFolder);
+    settle(100);
+    const bool sketchInCarcass = doc.groupOf(sketch) == carcass;
+    QMenu nestedOutlineMenu;
+    drawer->populateRowMenu(nestedOutlineMenu, sketch, ItemsPanel::RowKind::Outline);
+    QAction* removeFolder = menuAction(nestedOutlineMenu, QStringLiteral("Remove folder, keep contents"));
+    check(sketchInCarcass && removeFolder && !removeFolder->isEnabled(),
+          "keys: Remove folder, keep contents is disabled on an outline row inside a folder");
+    // The Model menu says it the same way (R12a), in its own title case, and
+    // keeps Ctrl+Shift+G; neither its words nor its tooltip call a folder a group.
+    QAction* modelRemove = action(probe, QStringLiteral("Remove Folder, Keep Contents"));
+    check(modelRemove && modelRemove->shortcut() == QKeySequence(QStringLiteral("Ctrl+Shift+G")) &&
+              !modelRemove->toolTip().contains(QStringLiteral("group"), Qt::CaseInsensitive),
+          QStringLiteral("keys: the Model menu reads \"Remove Folder, Keep Contents\" on Ctrl+Shift+G, "
+                         "never \"group\" (%1)")
+              .arg(modelRemove ? modelRemove->toolTip().section(QLatin1Char('\n'), 0, 0)
+                               : QStringLiteral("no such entry")));
+
+    // FOCUS AND SELECTION NEVER SEPARATE (fix round 1, item 2). A Ctrl+click
+    // that takes a row OUT of the selection does not make it the keys' row,
+    // so Alt+arrows can never move a row nobody has selected.
+    QWidget* shelfAgain = drawer->rowWidgetAt(drawerRowOf(drawer, shelf));
+    QWidget* backAgain = drawer->rowWidgetAt(drawerRowOf(drawer, back));
+    if (shelfAgain) clickAt(shelfAgain, QPointF(shelfAgain->width() / 3.0, shelfAgain->height() / 2.0));
+    // A BODY renamed to its own name is no change either (fix round 1, item 5).
+    const std::size_t beforeShelfRename = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_F2);
+    QPointer<QLineEdit> shelfEditor = drawer->openRenameEditor();
+    const bool shelfEditorOpened = !shelfEditor.isNull();
+    if (shelfEditor) sendKeyTo(shelfEditor, Qt::Key_Return);
     settle(50);
+    check(shelfEditorOpened && drawer->openRenameEditor() == nullptr &&
+              doc.undoDepth() == beforeShelfRename &&
+              !(toasts && toasts->currentText().startsWith(QStringLiteral("Renamed"))),
+          "keys: F2 then Enter on Shelf's unchanged name takes no checkpoint and reports nothing");
+    if (backAgain)
+        clickAt(backAgain, QPointF(backAgain->width() / 3.0, backAgain->height() / 2.0),
+                Qt::ControlModifier);
+    const bool bothIn = selected() == sorted({shelf, back}) && drawer->currentRowId() == back;
+    if (backAgain)
+        clickAt(backAgain, QPointF(backAgain->width() / 3.0, backAgain->height() / 2.0),
+                Qt::ControlModifier);
+    check(shelfAgain && backAgain && bothIn && selected() == std::vector<int>{shelf} &&
+              drawer->currentRowId() == shelf && drawer->movableIds() == std::vector<int>{shelf},
+          QStringLiteral("keys: Ctrl+click that deselects Back leaves the keys on Shelf, still "
+                         "selected (current %1)")
+              .arg(drawer->currentRowId()));
+    if (shelfAgain)
+        clickAt(shelfAgain, QPointF(shelfAgain->width() / 3.0, shelfAgain->height() / 2.0),
+                Qt::ControlModifier);
+    const std::vector<int> rootBefore = doc.orderedChildren(0);
+    const std::size_t beforeEmpty = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Down, Qt::AltModifier);
+    check(selected().empty() && drawer->movableIds().empty() && doc.undoDepth() == beforeEmpty &&
+              doc.orderedChildren(0) == rootBefore,
+          "keys: with nothing selected Alt+Down moves nothing - not even the row last clicked");
+    // ...and with no live row F2 is not the list's: it goes on to the Rename
+    // action (fix round 1, item 3).
+    QKeyEvent f2Idle(QEvent::ShortcutOverride, Qt::Key_F2, Qt::NoModifier);
+    QCoreApplication::sendEvent(drawer, &f2Idle);
+    check(probe.focusWidget() == drawer && !f2Idle.isAccepted(),
+          "keys: with no current row F2 is left to the Rename action");
     probe.close();
 }
 
@@ -45274,6 +45426,36 @@ int main(int argc, char* argv[])
                       .arg(stops.size())
                       .arg(chipStops.isEmpty() ? QStringLiteral("none")
                                                : chipStops.mid(0, 6).join(QStringLiteral(", "))));
+        }
+
+        // THE ITEMS DRAWER: its one typed field is the only Tab stop inside it
+        // (review R12b). The list itself is ClickFocus, so Tab passes it by,
+        // and the scroll area its rows sit in must not be a stop either - it
+        // would hold focus invisibly and turn the arrows into scrolling.
+        if (ItemsPanel* drawer = fw.itemsPanel()) {
+            QLineEdit* field = drawer->filterField();
+            if (field) field->setFocus(Qt::OtherFocusReason);
+            settle(60);
+            const bool startedInField = field && fw.focusWidget() == field;
+            QStringList drawerStops;
+            int walked = 0;
+            for (int i = 0; i < 40; ++i) {
+                QWidget* at = fw.focusWidget();
+                if (!at) break;
+                QKeyEvent tabKey(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier);
+                QCoreApplication::sendEvent(at, &tabKey);
+                QWidget* next = fw.focusWidget();
+                if (!next || next == at) break;
+                ++walked;
+                if ((next == drawer || drawer->isAncestorOf(next)) && next != field && next != drawer)
+                    drawerStops << QString::fromLatin1(next->metaObject()->className());
+            }
+            check(startedInField && walked >= 1 && drawerStops.isEmpty(),
+                  QStringLiteral("focus: Tab from the drawer's filter field (%1 stops) stops on "
+                                 "nothing else inside the drawer (%2)")
+                      .arg(walked)
+                      .arg(drawerStops.isEmpty() ? QStringLiteral("none")
+                                                 : drawerStops.join(QStringLiteral(", "))));
         }
 
         // THE HUB: its search field keeps focus through a click on a sort chip.

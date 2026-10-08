@@ -344,6 +344,15 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     myScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     myScroll->setWidgetResizable(true);
+    // THE LIST TAKES FOCUS, NEVER THE SCROLL AREA INSIDE IT (review R12b).
+    // QAbstractScrollArea is StrongFocus by default, so a real click on a
+    // twisty, an eye, a grain mark (all NoFocus) or on blank space among the
+    // rows walked up to IT, the list lost the keys and the arrows scrolled
+    // instead of walking - and Tab could stop on it with nothing on screen to
+    // show where. NoFocus on both, so that same click walks on up to this
+    // card (ClickFocus), and Tab passes the card by entirely.
+    myScroll->setFocusPolicy(Qt::NoFocus);
+    myScroll->viewport()->setFocusPolicy(Qt::NoFocus);
     // NOTHING here asks the scroll area how tall it should be, and that is
     // deliberate: QScrollArea::sizeHint() answers with a CACHED copy of its
     // widget's hint bounded to about 24 text lines, and it ignores
@@ -1687,9 +1696,14 @@ void ItemsPanel::populateRowMenu(QMenu& menu, int rowId, RowKind kind)
     rename->setEnabled(rowId != 0);
     up->setEnabled(upTarget.ok);
     down->setEnabled(downTarget.ok);
-    ungroup->setEnabled(myDocument && (kind == RowKind::Folder
-                                           ? myDocument->groupExists(rowId)
-                                           : (rowId != 0 && myDocument->groupOf(rowId) != 0)));
+    // NEVER on an outline row (review R12c): the route dissolves the folder
+    // the BODY selection shares (MainWindow::folderOfSelection()), which is
+    // not the outline's own folder - so offering it there would remove a
+    // folder the user did not point at.
+    ungroup->setEnabled(myDocument && kind != RowKind::Outline &&
+                        (kind == RowKind::Folder
+                             ? myDocument->groupExists(rowId)
+                             : (rowId != 0 && myDocument->groupOf(rowId) != 0)));
 
     connect(folder, &QAction::triggered, this, [this] { emit newFolderRequested(); });
     connect(rename, &QAction::triggered, this, [this, rowId, kind] {
@@ -1741,8 +1755,11 @@ bool ItemsPanel::claimsKey(const QKeyEvent* key) const
     case Qt::Key_Right:
     case Qt::Key_Home:
     case Qt::Key_End:
-    case Qt::Key_F2:
         return mods == Qt::NoModifier;
+    case Qt::Key_F2:
+        // Only over a live row: with none, F2 goes on to the Rename action,
+        // which renames whatever the viewport has selected.
+        return mods == Qt::NoModifier && visibleIndexOf(myCurrentId) >= 0;
     default:
         return false;   // letters are never the list's - E stays Extrude
     }
@@ -1846,6 +1863,12 @@ void ItemsPanel::renameCurrent()
 std::vector<int> ItemsPanel::movableIds() const
 {
     if (myCurrentId == 0) return {};
+    // A body row moves only while it is SELECTED - the backstop to
+    // activateRow()'s rule, so no route can leave a key move carrying a row
+    // the user has deselected.
+    if (myCurrentKind == RowKind::Body &&
+        std::find(mySelectedIds.begin(), mySelectedIds.end(), myCurrentId) == mySelectedIds.end())
+        return {};
     return idsForMenu(myCurrentId, myCurrentKind);
 }
 
@@ -1976,9 +1999,13 @@ void ItemsPanel::showDropTarget(const DropTarget& target)
 
 void ItemsPanel::activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods)
 {
-    // The row the keys continue from - whichever route selected it.
-    myCurrentId = id;
-    myCurrentKind = kind;
+    // The row the keys continue from - whichever route selected it. A folder
+    // or outline row is always selected by its own activation; a body row is
+    // only when the click leaves it in the selection (see the end).
+    if (kind != RowKind::Body) {
+        myCurrentId = id;
+        myCurrentKind = kind;
+    }
     if (kind == RowKind::Folder) {
         // A folder row selects the BODIES under it, and Ctrl ADDS them to
         // what is already selected - which is how two folders, or a folder
@@ -1998,7 +2025,19 @@ void ItemsPanel::activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods)
         emit outlineActivated(id);
         return;
     }
-    requestSelection(selectionFor(id, mods));
+    const std::vector<int> ids = selectionFor(id, mods);
+    // FOCUS AND SELECTION NEVER SEPARATE: a Ctrl+click that toggles this row
+    // OFF must not make it the keys' row, or Alt+Up would move a row nobody
+    // has selected. The keys' row falls back to what stays selected.
+    if (std::find(ids.begin(), ids.end(), id) != ids.end()) {
+        myCurrentId = id;
+        myCurrentKind = RowKind::Body;
+    } else if (myCurrentKind != RowKind::Body || myCurrentId == id ||
+               std::find(ids.begin(), ids.end(), myCurrentId) == ids.end()) {
+        myCurrentId = ids.empty() ? 0 : ids.back();
+        myCurrentKind = RowKind::Body;
+    }
+    requestSelection(ids);
     if (!(mods & Qt::ShiftModifier)) myAnchorRowId = id;
 }
 
@@ -2259,8 +2298,17 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
             // selection, so a right
             // press selects its row first - unless the row is already part of
             // the selection, which a multi-row menu gesture must keep.
-            if (!rowInSelection(rowId, kind))
+            if (!rowInSelection(rowId, kind)) {
                 activateRow(rowId, kind, Qt::NoModifier);
+            } else {
+                // Already selected, so it can be the keys' row without
+                // separating focus from the selection.
+                myCurrentId = rowId;
+                myCurrentKind = kind;
+            }
+            // The keys follow a right click too, so they work straight after
+            // the menu's Move down.
+            setFocus(Qt::MouseFocusReason);
             return true;
         }
         if (mouse->button() != Qt::LeftButton) return true;

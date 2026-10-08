@@ -1576,9 +1576,12 @@ void MainWindow::buildActions()
                                  "A folder is organisation only - it changes no geometry."));
     connect(myGroupAction, &QAction::triggered, this, &MainWindow::onGroupSelection);
 
-    myUngroupAction = new QAction(tr("&Ungroup"), this);
+    // Never "group" for a folder (the Items drawer spec's vocabulary rule):
+    // the words say what happens to the folder and to the wood in it, and the
+    // drawer's own row menu says the same thing in sentence case.
+    myUngroupAction = new QAction(tr("&Remove Folder, Keep Contents"), this);
     myUngroupAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
-    myUngroupAction->setToolTip(tr("Dissolve the folder these bodies are in (Ctrl+Shift+G)\n"
+    myUngroupAction->setToolTip(tr("Remove the folder these bodies are in (Ctrl+Shift+G)\n"
                                    "Everything inside moves up one level - nothing is "
                                    "deleted."));
     connect(myUngroupAction, &QAction::triggered, this, &MainWindow::onUngroupSelection);
@@ -5966,6 +5969,9 @@ void MainWindow::onGroupActivated(int groupId)
 void MainWindow::onGroupRenameCommitted(int groupId, QString newName)
 {
     if (!myDocument.groupExists(groupId)) return;
+    // The same name back is not a change: no checkpoint, no Note. Enter on an
+    // untouched rename field is how a rename is closed without editing it.
+    if (newName.trimmed() == QString::fromStdString(myDocument.groupNameOf(groupId))) return;
     checkpointDocument();
     myDocument.setGroupName(groupId, newName.trimmed().toStdString());
     updateActions();
@@ -6008,6 +6014,9 @@ void MainWindow::onItemRenameCommitted(int id, bool isOutline, QString newName)
     // checkpoint is never pushed for a mutation that was always going to
     // refuse, which a check-after-the-fact could not promise.
     if (!(isOutline ? myDocument.containsOutline(id) : myDocument.contains(id))) return;
+    // The same name back is not a change - onGroupRenameCommitted()'s rule.
+    const std::string current = isOutline ? myDocument.outlineNameOf(id) : myDocument.nameOf(id);
+    if (newName.trimmed() == QString::fromStdString(current)) return;
 
     checkpointDocument();
     myDocument.setItemName(id, newName.trimmed().toStdString());
