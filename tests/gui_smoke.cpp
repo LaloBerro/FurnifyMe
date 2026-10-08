@@ -805,7 +805,14 @@ void skipByEnvironment(int checks, const QString& why)
 // digit, against the binary this tree ships. The floor is their SUM, 6298 -
 // the number the end-of-run comparison actually reads (checks + skipped) -
 // where the step above wrote the checks alone and so sat one below it.
-constexpr int kCheckFloor = 6298;
+//
+// RE-RATCHETED (items-drawer final review fix wave, RF1-RF5 and M1-M6): the
+// row menu naming its folder, no reorder while filtered, renames on screen,
+// the destructor ending a live drag, the filter forgotten on a swap, Ctrl+D
+// keeping a folder's order, and C4's library guard made structural. TWO
+// consecutive unfiltered runs on one binary measured 6323 checks + 1
+// environment skip, agreeing to the digit; the floor is their sum, 6324.
+constexpr int kCheckFloor = 6324;
 
 void check(bool condition, const QString& what)
 {

@@ -183,9 +183,9 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 6298, measured twice on the tree that carries it.** Two consecutive
-unfiltered runs measured **6297 checks + 1 environment skip**, agreeing to the digit, against
-the binary this tree ships. The one environment skip is the RayTracing floor-blend
+**`kCheckFloor` is 6324, measured twice on the tree that carries it.** Two consecutive
+unfiltered runs measured **6323 checks + 1 environment skip**, agreeing to the digit, against
+one binary. The one environment skip is the RayTracing floor-blend
 measurement, which does not apply when PathTracing is the session's tier. The floor is the
 SUM, because the end-of-run comparison reads checks plus skips: the step before wrote the
 checks alone (5927 against a measured 5927 + 1) and so sat one below what it was guarding.
@@ -194,8 +194,9 @@ The history, since each step was itself a measured pair: **4782** at the improve
 **4873** after the boolean rework's block and repairs, **4914** after the UI-review branch's
 alignment sweep and folder-duplicate block, **5278** after the scene editor and its snapping
 phase, **5374** after the board sweep that worked every open card to a close, **5927**
-after the review-fixes branch worked the 2026-10 whole-app review's 26 cards, and **6298**
-after the items-drawer branch (T-063). The floor
+after the review-fixes branch worked the 2026-10 whole-app review's 26 cards, **6298**
+after the items-drawer branch (T-063), and **6324** after that branch's final-review fix wave
+(RF1-RF5, M1-M6). The floor
 has never been computed from a predicted delta at any of those steps, which is the whole
 point of the paragraph below.
 
@@ -2644,16 +2645,48 @@ pick in the viewport that finds its row, and a long list you can filter and walk
   ring around a folder row with no fill change (a fill would read as selection), or the title
   lit. The ghost is a viewport sibling rasterised once per drag in three variants, under the
   overlay paint-budget rule. Escape is claimed only while a drag is live, and a release
-  outside the card cancels. While a filter is active only into-folder drops are offered,
-  since a reorder in a filtered list would land beside rows the user cannot see.
+  outside the card cancels. **While a filter is active no route reorders** (ruling RF3): only
+  into-folder drops are offered, the row menu's Move up / Move down are disabled with the
+  reason as their tooltip, and Alt+Up/Down takes no checkpoint and puts "Clear the filter to
+  move rows up or down — it is hiding where they would land" in the status bar's left
+  channel — one sentence, `ItemMoveText::filteredReorderRefusal()`. A step among siblings
+  counts siblings the filter hides, so it would land beside rows the user cannot see.
+  Alt+Left stays live: "just after its folder" is a place on screen, the folder row being
+  shown as the row's ancestor.
 - **A drag whose release never comes must still put everything back** (ruling R10a). A lost
   release left four things standing app-wide — the closed-hand override cursor, the ghost,
   the Escape claim and the right channel's line — so a `hideEvent` (Close furniture hides
   the window and every child with it), a left press anywhere outside the rows, the
   application going inactive, and the destructor each end the drag; and a fresh press first
   cancels any stale drag before arming, so a lost release cannot turn the next click into a
-  move. A right press selects its row unless the row is already in the selection, so the row
-  menu acts on what was right-clicked.
+  move. And a window destroyed mid-drag (Alt+F4, the close accepted, the app quitting) ends
+  the drag in `~MainWindow()`, under a `QSignalBlocker`, while the document is still alive —
+  left to member order, `~QWidget`'s hide reached `ItemsPanel::hideEvent()` after the
+  `DocumentModel` was gone and announced the drag line into the half-destroyed window (M1).
+- **The row menu acts on what was right-clicked, and each entry carries it** (rulings RF1,
+  RF2). A right press selects its row unless the row is already in the selection — but a
+  folder row's press selects the folder's BODIES, and their shared folder can be a different
+  folder or none, so reading the selection back was not enough. **Remove folder, keep
+  contents** carries the folder it names (`removeFolderRequested(id)`: a folder row's own id,
+  a body row's own folder) into `MainWindow::removeFolderKeepContents()`, the one handler the
+  Model menu's Ctrl+Shift+G also ends in with the selection's shared folder; it is enabled
+  exactly when that folder exists, an empty one included, and its Note names it ("Removed
+  folder Carcass — contents kept"). **New folder with these** over a folder row WRAPS that
+  folder (`wrapFolderRequested(id)`): a new folder in its place — same parent, same position,
+  writing a stored order if the parent had none, since a folder that jumped to the end of its
+  parent's folders would read as a different row — holding it whole, subfolders and all, in
+  one checkpoint, with the rename opened over the new row. Over an outline row it is disabled,
+  as Remove folder already was (R12c). Both folder-row entries read one pushed flag,
+  `setFolderEditsAllowed()`, decided in `updateActions()` with the Model entries' own terms.
+- **A new folder lands where its rows were, and a rename is never typed blind** (RF4). New
+  Folder with These puts the folder in front of the first of the parent's children that is or
+  holds a filed body, when that parent has a stored order — the end of a long reordered parent
+  was rows away from what went into it; with no stored order the automatic order stands, the
+  `placeAfter()` rule. Every inline rename in the drawer scrolls its row into view first.
+  Ctrl+D on a folder copies a stored order into each clone too, one move per child, since a
+  single `moveItems()` puts what it carries in the list's current order (M5). A furniture swap
+  clears the filter — `forgetFurniture()` from `openFurniture()` and `showInitScreen()`, never
+  `resyncView()`, which undo and redo go through (M2).
 - **Reveal** writes the picked body's ancestors into `myExpanded`, so they stay open, and
   scrolls its row into view; a pick the filter hides says so at the card foot beside a Clear
   filter control rather than failing silently. A partly selected folder reads `2/5` in
@@ -2662,8 +2695,8 @@ pick in the viewport that finds its row, and a long list you can filter and walk
   restores the user's own folds; a held-open folder's twisty is inert and says why, because a
   click there would otherwise write a fold the user cannot see. Matches are highlighted in
   rich text with the user's name escaped. The field claims letters and Escape back from the
-  shortcut map, and Escape in an EMPTY field lets focus go rather than swallowing the key that
-  cancels a sketch.
+  shortcut map, and Escape in an EMPTY field hands focus back to the list (the nearest
+  click-focus ancestor) rather than swallowing the key that cancels a sketch.
 - **The keys: the list is `Qt::ClickFocus`, focus IS selection, and no ring is painted** —
   the selection fill is the focus cue, so the two can never separate. Up/Down/Shift, Left and
   Right to fold and step, Home/End, F2, Alt+Up/Down within a parent and Alt+Left out of a
@@ -2695,9 +2728,16 @@ the 122 boards the spec names; its scene does, five pieces of four furniture. So
 block copies the library file by file — the source is only ever opened by `QFile::copy()` —
 composes the largest scene's pieces into one furniture in the copy, derives the filter word
 from that room rather than from today's board names, and falls back to a 122-body stand-in,
-printing which of its four reasons applied, when the room cannot express what C4 checks. The
-real library's file count, size and newest time are snapshotted before and after and must
-not move. The block also writes eleven composited captures, one per state the spec names, so
+printing which of its four reasons applied, when the room cannot express what C4 checks.
+**That the real library is only read is held structurally, not by a snapshot** (RF5):
+`copyLibraryTree()` is the only code that touches it — QDir, QDirIterator and `QFile::copy()`,
+refusing when the copy and the library overlap either way — and the block checks that the two
+are disjoint and that every `FurnitureStore` the composition opened (read back off
+`rootPath()`) stands on the copy. The before/after snapshot of its file count, size and
+newest time is still taken and printed, but it measures the MACHINE: the author's own running
+FurnifyMe autosaving or OneDrive syncing moves it with no help from the suite, so a moved
+snapshot is a `skipByEnvironment()` naming what moved, and a still one a check — one count
+either way, so the floor cannot tell them apart. The block also writes eleven composited captures, one per state the spec names, so
 the drawer is looked at and not only driven. **Measured** at 130 rows: one filter keystroke
 and one drag-target change each under the 16 ms frame budget (`[items-cost]` lines). The
 keystroke first went red only in a FULL run — 16.35 ms against about 9 filtered — because the
