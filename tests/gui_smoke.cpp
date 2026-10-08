@@ -42,6 +42,7 @@
 #include "GridRenderer.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
+#include "DropIndicator.h"
 #include "ItemsFilterField.h"
 #include "ItemsPanel.h"
 #include "ItemMoveText.h"
@@ -1011,6 +1012,7 @@ constexpr BlockInfo kBlocks[] = {
     { "every-move-in-the-drawer-reports", false, true },
     { "the-drawer-filters-by-name", false, true },
     { "a-viewport-pick-reveals-its-row", false, true },
+    { "a-drag-shows-one-target-and-lands-there", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -4072,6 +4074,390 @@ void viewportPickRevealsBlock()
     settle(50);
     check(!drawer->filterActive() && drawer->scrollArea()->verticalScrollBar()->value() == 0,
           "reveal: Clear filter after a deselect clears the field and does not scroll to the old pick");
+    probe.close();
+}
+
+// A point in the DRAWER's coordinates, `y` pixels down row `id` and a third
+// of the way across it - over the name, never over a button.
+QPoint drawerRowPixel(ItemsPanel* drawer, int id, int y)
+{
+    const int row = drawerRowOf(drawer, id);
+    QWidget* w = row >= 0 ? drawer->rowWidgetAt(row) : nullptr;
+    return w ? w->mapTo(drawer, QPoint(w->width() / 3, y)) : QPoint(-1, -1);
+}
+
+int drawerRowHeight(ItemsPanel* drawer, int id)
+{
+    const int row = drawerRowOf(drawer, id);
+    QWidget* w = row >= 0 ? drawer->rowWidgetAt(row) : nullptr;
+    return w ? w->height() : 0;
+}
+
+// The live gesture the way Qt's implicit grab delivers it: a press on row
+// `fromId`, then moves and a release, every event sent to the PRESSED row
+// widget at positions given in the drawer's own coordinates. Never QDrag,
+// never OS input.
+class DrawerDrag {
+public:
+    DrawerDrag(ItemsPanel* drawer, int fromId, Qt::KeyboardModifiers mods = Qt::NoModifier)
+        : myDrawer(drawer), myMods(mods)
+    {
+        const int row = drawerRowOf(drawer, fromId);
+        myRow = row >= 0 ? drawer->rowWidgetAt(row) : nullptr;
+        if (!myRow) return;
+        myAt = drawerRowPixel(drawer, fromId, myRow->height() / 2);
+        send(QEvent::MouseButtonPress, myAt, Qt::LeftButton);
+    }
+    QWidget* row() const { return myRow; }
+    QPoint at() const { return myAt; }
+    // Travels from where the hand is to `to` in `steps` moves.
+    void moveTo(const QPoint& to, int steps = 4)
+    {
+        const QPoint from = myAt;
+        for (int i = 1; i <= steps; ++i) send(QEvent::MouseMove, from + (to - from) * i / steps, Qt::LeftButton);
+        myAt = to;
+        settle(30);
+    }
+    // One move and NO settle: what the drawer does synchronously with the
+    // event - what a per-move cost budget has to time.
+    void moveOnce(const QPoint& to)
+    {
+        send(QEvent::MouseMove, to, Qt::LeftButton);
+        myAt = to;
+    }
+    void release()
+    {
+        send(QEvent::MouseButtonRelease, myAt, Qt::NoButton);
+        settle(150);
+    }
+
+private:
+    void send(QEvent::Type type, const QPoint& drawerPos, Qt::MouseButtons buttons)
+    {
+        if (!myRow) return;
+        const QPoint local = myRow->mapFrom(myDrawer, drawerPos);
+        QMouseEvent event(type, QPointF(local), QPointF(myRow->mapToGlobal(local)),
+                          type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton, buttons, myMods);
+        QCoreApplication::sendEvent(myRow, &event);
+    }
+    ItemsPanel* myDrawer = nullptr;
+    QPointer<QWidget> myRow;
+    QPoint myAt;
+    Qt::KeyboardModifiers myMods;
+};
+
+// Exact-token pixels inside the drop indicator, rendered 1:1 with the card.
+int indicatorTokenPixels(ItemsPanel* drawer, const QColor& token)
+{
+    DropIndicator* indicator = drawer->dropIndicator();
+    if (!indicator || !indicator->isVisible()) return 0;
+    const QImage shot = renderExact(drawer);
+    const QRect area(indicator->mapTo(drawer, QPoint(0, 0)), indicator->size());
+    int count = 0;
+    const QRect clipped = area.intersected(shot.rect());
+    for (int y = clipped.top(); y <= clipped.bottom(); ++y)
+        for (int x = clipped.left(); x <= clipped.right(); ++x)
+            if (QColor(shot.pixel(x, y)) == token) ++count;
+    return count;
+}
+
+void dragShowsOneTargetBlock()
+{
+    RequiredTempDir dir;
+    QString id;
+    QString large;
+    {
+        FurnitureStore store(dir.path());
+        id = seedCabinet(store);
+        large = seedLargeFurniture(store, 122);
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    const bool opened = openWithDrawer(probe, id);
+    check(opened, "drag: the cabinet opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    ToastHost* toasts = probe.findChild<ToastHost*>();
+    const DocumentModel& doc = probe.document();
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int drawerFolder = idNamed(doc, QStringLiteral("Drawer"));
+    const int doors = idNamed(doc, QStringLiteral("Doors"));
+    const int side = idNamed(doc, QStringLiteral("Side left"));
+    const int sideRight = idNamed(doc, QStringLiteral("Side right"));
+    const int top = idNamed(doc, QStringLiteral("Top"));
+    const int doorLeft = idNamed(doc, QStringLiteral("Door left"));
+    const int shelf = idNamed(doc, QStringLiteral("Shelf"));
+    const int back = idNamed(doc, QStringLiteral("Back"));
+    drawer->setGroupExpanded(carcass, true);
+    drawer->setGroupExpanded(doors, true);
+    settle(100);
+    DropIndicator* indicator = drawer->dropIndicator();
+    check(indicator != nullptr && !indicator->isVisible() && !drawer->titleLit(),
+          "drag: at rest no indicator is showing");
+    if (!indicator) {
+        probe.close();
+        return;
+    }
+    const auto shown = [&] {
+        return (indicator->isVisible() ? 1 : 0) + (drawer->titleLit() ? 1 : 0);
+    };
+
+    // SELECT ON RELEASE (the graft from W).
+    probe.view()->setSelectedSolids({back});   // SEAM: the subject is the drawer's press
+    settle(80);
+    {
+        DrawerDrag click(drawer, shelf);
+        check(probe.view()->selectedSolidIds() == std::vector<int>{back},
+              "drag: a press alone does not change the selection");
+        click.moveTo(click.at() + QPoint(0, 3), 1);
+        check(!drawer->dragActive(), "drag: 3 px of travel is still a click, not a drag");
+        click.release();
+        check(probe.view()->selectedSolidIds() == std::vector<int>{shelf},
+              "drag: the release of a click selects the row");
+    }
+
+    // The insertion line, between rows, inside the target parent.
+    probe.view()->setSelectedSolids({back});
+    settle(80);
+    int lineLeftDepthOne = -1;
+    int lineLeftDepthZero = -1;
+    {
+        DrawerDrag drag(drawer, shelf);
+        drag.moveTo(drawerRowPixel(drawer, top, 2));
+        check(drawer->dragActive(), "drag: past 6 px the press becomes a drag");
+        check(drawer->dropKind() == ItemsPanel::DropKind::Line && drawer->dropParent() == carcass &&
+                  drawer->dropBeforeId() == top,
+              "drag: over Top's upper half the target is the line above Top, inside Carcass");
+        check(shown() == 1 && indicator->shape() == DropIndicator::Shape::Line,
+              "drag: exactly one indicator is visible - the insertion line");
+        QWidget* topRow = drawer->rowWidgetAt(drawerRowOf(drawer, top));
+        QWidget* aboveRow = drawer->rowWidgetAt(drawerRowOf(drawer, top) - 1);
+        const QRect mark(indicator->mapTo(drawer, QPoint(0, 0)), indicator->size());
+        const int lineY = mark.center().y();
+        const int gapTop = aboveRow ? aboveRow->mapTo(drawer, QPoint(0, aboveRow->height())).y() : -1;
+        const int gapBottom = topRow ? topRow->mapTo(drawer, QPoint(0, 0)).y() : -1;
+        check(lineY >= gapTop - 2 && lineY <= gapBottom + 2,
+              QStringLiteral("drag: the line lies between Side right and Top, mapped into the card "
+                             "(line y %1, gap %2..%3)").arg(lineY).arg(gapTop).arg(gapBottom));
+        lineLeftDepthOne = mark.left();
+        const int accentInk = indicatorTokenPixels(drawer, Theme::accentText());
+        const int dangerInk = indicatorTokenPixels(drawer, Theme::dangerText());
+        check(accentInk > 0 && dangerInk == 0,
+              QStringLiteral("drag: the line is painted in accentText (%1 accent, %2 danger pixels)")
+                  .arg(accentInk).arg(dangerInk));
+        check(contrastRatio(Theme::accentText(), Theme::panel()) >= 3.0,
+              QStringLiteral("drag: accentText is 3:1 or better on the panel (%1:1)")
+                  .arg(contrastRatio(Theme::accentText(), Theme::panel()), 0, 'f', 2));
+        drag.moveTo(drawerRowPixel(drawer, back, 2));
+        lineLeftDepthZero = QRect(indicator->mapTo(drawer, QPoint(0, 0)), indicator->size()).left();
+        check(lineLeftDepthOne - lineLeftDepthZero == 12,
+              QStringLiteral("drag: the line indents to the target parent's depth - 12 px per level "
+                             "(%1 against %2)").arg(lineLeftDepthOne).arg(lineLeftDepthZero));
+        drag.moveTo(drawerRowPixel(drawer, top, 2));
+        drag.release();
+    }
+    const std::vector<int> inCarcass = doc.orderedChildren(carcass);
+    const auto shelfAt = std::find(inCarcass.begin(), inCarcass.end(), shelf);
+    check(doc.groupOf(shelf) == carcass && shelfAt != inCarcass.end() && shelfAt + 1 != inCarcass.end() &&
+              *(shelfAt + 1) == top,
+          QStringLiteral("drag: the drop put Shelf exactly there - right above Top (%1)")
+              .arg(namesInOrder(doc, carcass).join(QStringLiteral(", "))));
+    check(probe.view()->selectedSolidIds() == std::vector<int>{back},
+          "drag: a drag never changed the selection");
+    const QString movedNote = toasts ? toasts->currentText() : QString();
+    check(movedNote == QStringLiteral("Moved Shelf above Top"),
+          QStringLiteral("drag: and it reported itself (\"%1\")").arg(movedNote));
+    const QStringList movedOrder = namesInOrder(doc, carcass);
+    trigger(probe, QStringLiteral("Undo"));
+    settle(150);
+    check(doc.groupOf(shelf) == 0, "drag: one Undo restores the old order");
+    trigger(probe, QStringLiteral("Redo"));
+    settle(150);
+    const bool saved = probe.saveCurrentFurniture();
+    check(saved, "drag: the reordered furniture saves");
+    const bool reopened = probe.openFurniture(id);
+    check(reopened, "drag: and reopens");
+    settle(250);
+    const QStringList reloadedOrder =
+        namesInOrder(probe.document(), idNamed(probe.document(), QStringLiteral("Carcass")));
+    check(reloadedOrder == movedOrder,
+          QStringLiteral("drag: the new order survived a save and a reload (%1)")
+              .arg(reloadedOrder.join(QStringLiteral(", "))));
+
+    // Re-read ids after the reload.
+    const int carcass2 = idNamed(probe.document(), QStringLiteral("Carcass"));
+    const int doors2 = idNamed(probe.document(), QStringLiteral("Doors"));
+    const int drawer2 = idNamed(probe.document(), QStringLiteral("Drawer"));
+    const int side2 = idNamed(probe.document(), QStringLiteral("Side left"));
+    const int sideRight2 = idNamed(probe.document(), QStringLiteral("Side right"));
+    const int doorLeft2 = idNamed(probe.document(), QStringLiteral("Door left"));
+    const int back2 = idNamed(probe.document(), QStringLiteral("Back"));
+    drawer->setGroupExpanded(carcass2, true);
+    drawer->setGroupExpanded(doors2, true);
+    settle(100);
+    (void)side; (void)sideRight; (void)top; (void)doorLeft; (void)drawerFolder; (void)carcass; (void)doors;
+
+    // Into a folder, the ring, and the hysteresis at its band edge.
+    const int doorsHeight = drawerRowHeight(drawer, doors2);
+    check(doorsHeight >= 20, QStringLiteral("drag: a folder row is tall enough to hold three bands "
+                                            "(%1 px)").arg(doorsHeight));
+    {
+        DrawerDrag drag(drawer, back2);
+        drag.moveTo(drawerRowPixel(drawer, doors2, doorsHeight / 2));
+        check(drawer->dropKind() == ItemsPanel::DropKind::Into && drawer->dropParent() == doors2,
+              "drag: the middle of a folder row is the into-folder target");
+        QWidget* doorsRow = drawer->rowWidgetAt(drawerRowOf(drawer, doors2));
+        const QRect ring(indicator->mapTo(drawer, QPoint(0, 0)), indicator->size());
+        const QRect rowRect = doorsRow ? QRect(doorsRow->mapTo(drawer, QPoint(0, 0)), doorsRow->size())
+                                       : QRect();
+        check(shown() == 1 && indicator->shape() == DropIndicator::Shape::Ring && doorsRow &&
+                  ring.contains(rowRect),
+              "drag: exactly one indicator - a ring around the Doors row");
+        check(doorsRow && !doorsRow->styleSheet().contains(Theme::chipActive().name()) &&
+                  !doorsRow->styleSheet().contains(Theme::chipHover().name()),
+              "drag: the into-folder ring changes no fill, so it never reads as selection");
+        drag.moveTo(drawerRowPixel(drawer, doors2, doorsHeight / 4 - 2), 1);
+        check(drawer->dropKind() == ItemsPanel::DropKind::Into,
+              "drag: the hand resting just past the into band's edge keeps Into (hysteresis)");
+        drag.moveTo(drawerRowPixel(drawer, doors2, std::max(0, doorsHeight / 4 - 6)), 1);
+        check(drawer->dropKind() == ItemsPanel::DropKind::Line && drawer->dropBeforeId() == doors2,
+              "drag: a few pixels further it becomes the line above Doors");
+        drag.moveTo(drawerRowPixel(drawer, doors2, doorsHeight / 2), 2);
+        drag.release();
+    }
+    check(probe.document().groupOf(back2) == doors2, "drag: the into-folder drop put Back in Doors");
+
+    // The bottom of an open folder's row, a body row's lower half, the title.
+    const int carcassHeight = drawerRowHeight(drawer, carcass2);
+    const int sideHeight = drawerRowHeight(drawer, side2);
+    {
+        DrawerDrag drag(drawer, doorLeft2);
+        drag.moveTo(drawerRowPixel(drawer, carcass2, carcassHeight - 2));
+        const std::vector<int> children = probe.document().orderedChildren(carcass2);
+        check(drawer->dropKind() == ItemsPanel::DropKind::Line && drawer->dropParent() == carcass2 &&
+                  !children.empty() && drawer->dropBeforeId() == children.front(),
+              "drag: the bottom of an open folder's row makes the item its first child");
+        drag.moveTo(drawerRowPixel(drawer, side2, sideHeight - 3));
+        check(drawer->dropKind() == ItemsPanel::DropKind::Line && drawer->dropParent() == carcass2 &&
+                  drawer->dropBeforeId() == sideRight2,
+              "drag: a body row's lower half is the line below it - never into its folder");
+        drag.moveTo(drawer->titleRowRect().center());
+        check(drawer->dropKind() == ItemsPanel::DropKind::TopLevelEnd && drawer->titleLit() &&
+                  !indicator->isVisible() && shown() == 1,
+              "drag: over the title row the target is the end of the top level - the title lit and "
+              "nothing else");
+        drag.release();
+    }
+    const std::vector<int> root = probe.document().orderedChildren(0);
+    check(probe.document().groupOf(doorLeft2) == 0 && !root.empty() && root.back() == doorLeft2,
+          "drag: a drop on the title row lands at the very end of the top level");
+    check(!drawer->titleLit(), "drag: the title goes back to rest once the drop is made");
+
+    // The refusal: a folder over a folder it holds.
+    const int drawerHeight = drawerRowHeight(drawer, drawer2);
+    {
+        DrawerDrag drag(drawer, carcass2);
+        drag.moveTo(drawerRowPixel(drawer, drawer2, drawerHeight / 2));
+        check(drawer->dropKind() == ItemsPanel::DropKind::Into && drawer->dropRefused() &&
+                  indicator->refused(),
+              "drag: Carcass over Drawer, a folder it holds, shows the refusal");
+        const int dangerInk = indicatorTokenPixels(drawer, Theme::dangerText());
+        const int accentInk = indicatorTokenPixels(drawer, Theme::accentText());
+        check(dangerInk > 0 && accentInk == 0,
+              QStringLiteral("drag: the refused ring is painted in dangerText (%1 danger, %2 accent "
+                             "pixels)").arg(dangerInk).arg(accentInk));
+        check(contrastRatio(Theme::dangerText(), Theme::panel()) >= 3.0,
+              QStringLiteral("drag: dangerText is 3:1 or better on the panel (%1:1)")
+                  .arg(contrastRatio(Theme::dangerText(), Theme::panel()), 0, 'f', 2));
+        const int revision = probe.document().revision();
+        drag.release();
+        const QString refusal = toasts ? toasts->currentText() : QString();
+        check(probe.document().revision() == revision &&
+                  refusal == QStringLiteral("Carcass can't go inside a folder it holds — drop it "
+                                            "beside it instead"),
+              QStringLiteral("drag: releasing on the refusal writes nothing and says why (\"%1\")")
+                  .arg(refusal));
+    }
+
+    // While filtered, only into-folder drops are offered: a reorder would
+    // land somewhere the filtered list cannot show.
+    typeInto(drawer->filterField(), QStringLiteral("Do"));   // Doors, Door right, Door left
+    const int doorRight2 = idNamed(probe.document(), QStringLiteral("Door right"));
+    {
+        DrawerDrag drag(drawer, doorLeft2);
+        drag.moveTo(drawerRowPixel(drawer, doorRight2, 2));
+        check(drawer->dragActive() && drawer->dropKind() == ItemsPanel::DropKind::None && shown() == 0,
+              "drag: filtered, a body row offers no line - nothing is shown");
+        drag.moveTo(drawer->titleRowRect().center());
+        check(drawer->dropKind() == ItemsPanel::DropKind::None && !drawer->titleLit(),
+              "drag: filtered, the title row offers no top-level end either");
+        drag.moveTo(drawerRowPixel(drawer, doors2, 2));
+        check(drawer->dropKind() == ItemsPanel::DropKind::Into && drawer->dropParent() == doors2,
+              "drag: filtered, a folder row is an into-folder target over its whole height");
+        drag.release();
+    }
+    check(probe.document().groupOf(doorLeft2) == doors2, "drag: the filtered into-folder drop lands");
+    drawer->clearFilterAction()->trigger();
+    settle(80);
+
+    // THE HAND IS READ ONLY WHERE THE LIST IS SEEN (ruling P10). A row
+    // scrolled up out of sight keeps its geometry - under the filter field,
+    // under the gap above the list - and a drop there must not land on a row
+    // nobody can see.
+    probe.resize(1100, 520);
+    const bool openedLarge = probe.openFurniture(large);
+    check(openedLarge, "drag: the 122-body cabinet opens for the scrolled list");
+    settle(250);
+    for (const DocumentModel::Group& g : probe.document().groups()) drawer->setGroupExpanded(g.id, true);
+    settle(150);
+    QScrollArea* scroll = drawer->scrollArea();
+    QScrollBar* bar = scroll ? scroll->verticalScrollBar() : nullptr;
+    check(bar && bar->maximum() > 200,
+          QStringLiteral("drag: the open list scrolls, so this is not vacuous (range %1)")
+              .arg(bar ? bar->maximum() : -1));
+    if (!bar) {
+        probe.close();
+        return;
+    }
+    bar->setValue(bar->maximum() / 2);
+    settle(80);
+    QWidget* listViewport = scroll->viewport();
+    const QRect seen(listViewport->mapTo(drawer, QPoint(0, 0)), listViewport->size());
+    QLineEdit* field = drawer->filterField();
+    const QPoint overField = field->mapTo(drawer, field->rect().center());
+    const QPoint overGap(seen.center().x(), seen.top() - 3);
+    int hiddenUnderField = 0;
+    int hiddenUnderGap = 0;
+    int pressId = 0;
+    for (int i = 0; i < drawer->rowCount(); ++i) {
+        QWidget* w = drawer->rowWidgetAt(i);
+        if (!w) continue;
+        const QRect r(w->mapTo(drawer, QPoint(0, 0)), w->size());
+        if (r.contains(overField)) hiddenUnderField = drawer->rowIdAt(i);
+        if (r.contains(overGap)) hiddenUnderGap = drawer->rowIdAt(i);
+        if (pressId == 0 && !drawer->rowIsGroupAt(i) && !drawer->rowIsOutlineAt(i) &&
+            r.top() > seen.center().y() && r.bottom() < seen.bottom())
+            pressId = drawer->rowIdAt(i);
+    }
+    check(hiddenUnderField != 0 && hiddenUnderGap != 0 && pressId != 0,
+          QStringLiteral("drag: rows scrolled out of sight lie under the filter field (%1) and the "
+                         "gap above the list (%2), and a seen body row is there to press (%3)")
+              .arg(hiddenUnderField).arg(hiddenUnderGap).arg(pressId));
+    const int revisionScrolled = probe.document().revision();
+    {
+        DrawerDrag drag(drawer, pressId);
+        drag.moveTo(drag.at() + QPoint(0, -20));
+        check(drawer->dragActive() && drawer->dropKind() != ItemsPanel::DropKind::None,
+              "drag: inside the seen list the hand finds a target - the control");
+        drag.moveTo(overField);
+        check(drawer->dropKind() == ItemsPanel::DropKind::None && shown() == 0,
+              "drag: over the filter field, the row scrolled out of sight under it is no target");
+        drag.moveTo(overGap, 1);
+        check(drawer->dropKind() == ItemsPanel::DropKind::None && shown() == 0,
+              "drag: just above the seen list, a hidden row is no target either");
+        drag.release();
+    }
+    check(probe.document().revision() == revisionScrolled && shown() == 0 && !drawer->dragActive(),
+          "drag: released over the filter field, nothing moved and nothing is left showing");
     probe.close();
 }
 
@@ -44217,6 +44603,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("every-move-in-the-drawer-reports")) everyMoveReportsBlock();
     if (blockEnabled("the-drawer-filters-by-name")) drawerFiltersByNameBlock();
     if (blockEnabled("a-viewport-pick-reveals-its-row")) viewportPickRevealsBlock();
+    if (blockEnabled("a-drag-shows-one-target-and-lands-there")) dragShowsOneTargetBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or

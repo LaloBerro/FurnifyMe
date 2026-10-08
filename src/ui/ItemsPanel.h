@@ -95,6 +95,22 @@ public:
     QString partialCountAt(int index) const;
     // The card foot that says a pick is hidden by the filter.
     QWidget* hiddenPickLine() const { return myFoot; }
+    // The drag (T-063): a custom in-process gesture, never QDrag. Read-only
+    // views of the live target, for the suite and the status line.
+    enum class DropKind { None, Line, Into, TopLevelEnd };
+    bool dragActive() const { return myDragging; }
+    DropKind dropKind() const { return myDropTarget.kind; }
+    bool dropRefused() const { return myDropTarget.refused; }
+    int dropParent() const { return myDropTarget.parent; }
+    int dropBeforeId() const { return myDropTarget.beforeId; }
+    class DropIndicator* dropIndicator() const { return myIndicator; }
+    bool titleLit() const { return myTitleLit; }
+    // The title row's band, in this card's coordinates: the drop target for
+    // "the end of the top level" (the card sizes itself to its rows, so there
+    // is almost no blank space below the last row to drop on).
+    QRect titleRowRect() const;
+    // Ends a live drag (or an armed press) without moving anything.
+    void cancelDrag();
     // A document swap: forget what the last pick left (ids restart per document).
     void resetPick();
     // A folder row's twisty, null for any other row - for the suite, which
@@ -420,24 +436,51 @@ private:
                     int parentId);
     void addGroupRow(int groupId, const QString& groupName, int depth, int parentId);
     void buildGroupRows(int groupId, int depth);
-    // The drag that moves a row into a folder. myDragId is what is being
-    // dragged (0 = nothing), myDragStart where the press landed, and
-    // myDragging only becomes true once the pointer has travelled - a press
-    // that never moves is an ordinary click and must stay one.
-    int myDragId = 0;
-    bool myDragIsGroup = false;
-    // Every row the drag is carrying. A drag that starts on a row which is
-    // part of a multiple selection carries the whole of it - which is what
-    // "grab them and insert them into a folder" means - and one that starts
-    // anywhere else carries just that row.
+    // The press that MAY become a drag. A row selects on RELEASE (the graft
+    // from W): a press that starts a drag must not change the selection, or
+    // organising the list would cancel whatever gesture is live in the
+    // viewport. myDragging only becomes true once the pointer has travelled
+    // kDragThresholdPx - a press that never moves is an ordinary click.
+    int myPressId = 0;
+    RowKind myPressKind = RowKind::Body;
+    Qt::KeyboardModifiers myPressMods = Qt::NoModifier;
+    bool myPressArmed = false;
+    // Every row the drag carries: a row already part of a multiple selection
+    // carries the selection; any other row carries itself.
     std::vector<int> myDragIds;
     QPoint myDragStart;
     bool myDragging = false;
-    // The folder row the pointer is over mid-drag, so it can be marked - 0
-    // for the root (anywhere else in the card). Read by restyleRows().
-    int myDropTarget = 0;
-    // Which folder a point in THIS panel's coordinates would drop into: a
-    // folder row answers itself, an item row answers the folder it sits in,
-    // and anything else is the root.
-    int dropTargetAt(const QPoint& pos) const;
+
+    struct DropTarget {
+        DropKind kind = DropKind::None;
+        int rowIndex = -1;          // into myRowList
+        bool lineAtBottom = false;  // the line is drawn under the row, not over it
+        int parent = 0;
+        int beforeId = 0;           // DocumentModel's: sibling, 0 = end, kIntoFolder
+        int depth = 0;              // the line's indent
+        bool refused = false;
+        bool sameSpot(const DropTarget& other) const
+        {
+            return kind == other.kind && rowIndex == other.rowIndex &&
+                   lineAtBottom == other.lineAtBottom && parent == other.parent &&
+                   beforeId == other.beforeId;
+        }
+    };
+    DropTarget myDropTarget;
+    // Geometry only - which target the point (THIS card's coordinates) is
+    // over, with the 4 px hysteresis read off myDropTarget. Only the part of
+    // the list the scroll viewport SHOWS is read (ruling P10): a row scrolled
+    // out of sight keeps its geometry under the filter field. Refusal is
+    // decided by the dry run in updateDrag().
+    DropTarget dropTargetAt(const QPoint& pos) const;
+    void showDropTarget(const DropTarget& target);
+    class DropIndicator* myIndicator = nullptr;
+    bool myTitleLit = false;
+    bool myTitleRefused = false;
+    void setTitleLit(bool lit, bool refused);
+    void styleTitle();
+    void activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods);
+    void beginDrag(const QPoint& panelPos, const QPoint& globalPos);
+    void updateDrag(const QPoint& panelPos, const QPoint& globalPos);
+    void finishDrag(bool commit);
 };

@@ -169,6 +169,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ItemsPanel.cpp
       src/ui/ItemMoveText.cpp
       src/ui/ItemsFilterField.cpp
+      src/ui/DropIndicator.cpp
       src/ui/PanelCloseButton.cpp
       src/ui/NameFurnitureCard.cpp
       src/ui/LoadingCard.cpp

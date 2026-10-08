@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "DocumentModel.h"
+#include "DropIndicator.h"
 #include "IconSet.h"
 #include "InlineRename.h"
 #include "ItemsFilterField.h"
@@ -64,6 +65,9 @@ constexpr int kIndentPx = Theme::Space::Snug;
 // and is about dragging OUT of an application; a row moving inside a 200px
 // drawer wants less.
 constexpr int kDragThresholdPx = 6;
+// How far the hand must travel past a zone's edge before the target flips
+// back - a resting hand must not flicker between "above" and "into".
+constexpr int kZoneHysteresisPx = 4;
 // What a row keeps between its own rounded background and the content inside
 // it - and therefore what the TITLE row must keep too, or the title and its
 // button do not line up with the list below (see the titleRow margins).
@@ -274,6 +278,9 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myRows->setSpacing(2);
     myRows->addStretch(1);
     myScroll->setWidget(rowHost);
+    // Where a drag will land (T-063): one mark, inside the scrolling content
+    // so it moves with the rows it points between.
+    myIndicator = new DropIndicator(rowHost);
     myOuter->addWidget(myScroll, 1);
 
     // What the filter says when it matches nothing. PLAIN text: the query in
@@ -483,6 +490,9 @@ void ItemsPanel::setVisible(bool visible)
     // the card from sizeHint() right after the Items action shows it - never
     // measures a stale list.
     if (visible) flushPendingRefresh();
+    // A drawer going away takes a live drag with it, moving nothing - a
+    // release can never reach a row that is no longer on screen.
+    else cancelDrag();
     QWidget::setVisible(visible);
 }
 
@@ -717,18 +727,7 @@ void ItemsPanel::applyTheme()
     // Restyle in place - NOT refresh(). See the header: a theme edit arrives
     // once per mouse move inside the colour picker, and rebuilding every row
     // per frame is work that changes nothing about which bodies exist.
-    if (myTitle) {
-        // A per-widget stylesheet wins over the app-wide one regardless of
-        // selector specificity, so the size sticks reliably here - this is a
-        // panel title, Theme::titleFont(). `background: transparent` is not
-        // decoration: the app-wide sheet paints every QWidget chrome-black,
-        // and a label that stamps its own rectangle over this card would be a
-        // black bar across it.
-        myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                              "font-weight: 600; font-size: %2pt;")
-                                   .arg(Theme::textMuted().name())
-                                   .arg(Theme::titleFont().pointSizeF()));
-    }
+    styleTitle();
 
     // The chevrons are pixels rasterised from text(): re-rasterised from the
     // new tokens and handed to every twisty.
@@ -797,6 +796,39 @@ void ItemsPanel::applyTheme()
     adjustSize();
 
     if (myView) applySelection(myView->selectedSolidIds());
+}
+
+void ItemsPanel::styleTitle()
+{
+    if (!myTitle) return;
+    // Lit in accentText while it is the drop target for the end of the top
+    // level; textMuted at rest. A per-widget stylesheet wins over the
+    // app-wide one regardless of selector specificity, so the size sticks
+    // reliably here - this is a panel title, Theme::titleFont().
+    // `background: transparent` is not decoration: the app-wide sheet paints
+    // every QWidget chrome-black, and a label that stamps its own rectangle
+    // over this card would be a black bar across it.
+    const QColor ink = !myTitleLit     ? Theme::textMuted()
+                       : myTitleRefused ? Theme::dangerText()
+                                        : Theme::accentText();
+    myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                          "font-weight: 600; font-size: %2pt;")
+                               .arg(ink.name())
+                               .arg(Theme::titleFont().pointSizeF()));
+}
+
+void ItemsPanel::setTitleLit(bool lit, bool refused)
+{
+    if (lit == myTitleLit && refused == myTitleRefused) return;
+    myTitleLit = lit;
+    myTitleRefused = refused;
+    styleTitle();
+}
+
+QRect ItemsPanel::titleRowRect() const
+{
+    if (!myTitle) return QRect();
+    return QRect(0, 0, width(), myTitle->geometry().bottom() + myOuter->spacing() / 2 + 1);
 }
 
 int ItemsPanel::rowsHeightCap() const
@@ -1005,6 +1037,12 @@ void ItemsPanel::refresh()
     // the next are different rows.
     std::unordered_map<qint64, Row> reusable;
     for (const Row& row : myRowList) reusable.emplace(rowKey(row), row);
+    // A live drag's target names a row by its INDEX, which this rebuild
+    // renumbers: forget it (and its mark), and the next move finds it again.
+    if (myDragging) {
+        myDropTarget = DropTarget{};
+        showDropTarget(myDropTarget);
+    }
     myRowList.clear();
     myVisible.clear();
     myReusable = &reusable;
@@ -1504,190 +1542,275 @@ void ItemsPanel::showRowMenu(const QPoint& globalPos, int rowId, bool isGroupRow
     }
 }
 
-int ItemsPanel::dropTargetAt(const QPoint& pos) const
+ItemsPanel::DropTarget ItemsPanel::dropTargetAt(const QPoint& pos) const
 {
-    // VISIBLE rows only: a hidden row keeps whatever geometry it last had,
-    // and a point over where it used to be must not drop into it.
+    DropTarget target;
+    if (!myDocument || !rect().contains(pos)) return target;   // outside: cancel
+    if (titleRowRect().contains(pos)) {
+        if (filterActive()) return target;   // a filtered list hides where a reorder lands
+        target.kind = DropKind::TopLevelEnd;  // parent 0, beforeId 0: the end of the top level
+        return target;
+    }
+    // ONLY WHAT THE LIST SHOWS (ruling P10). A row scrolled out of sight keeps
+    // its geometry - up under the filter field, in the gap above the list -
+    // and a hand resting there must not land on a row nobody can see.
+    if (myScroll) {
+        const QWidget* seen = myScroll->viewport();
+        if (!QRect(seen->mapTo(this, QPoint(0, 0)), seen->size()).contains(pos)) return target;
+    }
+    const int gap = myRows->spacing();
     for (std::size_t i : myVisible) {
         const Row& row = myRowList[i];
         // Mapped, not compared: a row's own geometry() is in the scrolling
-        // host's coordinates now, and `pos` is in this card's - the two agree
-        // only while the list is scrolled to the top, which is exactly the
-        // case a test would pass and a real drag would not.
-        if (!row.widget || !row.widget->rect().contains(row.widget->mapFrom(
-                               const_cast<ItemsPanel*>(this), pos)))
-            continue;
-        // A folder row takes the drop itself; an item row hands it to the
-        // folder that item is in, so dropping BESIDE something means "in
-        // there with it".
-        if (row.isGroup) return row.id;
-        return myDocument ? myDocument->groupOf(row.id) : 0;
+        // host's coordinates, and `pos` is in this card's.
+        const QPoint local = row.widget->mapFrom(this, pos);
+        QRect band = row.widget->rect();
+        band.setTop(band.top() - gap);   // the gap above a row belongs to it
+        if (!band.contains(local)) continue;
+        const int h = row.widget->height();
+        const int y = local.y();
+        const bool sameRow = myDropTarget.rowIndex == static_cast<int>(i);
+        target.rowIndex = static_cast<int>(i);
+        // While filtered, only into-folder drops are offered.
+        if (filterActive()) {
+            if (!row.isGroup) return DropTarget{};
+            target.kind = DropKind::Into;
+            target.parent = row.id;
+            target.beforeId = DocumentModel::kIntoFolder;
+            return target;
+        }
+        enum class Zone { Above, Into, Below };
+        Zone zone = Zone::Above;
+        if (row.isGroup) {
+            // 25 / 50 / 25, the into band dominant (WCAG 2.5.8), each edge
+            // pushed 4 px in favour of the zone the hand is already in.
+            int upper = h / 4;
+            int lower = h - h / 4;
+            if (sameRow && myDropTarget.kind == DropKind::Into) {
+                upper -= kZoneHysteresisPx;
+                lower += kZoneHysteresisPx;
+            } else if (sameRow && myDropTarget.kind == DropKind::Line) {
+                if (myDropTarget.lineAtBottom) lower -= kZoneHysteresisPx;
+                else upper += kZoneHysteresisPx;
+            }
+            zone = y < upper ? Zone::Above : (y < lower ? Zone::Into : Zone::Below);
+        } else {
+            // A body or an outline: halves. The old hidden rule - a drop on
+            // an item files into that item's folder - is retired.
+            int middle = h / 2;
+            if (sameRow && myDropTarget.kind == DropKind::Line)
+                middle += myDropTarget.lineAtBottom ? -kZoneHysteresisPx : kZoneHysteresisPx;
+            zone = y < middle ? Zone::Above : Zone::Below;
+        }
+        if (zone == Zone::Into) {
+            target.kind = DropKind::Into;
+            target.parent = row.id;
+            target.beforeId = DocumentModel::kIntoFolder;
+            return target;
+        }
+        target.kind = DropKind::Line;
+        if (zone == Zone::Above) {
+            target.parent = row.parentId;
+            target.beforeId = row.id;
+            target.depth = row.depth;
+            return target;
+        }
+        target.lineAtBottom = true;
+        if (row.isGroup && isGroupExpanded(row.id)) {
+            // Below an OPEN folder's row: the item becomes its first child.
+            const std::vector<int> children = myDocument->orderedChildren(row.id);
+            if (!children.empty()) {
+                target.parent = row.id;
+                target.beforeId = children.front();
+                target.depth = row.depth + 1;
+                return target;
+            }
+        }
+        const std::vector<int> siblings = myDocument->orderedChildren(row.parentId);
+        const auto at = std::find(siblings.begin(), siblings.end(), row.id);
+        target.parent = row.parentId;
+        target.beforeId = (at != siblings.end() && at + 1 != siblings.end()) ? *(at + 1) : 0;
+        target.depth = row.depth;
+        return target;
     }
-    return 0;   // the card's own background is the document's root
+    return target;   // the card's blank space: no target
+}
+
+void ItemsPanel::showDropTarget(const DropTarget& target)
+{
+    // EXACTLY ONE indicator: the lit title, or the line, or the ring.
+    setTitleLit(target.kind == DropKind::TopLevelEnd, target.refused);
+    if (!myIndicator) return;
+    if (target.kind == DropKind::Line && target.rowIndex >= 0) {
+        const QRect geo = myRowList[static_cast<std::size_t>(target.rowIndex)].widget->geometry();
+        const int gap = myRows->spacing();
+        const int y = target.lineAtBottom ? geo.bottom() + 1 + gap / 2 : geo.top() - (gap + 1) / 2;
+        const int left = kRowInset + target.depth * kIndentPx;
+        myIndicator->showLine(y, left, geo.right() - kRowInset, target.refused);
+    } else if (target.kind == DropKind::Into && target.rowIndex >= 0) {
+        myIndicator->showRing(myRowList[static_cast<std::size_t>(target.rowIndex)].widget->geometry(),
+                              target.refused);
+    } else {
+        myIndicator->clear();
+    }
+}
+
+void ItemsPanel::activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods)
+{
+    if (kind == RowKind::Folder) {
+        // A folder row selects the BODIES under it, and Ctrl ADDS them to
+        // what is already selected - which is how two folders, or a folder
+        // and a loose board, end up under one gizmo. Computed here because
+        // this panel is what knows the tree.
+        std::vector<int> ids = myDocument ? myDocument->bodiesUnderGroup(id) : std::vector<int>();
+        if (mods & Qt::ControlModifier) {
+            std::vector<int> merged = mySelectedIds;
+            for (int body : ids)
+                if (std::find(merged.begin(), merged.end(), body) == merged.end()) merged.push_back(body);
+            ids.swap(merged);
+        }
+        requestSelection(ids);
+        return;
+    }
+    if (kind == RowKind::Outline) {
+        emit outlineActivated(id);
+        return;
+    }
+    requestSelection(selectionFor(id, mods));
+    if (!(mods & Qt::ShiftModifier)) myAnchorRowId = id;
+}
+
+void ItemsPanel::beginDrag(const QPoint& /*panelPos*/, const QPoint& /*globalPos*/)
+{
+    myPressArmed = false;
+    myDragging = true;
+    // A press on a row that is ALREADY part of a multiple selection carries
+    // the whole of it - "grab them and insert them into a folder" - and one
+    // anywhere else carries just that row.
+    const bool inSelection =
+        std::find(mySelectedIds.begin(), mySelectedIds.end(), myPressId) != mySelectedIds.end();
+    if (myPressKind == RowKind::Body && inSelection && mySelectedIds.size() > 1 &&
+        myPressMods == Qt::NoModifier)
+        myDragIds = mySelectedIds;
+    else
+        myDragIds = {myPressId};
+    myDropTarget = DropTarget{};
+}
+
+void ItemsPanel::updateDrag(const QPoint& panelPos, const QPoint& /*globalPos*/)
+{
+    DropTarget target = dropTargetAt(panelPos);
+    if (target.sameSpot(myDropTarget)) return;
+    // THE DRY RUN decides the refusal - the same answer the release will get.
+    if (target.kind != DropKind::None && myDocument) {
+        const DocumentModel::MoveResult dry =
+            myDocument->checkMove(myDragIds, target.parent, target.beforeId);
+        target.refused = dry.check == DocumentModel::MoveCheck::IntoItself ||
+                         dry.check == DocumentModel::MoveCheck::Unknown;
+    }
+    myDropTarget = target;
+    showDropTarget(target);
+}
+
+void ItemsPanel::finishDrag(bool commit)
+{
+    const bool wasDragging = myDragging;
+    const DropTarget target = myDropTarget;
+    const std::vector<int> carried = myDragIds;
+    myDragging = false;
+    myPressArmed = false;
+    myDragIds.clear();
+    myDropTarget = DropTarget{};
+    showDropTarget(DropTarget{});
+    // A release with no target - outside the card, or over blank space -
+    // cancels. A refused target still asks, so MainWindow's Failure says why.
+    // DocumentModel's own rules answer it (a folder into its own subtree, a
+    // row onto where it already is) - this panel carries no second copy.
+    if (commit && wasDragging && target.kind != DropKind::None)
+        emit itemsMoveRequested(carried, target.parent, target.beforeId);
+}
+
+void ItemsPanel::cancelDrag()
+{
+    if (myDragging || myPressArmed) finishDrag(/*commit=*/false);
 }
 
 bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
 {
-    auto* watchedWidget = qobject_cast<QWidget*>(watched);
+    auto* rowWidget = qobject_cast<QWidget*>(watched);
     const QVariant groupProperty = watched->property("groupId");
     const QVariant outlineProperty = watched->property("outlineId");
     const QVariant solidProperty = watched->property("solidId");
-    const bool isRow =
-        groupProperty.isValid() || outlineProperty.isValid() || solidProperty.isValid();
+    if (!rowWidget ||
+        !(groupProperty.isValid() || outlineProperty.isValid() || solidProperty.isValid()))
+        return QWidget::eventFilter(watched, event);
+    const RowKind kind = groupProperty.isValid()     ? RowKind::Folder
+                         : outlineProperty.isValid() ? RowKind::Outline
+                                                     : RowKind::Body;
+    const int rowId = groupProperty.isValid()     ? groupProperty.toInt()
+                      : outlineProperty.isValid() ? outlineProperty.toInt()
+                                                  : solidProperty.toInt();
 
-    if (event->type() == QEvent::MouseButtonPress) {
-        // The press ARMS a drag as well as activating the row - both, not one
-        // or the other. A press that never travels is an ordinary click and
-        // has to behave exactly as it did before folders existed, so the
-        // activation happens here and the move handler below only takes over
-        // once the pointer has actually gone somewhere.
-        if (isRow && watchedWidget) {
-            myDragId = groupProperty.isValid()
-                           ? groupProperty.toInt()
-                           : (outlineProperty.isValid() ? outlineProperty.toInt()
-                                                        : solidProperty.toInt());
-            myDragIsGroup = groupProperty.isValid();
-            myDragStart = watchedWidget->mapTo(this, static_cast<QMouseEvent*>(event)->position().toPoint());
-            myDragging = false;
-            myDropTarget = 0;
-        }
-        if (groupProperty.isValid()) {
-            const int groupId = groupProperty.toInt();
-            myDragIds = {groupId};
-            // A folder row selects the BODIES under it, and Ctrl ADDS them to
-            // what is already selected - which is how two folders, or a
-            // folder and a loose board, end up under one gizmo. Computed here
-            // for the same reason a body row's selection is: this panel is
-            // what knows the tree.
-            const Qt::KeyboardModifiers mods =
-                static_cast<QMouseEvent*>(event)->modifiers();
-            std::vector<int> ids =
-                myDocument ? myDocument->bodiesUnderGroup(groupId) : std::vector<int>();
-            if (mods & Qt::ControlModifier) {
-                std::vector<int> merged = mySelectedIds;
-                for (int id : ids) {
-                    if (std::find(merged.begin(), merged.end(), id) == merged.end())
-                        merged.push_back(id);
-                }
-                ids.swap(merged);
-            }
-            requestSelection(ids);
-            return true;
-        }
-        if (outlineProperty.isValid()) {
-            myDragIds = {outlineProperty.toInt()};
-            emit outlineActivated(outlineProperty.toInt());
-            return true;
-        }
-        if (solidProperty.isValid()) {
-            const int id = solidProperty.toInt();
-            const Qt::KeyboardModifiers mods =
-                static_cast<QMouseEvent*>(event)->modifiers();
-            // A press on a row that is ALREADY part of a multiple selection
-            // leaves that selection alone: it is the start of a drag carrying
-            // all of them, and replacing the selection first would throw away
-            // the very thing being dragged. A release that turns out not to
-            // have travelled falls through to the plain click below.
-            const bool inSelection =
-                std::find(mySelectedIds.begin(), mySelectedIds.end(), id) != mySelectedIds.end();
-            if (inSelection && mySelectedIds.size() > 1 && mods == Qt::NoModifier) {
-                myDragIds = mySelectedIds;
-                return true;
-            }
-            myDragIds = {id};
-            requestSelection(selectionFor(id, mods));
-            if (!(mods & Qt::ShiftModifier)) myAnchorRowId = id;
-            return true;
-        }
+    switch (event->type()) {
+    case QEvent::MouseButtonPress: {
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() != Qt::LeftButton) return true;
+        // ARMED, not acted on: the press changes nothing. A release that
+        // never travelled is a click (activateRow); one that did is a drop.
+        myPressId = rowId;
+        myPressKind = kind;
+        myPressMods = mouse->modifiers();
+        myPressArmed = true;
+        myDragStart = rowWidget->mapTo(this, mouse->position().toPoint());
+        return true;
     }
-
-    // The drag itself (improvements item 10). Qt delivers the moves to the
-    // widget the press landed on, and every row filters through here, so this
-    // sees the whole gesture without a mouse grab of its own.
-    if (event->type() == QEvent::MouseMove && myDragId != 0 && watchedWidget) {
-        const QPoint here = watchedWidget->mapTo(this, static_cast<QMouseEvent*>(event)->position().toPoint());
-        if (!myDragging && (here - myDragStart).manhattanLength() >= kDragThresholdPx)
-            myDragging = true;
+    case QEvent::MouseMove: {
+        if (!myPressArmed && !myDragging) return true;
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        // Qt's implicit grab delivers every move to the pressed row, inside
+        // the card or out of it, which is what lets "outside" be read off
+        // this card's own rect.
+        const QPoint here = rowWidget->mapTo(this, mouse->position().toPoint());
+        if (!myDragging) {
+            if ((here - myDragStart).manhattanLength() < kDragThresholdPx) return true;
+            beginDrag(here, mouse->globalPosition().toPoint());
+        }
+        updateDrag(here, mouse->globalPosition().toPoint());
+        return true;
+    }
+    case QEvent::MouseButtonRelease: {
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() != Qt::LeftButton) return true;
         if (myDragging) {
-            const int target = dropTargetAt(here);
-            if (target != myDropTarget) {
-                myDropTarget = target;
-                restyleRows();   // the folder under the pointer is marked
-            }
-            return true;
+            updateDrag(rowWidget->mapTo(this, mouse->position().toPoint()),
+                       mouse->globalPosition().toPoint());
+            finishDrag(/*commit=*/true);
+        } else if (myPressArmed) {
+            myPressArmed = false;
+            activateRow(myPressId, myPressKind, myPressMods);
         }
-    }
-
-    if (event->type() == QEvent::MouseButtonRelease && myDragId != 0 && myDragging &&
-        watchedWidget) {
-        const QPoint here = watchedWidget->mapTo(this, static_cast<QMouseEvent*>(event)->position().toPoint());
-        const int target = dropTargetAt(here);
-        std::vector<int> dragged = myDragIds.empty() ? std::vector<int>{myDragId} : myDragIds;
-        myDragId = 0;
-        myDragIds.clear();
-        myDragging = false;
-        myDropTarget = 0;
-        restyleRows();
-        // A folder dropped into itself or into its own descendant is refused
-        // by DocumentModel::setGroupParent(), and a row dropped into the
-        // folder it is already in is a no-op there too - so this reports the
-        // move and lets the one place that owns the rule answer it, rather
-        // than carrying a second copy of the rule here.
-        emit itemsMoveRequested(dragged, target, target == 0 ? 0 : DocumentModel::kIntoFolder);
+        // A widget that accepts a press accepts its release too - CLAUDE.md's
+        // rule, learned from HintBalloon letting one through and having the
+        // viewport re-pick underneath it.
         return true;
     }
-    // Double-click renames - the FIRST press above already ran the single-
-    // click activation (select the body, or make the outline pending), which
-    // is harmless here: neither writes anything checkpointed, and refresh()
-    // does not rebuild rows over a selection-only change (see its own
-    // signature comment), so the row this rename opens over is still the
-    // live widget the press just fired on. The release that follows the
-    // dblclick is swallowed by the branch below, on the same terms every
-    // other release on a row already is.
-    if (event->type() == QEvent::MouseButtonDblClick) {
-        if (groupProperty.isValid()) {
-            beginRenameForGroup(groupProperty.toInt());
-            return true;
-        }
-        const QVariant outline = watched->property("outlineId");
-        if (outline.isValid()) {
-            beginRenameForItem(outline.toInt(), /*isOutline=*/true);
-            return true;
-        }
-        const QVariant id = watched->property("solidId");
-        if (id.isValid()) {
-            beginRenameForItem(id.toInt(), /*isOutline=*/false);
-            return true;
-        }
-    }
-    // A widget that accepts a press must accept the release too - CLAUDE.md's
-    // rule, learned from HintBalloon letting one through and having the
-    // viewport re-pick underneath it. WA_NoMousePropagation on this panel
-    // already stops the release reaching the viewport, but swallowing it here
-    // as well means the row's own two halves are handled in one place rather
-    // than one of them relying on an attribute set somewhere else.
-    // The right button, over any row or over the card's own background: the
-    // two folder gestures, as a menu. The Model menu's entries are the same
-    // two actions - this is a second ROUTE to them, never a second
-    // implementation (MainWindow answers both).
-    if (event->type() == QEvent::ContextMenu) {
-        auto* menuEvent = static_cast<QContextMenuEvent*>(event);
-        const int rowId = groupProperty.isValid()
-                              ? groupProperty.toInt()
-                              : (solidProperty.isValid() ? solidProperty.toInt() : 0);
-        showRowMenu(menuEvent->globalPos(), rowId, groupProperty.isValid());
+    case QEvent::MouseButtonDblClick:
+        // Press, release (which selected), DblClick, release: the rename
+        // opens over the row the release just selected. refresh() does not
+        // rebuild rows over a selection-only change, so the row is still the
+        // live widget.
+        if (kind == RowKind::Folder) beginRenameForGroup(rowId);
+        else beginRenameForItem(rowId, kind == RowKind::Outline);
         return true;
-    }
-
-    if (event->type() == QEvent::MouseButtonRelease && isRow) {
-        // A press that never travelled: the click itself has already been
-        // dealt with above, and all that is left is to disarm the drag it
-        // armed.
-        myDragId = 0;
-        myDragIds.clear();
-        myDragging = false;
-        myDropTarget = 0;
+    case QEvent::ContextMenu:
+        // The right button, over any row: the folder gestures, as a menu -
+        // a second ROUTE to the Model menu's actions, never a second
+        // implementation (MainWindow answers both).
+        showRowMenu(static_cast<QContextMenuEvent*>(event)->globalPos(),
+                    kind == RowKind::Outline ? 0 : rowId, kind == RowKind::Folder);
         return true;
+    default:
+        break;
     }
     return QWidget::eventFilter(watched, event);
 }
@@ -1911,16 +2034,13 @@ void ItemsPanel::beginRenameForGroup(int groupId)
 
 void ItemsPanel::restyleRows()
 {
-    // The three looks a row can wear, built ONCE per call rather than once per
+    // The two looks a row can wear, built ONCE per call rather than once per
     // row, and each row's stylesheet set only when its look actually CHANGED
     // (review ruling R5a): setStyleSheet() re-polishes the whole row subtree
     // even when handed the string it already has, which at 130 rows was the
     // entire cost of a selection change - and of every fold, since a fold
-    // restyles too.
-    const QString dropLook = QStringLiteral("#itemsRow { background-color: %1; "
-                                            "border: 1px solid %2; "
-                                            "border-radius: 4px; }")
-                                 .arg(Theme::chipHover().name(), Theme::accent().name());
+    // restyles too. A drag's target is NOT a look: the DropIndicator draws
+    // it over the rows, so "where it would land" never touches a fill.
     const QString markedLook = QStringLiteral("#itemsRow { background-color: %1; "
                                               "border-radius: 4px; }")
                                    .arg(Theme::chipActive().name());
@@ -1958,16 +2078,10 @@ void ItemsPanel::restyleRows()
             marked = row.isOutline ? (myPendingOutlineId != 0 && row.id == myPendingOutlineId)
                                    : selected.count(row.id) > 0;
         }
-        // The folder a drag is hovering over wears the accent BORDER rather
-        // than the selection fill, so "this is where it would land" cannot be
-        // mistaken for "this is selected".
-        //
-        // Otherwise the SAME fill a selected body row wears. One mark, one
-        // meaning - "this is the row the next thing you do will act on" -
-        // rather than a second visual language for the second kind of item.
-        const bool dropTarget =
-            myDragging && row.isGroup && row.id == myDropTarget && myDropTarget != 0;
-        const QString& look = dropTarget ? dropLook : (marked ? markedLook : plainLook);
+        // The SAME fill a selected body row wears. One mark, one meaning -
+        // "this is the row the next thing you do will act on" - rather than a
+        // second visual language for the second kind of item.
+        const QString& look = marked ? markedLook : plainLook;
         if (row.style == look) continue;
         row.widget->setStyleSheet(look);
         row.style = look;
