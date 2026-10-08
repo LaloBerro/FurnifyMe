@@ -1988,6 +1988,13 @@ void ItemsPanel::springOpen()
     if (!myDragging || mySpringFolder == 0) return;
     const int folder = mySpringFolder;
     mySpringFolder = 0;
+    // The arming rule, asked again now that it fires: inside the 700 ms the
+    // filter may have taken over (it holds folds on its own account, and a
+    // write here would outlive it - R7a), an Undo may have taken the folder
+    // away, or something else may already have opened it.
+    if (filterActive() || !myDocument || !myDocument->groupExists(folder) ||
+        isGroupExpanded(folder))
+        return;
     // Written into myExpanded, so it STAYS open after the drop - the Finder's
     // rule, and the user's to fold again. Visibility only (every row of the
     // tree exists), so the row the drag was pressed on is never destroyed.

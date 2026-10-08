@@ -4873,8 +4873,11 @@ void dragOpensFoldersAndScrollsBlock()
               "spring: after the folder opens under a still hand the ring is on it again");
 
         // REVIEW FOCUS 3: the drawer is asked to refresh mid-drag - a plain
-        // appStateChanged, a save, and Isolate (which DOES change what the
-        // rows show, so it would rebuild them).
+        // appStateChanged, a save, and Isolate (which changes what the rows
+        // show). None of these removes a row, so this part pins only that the
+        // gesture goes on to land; what the deferral itself buys - the row a
+        // drag was pressed on surviving its item's removal - is the section
+        // after the Undo one below.
         probe.view()->setSelectedSolids({back});   // Isolate needs a selection
         settle(50);
         emit probe.appStateChanged();
@@ -4883,14 +4886,7 @@ void dragOpensFoldersAndScrollsBlock()
         settle(150);
         QAction* isolate = action(probe, QStringLiteral("Isolate"));
         check(isolate && isolate->isChecked(),
-              "spring: Isolate really ran mid-drag (the refresh this section is about was asked for)");
-        check(drag.row() != nullptr && drag.row()->isVisible() && drawer->dragActive(),
-              "spring: a refresh during the drag leaves the pressed row alive and the drag live");
-        // A rebuild renumbers the rows and forgets the target - the ring
-        // under a still hand would vanish. Deferred, it stays.
-        check(drawer->dropKind() == ItemsPanel::DropKind::Into && drawer->dropParent() == doors &&
-                  drawer->dropIndicator() && drawer->dropIndicator()->isVisible(),
-              "spring: a refresh during the drag leaves the ring on Doors under the still hand");
+              "spring: Isolate really ran mid-drag (a refresh was asked for)");
         drag.moveTo(drawerRowPixel(drawer, doors, drawerRowHeight(drawer, doors) / 2));
         drag.release();
     }
@@ -4898,8 +4894,24 @@ void dragOpensFoldersAndScrollsBlock()
           "spring: ...and the release still lands - Shelf is in Doors");
     trigger(probe, QStringLiteral("Isolate"));
     settle(150);
-    check(drawerRowOf(drawer, shelf) >= 0,
-          "spring: the deferred refresh ran after the drop - Shelf's row is under Doors");
+    // Read off the row WIDGETS (their indent is the layout's left margin):
+    // Shelf drawn exactly as deep as Door left, a row Doors always held. This
+    // pins the drop's own rebuild; whether finishDrag()'s held refresh ran on
+    // this commit path cannot be seen from here, because the move's own
+    // updateActions() rebuilds the rows straight after it. The cancel path,
+    // where nothing else would, is pinned in the Undo section below.
+    const auto rowIndent = [drawer](int id) {
+        const int at = drawerRowOf(drawer, id);
+        QWidget* w = at >= 0 ? drawer->rowWidgetAt(at) : nullptr;
+        return (w && w->layout()) ? w->layout()->contentsMargins().left() : -1;
+    };
+    const int shelfIndent = rowIndent(shelf);
+    const int doorIndent = rowIndent(idNamed(doc, QStringLiteral("Door left")));
+    const int doorsIndent = rowIndent(doors);
+    check(shelfIndent >= 0 && shelfIndent == doorIndent && shelfIndent > doorsIndent,
+          QStringLiteral("spring: after the drop Shelf's row is drawn inside Doors (indent %1 px, "
+                         "Door left %2, Doors %3)")
+              .arg(shelfIndent).arg(doorIndent).arg(doorsIndent));
 
     // The held refresh runs when a drag ends WITHOUT a drop too: nothing
     // else is going to ask for one. Undo takes Shelf back out of Doors
@@ -4936,6 +4948,50 @@ void dragOpensFoldersAndScrollsBlock()
                              "(Shelf's row at the top level's %1 px, now %2)")
                   .arg(rootIndent).arg(freshIndent));
         drag.release();
+    }
+
+    // THE DEFERRAL'S HEADLINE REASON: a refresh mid-drag that REMOVES the
+    // item the drag was pressed on. A rebuild would hide and delete that row,
+    // and with it the grab every later move and the release are delivered
+    // to. Held, the row stays until the drag ends.
+    {
+        DrawerDrag drag(drawer, back);
+        drag.moveTo(drawerRowPixel(drawer, carcass, 3));
+        probe.view()->setSelectedSolids({back});
+        settle(50);
+        trigger(probe, QStringLiteral("Delete Selected"));
+        settle(150);
+        const bool deleted = !doc.contains(back);
+        check(deleted, "spring: Delete mid-drag removed Back, the pressed row's body, from the document");
+        check(drag.row() != nullptr && drag.row()->isVisible() && drawer->dragActive(),
+              "spring: a refresh that removes the pressed row's item leaves the pressed row alive and the drag live");
+        drawer->cancelDrag();
+        drag.release();
+        trigger(probe, QStringLiteral("Undo"));   // Back again, for anything after
+    }
+
+    // A spring armed before the filter took over must not fire into the
+    // user's own fold state (R7a): the filter holds folders open on its own
+    // account, and clearing it must leave Carcass folded as it was.
+    {
+        const bool foldedBefore = !drawer->isGroupExpanded(carcass);
+        check(foldedBefore, "spring: Carcass starts folded for the filter case");
+        DrawerDrag drag(drawer, back);
+        drag.moveTo(drawerRowPixel(drawer, carcass, drawerRowHeight(drawer, carcass) / 2));
+        const bool armed = drawer->dragActive() && drawer->dropKind() == ItemsPanel::DropKind::Into &&
+                           drawer->dropParent() == carcass;
+        check(armed, "spring: the hand rests on Carcass's into band (the spring is armed)");
+        drawer->filterField()->setText(QStringLiteral("Side"));
+        waitFully(900);   // past the filter's debounce AND the 700 ms spring
+        const bool filtered = drawer->filterActive();
+        check(filtered, "spring: the filter took over while the spring was armed");
+        drawer->cancelDrag();
+        drag.release();
+        drawer->filterField()->clear();
+        waitFully(300);   // the filter's debounce
+        const bool stillFolded = !drawer->isGroupExpanded(carcass);
+        check(stillFolded,
+              "spring: a spring that fires under the filter writes nothing - Carcass is folded once it clears");
     }
 
     // Auto-scroll, at the author's size.
