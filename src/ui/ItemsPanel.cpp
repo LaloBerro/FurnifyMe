@@ -1722,8 +1722,20 @@ void ItemsPanel::showSelection(const std::vector<int>& ids)
                 revealId = id;
     }
     myPickBaseline = ids;
+    // A standing hidden-pick notice names a body that must still be selected.
+    if (myHiddenPickId != 0 &&
+        std::find(ids.begin(), ids.end(), myHiddenPickId) == ids.end())
+        hideHiddenPick();
     applySelection(ids);
     if (revealId != 0) reveal(revealId);
+}
+
+void ItemsPanel::resetPick()
+{
+    // Body ids restart per document, so a baseline from the last one could
+    // swallow a reveal; a notice for its body is meaningless too.
+    myPickBaseline.clear();
+    hideHiddenPick();
 }
 
 void ItemsPanel::applySelection(const std::vector<int>& ids)
@@ -1754,8 +1766,18 @@ void ItemsPanel::reveal(int bodyId)
         restyleRows();
     }
     // A reveal never fails silently: hidden by the filter, the foot says so.
-    if (filterActive() && !QString::fromStdString(myDocument->nameOf(bodyId))
-                               .contains(myFilterText, Qt::CaseInsensitive)) {
+    // The row's own state, applyRowVisibility()'s answer - never a second
+    // copy of the matching rule.
+    bool hiddenByFilter = false;
+    if (filterActive()) {
+        hiddenByFilter = true;
+        for (const Row& row : myRowList)
+            if (!row.isGroup && !row.isOutline && row.id == bodyId) {
+                hiddenByFilter = !row.matched;
+                break;
+            }
+    }
+    if (hiddenByFilter) {
         showHiddenPick(bodyId);
         return;
     }

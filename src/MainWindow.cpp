@@ -5242,6 +5242,7 @@ void MainWindow::resyncView()
     // the one line that closes it. The kind lock needs nothing: it is derived
     // from the live selection, and clearSolids() below empties that.
     myView->resetPickGesture();
+    if (myItemsPanel) myItemsPanel->resetPick();
     // ...and the sentence it dropped comes off the bar with it. Called
     // directly rather than through the signal, because resetPickGesture()
     // promises on its own header to emit nothing.

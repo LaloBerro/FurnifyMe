@@ -3280,6 +3280,8 @@ void drawerListsStoredOrderBlock()
     // folder; fold it again so the row is hidden while the body stays selected.
     drawer->setGroupExpanded(carcass, false);
     settle(50);
+    check(drawerRowOf(drawer, topId) == -1,
+          "stored order: ...and Top's row is hidden again, so the check below is not vacuous");
     if (renameAction) renameAction->trigger();
     settle(50);
     const bool foldedEditOpened = drawer->openRenameEditor() != nullptr;
@@ -3974,8 +3976,8 @@ void viewportPickRevealsBlock()
     check(gotCount == expected,
           QStringLiteral("reveal: Doors, two of its bodies selected, reads %1 (\"%2\")")
               .arg(expected, gotCount));
-    check(contrastRatio(Theme::accentText(), Theme::panel()) >= 3.0,
-          QStringLiteral("reveal: the count's accentText is 3:1 or better on the panel (%1:1)")
+    check(contrastRatio(Theme::accentText(), Theme::panel()) >= 4.5,
+          QStringLiteral("reveal: the count's accentText is 4.5:1 or better on the panel (%1:1)")
               .arg(contrastRatio(Theme::accentText(), Theme::panel()), 0, 'f', 2));
     QWidget* doorsWidget = drawer->rowWidgetAt(doorsRow);
     QLabel* countLabel = nullptr;
@@ -3987,8 +3989,8 @@ void viewportPickRevealsBlock()
         const QRect area(countLabel->mapTo(drawer, QPoint(0, 0)), countLabel->size());
         int distance = 0;
         const QColor ink = nearestPixel(painted, area, Theme::accentText(), distance);
-        check(distance <= 60 && contrastRatio(ink, Theme::panel()) >= 3.0,
-              QStringLiteral("reveal: the painted count reads 3:1 or better (%1:1, %2 from the "
+        check(distance <= 60 && contrastRatio(ink, Theme::panel()) >= 4.5,
+              QStringLiteral("reveal: the painted count reads 4.5:1 or better (%1:1, %2 from the "
                              "token)").arg(contrastRatio(ink, Theme::panel()), 0, 'f', 2).arg(distance));
     }
     probe.view()->setSelectedSolids(inDoors);
@@ -3998,9 +4000,13 @@ void viewportPickRevealsBlock()
               doorsWidget->styleSheet().contains(Theme::chipActive().name()),
           "reveal: a fully selected folder wears the selection fill and no count");
 
-    // restyleRows() at the author's size, inside one frame.
-    std::vector<int> many;
-    for (std::size_t i = 0; i < 60; ++i) many.push_back(doc.solids()[i].id);
+    // restyleRows() ALONE at the author's size: the baseline is first set to
+    // 120 bodies (untimed - that pick reveals), then 60 of them are selected,
+    // which adds nothing new, so no reveal runs inside the timed call.
+    std::vector<int> most;
+    for (std::size_t i = 0; i < 120; ++i) most.push_back(doc.solids()[i].id);
+    drawer->showSelection(most);
+    std::vector<int> many(most.begin(), most.begin() + 60);
     QElapsedTimer clock;
     clock.start();
     drawer->showSelection(many);
@@ -4009,6 +4015,22 @@ void viewportPickRevealsBlock()
     check(restyleMs < 16.0,
           QStringLiteral("reveal: restyling 130 rows for a new selection costs under 16 ms (%1 ms)")
               .arg(restyleMs, 0, 'f', 2));
+
+    // The reveal path on its own: fold everything, then an outside pick of a
+    // body two folders deep (ensureFresh, expansion, visibility, layout, scroll).
+    drawer->showSelection({});
+    drawer->setGroupExpanded(carcass, false);
+    drawer->setGroupExpanded(drawers, false);
+    settle(50);
+    QElapsedTimer revealClock;
+    revealClock.start();
+    drawer->showSelection({target});
+    const double revealMs = revealClock.nsecsElapsed() / 1.0e6;
+    std::printf("[items-cost] reveal at 130 rows = %.2f ms\n", revealMs);
+    check(drawerRowOf(drawer, target) >= 0 && revealMs < 16.0,
+          QStringLiteral("reveal: an outside pick two folders deep opens, shows and scrolls in under "
+                         "16 ms (%1 ms)").arg(revealMs, 0, 'f', 2));
+    drawer->showSelection({});
 
     // The filter hides the pick: the card foot says so, and Clear filter shows it.
     typeInto(drawer->filterField(), QStringLiteral("Slat"));
@@ -4032,6 +4054,24 @@ void viewportPickRevealsBlock()
     check(clear && clear->text() == QStringLiteral("Clear filter") && !drawer->filterActive() &&
               !foot->isVisible() && drawerRowOf(drawer, target) >= 0,
           "reveal: Clear filter empties the field, the foot goes, and Board 121's row is there");
+
+    // The notice follows the selection: once the pick is no longer selected,
+    // the foot goes and Clear filter reveals nothing.
+    typeInto(drawer->filterField(), QStringLiteral("Slat"));
+    drawer->showSelection({});
+    settle(50);
+    drawer->showSelection({target});
+    settle(50);
+    const bool footUp = drawer->hiddenPickLine() && drawer->hiddenPickLine()->isVisible();
+    probe.view()->setSelectedSolids({});   // SEAM: the subject is the notice
+    settle(100);
+    const bool footGone = !drawer->hiddenPickLine()->isVisible();
+    check(footUp && footGone, "reveal: deselecting the hidden pick takes its foot away");
+    drawer->scrollArea()->verticalScrollBar()->setValue(0);
+    drawer->clearFilterAction()->trigger();
+    settle(50);
+    check(!drawer->filterActive() && drawer->scrollArea()->verticalScrollBar()->value() == 0,
+          "reveal: Clear filter after a deselect clears the field and does not scroll to the old pick");
     probe.close();
 }
 

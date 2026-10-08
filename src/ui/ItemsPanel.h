@@ -95,6 +95,8 @@ public:
     QString partialCountAt(int index) const;
     // The card foot that says a pick is hidden by the filter.
     QWidget* hiddenPickLine() const { return myFoot; }
+    // A document swap: forget what the last pick left (ids restart per document).
+    void resetPick();
     // A folder row's twisty, null for any other row - for the suite, which
     // reads its tooltip to see which way the folder currently points.
     class QPushButton* twistyAt(int index) const;
