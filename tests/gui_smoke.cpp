@@ -1719,8 +1719,10 @@ void sketchQuad(MainWindow& window, double x0, double y0, double x1, double y1)
     clickAt(view, QPointF(x0 * w, y1 * h));
 }
 
-// The eye on the drawer's TOP row. Each row carries exactly one QPushButton
-// and outline rows come first, so the first visible one is the topmost row's.
+// The eye on the drawer's TOP row: the first VISIBLE, CHECKABLE QPushButton in
+// creation order, which in a freshly built list is the topmost row's eye
+// (outline rows come first). A row carries more than one QPushButton - a
+// folder row's twisty, a body row's grain mark - and only the eye is checkable.
 //
 // One implementation, because two places wanted precisely this scan and a
 // second copy is a scan that can drift into looking for something else - the
@@ -1730,16 +1732,13 @@ QPushButton* firstVisibleRowToggle(QWidget* drawer)
 {
     if (!drawer) return nullptr;
     for (QPushButton* button : drawer->findChildren<QPushButton*>()) {
-        // NOT THE + IN THE TITLE ROW. It is a QPushButton too since the
-        // folders work (improvements item 11), it is always visible, and it
-        // is added to the panel BEFORE any row exists - so it is the first
-        // thing this scan reaches, and a probe that clicked it was not
-        // hiding a body, it was making a folder called "Folder" that every
-        // later row-index check in the shared window then read as row 0.
-        // Told apart structurally rather than by icon: an eye belongs to a
-        // ROW, the + is a child of the panel itself.
-        if (button->parentWidget() == drawer) continue;
-        // AND NOT THE GRAIN MARK, which is the second QPushButton on every
+        // The title row's New folder used to be a QPushButton here, added
+        // before any row, and a probe that clicked it made a folder called
+        // "Folder" that every later row-index check then read as row 0. It is
+        // a ToolChip now (a QAbstractButton, never found by this scan), so the
+        // structural skip that guarded against it is gone with it.
+        //
+        // NOT THE GRAIN MARK, which is the second QPushButton on every
         // body row since the per-body grain work. Told apart structurally
         // again, and by a difference that is real rather than incidental: the
         // eye is CHECKABLE because it mirrors a persisted on/off, and the
@@ -5865,23 +5864,33 @@ QString librarySnapshot(const QString& root)
     return QStringLiteral("%1 entries, %2 bytes, newest %3").arg(entries).arg(bytes).arg(newest);
 }
 
-// THE AUTHOR'S REAL ROOM, composed in a COPY (T-063's C4). No one furniture in
-// the library holds the 122 boards the spec names: its scene does, five pieces
-// of four furniture. So the library is copied, file by file, into `copyRoot` -
-// the source is only ever opened by QFile::copy(), which reads it - and the
-// largest scene's pieces are composed, each under a top folder named after its
-// furniture, into one furniture "Whole room" saved in the COPY. No
-// FurnitureStore is ever constructed on the source path. False, with `why`
-// naming WHICH of the four ways it failed - no library at the path, a file that
-// would not copy, no scene with pieces, or the composed room not saving - so a
-// fallback run says what to fix rather than one sentence for all four; `source`
-// names where it looked either way.
-bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& source, QString& why)
+// Whether `path` is `root` or lies anywhere beneath it - absolute and cleaned
+// first, and case-blind on Windows, where the file system is.
+bool pathInside(const QString& path, const QString& root)
 {
-    source = realLibraryPath();
+    const QString p = QDir::cleanPath(QFileInfo(path).absoluteFilePath()) + QLatin1Char('/');
+    const QString r = QDir::cleanPath(QFileInfo(root).absoluteFilePath()) + QLatin1Char('/');
+#ifdef _WIN32
+    return p.startsWith(r, Qt::CaseInsensitive);
+#else
+    return p.startsWith(r);
+#endif
+}
+
+// THE ONE PLACE THE REAL LIBRARY IS TOUCHED (review ruling RF5): file by file
+// into `copyRoot`, with QDir, QDirIterator and QFile::copy() alone - nothing
+// that writes to it, and nothing that knows what a furniture is. Refuses
+// outright when the two paths overlap, either way round, since a copy inside
+// its own source (or a source inside its copy) would be read while written.
+bool copyLibraryTree(const QString& source, const QString& copyRoot, QString& why)
+{
     const QDir from(source);
     if (!from.exists()) {
         why = QStringLiteral("no library at ") + source;
+        return false;
+    }
+    if (pathInside(copyRoot, source) || pathInside(source, copyRoot)) {
+        why = QStringLiteral("the copy and the library overlap: ") + copyRoot;
         return false;
     }
     QDirIterator files(source, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
@@ -5894,8 +5903,30 @@ bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& sou
             return false;
         }
     }
+    return true;
+}
+
+// THE AUTHOR'S REAL ROOM, composed in a COPY (T-063's C4). No one furniture in
+// the library holds the 122 boards the spec names: its scene does, five pieces
+// of four furniture. So the library is copied into `copyRoot` by
+// copyLibraryTree() - the only code that touches the source - and the largest
+// scene's pieces are composed, each under a top folder named after its
+// furniture, into one furniture "Whole room" saved in the COPY. Every
+// FurnitureStore this opens is recorded in `storeRoots`, read back off the
+// store itself (rootPath()), so the block CHECKS that none stood on the source
+// rather than trusting this comment (RF5). False, with `why` naming WHICH of
+// the four ways it failed - no library at the path, a file that would not
+// copy, no scene with pieces, or the composed room not saving - so a fallback
+// run says what to fix rather than one sentence for all four; `source` names
+// where it looked either way.
+bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& source, QString& why,
+                     QStringList& storeRoots)
+{
+    source = realLibraryPath();
+    if (!copyLibraryTree(source, copyRoot, why)) return false;
 
     FurnitureStore store(copyRoot);
+    storeRoots << store.rootPath();
     SceneModel best;
     int bestPieces = -1;
     for (const FurnitureStore::SceneInfo& info : store.listScenes()) {
@@ -6169,9 +6200,15 @@ void itemsEvidenceBlock(const QString& outDir)
     capture(probe, QStringLiteral("items-revealed"));
 
     // --- C4, on a copy of the author's real room ----------------------------
-    // The real library is READ and nothing more. Its snapshot is taken before
-    // the copy and again after every window on the copy is gone; a write
-    // anywhere in it would move the count, the size or the newest time.
+    // The real library is READ and nothing more, and that is held
+    // STRUCTURALLY (review ruling RF5): copyLibraryTree() is the only code
+    // that touches it, the copy and the library are checked to be disjoint,
+    // and every FurnitureStore the composition opened is checked to stand on
+    // the copy. A before/after snapshot is still taken and printed, but it is
+    // evidence about the MACHINE, not about this suite: the author's own
+    // running FurnifyMe autosaving, or OneDrive syncing, moves it with no help
+    // from here - so a moved snapshot is an environment skip naming what
+    // moved, never a failure that makes the gate depend on outside writers.
     const QString libraryBefore = librarySnapshot(realLibraryPath());
     RequiredTempDir realCopy;
     QString roomId;
@@ -6179,11 +6216,28 @@ void itemsEvidenceBlock(const QString& outDir)
     QString query;
     int roomBodies = 0;
     QString why;
+    QStringList storeRoots;
     // The real room is used only when it can express what C4 checks; every
     // threshold below follows from the room itself (its derived word, its own
     // body count, its own rows), so the checks and their count are the same
     // on either source.
-    bool real = composeRealRoom(realCopy.path(), roomId, source, why);
+    bool real = composeRealRoom(realCopy.path(), roomId, source, why, storeRoots);
+    check(!pathInside(realCopy.path(), realLibraryPath()) &&
+              !pathInside(realLibraryPath(), realCopy.path()),
+          QStringLiteral("C4: the copy and the real library are disjoint - neither lies inside the "
+                         "other (copy %1)")
+              .arg(realCopy.path()));
+    QStringList onLibrary;
+    for (const QString& root : storeRoots)
+        if (!pathInside(root, realCopy.path()) || pathInside(root, realLibraryPath()))
+            onLibrary << root;
+    check(onLibrary.isEmpty(),
+          QStringLiteral("C4: every FurnitureStore the composition opened stands on the copy, none "
+                         "on the real library (%1 opened%2)")
+              .arg(storeRoots.size())
+              .arg(onLibrary.isEmpty() ? QString()
+                                       : QStringLiteral("; on the library: ") +
+                                             onLibrary.join(QStringLiteral(", "))));
     real = real && roomCarriesC4(realCopy.path(), roomId, query, roomBodies, why);
     if (!real) {
         {
@@ -6328,8 +6382,16 @@ void itemsEvidenceBlock(const QString& outDir)
     const QString libraryAfter = librarySnapshot(realLibraryPath());
     std::printf("[items-c4] real library before: %s\n[items-c4] real library after:  %s\n",
                 qPrintable(libraryBefore), qPrintable(libraryAfter));
-    check(libraryAfter == libraryBefore,
-          "C4: the author's real library was only read - not one entry, byte or time moved");
+    // ONE count either way (checks + environment skips): a still snapshot is
+    // a check, a moved one an environment skip that says what moved.
+    if (libraryAfter != libraryBefore)
+        skipByEnvironment(1, QStringLiteral("the real library at %1 changed during the block, by a "
+                                            "writer outside this suite (the app's own autosave, a "
+                                            "sync client) - before: %2; after: %3")
+                                 .arg(realLibraryPath(), libraryBefore, libraryAfter));
+    else
+        check(libraryAfter == libraryBefore,
+              "C4: the author's real library did not move while the block ran");
 }
 
 int main(int argc, char* argv[])
