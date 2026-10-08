@@ -46,6 +46,7 @@
 #include "DragGhost.h"
 #include "ItemsFilterField.h"
 #include "ItemsPanel.h"
+#include "ItemsRow.h"
 #include "ItemMoveText.h"
 #include "Joinery.h"
 #include "JointChip.h"
@@ -1039,6 +1040,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-drawer-walks-and-moves-with-the-keys", false, true },
     { "the-drawer-tells-the-truth-at-its-edges", false, true },
     { "the-row-menu-acts-on-what-was-right-clicked", false, true },
+    { "the-drawer-is-reached-filed-and-heard", false, true },
     { "the-items-drawer-evidence", false, true },
 };
 
@@ -6786,6 +6788,659 @@ void rowMenuActsOnWhatWasClickedBlock()
                              "nothing announced while it is torn down (%1), the hand put back")
                   .arg(announced));
     }
+}
+
+// --- design batch A: the keyboard reaches the drawer, files rows, and is heard
+//
+// Dipsynator design review cycle 0, findings F1 F2 F3 F4 F7 F18 F19 under
+// rulings D1-D4 and D19 (.superpowers/sdd/plan/progress.md).
+//
+// Every accessibility event the drawer raises while this block's recorder is
+// QAccessible's update handler - the type, the object, and for a StateChanged
+// the states it names. A plain function and a global, because the handler is
+// a function pointer (recordAccessibleEvent()'s shape, with the states kept).
+struct DrawerAccessibleEvent {
+    QObject* object = nullptr;
+    QAccessible::Event type = QAccessible::Focus;
+    QAccessible::State changed;
+};
+std::vector<DrawerAccessibleEvent> g_drawerAccessibleEvents;
+void recordDrawerAccessibleEvent(QAccessibleEvent* event)
+{
+    DrawerAccessibleEvent entry;
+    entry.object = event->object();
+    entry.type = event->type();
+    if (event->type() == QAccessible::StateChanged)
+        entry.changed = static_cast<QAccessibleStateChangeEvent*>(event)->changedStates();
+    g_drawerAccessibleEvents.push_back(entry);
+}
+
+// A furniture with exactly ONE folder: Box (holding Lid) and a loose Base -
+// so Lid's menu has no other folder to offer.
+QString seedOneFolder(FurnitureStore& store)
+{
+    const QString id = store.createFurniture(QStringLiteral("One folder"));
+    DocumentModel doc;
+    const int box = doc.createGroup("Box");
+    const int lid = doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 400.0));
+    doc.setItemName(lid, "Lid");
+    doc.setItemGroup(lid, box);
+    const int base = doc.addSolid(ModelingOps::makeBox(gp_Pnt(400.0, 0.0, 0.0), 18.0, 300.0, 400.0));
+    doc.setItemName(base, "Base");
+    return store.saveFurniture(id, doc, QImage()) ? id : QString();
+}
+
+// A furniture with no folder at all.
+QString seedNoFolder(FurnitureStore& store)
+{
+    const QString id = store.createFurniture(QStringLiteral("No folder"));
+    DocumentModel doc;
+    const int plank = doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 400.0));
+    doc.setItemName(plank, "Plank");
+    return store.saveFurniture(id, doc, QImage()) ? id : QString();
+}
+
+// The row menu's "Move into" submenu, and its entries' texts.
+QMenu* moveIntoMenu(QMenu& menu)
+{
+    for (QAction* a : menu.actions())
+        if (a->menu() && a->text().remove(QLatin1Char('&')) == QStringLiteral("Move into"))
+            return a->menu();
+    return nullptr;
+}
+QStringList entryTexts(QMenu* menu)
+{
+    QStringList texts;
+    if (menu)
+        for (QAction* a : menu->actions()) texts << a->text();
+    return texts;
+}
+QAction* entryNamed(QMenu* menu, const QString& text)
+{
+    if (menu)
+        for (QAction* a : menu->actions())
+            if (a->text().trimmed() == text) return a;
+    return nullptr;
+}
+
+void drawerBatchABlock(const QString& outDir)
+{
+    RequiredTempDir dir;
+    QString cabinet;
+    QString oneFolder;
+    QString noFolder;
+    {
+        FurnitureStore store(dir.path());
+        cabinet = seedCabinet(store);
+        oneFolder = seedOneFolder(store);
+        noFolder = seedNoFolder(store);
+    }
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    check(openWithDrawer(probe, cabinet), "batch A: the cabinet opens with the drawer up");
+    ItemsPanel* drawer = probe.itemsPanel();
+    ToastHost* toasts = probe.findChild<ToastHost*>();
+    const DocumentModel& doc = probe.document();
+    QAction* undo = action(probe, QStringLiteral("Undo"));
+    const int carcass = idNamed(doc, QStringLiteral("Carcass"));
+    const int drawerFolder = idNamed(doc, QStringLiteral("Drawer"));
+    const int doors = idNamed(doc, QStringLiteral("Doors"));
+    const int sideLeft = idNamed(doc, QStringLiteral("Side left"));
+    const int sideRight = idNamed(doc, QStringLiteral("Side right"));
+    const int doorLeft = idNamed(doc, QStringLiteral("Door left"));
+    const int shelf = idNamed(doc, QStringLiteral("Shelf"));
+    const int back = idNamed(doc, QStringLiteral("Back"));
+    const int sketch = idNamed(doc, QStringLiteral("Sketch A"));
+    const auto selected = [&] {
+        std::vector<int> ids = probe.view()->selectedSolidIds();
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    const auto sorted = [](std::vector<int> ids) {
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    const auto clickRow = [&](int id) {
+        QWidget* row = drawer->rowWidgetAt(drawerRowOf(drawer, id));
+        if (row) clickAt(row, QPointF(row->width() / 3.0, row->height() / 2.0));
+        return row != nullptr;
+    };
+    const auto rowOf = [&](int id) {
+        return qobject_cast<ItemsRowWidget*>(drawer->rowWidgetAt(drawerRowOf(drawer, id)));
+    };
+    const auto toastSays = [&](const QString& text) {
+        return toasts && toasts->currentText() == text;
+    };
+    const auto status = [&] { return probe.statusBar()->currentMessage(); };
+
+    // === F3 + F4 (rulings D3, D4): the selection mark, and the pending outline
+    //
+    // Sketch A is made the pending outline by its own row, then Shelf and Back
+    // are selected. The list must show exactly the rows the status bar counts.
+    const bool sketchClicked = clickRow(sketch);
+    const int pendingAfterClick = probe.pendingOutlineId();
+    probe.view()->setSelectedSolids({shelf, back});   // SEAM: the subject is the mark, not the pick
+    settle(150);
+    int markedRows = 0;
+    QStringList markedNames;
+    for (int i = 0; i < drawer->rowCount(); ++i) {
+        if (!drawer->rowIsMarkedAt(i)) continue;
+        ++markedRows;
+        markedNames << drawer->rowTextAt(i);
+    }
+    const QString statusLine = status();
+    const QRegularExpressionMatch counted =
+        QRegularExpression(QStringLiteral("^(\\d+) bod")).match(statusLine);
+    const int statusCount = counted.hasMatch() ? counted.captured(1).toInt() : -1;
+    check(sketchClicked && pendingAfterClick == sketch && statusCount == 2 &&
+              markedRows == statusCount && !drawer->rowIsMarkedAt(drawerRowOf(drawer, sketch)),
+          QStringLiteral("D3/D4: with Sketch A pending, the rows wearing the mark (%1: %2) are "
+                         "exactly the %3 the status bar counts (\"%4\")")
+              .arg(markedRows)
+              .arg(markedNames.join(QStringLiteral(", ")))
+              .arg(statusCount)
+              .arg(statusLine));
+    ItemsRowWidget* sketchRow = rowOf(sketch);
+    const QString waiting = QStringLiteral(", waiting to extrude");
+    check(sketchRow && sketchRow->pendingOutline() &&
+              sketchRow->accessibleName().endsWith(waiting) &&
+              sketchRow->toolTip() == QStringLiteral("Sketch A") + waiting,
+          QStringLiteral("D4: the pending outline says so instead - its name and tooltip end "
+                         "\", waiting to extrude\" (\"%1\" / \"%2\")")
+              .arg(sketchRow ? sketchRow->accessibleName() : QString(),
+                   sketchRow ? sketchRow->toolTip() : QString()));
+    ItemsRowWidget* shelfRow = rowOf(shelf);
+    check(shelfRow && !shelfRow->accessibleName().endsWith(waiting) && shelfRow->toolTip().isEmpty(),
+          "D4: and no other row says it");
+
+    // The bar's ink, from the tokens: 3:1 against the card AND the fill it
+    // sits on (WCAG 1.4.11). accentText, because the accent itself does not.
+    const QColor bar = ItemsRowWidget::barColour();
+    const double barOnPanel = contrastRatio(bar, Theme::panel());
+    const double barOnFill = contrastRatio(bar, Theme::chipActive());
+    std::printf("[batch-A] bar %s: %.2f:1 on panel, %.2f:1 on the fill; the accent %s would be "
+                "%.2f:1 and %.2f:1; the fill alone %.2f:1 on the panel\n",
+                qPrintable(bar.name()), barOnPanel, barOnFill, qPrintable(Theme::accent().name()),
+                contrastRatio(Theme::accent(), Theme::panel()),
+                contrastRatio(Theme::accent(), Theme::chipActive()),
+                contrastRatio(Theme::chipActive(), Theme::panel()));
+    check(barOnPanel >= 3.0 && barOnFill >= 3.0,
+          QStringLiteral("D3: the selection bar's token reads 3:1 or better on the card (%1:1) "
+                         "and on the selection fill (%2:1)")
+              .arg(barOnPanel, 0, 'f', 2)
+              .arg(barOnFill, 0, 'f', 2));
+    // ...and from the PAINTED pixels: the bar's column on every marked row,
+    // the fill beside it, and the bare card on an unmarked row.
+    const QImage painted = renderExact(drawer);
+    int barRows = 0;
+    int barPixelRows = 0;
+    QColor paintedBar;
+    QColor paintedFill;
+    QColor paintedCard;
+    for (int i = 0; i < drawer->rowCount(); ++i) {
+        auto* row = qobject_cast<ItemsRowWidget*>(drawer->rowWidgetAt(i));
+        if (!row) continue;
+        const QPoint mid = row->mapTo(drawer, row->barRect().center());
+        const QPoint beside = row->mapTo(drawer, QPoint(ItemsRowWidget::kBarWidth + 1,
+                                                        row->height() / 2));
+        const QColor atBar = painted.pixelColor(mid);
+        if (drawer->rowIsMarkedAt(i)) {
+            ++barRows;
+            if (atBar.rgb() == bar.rgb()) ++barPixelRows;
+            paintedBar = atBar;
+            paintedFill = painted.pixelColor(beside);
+        } else if (row == sketchRow) {
+            paintedCard = painted.pixelColor(beside);
+            if (atBar.rgb() == bar.rgb()) --barPixelRows;   // a bar on the pending outline is wrong
+        }
+    }
+    check(barRows == 2 && barPixelRows == 2 && paintedFill.rgb() == Theme::chipActive().rgb() &&
+              paintedCard.rgb() == Theme::panel().rgb(),
+          QStringLiteral("D3: each marked row PAINTS the bar in its token beside the fill (%1 of "
+                         "%2 rows; fill %3, the pending outline's ground %4)")
+              .arg(barPixelRows)
+              .arg(barRows)
+              .arg(paintedFill.name(), paintedCard.name()));
+    const double paintedOnCard = contrastRatio(paintedBar, paintedCard);
+    const double paintedOnFill = contrastRatio(paintedBar, paintedFill);
+    check(paintedOnCard >= 3.0 && paintedOnFill >= 3.0,
+          QStringLiteral("D3: measured off the pixels, the bar reads %1:1 on the card and %2:1 "
+                         "on the fill")
+              .arg(paintedOnCard, 0, 'f', 2)
+              .arg(paintedOnFill, 0, 'f', 2));
+    painted.save(outDir + QStringLiteral("/items-selection-bar.png"));
+    std::printf("[batch-A] wrote items-selection-bar.png - look at it\n");
+
+    // === F18: the partial count, explained
+    probe.view()->setSelectedSolids({sideLeft, sideRight});   // SEAM: the subject is the count
+    settle(150);
+    const int carcassAt = drawerRowOf(drawer, carcass);
+    QLabel* count = drawer->partialCountLabelAt(carcassAt);
+    ItemsRowWidget* carcassRow = rowOf(carcass);
+    const QString words = QStringLiteral("2 of 4 bodies in Carcass are selected");
+    const QString tipOverCount =
+        count && carcassRow ? carcassRow->toolTipAt(count->geometry().center()) : QString();
+    check(drawer->partialCountAt(carcassAt) == QStringLiteral("2/4") && count &&
+              count->toolTip() == words && tipOverCount == words,
+          QStringLiteral("F18: \"2/4\" explains itself - its tooltip, shown over it although it "
+                         "is transparent to the mouse, reads \"%1\" (\"%2\")")
+              .arg(count ? count->toolTip() : QString(), tipOverCount));
+    check(carcassRow && carcassRow->accessibleName() == QStringLiteral("Carcass, folder, ") + words,
+          QStringLiteral("F18: and the folder row's name carries the same words (\"%1\")")
+              .arg(carcassRow ? carcassRow->accessibleName() : QString()));
+    probe.view()->setSelectedSolids({doorLeft});
+    settle(150);
+    ItemsRowWidget* doorsRow = rowOf(doors);
+    check(doorsRow && doorsRow->accessibleName() ==
+                          QStringLiteral("Doors, folder, 1 of 2 bodies in Doors is selected") &&
+              carcassRow && carcassRow->accessibleName() == QStringLiteral("Carcass, folder"),
+          QStringLiteral("F18: one of two is singular, and a folder no longer partly selected "
+                         "drops the words (\"%1\", \"%2\")")
+              .arg(doorsRow ? doorsRow->accessibleName() : QString(),
+                   carcassRow ? carcassRow->accessibleName() : QString()));
+
+    // === F7: what a screen reader is told
+    g_drawerAccessibleEvents.clear();
+    const QAccessible::UpdateHandler previousHandler =
+        QAccessible::installUpdateHandler(&recordDrawerAccessibleEvent);
+    clickRow(shelf);
+    g_drawerAccessibleEvents.clear();
+    sendKeyTo(&probe, Qt::Key_Down);   // Shelf -> Back
+    ItemsRowWidget* backRow = rowOf(back);
+    shelfRow = rowOf(shelf);
+    int focusOnBack = 0, selectionOnBack = 0, selectedChangedBack = 0, selectedChangedShelf = 0,
+        alerts = 0;
+    for (const DrawerAccessibleEvent& e : g_drawerAccessibleEvents) {
+        if (e.type == QAccessible::Alert) ++alerts;
+        if (e.object == backRow && e.type == QAccessible::Focus) ++focusOnBack;
+        if (e.object == backRow && e.type == QAccessible::Selection) ++selectionOnBack;
+        if (e.type == QAccessible::StateChanged && e.changed.selected) {
+            if (e.object == backRow) ++selectedChangedBack;
+            if (e.object == shelfRow) ++selectedChangedShelf;
+        }
+    }
+    check(backRow && drawer->currentRowId() == back && focusOnBack == 1 && selectionOnBack == 1,
+          QStringLiteral("F7: a Down step raises Focus and Selection for the row it lands on "
+                         "(Focus %1, Selection %2, among %3 events)")
+              .arg(focusOnBack)
+              .arg(selectionOnBack)
+              .arg(static_cast<int>(g_drawerAccessibleEvents.size())));
+    check(selectedChangedBack >= 1 && selectedChangedShelf >= 1,
+          QStringLiteral("F7: and both rows whose Selected state moved say so - StateChanged on "
+                         "Back (%1) and on Shelf (%2)")
+              .arg(selectedChangedBack)
+              .arg(selectedChangedShelf));
+    QAccessibleInterface* backFace = backRow ? QAccessible::queryAccessibleInterface(backRow) : nullptr;
+    QAccessibleInterface* shelfFace =
+        shelfRow ? QAccessible::queryAccessibleInterface(shelfRow) : nullptr;
+    const bool backRead = backFace && backFace->role() == QAccessible::TreeItem &&
+                          backFace->state().selected && backFace->state().selectable &&
+                          backFace->state().focused &&
+                          backFace->text(QAccessible::Name) == backRow->accessibleName();
+    check(backRead && shelfFace && !shelfFace->state().selected && !shelfFace->state().focused,
+          QStringLiteral("F7: a row is a tree item - Back reads selected and focused under its "
+                         "own name (\"%1\"), Shelf neither")
+              .arg(backFace ? backFace->text(QAccessible::Name) : QString()));
+    g_drawerAccessibleEvents.clear();
+    sendKeyTo(&probe, Qt::Key_Up, Qt::ShiftModifier);   // Back + Shelf
+    int addOnShelf = 0;
+    for (const DrawerAccessibleEvent& e : g_drawerAccessibleEvents) {
+        if (e.type == QAccessible::Alert) ++alerts;
+        if (e.object == shelfRow && e.type == QAccessible::SelectionAdd) ++addOnShelf;
+    }
+    check(selected() == sorted({shelf, back}) && addOnShelf == 1,
+          QStringLiteral("F7: a Shift step ADDS to the selection, and says SelectionAdd (%1)")
+              .arg(addOnShelf));
+    // A folder: Expanded or Collapsed, and the change is heard. Folded first:
+    // the F18 picks above came from the viewport, and a viewport pick REVEALS
+    // its row, which opened Carcass and Doors.
+    drawer->setGroupExpanded(carcass, false);
+    drawer->setGroupExpanded(doors, false);
+    settle(60);
+    sendKeyTo(&probe, Qt::Key_Home);   // Carcass
+    carcassRow = rowOf(carcass);
+    QAccessibleInterface* carcassFace =
+        carcassRow ? QAccessible::queryAccessibleInterface(carcassRow) : nullptr;
+    const bool foldedRead = carcassFace && carcassFace->state().expandable &&
+                            carcassFace->state().collapsed && !carcassFace->state().expanded;
+    g_drawerAccessibleEvents.clear();
+    sendKeyTo(&probe, Qt::Key_Right);   // opens Carcass
+    int expandedChanged = 0;
+    for (const DrawerAccessibleEvent& e : g_drawerAccessibleEvents) {
+        if (e.type == QAccessible::Alert) ++alerts;
+        if (e.object == carcassRow && e.type == QAccessible::StateChanged && e.changed.expanded)
+            ++expandedChanged;
+    }
+    const bool openRead = carcassFace && carcassFace->state().expanded &&
+                          !carcassFace->state().collapsed;
+    const bool opened = drawer->isGroupExpanded(carcass);
+    check(foldedRead && opened && openRead && expandedChanged == 1,
+          QStringLiteral("F7: a folder reads collapsed (%1), then expanded (%2) once Right opens it "
+                         "- and the change is announced (%3)")
+              .arg(foldedRead ? QStringLiteral("yes") : QStringLiteral("no"),
+                   openRead ? QStringLiteral("yes") : QStringLiteral("no"))
+              .arg(expandedChanged));
+    QAccessibleInterface* outlineFace =
+        sketchRow ? QAccessible::queryAccessibleInterface(sketchRow) : nullptr;
+    check(outlineFace && !outlineFace->state().selected && !outlineFace->state().expandable,
+          "F7: the pending outline is not read as selected (D4), and a row that is no folder is "
+          "not expandable");
+    QAccessible::installUpdateHandler(previousHandler);
+    check(alerts == 0,
+          QStringLiteral("F7: and NOT ONE Alert was raised - Windows plays a sound for one (%1)")
+              .arg(alerts));
+    drawer->setGroupExpanded(carcass, false);
+    settle(60);
+
+    // === F19 (ruling D19): one table for the keys, the sheet and the menu
+    clickRow(shelf);
+    QStringList unclaimedListKeys;
+    int askedKeys = 0;
+    for (const ItemsPanel::ListKey& entry : ItemsPanel::listKeys()) {
+        if (entry.fromFilterField) continue;
+        for (const QKeyCombination& key : entry.keys) {
+            ++askedKeys;
+            QKeyEvent over(QEvent::ShortcutOverride, key.key(), key.keyboardModifiers());
+            QCoreApplication::sendEvent(drawer, &over);
+            if (!over.isAccepted()) unclaimedListKeys << QKeySequence(key).toString();
+        }
+    }
+    check(askedKeys >= 13 && unclaimedListKeys.isEmpty(),
+          QStringLiteral("D19: every key in the list's table is a key the list claims (%1 asked; "
+                         "unclaimed: %2)")
+              .arg(askedKeys)
+              .arg(unclaimedListKeys.isEmpty() ? QStringLiteral("none")
+                                               : unclaimedListKeys.join(QStringLiteral(", "))));
+    if (QAction* openSheet = action(probe, QStringLiteral("Keyboard Shortcuts"))) openSheet->trigger();
+    settle(150);
+    ShortcutSheet* sheet = probe.findChild<ShortcutSheet*>();
+    const QStringList sheetTexts = sheet ? sheet->paintedTexts() : QStringList();
+    QStringList missingFromSheet;
+    for (const ItemsPanel::ListKey& entry : ItemsPanel::listKeys()) {
+        const QString label = ItemsPanel::listKeyLabel(entry);
+        const int at = sheetTexts.indexOf(label);
+        if (at < 0 || sheetTexts.value(at + 1) != ItemsPanel::listKeyText(entry))
+            missingFromSheet << label;
+    }
+    const int itemsListAt = sheetTexts.indexOf(QStringLiteral("Items list"));
+    check(sheet && itemsListAt > 0 && missingFromSheet.isEmpty() &&
+              sheetTexts.contains(QStringLiteral("Alt+Right")),
+          QStringLiteral("D19: the shortcut sheet has an \"Items list\" group generated from the "
+                         "same table, every entry with its keys (missing: %1)")
+              .arg(missingFromSheet.isEmpty() ? QStringLiteral("none")
+                                              : missingFromSheet.join(QStringLiteral(", "))));
+    if (sheet && sheet->isVisible()) {
+        QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(sheet, &escape);
+        settle(60);
+    }
+    drawer->setFocus();
+    settle(30);
+    {
+        QMenu menu;
+        drawer->populateRowMenu(menu, shelf, ItemsPanel::RowKind::Body);
+        QAction* up = menuAction(menu, QStringLiteral("Move up"));
+        QAction* down = menuAction(menu, QStringLiteral("Move down"));
+        const auto showsKeys = [](QAction* a, const QKeySequence& keys) {
+            return a && a->shortcut() == keys && a->shortcutContext() == Qt::WidgetShortcut &&
+                   a->isShortcutVisibleInContextMenu() &&
+                   a->associatedObjects().size() == 1;
+        };
+        check(showsKeys(up, QKeySequence(Qt::AltModifier | Qt::Key_Up)) &&
+                  showsKeys(down, QKeySequence(Qt::AltModifier | Qt::Key_Down)),
+              QStringLiteral("D19: Move up and Move down show Alt+Up and Alt+Down in the menu's "
+                             "shortcut column, scoped to the menu alone (\"%1\", \"%2\")")
+                  .arg(up ? up->shortcut().toString() : QString(),
+                       down ? down->shortcut().toString() : QString()));
+        // NO CONFLICT: with that menu alive, Alt+Up on the focused list is
+        // still the list's - claimed, one move, and the menu entry never fires.
+        int menuFired = 0;
+        if (up) QObject::connect(up, &QAction::triggered, [&menuFired] { ++menuFired; });
+        QKeyEvent over(QEvent::ShortcutOverride, Qt::Key_Up, Qt::AltModifier);
+        QCoreApplication::sendEvent(drawer, &over);
+        const std::size_t depth = doc.undoDepth();
+        sendKeyTo(&probe, Qt::Key_Up, Qt::AltModifier);   // Shelf above Sketch A
+        const std::size_t after = doc.undoDepth();
+        check(over.isAccepted() && after == depth + 1 && menuFired == 0,
+              QStringLiteral("D19: showing the key in the menu takes nothing from the list - "
+                             "Alt+Up is still claimed and moves once (%1 checkpoint, the menu "
+                             "entry fired %2 times)")
+                  .arg(static_cast<int>(after - depth))
+                  .arg(menuFired));
+    }
+    if (undo) undo->trigger();
+    settle(150);
+
+    // === F1 (ruling D1): Move into, from the row menu
+    rightPressRow(drawer, shelf);
+    {
+        QMenu menu;
+        drawer->populateRowMenu(menu, shelf, ItemsPanel::RowKind::Body);
+        QMenu* into = moveIntoMenu(menu);
+        const QStringList texts = entryTexts(into);
+        check(into && texts == QStringList({QStringLiteral("Carcass"), QStringLiteral("    Drawer"),
+                                            QStringLiteral("Doors")}),
+              QStringLiteral("D1: Shelf's menu offers Move into every folder, in the list's order "
+                             "and indented by depth (%1)")
+                  .arg(texts.join(QStringLiteral(" | "))));
+        QAction* toDoors = entryNamed(into, QStringLiteral("Doors"));
+        const std::size_t depth = doc.undoDepth();
+        if (toDoors) toDoors->trigger();
+        settle(150);
+        const std::size_t after = doc.undoDepth();
+        Toast* toast = probe.findChild<Toast*>();
+        check(doc.groupOf(shelf) == doors && after == depth + 1 &&
+                  toastSays(QStringLiteral("Moved Shelf to Doors")) && toast && toast->hasUndo(),
+              QStringLiteral("D1: Move into Doors files Shelf there - one checkpoint, and a Note "
+                             "with Undo (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+    }
+    if (undo) undo->trigger();
+    settle(150);
+    check(doc.groupOf(shelf) == 0, "D1: one Undo puts Shelf back at the top level");
+    {
+        // A folder's menu leaves out itself and what it holds; a row's own
+        // folder is left out (no change) - refused and no-change targets are
+        // never offered.
+        QMenu carcassMenu;
+        drawer->populateRowMenu(carcassMenu, carcass, ItemsPanel::RowKind::Folder);
+        QMenu doorMenu;
+        drawer->populateRowMenu(doorMenu, doorLeft, ItemsPanel::RowKind::Body);
+        const QStringList carcassTexts = entryTexts(moveIntoMenu(carcassMenu));
+        const QStringList doorTexts = entryTexts(moveIntoMenu(doorMenu));
+        check(carcassTexts == QStringList({QStringLiteral("Doors")}) &&
+                  doorTexts == QStringList({QStringLiteral("Carcass"), QStringLiteral("    Drawer")}),
+              QStringLiteral("D1: Carcass may not enter itself or Drawer (%1), and Door left is "
+                             "not offered the Doors it is in (%2)")
+                  .arg(carcassTexts.join(QStringLiteral(" | ")),
+                       doorTexts.join(QStringLiteral(" | "))));
+    }
+
+    // === F1 (ruling D1): Alt+Right, into the folder above
+    clickRow(shelf);
+    const QString noFolderAbove = ItemMoveText::noFolderAboveRefusal();
+    std::size_t depth = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Right, Qt::AltModifier);   // above Shelf: Sketch A, an outline
+    const std::size_t afterRefused = doc.undoDepth();
+    const QString refusedLine = status();
+    check(afterRefused == depth && doc.groupOf(shelf) == 0 && refusedLine == noFolderAbove,
+          QStringLiteral("D1: Alt+Right under an outline moves nothing, takes no checkpoint and "
+                         "says why in the status bar (\"%1\")")
+              .arg(refusedLine));
+    sendKeyTo(&probe, Qt::Key_Down);   // the selection moves on: the refusal goes
+    const QString afterStep = status();
+    check(afterStep != noFolderAbove && afterStep.startsWith(QStringLiteral("1 body selected")),
+          QStringLiteral("D1: a selection change withdraws it (\"%1\")").arg(afterStep));
+    // Sketch A under Doors - OPEN, so the rows straight above it are Door
+    // left and Door right, deeper: walked past, Doors is the sibling above.
+    drawer->setGroupExpanded(doors, true);
+    settle(60);
+    clickRow(sketch);
+    depth = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Right, Qt::AltModifier);
+    const std::size_t afterSketch = doc.undoDepth();
+    check(doc.groupOf(sketch) == doors && afterSketch == depth + 1 &&
+              toastSays(QStringLiteral("Moved Sketch A to Doors")),
+          QStringLiteral("D1: Alt+Right on Sketch A walks past the open Doors' rows and files it "
+                         "in Doors (\"%1\")")
+              .arg(toasts ? toasts->currentText() : QString()));
+    drawer->setGroupExpanded(doors, false);
+    settle(60);
+    clickRow(shelf);   // now right under Doors
+    depth = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Right, Qt::AltModifier);
+    const std::size_t afterShelf = doc.undoDepth();
+    const std::vector<int> inDoors = doc.orderedChildren(doors);
+    check(doc.groupOf(shelf) == doors && !inDoors.empty() && inDoors.back() == shelf &&
+              afterShelf == depth + 1 && toastSays(QStringLiteral("Moved Shelf to Doors")),
+          QStringLiteral("D1: Alt+Right files Shelf at the END of the folder above, Doors (%1)")
+              .arg(namesInOrder(doc, doors).join(QStringLiteral(", "))));
+    if (undo) undo->trigger();
+    settle(150);
+    if (undo) undo->trigger();
+    settle(150);
+    check(doc.groupOf(shelf) == 0 && doc.groupOf(sketch) == 0,
+          "D1: and each is one Undo - Shelf, then Sketch A, back at the top level");
+
+    // Refused while filtered, both routes - and the refusal comes down with
+    // the filter that caused it.
+    typeInto(drawer->filterField(), QStringLiteral("Shelf"));
+    clickRow(shelf);
+    const QString filteredInto = ItemMoveText::filteredIntoRefusal();
+    {
+        QMenu menu;
+        drawer->populateRowMenu(menu, shelf, ItemsPanel::RowKind::Body);
+        QMenu* into = moveIntoMenu(menu);
+        check(into && !into->menuAction()->isEnabled() &&
+                  into->menuAction()->toolTip() == filteredInto && menu.toolTipsVisible(),
+              "D1: while filtered, Move into is disabled and says why");
+        depth = doc.undoDepth();
+        if (QAction* toDoors = entryNamed(into, QStringLiteral("Doors"))) toDoors->trigger();
+        settle(100);
+        const std::size_t afterMenu = doc.undoDepth();
+        check(afterMenu == depth && doc.groupOf(shelf) == 0 && status() == filteredInto,
+              "D1: ...and an entry triggered anyway moves nothing and says why");
+    }
+    drawer->setFocus();
+    settle(30);
+    depth = doc.undoDepth();
+    sendKeyTo(&probe, Qt::Key_Right, Qt::AltModifier);
+    const std::size_t afterFilteredKey = doc.undoDepth();
+    const QString filteredLine = status();
+    check(drawer->filterActive() && afterFilteredKey == depth && doc.groupOf(shelf) == 0 &&
+              filteredLine == filteredInto,
+          QStringLiteral("D1: Alt+Right while filtered moves nothing and says why (\"%1\")")
+              .arg(filteredLine));
+    drawer->filterField()->clear();
+    settle(80);
+    const QString afterClear = status();
+    check(!drawer->filterActive() && afterClear != filteredInto && !afterClear.isEmpty(),
+          QStringLiteral("D1: clearing the filter takes its refusal down - the bar is back on "
+                         "the selection (\"%1\")")
+              .arg(afterClear));
+    // RF3's own sentence, which used to outlive its filter (backlog item b).
+    typeInto(drawer->filterField(), QStringLiteral("Shelf"));
+    clickRow(shelf);
+    sendKeyTo(&probe, Qt::Key_Down, Qt::AltModifier);
+    const bool rf3Shown = status() == ItemMoveText::filteredReorderRefusal();
+    drawer->filterField()->clear();
+    settle(80);
+    const QString afterRf3 = status();
+    check(rf3Shown && afterRf3 != ItemMoveText::filteredReorderRefusal(),
+          QStringLiteral("D1: and so does RF3's Alt+Down refusal (\"%1\")").arg(afterRf3));
+
+    // === F2 (ruling D2): Down or Enter in the filter field reaches the list,
+    // under the REAL focus model - Qt's own active window moved as
+    // probeFocusRing() moves it, and put back.
+    {
+        QWidget* const previousActive = QApplication::activeWindow();
+        const QPointer<QWidget> previousFocus = probe.focusWidget();
+        QT_WARNING_PUSH
+        QT_WARNING_DISABLE_DEPRECATED
+        QApplication::setActiveWindow(&probe);
+        QT_WARNING_POP
+        QLineEdit* field = drawer->filterField();
+        field->setFocus(Qt::OtherFocusReason);
+        settle(30);
+        const bool fieldHeld = field->hasFocus();
+        QKeyEvent downOver(QEvent::ShortcutOverride, Qt::Key_Down, Qt::NoModifier);
+        QCoreApplication::sendEvent(field, &downOver);
+        g_drawerAccessibleEvents.clear();
+        const QAccessible::UpdateHandler handler =
+            QAccessible::installUpdateHandler(&recordDrawerAccessibleEvent);
+        sendKeyTo(&probe, Qt::Key_Down);
+        QAccessible::installUpdateHandler(handler);
+        const int first = drawer->rowIdAt(0);
+        const bool entered = drawer->hasFocus() && QApplication::focusWidget() == drawer &&
+                             drawer->currentRowId() == first && first == carcass &&
+                             selected() == sorted(doc.bodiesUnderGroup(carcass));
+        int focusEvents = 0;
+        for (const DrawerAccessibleEvent& e : g_drawerAccessibleEvents)
+            if (e.type == QAccessible::Focus && e.object == rowOf(carcass)) ++focusEvents;
+        check(fieldHeld && downOver.isAccepted() && entered && focusEvents == 1,
+              QStringLiteral("D2: Down in the filter field moves the focus into the list on the "
+                             "first visible row and selects it (focus on the list: %1, current "
+                             "%2, a Focus event for it: %3)")
+                  .arg(drawer->hasFocus() ? QStringLiteral("yes") : QStringLiteral("no"))
+                  .arg(drawer->currentRowId())
+                  .arg(focusEvents));
+        // Enter, with a query: the first visible row is the match.
+        field->setFocus(Qt::OtherFocusReason);
+        settle(30);
+        typeInto(field, QStringLiteral("Back"));
+        QKeyEvent enterOver(QEvent::ShortcutOverride, Qt::Key_Return, Qt::NoModifier);
+        QCoreApplication::sendEvent(field, &enterOver);
+        sendKeyTo(&probe, Qt::Key_Return);
+        const bool enteredOnMatch = drawer->hasFocus() && drawer->currentRowId() == back &&
+                                    selected() == std::vector<int>{back};
+        check(enterOver.isAccepted() && enteredOnMatch,
+              QStringLiteral("D2: Enter does the same - with \"Back\" typed, the list takes the "
+                             "focus on Back, selected (current %1)")
+                  .arg(drawer->currentRowId()));
+        field->clear();
+        settle(60);
+        QT_WARNING_PUSH
+        QT_WARNING_DISABLE_DEPRECATED
+        QApplication::setActiveWindow(previousActive);
+        QT_WARNING_POP
+        if (previousFocus) previousFocus->setFocus(Qt::OtherFocusReason);
+        settle(30);
+    }
+    check(drawer->focusPolicy() == Qt::ClickFocus,
+          "D2: Tab stays as it was - the list is still Qt::ClickFocus, reached through the field");
+
+    // The empty submenu: one disabled entry that says why - two reasons.
+    check(probe.openFurniture(oneFolder), "D1: a furniture with one folder opens");
+    settle(250);
+    {
+        const int lid = idNamed(probe.document(), QStringLiteral("Lid"));
+        const int box = idNamed(probe.document(), QStringLiteral("Box"));
+        drawer->setGroupExpanded(box, true);
+        settle(60);
+        QMenu menu;
+        drawer->populateRowMenu(menu, lid, ItemsPanel::RowKind::Body);
+        QMenu* into = moveIntoMenu(menu);
+        const QList<QAction*> entries = into ? into->actions() : QList<QAction*>();
+        check(entries.size() == 1 && !entries.front()->isEnabled() &&
+                  entries.front()->text() == QStringLiteral("No other folder can take this"),
+              QStringLiteral("D1: with nowhere else to go, Move into holds one disabled entry "
+                             "that says why (%1)")
+                  .arg(entryTexts(into).join(QStringLiteral(" | "))));
+    }
+    check(probe.openFurniture(noFolder), "D1: a furniture with no folder opens");
+    settle(250);
+    {
+        const int plank = idNamed(probe.document(), QStringLiteral("Plank"));
+        QMenu menu;
+        drawer->populateRowMenu(menu, plank, ItemsPanel::RowKind::Body);
+        QMenu* into = moveIntoMenu(menu);
+        const QList<QAction*> entries = into ? into->actions() : QList<QAction*>();
+        check(entries.size() == 1 && !entries.front()->isEnabled() &&
+                  entries.front()->text() == QStringLiteral("No folders yet"),
+              QStringLiteral("D1: and with no folder at all, it says that instead (%1)")
+                  .arg(entryTexts(into).join(QStringLiteral(" | "))));
+    }
+    probe.close();
 }
 
 int main(int argc, char* argv[])
@@ -46982,6 +47637,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("the-drawer-walks-and-moves-with-the-keys")) drawerKeyboardBlock();
     if (blockEnabled("the-drawer-tells-the-truth-at-its-edges")) drawerEdgeStatesBlock();
     if (blockEnabled("the-row-menu-acts-on-what-was-right-clicked")) rowMenuActsOnWhatWasClickedBlock();
+    if (blockEnabled("the-drawer-is-reached-filed-and-heard")) drawerBatchABlock(outDir);
     if (blockEnabled("the-items-drawer-evidence")) itemsEvidenceBlock(outDir);
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
