@@ -2309,6 +2309,10 @@ private:
     // onPickRefusalWithdrawn(). Never a second source of truth for the
     // refusal itself: OcctViewWidget::autoPickRefusalText() is that.
     QString myPaintedPickRefusal;
+    // The Items drawer's last quiet move refusal (Alt+Right with no folder
+    // above, a step or a move into while filtered), so a filter change can
+    // take exactly that sentence down again - see the moveRefused connection.
+    QString myPaintedMoveRefusal;
     class ItemsPanel* myItemsPanel = nullptr;
     AppearancePanel* myAppearancePanel = nullptr;
     // The render settings card and the camera shutter (Task 7.2) - both

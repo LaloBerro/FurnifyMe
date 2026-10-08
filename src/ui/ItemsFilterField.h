@@ -10,6 +10,11 @@
 // on: the drawer's Clear filter action is the one thing that clears,
 // whichever route asks. On an EMPTY field Escape is not claimed at all: the
 // field hands the focus back and the key goes on to whatever owns it.
+//
+// Down and Enter hand over to the LIST (ruling D2): Tab passes the list by
+// (it is Qt::ClickFocus), so without them the keyboard could reach the field
+// and never the rows under it. Which keys do that is the drawer's one key
+// table's answer (ItemsPanel::listKeys()), never a second list written here.
 #include <QLineEdit>
 
 class ItemsFilterField : public QLineEdit {
@@ -24,6 +29,8 @@ public:
 
 signals:
     void escapePressed();
+    // Down or Enter: the drawer moves the focus into its rows.
+    void listRequested();
 
 protected:
     bool event(QEvent* event) override;

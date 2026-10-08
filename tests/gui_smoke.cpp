@@ -5341,7 +5341,7 @@ void drawerKeyboardBlock()
         {Qt::Key_E, Qt::NoModifier, "e"},     {Qt::Key_W, Qt::NoModifier, "w"},
         {Qt::Key_1, Qt::NoModifier, "1"},     {Qt::Key_Escape, Qt::NoModifier, ""},
         {Qt::Key_Delete, Qt::NoModifier, ""}, {Qt::Key_Z, Qt::ControlModifier, ""},
-        {Qt::Key_Right, Qt::AltModifier, ""},
+        {Qt::Key_Right, Qt::ControlModifier, ""},
     };
     QStringList claimed;
     for (const Unclaimed& u : unclaimed) {
@@ -5357,20 +5357,21 @@ void drawerKeyboardBlock()
     // The filter field sits OUTSIDE the scroll area, so a key it ignores
     // propagates straight up to the list. The list's keys are the list's only
     // while the list ITSELF holds focus: an arrow typed in the field neither
-    // walks the rows nor moves one.
+    // walks the rows nor moves one. (Plain Down is the field's own hand-over
+    // to the list since ruling D2 - design batch A's block pins that.)
     QLineEdit* field = drawer->filterField();
     if (field) field->setFocus();
     settle(30);
     const int currentBefore = drawer->currentRowId();
     const std::vector<int> selectionBefore = selected();
     const std::size_t depthBefore = doc.undoDepth();
-    sendKeyTo(&probe, Qt::Key_Down);
+    sendKeyTo(&probe, Qt::Key_Up);
     sendKeyTo(&probe, Qt::Key_Down, Qt::AltModifier);
     const bool fieldKept = field && probe.focusWidget() == field &&
                            drawer->currentRowId() == currentBefore &&
                            selected() == selectionBefore && doc.undoDepth() == depthBefore;
     check(fieldKept,
-          "keys: Down and Alt+Down typed in the filter field stay the field's - the list "
+          "keys: Up and Alt+Down typed in the filter field stay the field's - the list "
           "neither walks nor moves");
     drawer->setFocus();
     settle(30);
@@ -5761,7 +5762,11 @@ void drawerEdgeStatesBlock()
           QStringLiteral("edges: hidden, the row says so and the eye offers to show it (\"%1\", \"%2\")")
               .arg(bodyRow ? bodyRow->accessibleName() : QString(),
                    eye ? eye->accessibleName() : QString()));
-    check(folderRow && folderRow->accessibleName() == QStringLiteral("Carcass, folder, partly hidden"),
+    // Hiding Side left took it out of the selection too, so the folder is now
+    // PARTLY selected as well - and says that in words (F18, design batch A).
+    check(folderRow && folderRow->accessibleName() ==
+                           QStringLiteral("Carcass, folder, partly hidden, 1 of 2 bodies in "
+                                          "Carcass is selected"),
           QStringLiteral("edges: a folder with one of two hidden says \"partly hidden\" (\"%1\")")
               .arg(folderRow ? folderRow->accessibleName() : QString()));
     // The folder's own eye hides the rest: now the folder is hidden outright.
@@ -14735,17 +14740,24 @@ int main(int argc, char* argv[])
                     if (seen++ == 1) secondRow = row;
                 }
             }
-            // The same accent fill a selected body row wears - asserted as
-            // the token, not as "the stylesheet is non-empty", so a mark in
-            // some other colour fails rather than passes.
+            // The pending mark is the row's WORDS since design batch A
+            // (ruling D4) - the selection fill it used to wear made the list
+            // show more selected rows than the status bar counted. Its
+            // accessible name and its tooltip end ", waiting to extrude",
+            // and it wears no fill.
             const QString marked =
                 QStringLiteral("background-color: %1").arg(Theme::chipActive().name());
-            check(secondRow != nullptr &&
-                      secondRow->styleSheet().contains(marked),
-                  QStringLiteral("the newest outline's row carries the pending mark "
-                                 "before any click (\"%1\")")
-                      .arg(secondRow ? secondRow->styleSheet() : QString()));
-            check(firstRow != nullptr && !firstRow->styleSheet().contains(marked),
+            const QString waiting = QStringLiteral(", waiting to extrude");
+            const auto saysPending = [&](QWidget* row) {
+                return row && row->accessibleName().endsWith(waiting) &&
+                       row->toolTip().endsWith(waiting);
+            };
+            check(saysPending(secondRow) && !secondRow->styleSheet().contains(marked),
+                  QStringLiteral("the newest outline's row says it is waiting to extrude "
+                                 "before any click, with no selection fill (\"%1\")")
+                      .arg(secondRow ? secondRow->accessibleName() : QString()));
+            check(firstRow != nullptr && !saysPending(firstRow) &&
+                      !firstRow->styleSheet().contains(marked),
                   "and the other outline's row does not - only one is pending");
             check(window.findChild<QLabel*>() != nullptr, "the shell has labels to read");
 
@@ -14759,10 +14771,10 @@ int main(int argc, char* argv[])
                 // The mark FOLLOWS the click, both ways - a highlight that
                 // only ever arrived and never left would look right on this
                 // click and wrong on the next.
-                check(firstRow->styleSheet().contains(marked),
+                check(saysPending(firstRow) && !firstRow->styleSheet().contains(marked),
                       QStringLiteral("the mark moves to the row that was clicked "
-                                     "(\"%1\")").arg(firstRow->styleSheet()));
-                check(secondRow != nullptr && !secondRow->styleSheet().contains(marked),
+                                     "(\"%1\")").arg(firstRow->accessibleName()));
+                check(secondRow != nullptr && !saysPending(secondRow),
                       "and leaves the row it was on");
 
                 // And the state label NAMES it, so the two halves of the
@@ -19904,6 +19916,10 @@ int main(int argc, char* argv[])
             for (QAction* candidate : window.findChildren<QAction*>()) {
                 if (!candidate->shortcut().isEmpty()) ++expected;
             }
+            // ...plus the Items list's own keys, which no QAction carries: the
+            // sheet's generated "Items list" group, one row per entry of the
+            // drawer's key table (ruling D19).
+            expected += static_cast<int>(ItemsPanel::listKeys().size());
             check(sheet != nullptr && sheet->rowCount() == expected,
                   QStringLiteral("the sheet lists all %1 bound actions (got %2)")
                       .arg(expected)
@@ -32550,6 +32566,10 @@ int main(int argc, char* argv[])
             for (QAction* candidate : probe.findChildren<QAction*>()) {
                 if (!candidate->shortcut().isEmpty()) ++expected;
             }
+            // ...plus the Items list's own keys, which no QAction carries: the
+            // sheet's generated "Items list" group, one row per entry of the
+            // drawer's key table (ruling D19).
+            expected += static_cast<int>(ItemsPanel::listKeys().size());
             check(sheet != nullptr && sheet->rowCount() == expected,
                   QStringLiteral("the sheet lists all %1 bound actions on this probe, "
                                  "Duplicate included (got %2)")
@@ -36597,6 +36617,8 @@ int main(int argc, char* argv[])
                 for (QAction* candidate : autoProbe.findChildren<QAction*>()) {
                     if (!candidate->shortcut().isEmpty()) ++expected;
                 }
+                // ...plus the Items list's key table (ruling D19).
+                expected += static_cast<int>(ItemsPanel::listKeys().size());
                 check(sheet != nullptr && sheet->rowCount() == expected,
                       QStringLiteral("the sheet's count is unaffected by the new submenu - "
                                      "all %1 bound actions, none of the five unbound mode "

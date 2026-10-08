@@ -101,6 +101,15 @@ QString filteredReorderRefusal()
     return t("Clear the filter to move rows up or down — it is hiding where they would land");
 }
 
+QString filteredIntoRefusal()
+{
+    return t("Clear the filter to move rows into a folder — it is hiding where they would land");
+}
+QString noFolderAboveRefusal()
+{
+    return t("Nothing to move into — the row above is not a folder");
+}
+
 QStringList paintedTexts()
 {
     return {t("into %1"), t("to %1"), t("out of %1"), t("above %1"),
@@ -111,7 +120,8 @@ QStringList paintedTexts()
             t("%1 can't go inside itself — drop it beside it instead"),
             t("%1 can't go inside a folder it holds — drop it beside it instead"),
             t("That row is no longer in the list — nothing was moved"), escHint(),
-            releaseToCancel(), filteredDropHint(), noTargetHint(), filteredReorderRefusal()};
+            releaseToCancel(), filteredDropHint(), noTargetHint(), filteredReorderRefusal(),
+            filteredIntoRefusal(), noFolderAboveRefusal()};
 }
 
 }  // namespace ItemMoveText

@@ -980,6 +980,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
 
     myShortcutSheet = new ShortcutSheet(this);
     connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
+    // The Items list's own keys (ruling D19): no QAction carries them, so the
+    // sheet is handed the drawer's ONE key table and reads it on every build.
+    myShortcutSheet->addKeyTable(tr("Items list"), [] {
+        ShortcutSheet::KeyRows rows;
+        for (const ItemsPanel::ListKey& entry : ItemsPanel::listKeys())
+            rows.emplace_back(ItemsPanel::listKeyLabel(entry), ItemsPanel::listKeyText(entry));
+        return rows;
+    });
 
     // appStateChanged alone, not documentChanged too: every document edit
     // already calls updateActions() (and so emits appStateChanged) before it
@@ -1233,8 +1241,22 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(myItemsPanel, &ItemsPanel::wrapFolderRequested, this, &MainWindow::onWrapFolder);
     // A move the list refused (Alt+Up/Down while filtered): quiet, so the
     // status bar's left channel, never a Failure toast.
-    connect(myItemsPanel, &ItemsPanel::moveRefused, this,
-            [this](const QString& reason) { statusBar()->showMessage(reason); });
+    // REMEMBERED, so it can be WITHDRAWN (ruling D1, after the RF3 defect):
+    // the sentence blames the filter or the row above, and once either moves
+    // it is advice about a list that is no longer on screen. A selection
+    // change rewrites the bar anyway (onSelectionChanged()); a filter change
+    // does not, so it takes the sentence down itself - and only this
+    // sentence, compared against what the bar is actually showing.
+    connect(myItemsPanel, &ItemsPanel::moveRefused, this, [this](const QString& reason) {
+        myPaintedMoveRefusal = reason;
+        statusBar()->showMessage(reason);
+    });
+    connect(myItemsPanel, &ItemsPanel::filterChanged, this, [this] {
+        if (myPaintedMoveRefusal.isEmpty()) return;
+        const bool showing = statusBar()->currentMessage() == myPaintedMoveRefusal;
+        myPaintedMoveRefusal.clear();
+        if (showing) showSelectionStatus();
+    });
     connect(myItemsPanel, &ItemsPanel::deleteGroupRequested, this,
             &MainWindow::onDeleteGroup);
 
@@ -10219,6 +10241,8 @@ void MainWindow::onSelectionChanged()
 
     updateActions();
 
+    // A move refusal is about the selection it was made with (D1).
+    myPaintedMoveRefusal.clear();
     showSelectionStatus();
 }
 

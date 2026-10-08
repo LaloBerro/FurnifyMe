@@ -98,6 +98,14 @@ std::vector<ShortcutSheet::Group> ShortcutSheet::buildGroups() const
         }
     }
 
+    // The widgets' own key tables, after the menus and before the catch-all.
+    for (const auto& [title, rows] : myKeyTables) {
+        Group group;
+        group.title = title;
+        for (const auto& [label, keys] : rows()) group.rows.push_back(Row{label, keys});
+        if (!group.rows.empty()) groups.push_back(std::move(group));
+    }
+
     Group elsewhere;
     elsewhere.title = tr("Other");
     for (QAction* candidate : parentWidget()->findChildren<QAction*>()) {
@@ -108,6 +116,11 @@ std::vector<ShortcutSheet::Group> ShortcutSheet::buildGroups() const
     if (!elsewhere.rows.empty()) groups.push_back(std::move(elsewhere));
 
     return groups;
+}
+
+void ShortcutSheet::addKeyTable(const QString& title, std::function<KeyRows()> rows)
+{
+    if (rows) myKeyTables.emplace_back(title, std::move(rows));
 }
 
 void ShortcutSheet::rebuild()

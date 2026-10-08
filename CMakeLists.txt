@@ -167,6 +167,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ToolCluster.cpp
       src/ui/ViewportOverlay.cpp
       src/ui/ItemsPanel.cpp
+      src/ui/ItemsRow.cpp
       src/ui/ItemMoveText.cpp
       src/ui/ItemsFilterField.cpp
       src/ui/DropIndicator.cpp

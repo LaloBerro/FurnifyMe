@@ -11,6 +11,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <functional>
+#include <utility>
 #include <vector>
 
 class QAction;
@@ -24,8 +26,17 @@ public:
     // Rebuilds from the parent window's actions, then shows and centres itself.
     void showSheet();
 
-    // Total shortcut rows, headings excluded - one per bound action.
+    // Total shortcut rows, headings excluded - one per bound action, plus one
+    // per row of every key table added below.
     int rowCount() const;
+
+    // Keys that NO QAction carries - a widget's own keys, such as the Items
+    // list's arrows (ruling D19) - listed as a group of their own after the
+    // menus. Generated, never written here: `rows` is asked afresh on every
+    // build and reads the same table the widget's key handling reads.
+    // Each row is (label, keys).
+    using KeyRows = std::vector<std::pair<QString, QString>>;
+    void addKeyTable(const QString& title, std::function<KeyRows()> rows);
 
     // Every string this sheet paints: the title, the group headings, and each
     // row's label and keys. Painted copy is invisible to gui_smoke's
@@ -63,6 +74,7 @@ private:
     void recentre();
 
     std::vector<Group> myGroups;
+    std::vector<std::pair<QString, std::function<KeyRows()>>> myKeyTables;
     // A click outside is swallowed so it cannot also pick in the viewport
     // behind an apparently-modal sheet; its release has to go the same way,
     // or the viewport picks on the release instead.

@@ -33,6 +33,13 @@ QString noTargetHint();
 // a step among siblings would land beside rows the filter is hiding. The menu
 // entries' tooltip and the status bar's left channel both read this.
 QString filteredReorderRefusal();
+// Move into (the row menu's submenu) and Alt+Right while the filter is active
+// (ruling D1, after RF3): the filter hides some of the folders and siblings a
+// move into would land among.
+QString filteredIntoRefusal();
+// Alt+Right on a row whose previous visible sibling is not a folder (ruling
+// D1): quiet, in the status bar's left channel.
+QString noFolderAboveRefusal();
 // Every fixed fragment above, for the vocabulary sweep.
 QStringList paintedTexts();
 

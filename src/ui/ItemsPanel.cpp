@@ -9,11 +9,13 @@
 #include "InlineRename.h"
 #include "ItemMoveText.h"
 #include "ItemsFilterField.h"
+#include "ItemsRow.h"
 #include "KeyClaim.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 #include "ToolChip.h"
 
+#include <QAccessible>
 #include <QAction>
 #include <QEvent>
 #include <QFontMetrics>
@@ -35,6 +37,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -126,6 +129,18 @@ QString rowAccessibleName(const QString& name, const QString& folder, const QStr
     QString text = name;
     if (!folder.isEmpty()) text += ItemsPanel::tr(", in %1").arg(folder);
     return text + visibility;
+}
+// The pending outline's words (ruling D4), at the end of its name and tooltip.
+QString waitingToExtrude() { return ItemsPanel::tr(", waiting to extrude"); }
+// A partly selected folder's count, in words (F18): "2 of 4 bodies in Carcass
+// are selected". A partial count always has two or more bodies under it.
+QString partialCountWords(int chosen, int total, const QString& folder)
+{
+    return chosen == 1 ? ItemsPanel::tr("1 of %1 bodies in %2 is selected").arg(total).arg(folder)
+                       : ItemsPanel::tr("%1 of %2 bodies in %3 are selected")
+                             .arg(chosen)
+                             .arg(total)
+                             .arg(folder);
 }
 
 // A row's name. A QLabel that answers its size from the PLAIN name in either
@@ -287,9 +302,14 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     Theme::makeSurfaceTransparent(this);
     setFixedWidth(cardWidth());
     // ClickFocus: a click on a row gives the list the keys; Tab never stops
-    // here. It paints no ring - the selection fill is the focus cue (WCAG
-    // 2.4.7), because the focused row IS the selected row.
+    // here - the filter field, which Tab does reach, hands over to the list
+    // on Down or Enter (ruling D2). It paints no ring - the selection mark
+    // (fill and bar) is the focus cue (WCAG 2.4.7), because the focused row
+    // IS the selected row.
     setFocusPolicy(Qt::ClickFocus);
+    // Before the first row exists, so no row is ever answered by Qt's generic
+    // widget interface and cached that way (finding F7).
+    ItemsRowWidget::installAccessibility();
 
     myOuter = new QVBoxLayout(this);
     myOuter->setContentsMargins(kPad, kPad, kPad, kPad);
@@ -331,6 +351,7 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     });
     connect(myFilter, &QLineEdit::textChanged, this, &ItemsPanel::setFilter);
     connect(myFilter, &ItemsFilterField::escapePressed, myClearFilterAction, &QAction::trigger);
+    connect(myFilter, &ItemsFilterField::listRequested, this, &ItemsPanel::enterListFromFilter);
 
     // The rows live inside a scroll area now (improvements item 12: "the items
     // list is too long and it does not have a scroll bar, can you add an
@@ -575,6 +596,7 @@ void ItemsPanel::setFilter(const QString& text)
     applyRowVisibility();
     relayoutCard();
     restyleRows();
+    emit filterChanged();
 }
 
 void ItemsPanel::setGrainLook(QPushButton* grain, bool across)
@@ -733,6 +755,8 @@ void ItemsPanel::syncTwisty(Row& row, bool open, bool heldByFilter)
     if (row.twistyOpen != open) row.twisty->setIcon(chevron(open));
     row.twistyOpen = open;
     row.twistyHeld = heldByFilter;
+    // The same answer, as a state a screen reader hears change (F7).
+    row.widget->setExpanded(open);
     // While the filter holds it the twisty does nothing (see addGroupRow()),
     // and says why rather than looking like a control that is broken.
     row.twisty->setToolTip(heldByFilter ? filterHeldTip()
@@ -763,7 +787,8 @@ void ItemsPanel::nameRow(Row& row, bool shown, bool anyShown)
         if (widget && widget->accessibleName() != text) widget->setAccessibleName(text);
     };
     if (row.isGroup) {
-        name(row.widget, rowAccessibleName(tr("%1, folder").arg(row.text), folderName, visibility));
+        row.baseName = rowAccessibleName(tr("%1, folder").arg(row.text), folderName, visibility);
+        writeRowName(row);
         // The eye reads checked only while EVERYTHING under it shows, and a
         // click flips that - so its name is the click's outcome.
         name(row.eye, shown ? tr("Hide everything in %1").arg(row.text)
@@ -771,10 +796,27 @@ void ItemsPanel::nameRow(Row& row, bool shown, bool anyShown)
         if (row.twisty) name(row.twisty, twistyName(row.twistyOpen, row.text));
         return;
     }
-    name(row.widget, rowAccessibleName(row.text, folderName, visibility));
+    row.baseName = rowAccessibleName(row.text, folderName, visibility);
+    writeRowName(row);
     // The eye's checked state is the item's visibility; its name is what a
     // click will do, so the two read together ("Hide Side left", checked).
     name(row.eye, shown ? tr("Hide %1").arg(row.text) : tr("Show %1").arg(row.text));
+}
+
+void ItemsPanel::writeRowName(Row& row)
+{
+    // What the SELECTION adds to a row's name, after the words nameRow()
+    // composed: the pending outline is "waiting to extrude" (ruling D4 - it
+    // wears no mark, so its name has to carry it), and a partly selected
+    // folder spells its count out (F18), since "2/4" alone says nothing aloud.
+    QString text = row.baseName;
+    if (row.pending) text += waitingToExtrude();
+    if (!row.partialWords.isEmpty()) text += QStringLiteral(", ") + row.partialWords;
+    if (row.widget->accessibleName() != text) row.widget->setAccessibleName(text);
+    // The tooltip a pointer finds there says the same - and only on the
+    // pending outline, the one row whose state no mark shows.
+    const QString tip = row.pending ? row.text + waitingToExtrude() : QString();
+    if (row.widget->toolTip() != tip) row.widget->setToolTip(tip);
 }
 
 const QIcon& ItemsPanel::chevron(bool open)
@@ -1385,7 +1427,9 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
         return;
     }
 
-    auto* row = new QWidget(this);
+    auto* row = new ItemsRowWidget(isOutline ? ItemsRowWidget::Kind::Outline
+                                             : ItemsRowWidget::Kind::Body,
+                                   this);
     auto* layout = new QHBoxLayout(row);
     // Indented by how deep in the folder tree it sits (improvements item 10).
     // The INDENT is the only thing depth changes about a row: everything else
@@ -1542,10 +1586,11 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
         return;
     }
 
-    auto* row = new QWidget(this);
+    auto* row = new ItemsRowWidget(ItemsRowWidget::Kind::Folder, this);
     auto* layout = new QHBoxLayout(row);
     layout->setContentsMargins(kRowInset + depth * kIndentPx, 4, kRowInset, 4);
     layout->setSpacing(6);
+    row->setExpanded(isGroupExpanded(groupId));
 
     auto* twisty = new QPushButton(row);
     twisty->setFixedSize(16, 16);
@@ -1582,6 +1627,9 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
                              .arg(Theme::labelFont().pointSizeF()));
     count->hide();
     layout->addWidget(count);
+    // Transparent for the mouse (a press on it is the row's), so Qt never
+    // sends it a ToolTip event: the row answers for it (F18).
+    row->setPassThroughTip(count);
 
     auto* eye = new QPushButton(row);
     eye->setCheckable(true);
@@ -1744,6 +1792,21 @@ void ItemsPanel::populateRowMenu(QMenu& menu, int rowId, RowKind kind)
     QAction* rename = menu.addAction(tr("Rename"));
     QAction* up = menu.addAction(tr("Move up"));
     QAction* down = menu.addAction(tr("Move down"));
+    // The list's keys in the menu's shortcut column (ruling D19), read off the
+    // ONE table the key handling reads. Context WidgetShortcut, so the only
+    // place Qt's shortcut map could match one is the menu itself while it has
+    // the keyboard: nothing is registered for the window, and the list's own
+    // Alt+Up/Down claim (claimsKey()) never meets a rival.
+    const auto showKeys = [](QAction* entry, ListCommand command) {
+        entry->setShortcut(listKeySequence(command));
+        entry->setShortcutContext(Qt::WidgetShortcut);
+        entry->setShortcutVisibleInContextMenu(true);
+    };
+    showKeys(up, ListCommand::MoveUp);
+    showKeys(down, ListCommand::MoveDown);
+    // MOVE INTO (ruling D1): the non-drag way to file a row in a folder that
+    // already exists (WCAG 2.5.7) - every folder the carried rows may enter.
+    QMenu* into = menu.addMenu(tr("Move into"));
     // Never "group" for a folder (ruling P6): this dissolves a folder and keeps
     // every piece of wood in it - the right-clicked folder, or a body row's
     // own folder (ruling RF1).
@@ -1836,6 +1899,56 @@ void ItemsPanel::populateRowMenu(QMenu& menu, int rowId, RowKind kind)
         }
         emit itemsMoveRequested(ids, downTarget.parent, downTarget.beforeId);
     });
+    // Move into's entries: each folder checkMove() answers Moved for, depth
+    // first in the list's own order and indented by depth. A refused target
+    // (a folder into itself or one it holds) and a no-change one (where the
+    // rows already are) are left out rather than offered and refused. The
+    // folder Alt+Right would choose wears that key, so the menu teaches it.
+    {
+        const int above = filtering ? 0 : folderAbove(rowId);
+        int offered = 0;
+        std::vector<std::pair<int, int>> folders;   // id, depth
+        if (myDocument) {
+            const std::function<void(int, int)> walk = [&](int parent, int depth) {
+                for (int child : myDocument->orderedChildren(parent)) {
+                    if (!myDocument->groupExists(child)) continue;
+                    folders.emplace_back(child, depth);
+                    walk(child, depth + 1);
+                }
+            };
+            walk(0, 0);
+        }
+        for (const auto& [folderId, depth] : folders) {
+            if (myDocument->checkMove(ids, folderId, DocumentModel::kIntoFolder).check !=
+                DocumentModel::MoveCheck::Moved)
+                continue;
+            // The user's own word, with its '&' doubled so Qt never reads it
+            // as a mnemonic.
+            QString label = QString::fromStdString(myDocument->groupNameOf(folderId));
+            label.replace(QLatin1Char('&'), QStringLiteral("&&"));
+            QAction* entry = into->addAction(QString(depth * 4, QLatin1Char(' ')) + label);
+            entry->setData(folderId);
+            if (folderId == above) showKeys(entry, ListCommand::MoveIntoFolderAbove);
+            connect(entry, &QAction::triggered, this, [this, ids, folderId] {
+                if (filterActive()) {
+                    emit moveRefused(ItemMoveText::filteredIntoRefusal());
+                    return;
+                }
+                emit itemsMoveRequested(ids, folderId, DocumentModel::kIntoFolder);
+            });
+            ++offered;
+        }
+        if (offered == 0) {
+            // Never an empty submenu: one disabled entry that says why.
+            QAction* none = into->addAction(folders.empty() ? tr("No folders yet")
+                                                            : tr("No other folder can take this"));
+            none->setEnabled(false);
+        }
+        // RF3's rule for a move into, too (D1): the filter hides folders and
+        // the siblings a row would land among.
+        into->menuAction()->setEnabled(!filtering);
+        if (filtering) into->menuAction()->setToolTip(ItemMoveText::filteredIntoRefusal());
+    }
     if (removeTarget != 0)
         connect(ungroup, &QAction::triggered, this,
                 [this, removeTarget] { emit removeFolderRequested(removeTarget); });
@@ -1865,24 +1978,78 @@ bool ItemsPanel::claimsKey(const QKeyEvent* key) const
     // must not walk the rows out from under it. Nor during a drag, whose own
     // Escape claim is the only key it has (ruling R10a).
     if (!holdsFocus() || myDragging) return false;
-    const Qt::KeyboardModifiers mods = key->modifiers() & ~Qt::KeypadModifier;
-    switch (key->key()) {
-    case Qt::Key_Up:
-    case Qt::Key_Down:
-        return mods == Qt::NoModifier || mods == Qt::ShiftModifier || mods == Qt::AltModifier;
-    case Qt::Key_Left:
-        return mods == Qt::NoModifier || mods == Qt::AltModifier;
-    case Qt::Key_Right:
-    case Qt::Key_Home:
-    case Qt::Key_End:
-        return mods == Qt::NoModifier;
-    case Qt::Key_F2:
-        // Only over a live row: with none, F2 goes on to the Rename action,
-        // which renames whatever the viewport has selected.
-        return mods == Qt::NoModifier && visibleIndexOf(myCurrentId) >= 0;
-    default:
-        return false;   // letters are never the list's - E stays Extrude
+    // THE TABLE decides (ruling D19) - letters are never in it, so E stays
+    // Extrude.
+    const ListKey* entry = listKeyFor(
+        QKeyCombination(key->modifiers() & ~Qt::KeypadModifier, Qt::Key(key->key())),
+        /*fromFilterField=*/false);
+    if (!entry) return false;
+    // F2 only over a live row: with none, F2 goes on to the Rename action,
+    // which renames whatever the viewport has selected.
+    if (entry->command == ListCommand::Rename) return visibleIndexOf(myCurrentId) >= 0;
+    return true;
+}
+
+const std::vector<ItemsPanel::ListKey>& ItemsPanel::listKeys()
+{
+    // One row of the ShortcutSheet's "Items list" group per entry, in this
+    // order. The labels say what the KEY does, in the sheet's own register.
+    static const std::vector<ListKey> table = {
+        {ListCommand::Step, {QKeyCombination(Qt::Key_Up), QKeyCombination(Qt::Key_Down)},
+         QT_TR_NOOP("Select the row above or below"), false},
+        {ListCommand::ExtendStep,
+         {QKeyCombination(Qt::ShiftModifier, Qt::Key_Up),
+          QKeyCombination(Qt::ShiftModifier, Qt::Key_Down)},
+         QT_TR_NOOP("Add the row above or below to the selection"), false},
+        {ListCommand::FirstOrLast, {QKeyCombination(Qt::Key_Home), QKeyCombination(Qt::Key_End)},
+         QT_TR_NOOP("Select the first or the last row"), false},
+        {ListCommand::FoldOrParent, {QKeyCombination(Qt::Key_Left)},
+         QT_TR_NOOP("Close the folder, or go to the folder the row is in"), false},
+        {ListCommand::UnfoldOrChild, {QKeyCombination(Qt::Key_Right)},
+         QT_TR_NOOP("Open the folder, or go to its first row"), false},
+        {ListCommand::Rename, {QKeyCombination(Qt::Key_F2)}, QT_TR_NOOP("Rename the row"), false},
+        {ListCommand::MoveUp, {QKeyCombination(Qt::AltModifier, Qt::Key_Up)},
+         QT_TR_NOOP("Move up"), false},
+        {ListCommand::MoveDown, {QKeyCombination(Qt::AltModifier, Qt::Key_Down)},
+         QT_TR_NOOP("Move down"), false},
+        {ListCommand::MoveOutOfFolder, {QKeyCombination(Qt::AltModifier, Qt::Key_Left)},
+         QT_TR_NOOP("Move out of its folder"), false},
+        {ListCommand::MoveIntoFolderAbove, {QKeyCombination(Qt::AltModifier, Qt::Key_Right)},
+         QT_TR_NOOP("Move into the folder above"), false},
+        {ListCommand::EnterList, {QKeyCombination(Qt::Key_Down), QKeyCombination(Qt::Key_Return)},
+         QT_TR_NOOP("From the filter field, go to the list"), true},
+    };
+    return table;
+}
+
+const ItemsPanel::ListKey* ItemsPanel::listKeyFor(QKeyCombination combination, bool fromFilterField)
+{
+    // Keypad Enter is the same key as Return to the hand that presses it.
+    if (combination.key() == Qt::Key_Enter)
+        combination = QKeyCombination(combination.keyboardModifiers(), Qt::Key_Return);
+    for (const ListKey& entry : listKeys()) {
+        if (entry.fromFilterField != fromFilterField) continue;
+        for (const QKeyCombination& key : entry.keys)
+            if (key == combination) return &entry;
     }
+    return nullptr;
+}
+
+QString ItemsPanel::listKeyLabel(const ListKey& entry) { return tr(entry.label); }
+
+QString ItemsPanel::listKeyText(const ListKey& entry)
+{
+    QStringList keys;
+    for (const QKeyCombination& key : entry.keys)
+        keys << QKeySequence(key).toString(QKeySequence::NativeText);
+    return keys.join(QStringLiteral(", "));
+}
+
+QKeySequence ItemsPanel::listKeySequence(ListCommand command)
+{
+    for (const ListKey& entry : listKeys())
+        if (entry.command == command && !entry.keys.empty()) return QKeySequence(entry.keys.front());
+    return QKeySequence();
 }
 
 bool ItemsPanel::event(QEvent* event)
@@ -1902,23 +2069,27 @@ void ItemsPanel::keyPressEvent(QKeyEvent* event)
         QWidget::keyPressEvent(event);
         return;
     }
-    const Qt::KeyboardModifiers mods = event->modifiers() & ~Qt::KeypadModifier;
-    if (mods == Qt::AltModifier) {
-        moveByKey(event->key());
-        event->accept();
-        return;
-    }
+    // claimsKey() found the entry; its COMMAND decides, and the key only
+    // says which way (up or down, first or last).
+    const ListKey* entry = listKeyFor(
+        QKeyCombination(event->modifiers() & ~Qt::KeypadModifier, Qt::Key(event->key())),
+        /*fromFilterField=*/false);
+    const bool upward = event->key() == Qt::Key_Up || event->key() == Qt::Key_Home;
     const int at = visibleIndexOf(myCurrentId);
     const int last = rowCount() - 1;
-    switch (event->key()) {
-    case Qt::Key_Up: stepTo(at <= 0 ? 0 : at - 1, mods); break;
-    case Qt::Key_Down: stepTo(at < 0 ? 0 : std::min(at + 1, last), mods); break;
-    case Qt::Key_Home: stepTo(0, Qt::NoModifier); break;
-    case Qt::Key_End: stepTo(last, Qt::NoModifier); break;
-    case Qt::Key_Left: foldOrParent(); break;
-    case Qt::Key_Right: unfoldOrChild(); break;
-    case Qt::Key_F2: renameCurrent(); break;
-    default: break;
+    const int next = upward ? (at <= 0 ? 0 : at - 1) : (at < 0 ? 0 : std::min(at + 1, last));
+    switch (entry->command) {
+    case ListCommand::Step: stepTo(next, Qt::NoModifier); break;
+    case ListCommand::ExtendStep: stepTo(next, Qt::ShiftModifier); break;
+    case ListCommand::FirstOrLast: stepTo(upward ? 0 : last, Qt::NoModifier); break;
+    case ListCommand::FoldOrParent: foldOrParent(); break;
+    case ListCommand::UnfoldOrChild: unfoldOrChild(); break;
+    case ListCommand::Rename: renameCurrent(); break;
+    case ListCommand::MoveUp:
+    case ListCommand::MoveDown:
+    case ListCommand::MoveOutOfFolder:
+    case ListCommand::MoveIntoFolderAbove: moveByCommand(entry->command); break;
+    case ListCommand::EnterList: break;   // the filter field's, never claimed here
     }
     event->accept();
 }
@@ -1942,9 +2113,62 @@ void ItemsPanel::stepTo(int visibleIndex, Qt::KeyboardModifiers mods)
     const RowKind kind =
         row->isGroup ? RowKind::Folder : (row->isOutline ? RowKind::Outline : RowKind::Body);
     // Focus IS selection: stepping selects, exactly as a click on the row.
-    activateRow(id, kind, (mods & Qt::ShiftModifier) ? Qt::KeyboardModifiers(Qt::ShiftModifier)
-                                                    : Qt::KeyboardModifiers(Qt::NoModifier));
+    const bool extend = (mods & Qt::ShiftModifier) != 0;
+    activateRow(id, kind, extend ? Qt::KeyboardModifiers(Qt::ShiftModifier)
+                                 : Qt::KeyboardModifiers(Qt::NoModifier));
     scrollToRow(id);
+    announceCurrent(extend);
+}
+
+ItemsPanel::Row* ItemsPanel::rowById(int id)
+{
+    for (Row& row : myRowList)
+        if (row.id == id) return &row;
+    return nullptr;
+}
+
+void ItemsPanel::announceCurrent(bool extend)
+{
+    // A KEYBOARD STEP, told to a screen reader (finding F7): the row the keys
+    // are on now gets the focus, and the selection follows it - Selection
+    // (it is now the selection) or SelectionAdd (a Shift step joined it).
+    // The row's own state changes - selected, expanded - raise StateChanged
+    // from ItemsRowWidget as they happen. Never an Alert (CLAUDE.md, F26).
+    for (Row& row : myRowList) row.widget->setCurrent(row.id == myCurrentId);
+    Row* row = rowById(myCurrentId);
+    if (!row || row->widget->isHidden()) return;
+    QAccessibleEvent focus(row->widget, QAccessible::Focus);
+    QAccessible::updateAccessibility(&focus);
+    QAccessibleEvent selection(row->widget, extend ? QAccessible::SelectionAdd
+                                                   : QAccessible::Selection);
+    QAccessible::updateAccessibility(&selection);
+}
+
+void ItemsPanel::enterListFromFilter()
+{
+    // DOWN OR ENTER IN THE FILTER FIELD (ruling D2): the keyboard's way into
+    // the rows, which Tab passes by. Focus lands on the first visible row and
+    // selects it - focus and selection never separate in this list. With no
+    // row to land on the field keeps the keys.
+    if (rowCount() == 0) return;
+    setFocus(Qt::OtherFocusReason);
+    stepTo(0, Qt::NoModifier);
+}
+
+int ItemsPanel::folderAbove(int id) const
+{
+    const int at = visibleIndexOf(id);
+    const Row* row = visibleRow(at);
+    if (!row) return 0;
+    for (int v = at - 1; v >= 0; --v) {
+        const Row* previous = visibleRow(v);
+        // Deeper: inside an earlier sibling folder that is open - walk past.
+        if (previous->depth > row->depth) continue;
+        // Shallower: the row's own folder - it has no sibling above it.
+        if (previous->depth < row->depth) return 0;
+        return previous->isGroup ? previous->id : 0;
+    }
+    return 0;
 }
 
 void ItemsPanel::foldOrParent()
@@ -1992,11 +2216,33 @@ std::vector<int> ItemsPanel::movableIds() const
     return idsForMenu(myCurrentId, myCurrentKind);
 }
 
-void ItemsPanel::moveByKey(int key)
+void ItemsPanel::moveByCommand(ListCommand command)
 {
     if (!myDocument) return;
     const std::vector<int> ids = movableIds();
     if (ids.empty()) return;
+    // ALT+RIGHT, INTO THE FOLDER ABOVE (ruling D1): the previous visible
+    // sibling, when it is a folder, takes the selection at its end - the
+    // same "into" a drop on a folder row asks for, so the Note reads the
+    // same ("Moved Shelf to Doors"). Refused while filtered (RF3's reason:
+    // "the row above" is the row the filter left above), and quietly when
+    // that row is not a folder - a reason in the status bar, no checkpoint.
+    if (command == ListCommand::MoveIntoFolderAbove) {
+        if (filterActive()) {
+            emit moveRefused(ItemMoveText::filteredIntoRefusal());
+            return;
+        }
+        const int folder = folderAbove(myCurrentId);
+        if (folder == 0) {
+            emit moveRefused(ItemMoveText::noFolderAboveRefusal());
+            return;
+        }
+        emit itemsMoveRequested(ids, folder, DocumentModel::kIntoFolder);
+        return;
+    }
+    const int key = command == ListCommand::MoveOutOfFolder ? Qt::Key_Left
+                    : command == ListCommand::MoveUp        ? Qt::Key_Up
+                                                            : Qt::Key_Down;
     // Alt+Up/Down WHILE FILTERED is refused (ruling RF3): "one place up"
     // counts siblings the filter is hiding, so the row would land beside
     // something nobody can see. Quiet - no checkpoint, no toast - and never
@@ -2533,10 +2779,12 @@ QStringList ItemsPanel::paintedTexts() const
             tr(", in %1"), tr(", hidden"), tr(", partly hidden"), tr("%1, folder"),
             tr("Hide %1"), tr("Show %1"), tr("Grain along"), tr("Grain across"),
             tr("Hide everything in %1"), tr("Show everything in %1"), tr("Open %1"),
-            tr("Close %1"), tr("Close this folder"), tr("Open this folder"),
+            tr("Close %1"), tr("Close this folder"), tr("Open this folder"), waitingToExtrude(),
+            tr("1 of %1 bodies in %2 is selected"), tr("%1 of %2 bodies in %3 are selected"),
             // The row menu (populateRowMenu()).
             tr("New folder with these"), tr("Rename"), tr("Move up"), tr("Move down"),
-            tr("Remove folder, keep contents"), tr("Delete folder and its contents")};
+            tr("Remove folder, keep contents"), tr("Delete folder and its contents"),
+            tr("Move into"), tr("No folders yet"), tr("No other folder can take this")};
 }
 
 void ItemsPanel::showSelection(const std::vector<int>& ids)
@@ -2669,6 +2917,18 @@ QString ItemsPanel::partialCountAt(int index) const
     return row && row->count && !row->count->isHidden() ? row->count->text() : QString();
 }
 
+QLabel* ItemsPanel::partialCountLabelAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row ? row->count : nullptr;
+}
+
+bool ItemsPanel::rowIsMarkedAt(int index) const
+{
+    const Row* row = visibleRow(index);
+    return row && row->widget->marked();
+}
+
 void ItemsPanel::showPendingOutline(int id)
 {
     myPendingOutlineId = id;
@@ -2796,18 +3056,41 @@ void ItemsPanel::restyleRows()
             int chosen = 0;
             for (int id : under) chosen += selected.count(id) ? 1 : 0;
             marked = !under.empty() && chosen == static_cast<int>(under.size());
-            // PARTLY selected: a count instead of the fill.
+            // PARTLY selected: a count instead of the fill - and the same
+            // count in words, on its tooltip and in the row's name (F18).
             const bool partial = chosen > 0 && !marked;
+            const QString words =
+                partial ? partialCountWords(chosen, static_cast<int>(under.size()), row.text)
+                        : QString();
             if (row.count) {
                 const QString text =
                     partial ? tr("%1/%2").arg(chosen).arg(static_cast<int>(under.size())) : QString();
                 if (row.count->text() != text) row.count->setText(text);
+                if (row.count->toolTip() != words) row.count->setToolTip(words);
                 if (row.count->isHidden() == partial) row.count->setVisible(partial);
             }
+            if (row.partialWords != words) {
+                row.partialWords = words;
+                writeRowName(row);
+            }
+        } else if (row.isOutline) {
+            // THE PENDING OUTLINE IS NOT MARKED (ruling D4). It used to wear
+            // the selection fill, so the list showed one more selected row
+            // than the status bar counted - and since the fill is also the
+            // focus cue, two rows looked focused. Its name says it instead.
+            const bool pending = myPendingOutlineId != 0 && row.id == myPendingOutlineId;
+            row.widget->setPendingOutline(pending);
+            if (row.pending != pending) {
+                row.pending = pending;
+                writeRowName(row);
+            }
         } else {
-            marked = row.isOutline ? (myPendingOutlineId != 0 && row.id == myPendingOutlineId)
-                                   : selected.count(row.id) > 0;
+            marked = selected.count(row.id) > 0;
         }
+        // The fill's partner (ruling D3): a 3 px bar the row paints itself,
+        // in a token that clears 3:1 where the fill alone does not.
+        row.widget->setMarked(marked);
+        row.widget->setCurrent(row.id == myCurrentId);
         // WHAT A DRAG CARRIES (T-063): its name at 45% (nameColour()), and its
         // buttons out of reach for as long as the hand holds it. Each set only
         // when it changes, by the same rule as the look below - a drag begins
@@ -2816,9 +3099,9 @@ void ItemsPanel::restyleRows()
         if (row.eye && row.eye->isEnabled() == carried) row.eye->setEnabled(!carried);
         if (row.grain && row.grain->isEnabled() == carried) row.grain->setEnabled(!carried);
         styleNameColour(row);
-        // The SAME fill a selected body row wears. One mark, one meaning -
-        // "this is the row the next thing you do will act on" - rather than a
-        // second visual language for the second kind of item.
+        // One mark, one meaning - "this is part of the selection the status
+        // bar counts" - on a body row and on a folder whose every body is in
+        // it, and on nothing else.
         const QString& look = marked ? markedLook : plainLook;
         if (row.style == look) continue;
         row.widget->setStyleSheet(look);

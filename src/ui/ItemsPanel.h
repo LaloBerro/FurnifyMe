@@ -30,6 +30,8 @@
 // set from anywhere else; see MainWindow's constructor.
 #include <QColor>
 #include <QIcon>
+#include <QKeyCombination>
+#include <QKeySequence>
 #include <QPoint>
 #include <QSize>
 #include <QString>
@@ -94,6 +96,11 @@ public:
     class QScrollArea* scrollArea() const { return myScroll; }
     // "2/5" on a folder row whose subtree is PARTLY selected; empty otherwise.
     QString partialCountAt(int index) const;
+    // The label that shows it (finding F18): its tooltip spells the count out.
+    class QLabel* partialCountLabelAt(int index) const;
+    // Whether the row wears the selection mark - the fill and the 3 px bar
+    // (rulings D3/D4). Never true for an outline row.
+    bool rowIsMarkedAt(int index) const;
     // The card foot that says a pick is hidden by the filter.
     QWidget* hiddenPickLine() const { return myFoot; }
     // The drag (T-063): a custom in-process gesture, never QDrag. Read-only
@@ -132,6 +139,41 @@ public:
     // What a row IS, handed to every gesture that acts on one.
     enum class RowKind { Body, Outline, Folder };
 
+    // THE LIST'S KEYS, in ONE table (ruling D19): claimsKey() and
+    // keyPressEvent() look a key up here, the filter field asks it which of
+    // its keys hand over to the list, the row menu reads the Move entries'
+    // keys off it, and MainWindow hands it to the ShortcutSheet as its "Items
+    // list" group - so a key the list answers is a key the sheet lists, and
+    // neither can be written twice. Each entry is one row of the sheet.
+    enum class ListCommand {
+        Step,                 // Up / Down
+        ExtendStep,           // Shift+Up / Shift+Down
+        FirstOrLast,          // Home / End
+        FoldOrParent,         // Left
+        UnfoldOrChild,        // Right
+        Rename,               // F2, over a live row only
+        MoveUp,               // Alt+Up
+        MoveDown,             // Alt+Down
+        MoveOutOfFolder,      // Alt+Left
+        MoveIntoFolderAbove,  // Alt+Right (ruling D1)
+        EnterList,            // Down / Enter in the filter field (ruling D2)
+    };
+    struct ListKey {
+        ListCommand command;
+        std::vector<QKeyCombination> keys;
+        const char* label;          // untranslated; listKeyLabel() translates
+        bool fromFilterField;       // answered by the filter field, not the list
+    };
+    static const std::vector<ListKey>& listKeys();
+    // The entry a key belongs to, in the list's scope or the filter field's -
+    // null when it is not one of the drawer's keys. `mods` without Keypad.
+    static const ListKey* listKeyFor(QKeyCombination combination, bool fromFilterField);
+    static QString listKeyLabel(const ListKey& entry);
+    // "Up, Down" - every combination, in the platform's own spelling.
+    static QString listKeyText(const ListKey& entry);
+    // The first combination of `command`, for the row menu's shortcut column.
+    static QKeySequence listKeySequence(ListCommand command);
+
     // Builds the row's right-click menu into `menu`, every entry already
     // wired to the move, rename or folder route it names - showRowMenu()
     // only exec()s it, and the suite triggers entries without a modal loop.
@@ -165,10 +207,12 @@ public:
     // which outline is pending, and giving it one would be a second answer to
     // a question MainWindow already answers.
     //
-    // It wears the SAME accent inset a selected body row wears. Two outlines
-    // in the drawer and no mark on either is a choice the user cannot see -
-    // and clicking a row is how that choice is made, so the row is exactly
-    // where the feedback belongs.
+    // It does NOT wear the selection mark any more (ruling D4): the list
+    // showed three filled rows while the status bar said "2 bodies selected",
+    // and the fill is also the focus cue, so two rows looked focused. Its row
+    // says it instead - accessible name and tooltip end ", waiting to
+    // extrude" - and design batch C tints its glyph (ItemsRowWidget::
+    // pendingOutline() is the hook).
     void showPendingOutline(int id);
 
     // Opens the inline rename gesture (ui/InlineRename) over `id`'s row -
@@ -268,6 +312,10 @@ signals:
     // the Model menu's Ctrl+Shift+G, which keeps its selection meaning. The
     // same handler the Model menu's entry ends in, so one author writes the Note.
     void removeFolderRequested(int folderId);
+    // The filter's text changed (setFilter()): MainWindow withdraws a move
+    // refusal the old filter caused (ruling D1 - the RF3 sentence stayed up
+    // after the filter it blamed was gone).
+    void filterChanged();
     // A move the list will not make, with the reason for the status bar's left
     // channel - a quiet refusal, not a Failure (ruling RF3: Alt+Up/Down while
     // the filter hides where the row would land).
@@ -331,7 +379,7 @@ private:
     // the four parallel vectors this held before, which had to be indexed in
     // lockstep by every reader.
     struct Row {
-        QWidget* widget = nullptr;
+        class ItemsRowWidget* widget = nullptr;
         class QLabel* name = nullptr;
         class QPushButton* eye = nullptr;
         // The grain mark, on BODY rows only - null on an outline and on a
@@ -362,6 +410,12 @@ private:
         bool matched = false;   // its name holds the filter's query
         bool muted = false;     // shown only because a match lies beneath it
         QString nameSheet;      // the stylesheet last applied to `name`
+        // The accessible name nameRow() composed, before writeRowName() adds
+        // what the selection says: the pending outline's ", waiting to
+        // extrude" (D4) and a folder's partial count in words (F18).
+        QString baseName;
+        QString partialWords;   // "2 of 4 bodies in Carcass are selected", or empty
+        bool pending = false;   // the outline Extrude will consume
     };
 
     DocumentModel* myDocument = nullptr;
@@ -415,6 +469,9 @@ private:
     // `shown`/`anyShown`: for a folder, whether every / any body under it is
     // on (an item passes its own visibility twice).
     void nameRow(Row& row, bool shown, bool anyShown);
+    // Writes the row's accessible name (and the pending outline's tooltip)
+    // from baseName plus the selection's words - only when they moved.
+    void writeRowName(Row& row);
     static QString twistyName(bool open, const QString& folderName);
     // The twisty's two chevrons, rasterised once per theme (applyTheme()
     // drops them) rather than once per twisty that changes.
@@ -523,15 +580,26 @@ private:
     // off the window rather than hasFocus(), which is false in any window
     // that is not the OS-active one.
     bool holdsFocus() const;
-    // The keys the list owns while it holds focus: arrows, Shift+Up/Down,
-    // Alt+Up/Down/Left, Home, End, F2. Never a letter.
+    // The keys the list owns while it holds focus - listKeys()' list-scope
+    // entries: arrows, Shift+Up/Down, Alt+arrows, Home, End, F2. Never a letter.
     bool claimsKey(const QKeyEvent* key) const;
     int visibleIndexOf(int id) const;
     void stepTo(int visibleIndex, Qt::KeyboardModifiers mods);
     void foldOrParent();
     void unfoldOrChild();
     void renameCurrent();
-    void moveByKey(int key);
+    // Alt+Up/Down/Left/Right, through the one move signal.
+    void moveByCommand(ListCommand command);
+    // Ruling D1: the folder directly above `id` among its siblings as the
+    // list SHOWS them - the previous visible row at the same depth, with no
+    // shallower row between - or 0 when that row is not a folder.
+    int folderAbove(int id) const;
+    // Ruling D2: Down or Enter in the filter field.
+    void enterListFromFilter();
+    // Finding F7: the current row, told to a screen reader - Focus, then
+    // Selection (SelectionAdd for a Shift step).
+    void announceCurrent(bool extend);
+    Row* rowById(int id);
     // Builds `groupId`'s children into the rows, depth first. Recursive: the
     // tree nests to any depth, and a loop with an explicit stack would be the
     // same thing written longer.

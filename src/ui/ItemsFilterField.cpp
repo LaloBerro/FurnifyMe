@@ -1,5 +1,6 @@
 #include "ItemsFilterField.h"
 
+#include "ItemsPanel.h"
 #include "Theme.h"
 
 #include <QKeyEvent>
@@ -39,10 +40,27 @@ void ItemsFilterField::applyTheme()
     setPalette(p);
 }
 
+namespace {
+// Whether `key` is one the drawer's table gives the field for handing over to
+// the list (ruling D2).
+bool handsOverToList(const QKeyEvent* key)
+{
+    return ItemsPanel::listKeyFor(QKeyCombination(key->modifiers() & ~Qt::KeypadModifier,
+                                                  Qt::Key(key->key())),
+                                  /*fromFilterField=*/true) != nullptr;
+}
+}  // namespace
+
 bool ItemsFilterField::event(QEvent* event)
 {
     if (event->type() == QEvent::ShortcutOverride) {
         auto* key = static_cast<QKeyEvent*>(event);
+        // The hand-over keys are the field's while it has the keyboard, so a
+        // window shortcut on Enter or Down cannot take them first.
+        if (handsOverToList(key)) {
+            event->accept();
+            return true;
+        }
         if (key->key() == Qt::Key_Escape &&
             (key->modifiers() & ~Qt::KeypadModifier) == Qt::NoModifier) {
             // A query to clear: Escape is the field's.
@@ -62,6 +80,11 @@ bool ItemsFilterField::event(QEvent* event)
 
 void ItemsFilterField::keyPressEvent(QKeyEvent* event)
 {
+    if (handsOverToList(event)) {
+        emit listRequested();
+        event->accept();
+        return;
+    }
     if (event->key() == Qt::Key_Escape) {
         if (text().isEmpty()) {
             // Reached only when no shortcut took the key: let go of the focus
