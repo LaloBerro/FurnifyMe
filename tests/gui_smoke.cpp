@@ -4601,6 +4601,9 @@ void dragReadsAndCancelsBlock(const QString& outDir)
     settle(80);
     const int revisionAtStart = doc.revision();
     const std::size_t depthAtStart = doc.undoDepth();
+    // The right channel's LAST drag line, read before the release - what the
+    // "put back" check below must see gone.
+    QString lastDragLine;
     {
         DrawerDrag drag(drawer, shelf);
         drag.moveTo(drawerRowPixel(drawer, top, 2));
@@ -4673,6 +4676,7 @@ void dragReadsAndCancelsBlock(const QString& outDir)
         check(drawer->dragStatusText() == QStringLiteral("Release to cancel"),
               "feedback: ...and so does the status line");
         printWindowCapture(&probe, outDir + QStringLiteral("/drag-ghost-cancel.png"));
+        lastDragLine = stateLabelText(probe);
         drag.release();
     }
     check(doc.revision() == revisionAtStart && doc.undoDepth() == depthAtStart &&
@@ -4680,8 +4684,9 @@ void dragReadsAndCancelsBlock(const QString& outDir)
           "feedback: a release outside the card cancels - revision() unchanged, nothing moved");
     check(!ghost->isVisible() && QGuiApplication::overrideCursor() == nullptr &&
               drawer->dragStatusText().isEmpty() &&
-              !stateLabelText(probe).startsWith(QStringLiteral("Drop to move")),
-          "feedback: ...and the ghost, the cursor and the status line are all put back");
+              !lastDragLine.isEmpty() && stateLabelText(probe) != lastDragLine,
+          QStringLiteral("feedback: ...and the ghost, the cursor and the status line are all put "
+                         "back (the right channel no longer reads \"%1\")").arg(lastDragLine));
     check(probe.view()->selectedSolidIds() == std::vector<int>{back},
           "feedback: the selection survived the whole gesture");
 
@@ -4743,7 +4748,85 @@ void dragReadsAndCancelsBlock(const QString& outDir)
     }
     check(toasts && toasts->currentText() == QStringLiteral("Moved 3 bodies to Doors"),
           "feedback: and the Note says the same move in the past tense");
+
+    // A DRAG WHOSE RELEASE NEVER ARRIVES (ruling R10a) must not leave its
+    // app-wide things up. A left press that lands anywhere outside the rows
+    // is the next thing the hand did instead.
+    const int revisionBeforeStale = doc.revision();
+    {
+        DrawerDrag drag(drawer, shelf);
+        drag.moveTo(drawerRowPixel(drawer, back, 2));
+        check(drawer->dragActive() && QGuiApplication::overrideCursor() != nullptr,
+              "lost release: a drag is live, its cursor up - the control");
+        QWidget* elsewhere = probe.statusBar();
+        const QPointF at(elsewhere->width() / 2.0, elsewhere->height() / 2.0);
+        QMouseEvent down(QEvent::MouseButtonPress, at, elsewhere->mapToGlobal(at), Qt::LeftButton,
+                         Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(elsewhere, &down);
+        QMouseEvent up(QEvent::MouseButtonRelease, at, elsewhere->mapToGlobal(at), Qt::LeftButton,
+                       Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(elsewhere, &up);
+        settle(30);
+        check(!drawer->dragActive() && QGuiApplication::overrideCursor() == nullptr &&
+                  !ghost->isVisible() && drawer->dragStatusText().isEmpty(),
+              "lost release: a left press outside the rows ends the drag - cursor, ghost and line "
+              "all put back");
+    }
+    {
+        DrawerDrag drag(drawer, shelf);
+        drag.moveTo(drawerRowPixel(drawer, back, 2));
+        check(drawer->dragActive(), "lost release: a second drag is live - the control");
+        QApplicationStateChangeEvent away(Qt::ApplicationInactive);
+        QCoreApplication::sendEvent(QCoreApplication::instance(), &away);
+        settle(30);
+        check(!drawer->dragActive() && QGuiApplication::overrideCursor() == nullptr &&
+                  !ghost->isVisible(),
+              "lost release: the application going inactive (Alt+Tab) ends the drag");
+        drag.release();
+    }
+    check(doc.revision() == revisionBeforeStale,
+          "lost release: ...and neither ending moved anything");
     probe.close();
+
+    // Close furniture mid-drag on a CLEAN document: the editor hides, which
+    // never reaches the drawer's own setVisible() - its parent hid it.
+    MainWindow closing(nullptr, /*persistProgress=*/false, dir.path());
+    closing.resize(1200, 780);
+    check(openWithDrawer(closing, id), "lost release: a fresh editor opens the cabinet, drawer up");
+    wireSelector(closing);
+    ItemsPanel* closingDrawer = closing.itemsPanel();
+    DragGhost* closingGhost = closingDrawer->dragGhost();
+    const int closingShelf = idNamed(closing.document(), QStringLiteral("Shelf"));
+    const int closingBack = idNamed(closing.document(), QStringLiteral("Back"));
+    {
+        // Never released: the row it pressed is rebuilt by the close.
+        DrawerDrag drag(closingDrawer, closingShelf);
+        drag.moveTo(drawerRowPixel(closingDrawer, closingBack, 2));
+        check(closingDrawer->dragActive() && closingGhost && closingGhost->isVisible() &&
+                  QGuiApplication::overrideCursor() != nullptr,
+              "lost release: a drag is live in the fresh editor - the control");
+        trigger(closing, QStringLiteral("Close furniture"));
+        settle(150);
+    }
+    check(!closing.isVisible(), "lost release: Close furniture hid the editor (not vacuous)");
+    check(QGuiApplication::overrideCursor() == nullptr,
+          "lost release: after Close furniture mid-drag no override cursor is left stuck");
+    check(!closingDrawer->dragActive() && closingGhost && !closingGhost->isVisible() &&
+              closingDrawer->dragStatusText().isEmpty(),
+          "lost release: ...the drag is over and its ghost and line are gone");
+    // The claim, read the way a key reads it: the editor back on screen with
+    // the drawer up, and Escape no longer taken from the shortcut map.
+    closing.openFurniture(id);
+    closing.show();
+    settle(250);
+    {
+        QWidget* focus = closing.focusWidget() ? closing.focusWidget() : static_cast<QWidget*>(&closing);
+        QKeyEvent over(QEvent::ShortcutOverride, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(focus, &over);
+        check(closingDrawer->isVisible() && !over.isAccepted(),
+              "lost release: ...and the Escape claim went with it (drawer back up, Escape unclaimed)");
+    }
+    closing.close();
 }
 
 int main(int argc, char* argv[])

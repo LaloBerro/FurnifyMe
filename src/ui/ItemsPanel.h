@@ -246,8 +246,16 @@ protected:
     // up to date on the way back on screen, setVisible() before the overlay
     // measures it and showEvent() for a parent shown with it still open.
     void showEvent(class QShowEvent* event) override;
+    // The drawer leaving the screen by ANY route - its own setVisible(false),
+    // or a parent hiding it (Close furniture hides the whole editor, which
+    // never reaches this panel's setVisible()) - takes a live drag with it
+    // (ruling R10a). Qt's hideChildren() sends this event either way.
+    void hideEvent(class QHideEvent* event) override;
 
 public:
+    // A panel dying mid-drag still puts back the app-wide things the drag
+    // put up - the override cursor above all, which is a stack.
+    ~ItemsPanel() override;
     void setVisible(bool visible) override;
 
 private:

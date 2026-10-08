@@ -18,6 +18,7 @@
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QLabel>
 #include <QContextMenuEvent>
 #include <QMenu>
@@ -188,6 +189,32 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override
     {
+        // A DRAG WHOSE RELEASE NEVER ARRIVES must not leave its app-wide
+        // things up (ruling R10a). Qt's implicit grab sends the drag's own
+        // release to the PRESSED ROW, where the row filter lands the drop -
+        // so a left press or release reaching any widget outside the rows
+        // means the release this drag was waiting for went somewhere else
+        // (a row destroyed under the grab, focus taken away, a stale press).
+        // Widgets only: a real event reaches the QWidgetWindow (a QWindow)
+        // first, and the drag's own release passes through there on its way
+        // to the row. The event itself is never eaten - the click does what
+        // it always did.
+        const QEvent::Type type = event->type();
+        if (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonRelease) {
+            auto* widget = qobject_cast<QWidget*>(watched);
+            if (widget && static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton &&
+                !onARow(widget))
+                myPanel->cancelDrag();
+            return false;
+        }
+        // Alt+Tab, a dialog of another app: the release will be delivered
+        // to whatever the user does next, never to this drag.
+        if (type == QEvent::ApplicationStateChange) {
+            if (static_cast<QApplicationStateChangeEvent*>(event)->applicationState() !=
+                Qt::ApplicationActive)
+                myPanel->cancelDrag();
+            return false;
+        }
         int key = 0;
         if (!KeyClaim::claim(myPanel, watched, event, /*wantEnter=*/false,
                              /*exemptLineEdits=*/false, &key))
@@ -197,6 +224,19 @@ protected:
     }
 
 private:
+    // Whether `widget` is one of this panel's rows or inside one - the rows
+    // carry their item's id as a property, which is how the row filter
+    // itself recognises them.
+    bool onARow(const QWidget* widget) const
+    {
+        for (const QWidget* w = widget; w && w != myPanel; w = w->parentWidget()) {
+            if (w->property("groupId").isValid() || w->property("outlineId").isValid() ||
+                w->property("solidId").isValid())
+                return myPanel->isAncestorOf(w);
+        }
+        return false;
+    }
+
     ItemsPanel* myPanel;
 };
 
@@ -314,7 +354,12 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myIndicator = new DropIndicator(rowHost);
     // ...and what the drag carries, over the VIEWPORT so it can follow the
     // hand out of this card (where a release cancels).
-    if (myView) myGhost = new DragGhost(myView);
+    if (myView) {
+        myGhost = new DragGhost(myView);
+        // The viewport owns it, and may go first in a teardown - this panel's
+        // destructor must not reach a ghost that is already gone.
+        connect(myGhost, &QObject::destroyed, this, [this] { myGhost = nullptr; });
+    }
     myOuter->addWidget(myScroll, 1);
 
     // What the filter says when it matches nothing. PLAIN text: the query in
@@ -540,6 +585,24 @@ void ItemsPanel::showEvent(QShowEvent* event)
     // (showChildren()), which does not go through setVisible().
     flushPendingRefresh();
     QWidget::showEvent(event);
+}
+
+void ItemsPanel::hideEvent(QHideEvent* event)
+{
+    // A release can never reach a row that is no longer on screen, so the
+    // drag ends here, moving nothing - and with it the closed hand, the
+    // ghost, the Escape claim and the drag line in the status bar (R10a).
+    cancelDrag();
+    QWidget::hideEvent(event);
+}
+
+ItemsPanel::~ItemsPanel()
+{
+    if (!myDragging) return;
+    // No signal leaves a dying panel: MainWindow may be mid-teardown itself,
+    // and the drag line it would refresh belongs to a window going away.
+    const QSignalBlocker quiet(this);
+    cancelDrag();
 }
 
 const ItemsPanel::Row* ItemsPanel::visibleRow(int index) const
