@@ -1405,7 +1405,9 @@ private slots:
     // commit in this file follows.
     void onItemRenameCommitted(int id, bool isOutline, QString newName);
     // --- folders (improvements item 10) --------------------------------------
-    // Model -> Group (Ctrl+G) and Ungroup (Ctrl+Shift+G). A folder is pure
+    // Model -> New Folder with These (Ctrl+G) and Remove Folder, Keep Contents
+    // (Ctrl+Shift+G). onGroupSelection() files the selected whole bodies and
+    // does nothing with none - never an empty folder. A folder is pure
     // organisation - see DocumentModel::Group - so these do the whole of it:
     // nothing else in this window reads a folder to decide what it does.
     // (The two QActions themselves live with the other actions further down -

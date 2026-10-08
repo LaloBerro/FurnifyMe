@@ -1020,6 +1020,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-drag-reads-and-cancels", false, true },
     { "a-drag-opens-folders-and-scrolls", false, true },
     { "the-drawer-walks-and-moves-with-the-keys", false, true },
+    { "the-drawer-tells-the-truth-at-its-edges", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -5484,6 +5485,280 @@ void drawerKeyboardBlock()
     QCoreApplication::sendEvent(drawer, &f2Idle);
     check(probe.focusWidget() == drawer && !f2Idle.isAccepted(),
           "keys: with no current row F2 is left to the Rename action");
+    probe.close();
+}
+
+// --- the drawer's edges tell the truth (T-063, plan Task 13) ------------------
+// A row's one CHECKABLE button is its eye (firstVisibleRowToggle()'s rule).
+QPushButton* checkableButtonIn(QWidget* row)
+{
+    if (!row) return nullptr;
+    for (QPushButton* b : row->findChildren<QPushButton*>())
+        if (b->isCheckable()) return b;
+    return nullptr;
+}
+
+// The letter after the '&' in a menu entry's text, lower-cased; null if none.
+QChar mnemonicOf(const QString& text)
+{
+    for (int i = 0; i + 1 < text.size(); ++i) {
+        if (text[i] != QLatin1Char('&')) continue;
+        if (text[i + 1] == QLatin1Char('&')) { ++i; continue; }
+        return text[i + 1].toLower();
+    }
+    return QChar();
+}
+
+void drawerEdgeStatesBlock()
+{
+    RequiredTempDir dir;
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.resize(1100, 780);
+    probe.setAttribute(Qt::WA_ShowWithoutActivating);
+    probe.show();
+    waitFully(300);
+    probe.view()->setAnimationsEnabled(false);
+    enterFreshFurniture(probe);
+    if (QAction* items = action(probe, QStringLiteral("Items")))
+        if (!items->isChecked()) items->trigger();
+    settle(200);
+    ItemsPanel* drawer = probe.itemsPanel();
+    QStringList toolTipsSeen;   // every reason New folder gave, for the sweep below
+
+    // EMPTY: the words name everything the list will hold, then the first step.
+    QLabel* empty = drawer->findChild<QLabel*>(QStringLiteral("itemsEmpty"));
+    check(empty && empty->isVisible() &&
+              empty->text().startsWith(QStringLiteral(
+                  "Nothing to list yet — bodies, outlines and folders you make show up here")),
+          QStringLiteral("edges: the empty state names everything the list holds (\"%1\")")
+              .arg(empty ? empty->text().section(QLatin1Char('\n'), 0, 0) : QString()));
+    check(empty && empty->text().contains(QStringLiteral(
+                       "Press Ctrl+K and click points on the ground to draw your first outline.")),
+          "edges: ...followed by the first-outline hint");
+
+    // NEW FOLDER: one action (the Model menu's, R12d's words), one chip mirroring it.
+    ToolChip* chip = drawer->newFolderChip();
+    QAction* newFolder = action(probe, QStringLiteral("New Folder with These"));
+    check(chip && newFolder && chip->action() == newFolder,
+          "edges: the title row's New folder is a ToolChip mirroring the Model menu's "
+          "New Folder with These");
+    check(newFolder && newFolder->shortcut() == QKeySequence(QStringLiteral("Ctrl+G")),
+          "edges: New Folder with These keeps Ctrl+G");
+    // Its mnemonic, and Remove Folder, Keep Contents' (Task 12's &R), are each
+    // the only one of their letter in the Model menu.
+    {
+        QMenu* model = nullptr;
+        for (QMenu* m : probe.findChildren<QMenu*>())
+            if (m->title() == QStringLiteral("&Model")) model = m;
+        QAction* removeFolder = action(probe, QStringLiteral("Remove Folder, Keep Contents"));
+        QStringList clashes;
+        int folderEntries = 0;
+        if (model) {
+            for (QAction* mine : {newFolder, removeFolder}) {
+                if (!mine || !model->actions().contains(mine)) continue;
+                ++folderEntries;
+                const QChar key = mnemonicOf(mine->text());
+                if (key.isNull()) clashes << mine->text() + QStringLiteral(" has none");
+                for (QAction* other : model->actions())
+                    if (other != mine && !key.isNull() && mnemonicOf(other->text()) == key)
+                        clashes << mine->text() + QStringLiteral(" / ") + other->text();
+            }
+        }
+        check(model && folderEntries == 2 && clashes.isEmpty(),
+              QStringLiteral("edges: both folder entries sit in the Model menu, each with a "
+                             "mnemonic no other entry uses (%1)")
+                  .arg(clashes.isEmpty() ? QStringLiteral("clean")
+                                         : clashes.join(QStringLiteral(", "))));
+    }
+    if (newFolder) toolTipsSeen << newFolder->toolTip();
+    check(newFolder && !newFolder->isEnabled() && chip && !chip->isEnabled() &&
+              chip->toolTip().contains(QStringLiteral("Select bodies to put in a folder")),
+          QStringLiteral("edges: with nothing selected New folder is disabled and says why (\"%1\")")
+              .arg(chip ? chip->toolTip() : QString()));
+    const std::size_t groupsBefore = probe.document().groups().size();
+    // The row menu's entry and any other caller reach the handler through the
+    // drawer's signal, past the action's disabled state: the rule holds there too.
+    emit drawer->newFolderRequested();
+    settle(100);
+    check(probe.document().groups().size() == groupsBefore,
+          "edges: ...and asking for one anyway makes no empty folder");
+    check(chip && chip->focusPolicy() == Qt::NoFocus &&
+              chip->accessibleName() == QStringLiteral("New Folder with These"),
+          QStringLiteral("edges: the chip takes no focus and carries its action's name (\"%1\")")
+              .arg(chip ? chip->accessibleName() : QString()));
+
+    const bool firstBuilt = buildBody(probe, 0.30, 0.30, 0.45, 0.50, 30.0);
+    const bool secondBuilt = buildBody(probe, 0.60, 0.30, 0.75, 0.50, 30.0);
+    check(firstBuilt && secondBuilt && probe.document().solids().size() == 2,
+          "edges: two bodies are made");
+    settle(150);
+    const int body = probe.document().solids().front().id;
+    const int other = probe.document().solids().back().id;
+    probe.view()->clearSelection();
+    settle(80);
+    check(newFolder && !newFolder->isEnabled(),
+          "edges: bodies exist but NOTHING is selected - New folder stays disabled");
+    const std::size_t groupsWithBodies = probe.document().groups().size();
+    emit drawer->newFolderRequested();
+    settle(100);
+    check(probe.document().groups().size() == groupsWithBodies,
+          "edges: ...and a request through the drawer still makes no empty folder");
+
+    // A FACE is not a body: filing it would file nothing, so the rule is
+    // whole bodies - and the row menu's own entry agrees with the action.
+    QPoint facePixel;
+    TopoDS_Face face;
+    const bool facePicked = pickFaceOf(probe, body, facePixel, face);
+    if (newFolder) toolTipsSeen << newFolder->toolTip();
+    check(facePicked && newFolder && !newFolder->isEnabled() &&
+              newFolder->toolTip().contains(QStringLiteral("Select bodies to put in a folder")),
+          "edges: with a FACE selected New folder is disabled too - a folder holds bodies");
+    {
+        QMenu rowMenu;
+        drawer->populateRowMenu(rowMenu, body, ItemsPanel::RowKind::Body);
+        QAction* entry = menuAction(rowMenu, QStringLiteral("New folder with these"));
+        check(facePicked && entry && !entry->isEnabled(),
+              "edges: ...and so is the row menu's New folder with these");
+    }
+    emit drawer->newFolderRequested();
+    settle(100);
+    check(probe.document().groups().size() == groupsWithBodies,
+          "edges: ...and a request with only a face selected makes no folder");
+
+    const bool bothPicked = pickBodyOf(probe, body) && pickBodyOf(probe, other, /*additive=*/true);
+    if (newFolder) toolTipsSeen << newFolder->toolTip();
+    check(bothPicked && newFolder && newFolder->isEnabled() && chip && chip->isEnabled(),
+          "edges: with bodies selected, New folder is enabled");
+    if (chip) clickAt(chip, QPointF(chip->width() / 2.0, chip->height() / 2.0));
+    settle(200);
+    if (QLineEdit* naming = drawer->openRenameEditor()) {
+        QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(naming, &escape);
+        settle(80);
+    }
+    const int folder = probe.document().groupOf(body);
+    check(probe.document().groups().size() == groupsBefore + 1 && folder > 0 &&
+              probe.document().groupOf(other) == folder,
+          "edges: the chip does what the action does - both bodies are in one new folder");
+
+    // NAMES A SCREEN READER READS: the row says where it is and whether it
+    // shows; each button says what a click will do. Renamed AFTER the rows
+    // exist, so every name below comes from a REUSED row, not a fresh one.
+    emit drawer->renameCommitted(body, false, QStringLiteral("Side left"));
+    settle(120);
+    emit drawer->renameCommitted(other, false, QStringLiteral("Side right"));
+    settle(120);
+    emit drawer->groupRenameCommitted(folder, QStringLiteral("Carcass"));
+    settle(120);
+    drawer->setGroupExpanded(folder, true);
+    settle(80);
+    QWidget* folderRow = drawer->rowWidgetAt(drawerRowOf(drawer, folder));
+    QWidget* bodyRow = drawer->rowWidgetAt(drawerRowOf(drawer, body));
+    check(folderRow && folderRow->accessibleName() == QStringLiteral("Carcass, folder"),
+          QStringLiteral("edges: a folder row is named \"Carcass, folder\" (\"%1\")")
+              .arg(folderRow ? folderRow->accessibleName() : QString()));
+    check(bodyRow && bodyRow->accessibleName() == QStringLiteral("Side left, in Carcass"),
+          QStringLiteral("edges: a body row names its folder (\"%1\")")
+              .arg(bodyRow ? bodyRow->accessibleName() : QString()));
+    QPushButton* eye = checkableButtonIn(bodyRow);
+    check(eye && eye->isChecked() && eye->accessibleName() == QStringLiteral("Hide Side left"),
+          QStringLiteral("edges: the eye says what a click will do - \"Hide Side left\" - and "
+                         "carries a checked state (\"%1\")")
+              .arg(eye ? eye->accessibleName() : QString()));
+    QPushButton* grain = drawer->grainMarkAt(drawerRowOf(drawer, body));
+    check(grain && !grain->isCheckable() && grain->accessibleName() == QStringLiteral("Grain along"),
+          QStringLiteral("edges: the grain mark is named \"Grain along\" and is no toggle (\"%1\")")
+              .arg(grain ? grain->accessibleName() : QString()));
+    QPushButton* folderEye = checkableButtonIn(folderRow);
+    QPushButton* twisty = drawer->twistyAt(drawerRowOf(drawer, folder));
+    check(folderEye && folderEye->accessibleName() == QStringLiteral("Hide everything in Carcass") &&
+              twisty && twisty->accessibleName() == QStringLiteral("Close Carcass"),
+          QStringLiteral("edges: the folder's eye and twisty name the folder (\"%1\", \"%2\")")
+              .arg(folderEye ? folderEye->accessibleName() : QString(),
+                   twisty ? twisty->accessibleName() : QString()));
+
+    // Hide one of the two: the body row says hidden, the folder says PARTLY.
+    if (eye) clickAt(eye, QPointF(eye->width() / 2.0, eye->height() / 2.0));
+    settle(150);
+    bodyRow = drawer->rowWidgetAt(drawerRowOf(drawer, body));
+    folderRow = drawer->rowWidgetAt(drawerRowOf(drawer, folder));
+    eye = checkableButtonIn(bodyRow);
+    check(bodyRow && bodyRow->accessibleName() == QStringLiteral("Side left, in Carcass, hidden") &&
+              eye && !eye->isChecked() && eye->accessibleName() == QStringLiteral("Show Side left"),
+          QStringLiteral("edges: hidden, the row says so and the eye offers to show it (\"%1\", \"%2\")")
+              .arg(bodyRow ? bodyRow->accessibleName() : QString(),
+                   eye ? eye->accessibleName() : QString()));
+    check(folderRow && folderRow->accessibleName() == QStringLiteral("Carcass, folder, partly hidden"),
+          QStringLiteral("edges: a folder with one of two hidden says \"partly hidden\" (\"%1\")")
+              .arg(folderRow ? folderRow->accessibleName() : QString()));
+    // The folder's own eye hides the rest: now the folder is hidden outright.
+    folderEye = checkableButtonIn(folderRow);
+    if (folderEye && !folderEye->isChecked()) {
+        // Unchecked while partly hidden: one click shows all, a second hides all.
+        clickAt(folderEye, QPointF(folderEye->width() / 2.0, folderEye->height() / 2.0));
+        settle(150);
+        folderEye = checkableButtonIn(drawer->rowWidgetAt(drawerRowOf(drawer, folder)));
+    }
+    if (folderEye) clickAt(folderEye, QPointF(folderEye->width() / 2.0, folderEye->height() / 2.0));
+    settle(150);
+    folderRow = drawer->rowWidgetAt(drawerRowOf(drawer, folder));
+    folderEye = checkableButtonIn(folderRow);
+    check(folderRow && folderRow->accessibleName() == QStringLiteral("Carcass, folder, hidden") &&
+              folderEye && !folderEye->isChecked() &&
+              folderEye->accessibleName() == QStringLiteral("Show everything in Carcass"),
+          QStringLiteral("edges: everything hidden, the folder says hidden and its eye offers to "
+                         "show it all (\"%1\", \"%2\")")
+              .arg(folderRow ? folderRow->accessibleName() : QString(),
+                   folderEye ? folderEye->accessibleName() : QString()));
+    if (folderEye) clickAt(folderEye, QPointF(folderEye->width() / 2.0, folderEye->height() / 2.0));
+    settle(150);
+    drawer->setGroupExpanded(folder, false);
+    settle(80);
+    twisty = drawer->twistyAt(drawerRowOf(drawer, folder));
+    check(twisty && twisty->accessibleName() == QStringLiteral("Open Carcass"),
+          QStringLiteral("edges: folded, the twisty offers to open it (\"%1\")")
+              .arg(twisty ? twisty->accessibleName() : QString()));
+
+    // EVERY WORD the drawer paints passes the sweep - and the two Model menu
+    // entries that make and remove folders, in each state seen above.
+    QStringList copy = drawer->paintedTexts();
+    copy << ItemMoveText::paintedTexts() << toolTipsSeen;
+    if (QAction* removeFolder = action(probe, QStringLiteral("Remove Folder, Keep Contents")))
+        copy << removeFolder->text() << removeFolder->toolTip();
+    if (newFolder) copy << newFolder->text() << newFolder->toolTip();
+    QStringList missing;
+    for (const QString& expected :
+         {QStringLiteral("Nothing to list yet — bodies, outlines and folders you make show up here"),
+          QStringLiteral(", in %1"), QStringLiteral(", hidden"), QStringLiteral(", partly hidden"),
+          QStringLiteral("Hide %1"), QStringLiteral("Show %1"), QStringLiteral("Grain along"),
+          QStringLiteral("Grain across"), QStringLiteral("%1, folder"),
+          QStringLiteral("Hide everything in %1"), QStringLiteral("Show everything in %1"),
+          QStringLiteral("Open %1"), QStringLiteral("Close %1"),
+          QStringLiteral("New folder with these"), QStringLiteral("Remove folder, keep contents"),
+          QStringLiteral("Delete folder and its contents"), QStringLiteral("Move up"),
+          QStringLiteral("Rename"), QStringLiteral("Release to cancel")}) {
+        if (!std::any_of(copy.begin(), copy.end(),
+                         [&](const QString& t) { return t.startsWith(expected); }))
+            missing << expected;
+    }
+    check(missing.isEmpty(),
+          QStringLiteral("edges: the drawer's swept copy holds every word it paints and names (%1)")
+              .arg(missing.isEmpty() ? QStringLiteral("all present")
+                                     : QStringLiteral("missing: ") + missing.join(QStringLiteral(" | "))));
+    QStringList offenders;
+    for (const QString& text : copy) {
+        for (const QString& word : bannedWords())
+            if (usesBannedWord(text, word))
+                offenders << text + QStringLiteral(" [") + word + QStringLiteral("]");
+        // A folder is never a "group" in this drawer's words (spec vocabulary).
+        if (text.contains(QStringLiteral("group"), Qt::CaseInsensitive))
+            offenders << text + QStringLiteral(" [group]");
+    }
+    check(offenders.isEmpty(),
+          QStringLiteral("edges: all of the drawer's copy passes the banned-word sweep and never "
+                         "calls a folder a group (%1 swept; %2)")
+              .arg(copy.size())
+              .arg(offenders.isEmpty() ? QStringLiteral("clean") : offenders.join(QStringLiteral(", "))));
     probe.close();
 }
 
@@ -10406,7 +10681,7 @@ int main(int argc, char* argv[])
         // A rebuild leaves nothing of the previous list on screen. refresh()
         // deleteLater()s the old rows, which keeps them alive, parented and
         // VISIBLE until control reaches the event loop - so the card painted
-        // the empty state's "No bodies yet" underneath the first real row,
+        // the empty state's "Nothing to list yet" underneath the first real row,
         // and that stale text was a live hit-test target while it lasted.
         // Found in a magnified render of the drawer, not by any check that
         // existed.
@@ -10414,7 +10689,7 @@ int main(int argc, char* argv[])
         if (drawer) {
             for (QLabel* label : drawer->findChildren<QLabel*>()) {
                 if (label->isVisible() &&
-                    label->text().contains(QStringLiteral("No bodies yet")))
+                    label->text().contains(QStringLiteral("Nothing to list yet")))
                     stale << label->text().left(24);
             }
         }
@@ -31327,7 +31602,8 @@ int main(int argc, char* argv[])
         // --- A and B into a folder ------------------------------------------
         fView->setSelectedSolids({idA, idB});
         settle(80);
-        check(trigger(probe, QStringLiteral("Group")), "Group puts the two bodies in a folder");
+        check(trigger(probe, QStringLiteral("New Folder with These")),
+              "New Folder with These puts the two bodies in a folder");
         settle(150);
         const int folder = probe.document().groupOf(idA);
         check(folder > 0 && probe.document().groupOf(idB) == folder,
@@ -31529,7 +31805,7 @@ int main(int argc, char* argv[])
         // rule - which is all the nesting this needs.
         fView->setSelectedSolids({idA});
         settle(80);
-        check(trigger(probe, QStringLiteral("Group")), "A gets a folder of its own");
+        check(trigger(probe, QStringLiteral("New Folder with These")), "A gets a folder of its own");
         settle(150);
         const int sub = probe.document().groupOf(idA);
         check(sub > 0 && sub != folder && probe.document().groupOf(sub) == folder,
@@ -45251,9 +45527,7 @@ int main(int argc, char* argv[])
         if (!rw.document().solids().empty())
             rw.view()->setSelectedSolids({rw.document().solids().back().id});
         settle(150);
-        QPushButton* plus = nullptr;
-        for (QPushButton* b : drawer ? drawer->findChildren<QPushButton*>() : QList<QPushButton*>())
-            if (b->parentWidget() == drawer) plus = b;
+        ToolChip* plus = drawer ? drawer->newFolderChip() : nullptr;
         if (plus) clickAt(plus, QPointF(plus->width() / 2.0, plus->height() / 2.0));
         settle(250);
         QPushButton* folderEye = nullptr;
@@ -45663,6 +45937,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("a-drag-reads-and-cancels")) dragReadsAndCancelsBlock(outDir);
     if (blockEnabled("a-drag-opens-folders-and-scrolls")) dragOpensFoldersAndScrollsBlock();
     if (blockEnabled("the-drawer-walks-and-moves-with-the-keys")) drawerKeyboardBlock();
+    if (blockEnabled("the-drawer-tells-the-truth-at-its-edges")) drawerEdgeStatesBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or

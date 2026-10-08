@@ -137,6 +137,13 @@ public:
     // only exec()s it, and the suite triggers entries without a modal loop.
     void populateRowMenu(class QMenu& menu, int rowId, RowKind kind);
 
+    // The title row's New folder: a ToolChip mirroring MainWindow's action
+    // (the Model menu's New Folder with These), so its enabled state and its
+    // reason are the action's - and the row menu's own entry reads the same
+    // enabled state, so the three cannot disagree (T-063). Called once.
+    void setNewFolderAction(class QAction* action);
+    class ToolChip* newFolderChip() const { return myNewFolderChip; }
+
     // Highlights the rows for these solids. Called when the viewport selection
     // changes, so the two views of the document never disagree.
     void showSelection(const std::vector<int>& ids);
@@ -234,9 +241,11 @@ signals:
     void itemsMoveRequested(std::vector<int> ids, int parent, int beforeId);
     // dragStatusText() changed - a drag began, moved to a new target, or ended.
     void dragStatusChanged();
-    // The + button in the title row, and the right-click menu's own entry:
-    // make a folder out of whatever is selected (or an empty one when nothing
-    // is).
+    // The right-click menu's New folder with these: put the selected bodies
+    // in a new folder. The user's rule (2026-10-07): with nothing selected it
+    // is disabled, and it NEVER makes an empty folder - MainWindow's handler
+    // refuses an empty selection even when this arrives past a disabled
+    // entry. (The title row's chip triggers MainWindow's action directly.)
     void newFolderRequested();
     // The right-click menu's other two, each the same route the Model menu
     // takes rather than a second implementation.
@@ -344,11 +353,14 @@ private:
     // as it always did and the wheel does the work. A QScrollArea still
     // scrolls with its bar off - the policy governs the bar, not the area.
     class QScrollArea* myScroll = nullptr;
-    // The + in the title row: one click makes a folder. It replaced the hover
-    // x this card used to carry - the drawer is closed from its rail chip and
-    // its menu entry, and the corner is worth more as the one control this
-    // list actually needs.
-    class QPushButton* myNewFolder = nullptr;
+    // New folder in the title row: one click files the selection in a folder.
+    // It replaced the hover x this card used to carry - the drawer is closed
+    // from its rail chip and its menu entry, and the corner is worth more as
+    // the one control this list actually needs. A ToolChip mirroring
+    // MainWindow's action (setNewFolderAction()), null until that is handed in.
+    class QHBoxLayout* myTitleRow = nullptr;
+    class ToolChip* myNewFolderChip = nullptr;
+    class QAction* myNewFolderAction = nullptr;
     // The tallest the card may grow before the rows start scrolling: a share
     // of the VIEWPORT's own height, read live, so the answer follows the
     // window rather than a number picked on one screen. Zero until the card
@@ -371,6 +383,14 @@ private:
     // is inert and its tooltip says so (ruling R7a).
     void syncTwisty(Row& row, bool open, bool heldByFilter = false);
     static QString filterHeldTip();
+    // THE ONE PLACE a row's accessible names are written (T-063): the row
+    // ("Side left, in Carcass, hidden"), its eye ("Hide Side left"), its
+    // grain mark and its twisty. Run on every build - a fresh row and a
+    // reused one alike - so a rename, a move or an eye click is heard.
+    // `shown`/`anyShown`: for a folder, whether every / any body under it is
+    // on (an item passes its own visibility twice).
+    void nameRow(Row& row, bool shown, bool anyShown);
+    static QString twistyName(bool open, const QString& folderName);
     // The twisty's two chevrons, rasterised once per theme (applyTheme()
     // drops them) rather than once per twisty that changes.
     const QIcon& chevron(bool open);

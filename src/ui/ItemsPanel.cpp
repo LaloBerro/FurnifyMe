@@ -12,6 +12,7 @@
 #include "KeyClaim.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
+#include "ToolChip.h"
 
 #include <QAction>
 #include <QEvent>
@@ -57,7 +58,7 @@ QString nameSpecimen() { return QStringLiteral("Left side panel"); }
 // mistake rather than as a distinction.
 constexpr int kRadius = 10;
 constexpr int kPad = Theme::Space::Snug;
-// The height the empty state genuinely needs - title, the "no bodies yet"
+// The height the empty state genuinely needs - title, the "nothing to list yet"
 // message wrapped at this width, and the padding around them. Used as a
 // FLOOR rather than only as the empty layout's natural size, so the card does
 // not visibly shrink the moment the first body arrives and grow again when it
@@ -107,6 +108,24 @@ constexpr double kCarriedAlpha = 0.45;
 QIcon eyeIcon()
 {
     return IconSet::toggleIcon(IconSet::Glyph::Eye, IconSet::Glyph::EyeHidden);
+}
+// What the list says while it holds nothing (T-063): every kind of row it
+// will hold, then the first step towards one. One function, so the label
+// and the vocabulary sweep (paintedTexts()) read the same words.
+QString emptyText()
+{
+    return ItemsPanel::tr("Nothing to list yet — bodies, outlines and folders you make show up "
+                          "here\n\nPress Ctrl+K and click points on the ground to draw your "
+                          "first outline.");
+}
+// "Side left, in Carcass, hidden" - the row's name, the folder it sits in and
+// whether it is on screen: what a screen reader needs to know a row by
+// (T-063). `visibility` is empty, ", hidden" or ", partly hidden".
+QString rowAccessibleName(const QString& name, const QString& folder, const QString& visibility)
+{
+    QString text = name;
+    if (!folder.isEmpty()) text += ItemsPanel::tr(", in %1").arg(folder);
+    return text + visibility;
 }
 
 // A row's name. A QLabel that answers its size from the PLAIN name in either
@@ -276,8 +295,9 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myOuter->setContentsMargins(kPad, kPad, kPad, kPad);
     myOuter->setSpacing(8);
 
-    // The title row: the word, and the one control this list needs - a + that
-    // makes a folder out of whatever is selected. It sits where the hover x
+    // The title row: the word, and the one control this list needs - New
+    // folder, which files whatever is selected (a ToolChip mirroring
+    // MainWindow's action, added by setNewFolderAction()). It sits where the hover x
     // used to (that x is gone from THIS drawer by the user's call; the rail
     // chip and the menu entry still close it).
     auto* titleRow = new QHBoxLayout();
@@ -291,26 +311,11 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     // two cannot drift apart again.
     titleRow->setContentsMargins(kRowInset, 0, kRowInset, 0);
     titleRow->setSpacing(6);
+    myTitleRow = titleRow;
     myTitle = new QLabel(tr("Items"), this);
     titleRow->addWidget(myTitle, 1);
-    myNewFolder = new QPushButton(this);
-    // THE SAME SIZE THE ROWS' OWN BUTTONS ARE. It was 20 against their 24,
-    // and because a button centres its glyph two right-aligned buttons of
-    // different widths put their ICONS in different columns even when their
-    // edges line up - which is half of why this control never looked square
-    // with the list. One size for one kind of control.
-    myNewFolder->setFixedSize(kRowButtonPx, kRowButtonPx);
-    myNewFolder->setCursor(Qt::PointingHandCursor);
-    myNewFolder->setFocusPolicy(Qt::NoFocus);
-    myNewFolder->setIcon(IconSet::icon(IconSet::Glyph::Folder));
-    myNewFolder->setToolTip(tr("New folder from the selected bodies"));
-    myNewFolder->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
-    connect(myNewFolder, &QPushButton::clicked, this,
-            [this] { emit newFolderRequested(); });
-    titleRow->addWidget(myNewFolder);
     myOuter->addLayout(titleRow);
     myTitle->show();   // measured immediately, same reason as the rows in refresh()
-    myNewFolder->show();
 
     // The filter (T-063): permanent, under the title. Escape in it, and the
     // hidden-pick line's Clear filter (Task 8), trigger ONE action.
@@ -577,6 +582,10 @@ void ItemsPanel::setGrainLook(QPushButton* grain, bool across)
     grain->setIcon(IconSet::icon(across ? IconSet::Glyph::GrainAcross : IconSet::Glyph::GrainAlong));
     grain->setToolTip(across ? tr("The grain runs across this body — click to turn it back")
                              : tr("The grain runs along this body — click to turn it"));
+    // Its NAME carries the state (ruling P8): the mark is deliberately not
+    // checkable - neither direction is "on" - so a screen reader hears the
+    // direction itself rather than a toggle state.
+    grain->setAccessibleName(across ? tr("Grain across") : tr("Grain along"));
 }
 
 void ItemsPanel::flushPendingRefresh()
@@ -728,7 +737,44 @@ void ItemsPanel::syncTwisty(Row& row, bool open, bool heldByFilter)
     // and says why rather than looking like a control that is broken.
     row.twisty->setToolTip(heldByFilter ? filterHeldTip()
                                         : (open ? tr("Close this folder") : tr("Open this folder")));
+    row.twisty->setAccessibleName(twistyName(open, row.text));
     row.twisty->setCursor(heldByFilter ? Qt::ArrowCursor : Qt::PointingHandCursor);
+}
+
+QString ItemsPanel::twistyName(bool open, const QString& folderName)
+{
+    // What a click will do, with the folder named - a screen reader moving
+    // down the list meets several of these and "Open this folder" alone
+    // would not say which.
+    return open ? tr("Close %1").arg(folderName) : tr("Open %1").arg(folderName);
+}
+
+void ItemsPanel::nameRow(Row& row, bool shown, bool anyShown)
+{
+    const QString folderName = row.parentId > 0 && myDocument
+                                   ? QString::fromStdString(myDocument->groupNameOf(row.parentId))
+                                   : QString();
+    const QString visibility = shown ? QString()
+                               : anyShown ? tr(", partly hidden")
+                                          : tr(", hidden");
+    // Each write only when the words moved: QWidget::setAccessibleName()
+    // raises a NameChanged event per call, and a rebuild touches every row.
+    const auto name = [](QWidget* widget, const QString& text) {
+        if (widget && widget->accessibleName() != text) widget->setAccessibleName(text);
+    };
+    if (row.isGroup) {
+        name(row.widget, rowAccessibleName(tr("%1, folder").arg(row.text), folderName, visibility));
+        // The eye reads checked only while EVERYTHING under it shows, and a
+        // click flips that - so its name is the click's outcome.
+        name(row.eye, shown ? tr("Hide everything in %1").arg(row.text)
+                            : tr("Show everything in %1").arg(row.text));
+        if (row.twisty) name(row.twisty, twistyName(row.twistyOpen, row.text));
+        return;
+    }
+    name(row.widget, rowAccessibleName(row.text, folderName, visibility));
+    // The eye's checked state is the item's visibility; its name is what a
+    // click will do, so the two read together ("Hide Side left", checked).
+    name(row.eye, shown ? tr("Hide %1").arg(row.text) : tr("Show %1").arg(row.text));
 }
 
 const QIcon& ItemsPanel::chevron(bool open)
@@ -1206,7 +1252,7 @@ void ItemsPanel::refresh()
         // that moment the card paints the previous list underneath the
         // new one and the stale rows are still hit-test targets. Caught
         // in a magnified render of the drawer: "Body 01" was drawn
-        // straight over the empty state's "No bodies yet" it had just
+        // straight over the empty state's "Nothing to list yet" it had just
         // replaced. deleteLater() itself stays - refresh() is reachable
         // from an eye button's own toggled handler, so deleting these
         // outright would destroy the widget whose signal is being
@@ -1250,9 +1296,10 @@ void ItemsPanel::refresh()
     applyRowVisibility();
 
     if (myRowList.empty() && !myEmpty) {
-        auto* empty = new QLabel(tr("No bodies yet.\n\nPress Ctrl+K and click points on "
-                                    "the ground to draw your first outline."),
-                                 this);
+        auto* empty = new QLabel(emptyText(), this);
+        // Named so a reader - the suite, an accessibility tool - can find the
+        // one label that says the list is empty.
+        empty->setObjectName(QStringLiteral("itemsEmpty"));
         empty->setWordWrap(true);
         empty->setAlignment(Qt::AlignTop);
         // MEASURED HERE, at the width it will actually have, and pinned - so
@@ -1333,6 +1380,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
             entry.depth = depth;
         }
         entry.parentId = parentId;
+        nameRow(entry, visible, visible);
         myRowList.push_back(entry);
         return;
     }
@@ -1446,6 +1494,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     entry.onScreen = onScreen;
     entry.grainAcross = across;
     entry.text = name->text();
+    nameRow(entry, visible, visible);
     myRowList.push_back(entry);
 }
 
@@ -1461,12 +1510,16 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     // otherwise. Derived, never stored - a folder has no visibility of its
     // own that could drift from its contents'.
     bool allVisible = true;
+    // ...and whether ANY of them is, so the row's accessible name can tell
+    // "hidden" from "partly hidden" (T-063). An empty folder hides nothing.
+    bool anyVisible = true;
     if (myDocument) {
-        for (int bodyId : myDocument->bodiesUnderGroup(groupId)) {
-            if (!myDocument->isVisible(bodyId)) {
-                allVisible = false;
-                break;
-            }
+        const std::vector<int> bodies = myDocument->bodiesUnderGroup(groupId);
+        anyVisible = bodies.empty();
+        for (int bodyId : bodies) {
+            if (myDocument->isVisible(bodyId)) anyVisible = true;
+            else allVisible = false;
+            if (anyVisible && !allVisible) break;
         }
     }
 
@@ -1484,6 +1537,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
             entry.depth = depth;
         }
         entry.parentId = parentId;
+        nameRow(entry, allVisible, anyVisible);
         myRowList.push_back(entry);
         return;
     }
@@ -1570,6 +1624,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     entry.parentId = parentId;
     entry.twistyOpen = open;
     entry.text = groupName;
+    nameRow(entry, allVisible, anyVisible);
     myRowList.push_back(entry);
 }
 
@@ -1665,6 +1720,24 @@ std::vector<int> ItemsPanel::idsForMenu(int rowId, RowKind kind) const
     return {rowId};
 }
 
+void ItemsPanel::setNewFolderAction(QAction* action)
+{
+    if (!action || myNewFolderChip || !myTitleRow) return;
+    myNewFolderAction = action;
+    // A ToolChip, so it holds no state of its own: enabled, tooltip (the
+    // reason when disabled) and accessible name all follow the action on
+    // every QAction::changed - the shell's one rule for a control.
+    myNewFolderChip =
+        new ToolChip(action, IconSet::Glyph::Folder, ToolChip::ChipMode::IconOnly, this);
+    // THE SAME SIZE THE ROWS' OWN BUTTONS ARE, so its glyph sits in the eyes'
+    // column: two right-aligned buttons of different widths centre their
+    // icons in different columns even when their edges line up.
+    myNewFolderChip->setFixedSize(kRowButtonPx, kRowButtonPx);
+    myNewFolderChip->setFocusPolicy(Qt::NoFocus);
+    myTitleRow->addWidget(myNewFolderChip);
+    myNewFolderChip->show();   // measured immediately, as the title is
+}
+
 void ItemsPanel::populateRowMenu(QMenu& menu, int rowId, RowKind kind)
 {
     QAction* folder = menu.addAction(tr("New folder with these"));
@@ -1690,7 +1763,12 @@ void ItemsPanel::populateRowMenu(QMenu& menu, int rowId, RowKind kind)
         upTarget = myDocument->siblingStepTarget(ids, -1);
         downTarget = myDocument->siblingStepTarget(ids, +1);
     }
-    folder->setEnabled(!mySelectedIds.empty());
+    // The action's own answer when there is one (whole bodies selected -
+    // MainWindow::updateActions()), so the title chip, the Model menu and
+    // this entry cannot disagree; a picked FACE reports its body in
+    // mySelectedIds, and filing that body would file nothing the user chose.
+    folder->setEnabled(myNewFolderAction ? myNewFolderAction->isEnabled()
+                                         : !mySelectedIds.empty());
     // Every kind of row renames - an outline row passed id 0 here once, so
     // its Rename sat disabled while a double-click on the same row worked.
     rename->setEnabled(rowId != 0);
@@ -2387,11 +2465,25 @@ QStringList ItemsPanel::paintedTexts() const
     // text. Same boundary InitScreen::paintedTexts() and
     // VersionsPanel::paintedTexts() already draw for their own user-supplied
     // names.
+    //
+    // EVERYTHING this drawer says, painted or spoken (T-063): the accessible
+    // names below are words a screen reader reads aloud, and the row menu's
+    // entries are words a user reads, so the vocabulary sweep covers them
+    // too. The name fragments come from the same functions the rows use.
     return {tr("Items"), tr("Show or hide this body"), tr("Show or hide this outline"),
-            tr("No bodies yet.\n\nPress Ctrl+K and click points on "
-               "the ground to draw your first outline."),
+            tr("Show or hide everything in this folder"), emptyText(),
             ItemsFilterField::placeholder(), tr("Clear filter"), tr("Nothing matches \"%1\""),
-            filterHeldTip(), tr("%1 is hidden by the filter —")};
+            filterHeldTip(), tr("%1 is hidden by the filter —"),
+            tr("The grain runs along this body — click to turn it"),
+            tr("The grain runs across this body — click to turn it back"),
+            // Accessible names (nameRow()).
+            tr(", in %1"), tr(", hidden"), tr(", partly hidden"), tr("%1, folder"),
+            tr("Hide %1"), tr("Show %1"), tr("Grain along"), tr("Grain across"),
+            tr("Hide everything in %1"), tr("Show everything in %1"), tr("Open %1"),
+            tr("Close %1"), tr("Close this folder"), tr("Open this folder"),
+            // The row menu (populateRowMenu()).
+            tr("New folder with these"), tr("Rename"), tr("Move up"), tr("Move down"),
+            tr("Remove folder, keep contents"), tr("Delete folder and its contents")};
 }
 
 void ItemsPanel::showSelection(const std::vector<int>& ids)

@@ -1220,8 +1220,9 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(myItemsPanel, &ItemsPanel::itemsMoveRequested, this, &MainWindow::onItemsMoveRequested);
     // The drag's present-tense line takes the right channel while it lasts.
     connect(myItemsPanel, &ItemsPanel::dragStatusChanged, this, &MainWindow::updateStateLabel);
-    // The + in the title row and the right-click menu, each landing on the
-    // SAME two handlers the Model menu's own entries do.
+    // The right-click menu's entries, each landing on the SAME handler the
+    // Model menu's own entry does (the title row's chip triggers that entry's
+    // action itself - see buildOverlay()).
     connect(myItemsPanel, &ItemsPanel::newFolderRequested, this,
             &MainWindow::onGroupSelection);
     connect(myItemsPanel, &ItemsPanel::ungroupRequested, this,
@@ -1570,10 +1571,15 @@ void MainWindow::buildActions()
     // no rail chips: the rail's height is a real ceiling on this app's own
     // screen (CLAUDE.md, "The shell is action-driven"), and grouping is a
     // thing done occasionally rather than constantly.
-    myGroupAction = new QAction(tr("&Group"), this);
+    //
+    // It MAKES A FOLDER, so it says so (ruling R12d): "New Folder with These",
+    // the row menu's "New folder with these" in menu case - never "Group",
+    // which is the current selection's word. &T because N (Next Tool) and F
+    // (Turn Mirroring O&ff) are taken in the Model menu. The drawer's title
+    // chip mirrors this action (ItemsPanel::setNewFolderAction()), and its
+    // tooltip - the reason while disabled - is updateActions()'s.
+    myGroupAction = new QAction(tr("New Folder with &These"), this);
     myGroupAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
-    myGroupAction->setToolTip(tr("Put the selected bodies in a folder (Ctrl+G)\n"
-                                 "A folder is organisation only - it changes no geometry."));
     connect(myGroupAction, &QAction::triggered, this, &MainWindow::onGroupSelection);
 
     // Never "group" for a folder (the Items drawer spec's vocabulary rule):
@@ -2271,6 +2277,9 @@ void MainWindow::buildOverlay()
     // what puts it in occupiedRects(), so the toast, the balloon and the
     // guide step around it without any of them naming this widget.
     myOverlay->addWidget(myItemsPanel, ViewportOverlay::Anchor::TopLeft);
+    // The title row's New folder is a chip mirroring the Model menu's New
+    // Folder with These - one action, so the menu, Ctrl+G and the chip agree.
+    myItemsPanel->setNewFolderAction(myGroupAction);
 
     // The versions drawer, same anchor - TopLeft entries stack downward in
     // the order they are added (see ViewportOverlay::relayout()), so this
@@ -3354,7 +3363,7 @@ void MainWindow::updateActions()
         myView->selectionKind() == OcctViewWidget::PickKind::Body && selectedCount == 2;
     myJointAction->setEnabled(!mySketching && !atInit && !myRenderModeOn && twoWholeBodies);
 
-    // Folders (improvements item 10). Group wants WHOLE BODIES selected -
+    // Folders (improvements item 10). New Folder with These wants WHOLE BODIES -
     // selectedSolidIds() reports the owning body of a picked face or edge
     // too, so the kind term is what stops a face pick reading as its body.
     // Ungroup wants those bodies to share one folder: with nothing selected,
@@ -3362,9 +3371,20 @@ void MainWindow::updateActions()
     // WHICH folder would be dissolved.
     const bool wholeBodies =
         myView->selectionKind() == OcctViewWidget::PickKind::Body && selectedCount >= 1;
-    // Group needs no selection at all - with none it makes an empty folder
-    // (see onGroupSelection()), which is the + button's own meaning.
-    myGroupAction->setEnabled(!mySketching && !atInit && !myRenderModeOn);
+    // New Folder with These files the selected WHOLE BODIES - the user's
+    // ruling (2026-10-07): with nothing selected it is disabled, and it never
+    // makes an empty folder, which would be a row about nothing. A picked
+    // face or edge is not a body either (wholeBodies' kind term): filing its
+    // body would file something the user did not choose. Disabled, it says
+    // why, and how to get there - the drawer's chip shows this same tooltip.
+    myGroupAction->setEnabled(!mySketching && !atInit && !myRenderModeOn && wholeBodies);
+    myGroupAction->setToolTip(
+        mySketching ? sketchReason
+        : !wholeBodies
+            ? tr("Select bodies to put in a folder — click their rows in the Items list, or "
+                 "double-click them in the viewport (Ctrl+G)")
+            : tr("Put the selected bodies in a new folder (Ctrl+G)\n"
+                 "A folder is organisation only — it changes no geometry."));
     mySlatsAction->setEnabled(canBeginSlats() || mySlatsActive);
     myUngroupAction->setEnabled(!mySketching && !atInit && !myRenderModeOn && wholeBodies &&
                                 folderOfSelection() != 0);
@@ -5770,13 +5790,14 @@ void MainWindow::onGroupSelection()
     // because a face was picked would be acting on something the user did not
     // choose. The same selection-content term every gizmo predicate carries.
     //
-    // NOTHING selected is not a refusal: it makes an EMPTY folder, which is
-    // what the + in the drawer's title row is for - a place to drag rows into
-    // rather than a gesture that only works if you got the selection right
-    // first.
+    // NOTHING TO FILE IS A NO-OP, never an empty folder - the user's ruling
+    // (2026-10-07). updateActions() disables the action for exactly this
+    // case, but the drawer's row menu reaches here through a signal, past
+    // any disabled state, so the rule is held here too.
     const std::vector<int> ids = myView->selectionKind() == OcctViewWidget::PickKind::Body
                                      ? myView->selectedSolidIds()
                                      : std::vector<int>();
+    if (ids.empty()) return;
 
     checkpointDocument();
     // Created INSIDE whatever folder the selection already shares, so
@@ -5792,11 +5813,8 @@ void MainWindow::onGroupSelection()
 
     updateActions();
     emit documentChanged();
-    const QString message = ids.empty()
-                                ? tr("Empty folder added — drag rows into it")
-                                : (ids.size() == 1
-                                       ? tr("1 body put in a folder")
-                                       : tr("%1 bodies put in a folder").arg(ids.size()));
+    const QString message = ids.size() == 1 ? tr("1 body put in a folder")
+                                            : tr("%1 bodies put in a folder").arg(ids.size());
     reportNote(message, true, myDocument.revision());
     // Straight into the rename, over the row that was just made: a folder
     // called "Folder" is a folder nobody named, and the one moment the user
