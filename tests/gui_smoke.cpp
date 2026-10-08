@@ -797,7 +797,15 @@ void skipByEnvironment(int checks, const QString& why)
 // full run. TWO consecutive unfiltered runs on the final tree measured 5927
 // checks + 1 environment skip, agreeing to the digit - after the Alert-sound
 // fix and the grey body default, both of which landed before that pair.
-constexpr int kCheckFloor = 5927;
+//
+// RE-RATCHETED (items-drawer branch, T-063): the stored sibling order, every
+// move reported, reveal, the filter, the drag's line, ring, ghost and Escape,
+// the keyboard, the edge states and the evidence block. TWO consecutive
+// unfiltered runs measured 6297 checks + 1 environment skip, agreeing to the
+// digit, against the binary this tree ships. The floor is their SUM, 6298 -
+// the number the end-of-run comparison actually reads (checks + skipped) -
+// where the step above wrote the checks alone and so sat one below it.
+constexpr int kCheckFloor = 6298;
 
 void check(bool condition, const QString& what)
 {
@@ -5126,12 +5134,14 @@ QAction* menuAction(QMenu& menu, const QString& text)
 // QApplication::setActiveWindow() moves Qt's OWN record of the active window
 // (deprecated since 6.5 in favour of activateWindow(), which asks the OS - the
 // one thing this suite must never do). It is restored when the probe ends,
-// and FocusRingProbe::osUntouched pins that the OS was not asked: the
-// foreground window is never the suite's own.
+// and so is the window's own focus child, so the probe leaves focus exactly
+// where it found it and no caller has to put it back.
+// FocusRingProbe::osUntouched records what can be observed of the OS side: at
+// the end of the probe the foreground window is none of the suite's own.
 struct FocusRingProbe {
     bool focusedForPaint = false;     // hasFocus() true AND Qt's focus widget is the list
     bool unfocusedForPaint = false;   // hasFocus() false after clearFocus()
-    bool osUntouched = true;          // the OS foreground window is not the suite's
+    bool osUntouched = true;          // the OS foreground window is no suite window
     QImage focused;
     QImage unfocused;
 };
@@ -5140,6 +5150,7 @@ FocusRingProbe probeFocusRing(QWidget* list)
 {
     FocusRingProbe probe;
     QWidget* const previous = QApplication::activeWindow();
+    const QPointer<QWidget> previousFocus = list->window()->focusWidget();
     QT_WARNING_PUSH
     QT_WARNING_DISABLE_DEPRECATED
     QApplication::setActiveWindow(list->window());
@@ -5153,13 +5164,16 @@ FocusRingProbe probeFocusRing(QWidget* list)
     probe.unfocusedForPaint = !list->hasFocus();
     probe.unfocused = renderExact(list);
 #ifdef _WIN32
-    probe.osUntouched =
-        GetForegroundWindow() != reinterpret_cast<HWND>(list->window()->winId());
+    const HWND foreground = GetForegroundWindow();
+    for (QWidget* top : QApplication::topLevelWidgets())
+        if (top->isVisible() && foreground == reinterpret_cast<HWND>(top->winId()))
+            probe.osUntouched = false;
 #endif
     QT_WARNING_PUSH
     QT_WARNING_DISABLE_DEPRECATED
     QApplication::setActiveWindow(previous);
     QT_WARNING_POP
+    if (previousFocus) previousFocus->setFocus(Qt::OtherFocusReason);
     settle(30);
     return probe;
 }
@@ -5243,11 +5257,9 @@ void drawerKeyboardBlock()
     const FocusRingProbe ring = probeFocusRing(drawer);
     check(ring.focusedForPaint && ring.unfocusedForPaint && ring.osUntouched,
           "keys: the list really holds focus as a style or stylesheet reads it, and loses it "
-          "again - without the OS being asked to activate anything");
+          "again - and the OS foreground window is never a suite window");
     check(ring.focused == ring.unfocused,
           "keys: holding focus paints nothing - no focus ring; the selection fill is the cue");
-    drawer->setFocus();
-    settle(30);
 
     // Visible rows: Carcass, Doors, Sketch A, Shelf, Back.
     sendKeyTo(&probe, Qt::Key_Down);
@@ -5859,20 +5871,28 @@ QString librarySnapshot(const QString& root)
 // the source is only ever opened by QFile::copy(), which reads it - and the
 // largest scene's pieces are composed, each under a top folder named after its
 // furniture, into one furniture "Whole room" saved in the COPY. No
-// FurnitureStore is ever constructed on the source path. False when there is
-// no library on this machine or any file fails to copy; `source` names where
-// it looked either way.
-bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& source)
+// FurnitureStore is ever constructed on the source path. False, with `why`
+// naming WHICH of the four ways it failed - no library at the path, a file that
+// would not copy, no scene with pieces, or the composed room not saving - so a
+// fallback run says what to fix rather than one sentence for all four; `source`
+// names where it looked either way.
+bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& source, QString& why)
 {
     source = realLibraryPath();
     const QDir from(source);
-    if (!from.exists()) return false;
+    if (!from.exists()) {
+        why = QStringLiteral("no library at ") + source;
+        return false;
+    }
     QDirIterator files(source, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
     while (files.hasNext()) {
         const QString path = files.next();
         const QString target = copyRoot + QLatin1Char('/') + from.relativeFilePath(path);
         QDir().mkpath(QFileInfo(target).absolutePath());
-        if (!QFile::copy(path, target)) return false;
+        if (!QFile::copy(path, target)) {
+            why = QStringLiteral("a file failed to copy: ") + path;
+            return false;
+        }
     }
 
     FurnitureStore store(copyRoot);
@@ -5887,7 +5907,10 @@ bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& sou
             bestPieces = static_cast<int>(scene.pieces().size());
         }
     }
-    if (bestPieces <= 0) return false;
+    if (bestPieces <= 0) {
+        why = QStringLiteral("no scene with pieces in the library at ") + source;
+        return false;
+    }
     QMap<QString, QString> furnitureNames;
     for (const FurnitureStore::FurnitureInfo& info : store.listFurniture())
         furnitureNames[info.id] = info.name;
@@ -5924,8 +5947,13 @@ bool composeRealRoom(const QString& copyRoot, QString& furnitureId, QString& sou
         }
     }
     furnitureId = store.createFurniture(QStringLiteral("Whole room"));
-    return !furnitureId.isEmpty() && room.count() > 0 &&
-           store.saveFurniture(furnitureId, room, QImage());
+    const bool saved = !furnitureId.isEmpty() && room.count() > 0 &&
+                       store.saveFurniture(furnitureId, room, QImage());
+    if (!saved)
+        why = QStringLiteral("the composed room failed to save (%1 bodies composed from %2 pieces)")
+                  .arg(room.count())
+                  .arg(bestPieces);
+    return saved;
 }
 
 // THE WORD C4 TYPES, DERIVED FROM THE ROOM rather than written down: the
@@ -6155,8 +6183,7 @@ void itemsEvidenceBlock(const QString& outDir)
     // threshold below follows from the room itself (its derived word, its own
     // body count, its own rows), so the checks and their count are the same
     // on either source.
-    bool real = composeRealRoom(realCopy.path(), roomId, source);
-    if (!real) why = QStringLiteral("no library to copy and compose at ") + source;
+    bool real = composeRealRoom(realCopy.path(), roomId, source, why);
     real = real && roomCarriesC4(realCopy.path(), roomId, query, roomBodies, why);
     if (!real) {
         {
@@ -6292,7 +6319,8 @@ void itemsEvidenceBlock(const QString& outDir)
               "C4: Right unfolds a folded folder and Left folds it again");
         const FocusRingProbe ring = probeFocusRing(roomDrawer);
         check(ring.focusedForPaint && ring.unfocusedForPaint && ring.osUntouched,
-              "C4: the room's list really holds focus as a style reads it, and loses it again");
+              "C4: the room's list really holds focus as a style reads it, and loses it again - "
+              "and the OS foreground window is never a suite window");
         check(ring.focused == ring.unfocused, "C4: no focus ring is painted");
         room.close();
     }

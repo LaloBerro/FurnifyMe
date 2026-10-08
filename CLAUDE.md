@@ -105,7 +105,8 @@ direct modeling, the serial round trip, `Measure`, `UserProgress`, the oriented 
 box, the mitre frame, the whole joinery layer (665 on its own) and `resizeAlongAxis` with
 its stretch. (`ctest` is **14/14** as of 2026-10-07 - the scene model, booleans and
 `headless_colour_literals`, which holds hex to `Theme.cpp`, came after that count; the check
-total above was not re-measured with them.)
+total above was not re-measured with them. `ctest` is **15/15** as of 2026-10-08 with
+`headless_item_order`, the Items drawer's stored order, at 57 checks on its own.)
 
 Verified by driving the running app and reading the screenshots:
 viewport renders with grid, triedron and lighting; sketch mode draws a live yellow polyline
@@ -182,16 +183,19 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 5927, measured twice on the tree that carries it.** Two consecutive
-unfiltered runs measured **5927 checks + 1 environment skip**, agreeing to the digit, against
+**`kCheckFloor` is 6298, measured twice on the tree that carries it.** Two consecutive
+unfiltered runs measured **6297 checks + 1 environment skip**, agreeing to the digit, against
 the binary this tree ships. The one environment skip is the RayTracing floor-blend
-measurement, which does not apply when PathTracing is the session's tier.
+measurement, which does not apply when PathTracing is the session's tier. The floor is the
+SUM, because the end-of-run comparison reads checks plus skips: the step before wrote the
+checks alone (5927 against a measured 5927 + 1) and so sat one below what it was guarding.
 
 The history, since each step was itself a measured pair: **4782** at the improvements merge,
 **4873** after the boolean rework's block and repairs, **4914** after the UI-review branch's
 alignment sweep and folder-duplicate block, **5278** after the scene editor and its snapping
-phase, **5374** after the board sweep that worked every open card to a close, and **5927**
-after the review-fixes branch worked the 2026-10 whole-app review's 26 cards. The floor
+phase, **5374** after the board sweep that worked every open card to a close, **5927**
+after the review-fixes branch worked the 2026-10 whole-app review's 26 cards, and **6298**
+after the items-drawer branch (T-063). The floor
 has never been computed from a predicted delta at any of those steps, which is the whole
 point of the paragraph below.
 
@@ -313,7 +317,11 @@ Source files under `src/`, plus `tests/`:
 | `ui/ToolChip.{h,cpp}` | a button built from a `QAction`, never storing its own state |
 | `ui/ToolCluster.{h,cpp}` | a vertical stack of chips |
 | `ui/ViewportOverlay.{h,cpp}` | anchors clusters to viewport edges; not a widget |
-| `ui/ItemsPanel.{h,cpp}` | solid list with visibility toggles |
+| `ui/ItemsPanel.{h,cpp}` | the item list: rows reused by id and folded by visibility, the stored order, the drag, the filter, reveal, the keys |
+| `ui/ItemMoveText.{h,cpp}` | the ONE author of the drawer's move copy: present tense for the drag's status line, past for the Note, the Failure's reason |
+| `ui/ItemsFilterField.{h,cpp}` | the drawer's permanent "Filter by name" field; claims Escape and letters back from the shortcut map |
+| `ui/DropIndicator.{h,cpp}` | the drag's one mark inside the drawer: an insertion line with a ring, or a ring around a folder row; `accentText`, `dangerText` when refused |
+| `ui/DragGhost.{h,cpp}` | what a drag carries, over the viewport; three variants rasterised once per drag |
 | `ui/PanelCloseButton.{h,cpp}` | the hover-only x in a panel's corner; triggers the panel's own `QAction`, holds no state |
 | `ui/AxisGizmo.{h,cpp}` | Unity-style orientation gizmo; each axis tip snaps the view |
 | `ui/WalkthroughPanel.{h,cpp}` | the guided first build; steps derived from live state |
@@ -397,7 +405,13 @@ that word for something else and says it constantly: a multi-body selection is a
 `selectionSizesKind() == Group`, "3 bodies selected — overall …" and "a group's overall size
 is read-only" all depend on it. A **folder** is a named, saved container in the Items drawer;
 a **group** is whatever happens to be selected right now. Two concepts, two words, and
-banning either would make one of them unsayable.
+banning either would make one of them unsayable. **The folder's own controls broke that line
+until the Items drawer rework**: the Model menu made a folder with `Group` and dissolved one
+with `Ungroup`, so the one place a folder was created spoke the selection's word. They read
+**New Folder with These** (`Ctrl+G`) and **Remove Folder, Keep Contents** (`Ctrl+Shift+G`)
+now, and the row menu says the same in sentence case. The drawer's edge block sweeps every
+string the drawer paints for "group" as well as the banned list — a rule local to the drawer,
+since the word stays the selection's everywhere else.
 
 **The Settings row was renamed when the panel grew, and the rename is deliberate.** It
 used to read "The colours-and-fonts panel | Appearance | theme, **settings**, preferences",
@@ -2427,9 +2441,10 @@ load never has to resolve a forward reference, and the whole block is validated 
 anything is mutated — the same scratch-then-swap law every other load in this app follows.
 `ItemsPanel` grew tree rows (`addItemRow`, `addGroupRow`, `buildGroupRows`, `kIndentPx = 12`),
 multi-select (plain/Ctrl/Shift through one `selectionRequested(std::vector<int>)` signal),
-drag-and-drop onto a folder (`itemsDropped(std::vector<int>, int)`, `kDragThresholdPx = 6`),
-and a right-click menu of New folder with these / Rename / Ungroup / **Delete folder and its
-contents**. Folders start **folded** (`myExpanded` is empty until something opens one), which
+drag-and-drop onto a folder (`kDragThresholdPx = 6`), and a right-click menu with **Delete
+folder and its contents** at its foot. The drag, the signal it emits and the menu's other words
+were all rebuilt by the Items drawer rework — see "The Items drawer is a map you can trust"
+below. Folders start **folded** (`myExpanded` is empty until something opens one), which
 is the user's call and the right default for the drawer's actual problem — a long list.
 
 **The drawer scrolls, and its height comes from the rows (item 12).** The user's words were
@@ -2443,7 +2458,8 @@ bounded to roughly 24 text lines and it ignores `sizeAdjustPolicy` entirely, so 
 attempt to raise a cap was raising a cap that was never the binding constraint.
 `ItemsPanel::sizeHint()` reads `myRows->sizeHint()` — the row container's own height —
 directly, and never `heightForWidth()`. The title row's `+` makes a folder from the
-selection; there is **no hover × on this drawer**, by the user's call, and the rail chip and
+selection (a `ToolChip` mirroring New Folder with These since the rework, disabled with its
+reason while nothing is selected); there is **no hover × on this drawer**, by the user's call, and the rail chip and
 the menu entry still close it.
 
 **Slats (item 14).** Two rounds of pictures settled what the user wanted: not one stick at a
@@ -2579,6 +2595,124 @@ control, not a new colour.
 to (`saveDialogPath()`/`rememberSaveDialogPath()`), a clicked point in the UI during a sketch
 does not become a sketch point, and Join plus a face pick no longer disables joinery — that
 last is item 2, written up where the joint card lives.
+
+### The Items drawer is a map you can trust (T-063)
+
+Spec `.dipsynator/items-drawer/spec.md`, option A ("hierarchy you can hold") with option W's
+select-on-release graft, plus two fixes the critiques found: the title row is the drop target
+for "the end of the top level", because a card that sizes itself to its rows has almost no
+blank space below the last one; and a move carries a body's mirror twin, so a source and its
+twin never end up in different folders. The brief in one line: the list and the wood should
+be a two-way map — a drag you can read, cancel and reorder with, a drop that always reports, a
+pick in the viewport that finds its row, and a long list you can filter and walk with the keys.
+
+- **Order is sparse, stored and undoable.** `DocumentModel::State` carries a per-parent
+  sequence that exists only once the user has reordered that parent, and `orderedChildren()`
+  is the ONE resolver: explicit entries first, then every unranked child in the old automatic
+  order (folders, outlines, bodies by creation). So a new item lands at the end with no
+  creation route knowing order exists, a deleted id drops out when the list is next read, and
+  a furniture saved before this loads exactly as it always looked. The one exception is the
+  user's own rule that a Ctrl+D copy lands directly after its source: `placeAfter()`, which
+  writes only into a parent that already has a sequence. The manifest's optional `"order"`
+  block is positional, validated in full before anything is mutated, and carried by versions.
+  `restoreFrom()` carries the folder tree and the order now too — it used to keep the LIVE
+  document's folders across a version restore, whose ids named nothing in the restored bodies.
+- **One mutator, one answer.** `moveItems(ids, parent, beforeId)` returns a `MoveResult`
+  whose `check` is `Moved`, `NoChange`, `IntoItself` or `Unknown`; `checkMove()` is its dry
+  run — the `checkMitre()` contract. The drop indicator, the ghost, the status line, the Note
+  and the Failure all read that one value, so they cannot disagree about what a release will
+  do. Every route — a drop, Alt+arrow, Move up / Move down — emits `itemsMoveRequested()`, and
+  `MainWindow::onItemsMoveRequested()` takes ONE checkpoint and a Note with Undo for `Moved`,
+  **nothing at all** for `NoChange` (no checkpoint, no toast, `revision()` still), and a
+  Failure with the reason for a refusal. `ItemMoveText` writes every sentence, present tense
+  for the drag's line and past for the Note, so the drag says in advance the words the Note
+  will use afterwards.
+- **Rows are reused by id and folding is visibility.** The plan said "build every row once
+  per document change", and review measured what that meant: about 120 ms per edit at 130
+  rows, paid even with the drawer closed — fifteen times the "slightly more work per edit" the
+  user had approved. So a rebuild updates rows in place by id, creates only new ids, deletes
+  only gone ones, and a closed drawer defers the whole thing to its next show; an eye toggle
+  or a rename at 130 rows measured 1.3 ms after. Opening a folder — a twisty, a reveal, a
+  spring mid-drag — creates no widget, which is what keeps the row a drag was pressed on
+  alive, and a refresh asked for mid-drag waits for the drag's end. `rowCount()` and its
+  family index VISIBLE rows, which is what every caller always meant by "row 3".
+- **The drag is never `QDrag`** (whose OLE loop `sendEvent()` cannot drive). A row selects on
+  RELEASE; folder rows split 25/50/25 into above/into/below and body rows split in halves,
+  with 4 px of hysteresis so a resting hand does not flicker the target; a folded folder
+  hovered for 700 ms springs open, and the list scrolls at its edges. **Exactly one** cue is
+  ever drawn, in `accentText` (`dangerText` when refused): an insertion line with a ring, a
+  ring around a folder row with no fill change (a fill would read as selection), or the title
+  lit. The ghost is a viewport sibling rasterised once per drag in three variants, under the
+  overlay paint-budget rule. Escape is claimed only while a drag is live, and a release
+  outside the card cancels. While a filter is active only into-folder drops are offered,
+  since a reorder in a filtered list would land beside rows the user cannot see.
+- **A drag whose release never comes must still put everything back** (ruling R10a). A lost
+  release left four things standing app-wide — the closed-hand override cursor, the ghost,
+  the Escape claim and the right channel's line — so a `hideEvent` (Close furniture hides
+  the window and every child with it), a left press anywhere outside the rows, the
+  application going inactive, and the destructor each end the drag; and a fresh press first
+  cancels any stale drag before arming, so a lost release cannot turn the next click into a
+  move. A right press selects its row unless the row is already in the selection, so the row
+  menu acts on what was right-clicked.
+- **Reveal** writes the picked body's ancestors into `myExpanded`, so they stay open, and
+  scrolls its row into view; a pick the filter hides says so at the card foot beside a Clear
+  filter control rather than failing silently. A partly selected folder reads `2/5` in
+  `accentText`, a mark distinct from a whole folder's selection fill.
+- **The filter** force-opens ancestors WITHOUT touching `myExpanded`, so an emptied field
+  restores the user's own folds; a held-open folder's twisty is inert and says why, because a
+  click there would otherwise write a fold the user cannot see. Matches are highlighted in
+  rich text with the user's name escaped. The field claims letters and Escape back from the
+  shortcut map, and Escape in an EMPTY field lets focus go rather than swallowing the key that
+  cancels a sketch.
+- **The keys: the list is `Qt::ClickFocus`, focus IS selection, and no ring is painted** —
+  the selection fill is the focus cue, so the two can never separate. Up/Down/Shift, Left and
+  Right to fold and step, Home/End, F2, Alt+Up/Down within a parent and Alt+Left out of a
+  folder, all through `moveItems()`. The scroll area the rows sit in is `NoFocus` (R12b): a
+  real click walks up to the first click-focus ancestor, and that used to be an invisible
+  scroll area that then ate every key.
+- **Words.** A row is named for a screen reader as "Side left, in Carcass, hidden"; an eye by
+  what its click will do ("Hide Side left"); a twisty by its folder ("Open Carcass"); the
+  grain mark by name only ("Grain along"), since it is deliberately not checkable and that is
+  how `firstVisibleRowToggle()` tells it from an eye. The menu's folder words moved off
+  "group" (see the vocabulary section), Rename now works from an outline row, a rename to the
+  unchanged name is no change and takes no checkpoint, and the empty state names what the
+  list will hold.
+- **Known limit, accepted with A:** a drag of a selection made of whole folders carries their
+  bodies, not the folders. Option W's representing-rows rule would fix it, in a follow-up.
+
+**Two of this branch's checks were vacuous for the oldest reason in this file, and the fix
+had to touch Qt's own bookkeeping.** "No focus ring is painted" compared a render with focus
+against one without — but every window this suite shows is never OS-active, so `hasFocus()`,
+which is what a style's `State_HasFocus` and a stylesheet's `:focus` both read, was false in
+BOTH renders, and a ring keyed on it went straight past. `probeFocusRing()` now moves Qt's own
+record of the active window with the deprecated `QApplication::setActiveWindow()` — never
+`activateWindow()`, which asks the OS, the one thing this suite must not do — restores it and
+the window's focus child on the way out, and records that the OS foreground window is never a
+suite window. A painted ring now turns both checks red.
+
+**C4 runs on a COPY of the author's real room.** No single furniture in the library holds
+the 122 boards the spec names; its scene does, five pieces of four furniture. So the evidence
+block copies the library file by file — the source is only ever opened by `QFile::copy()` —
+composes the largest scene's pieces into one furniture in the copy, derives the filter word
+from that room rather than from today's board names, and falls back to a 122-body stand-in,
+printing which of its four reasons applied, when the room cannot express what C4 checks. The
+real library's file count, size and newest time are snapshotted before and after and must
+not move. The block also writes eleven composited captures, one per state the spec names, so
+the drawer is looked at and not only driven. **Measured** at 130 rows: one filter keystroke
+and one drag-target change each under the 16 ms frame budget (`[items-cost]` lines). The
+keystroke first went red only in a FULL run — 16.35 ms against about 9 filtered — because the
+first letter makes a `QLabel` build a rich-text control for every matched label, and each of
+those ~540 `ChildAdded` events passes through every application-wide event filter. The cure
+was less work in the keystroke's own turn, not a looser bound: the twisty chevrons cached per
+theme, no throw-away markup parse, and the highlight's words written at once only for rows on
+screen, the rest queued — safe because a row measures itself from the plain name.
+
+**A filtered run lied once more, in the other direction.** Filtered runs of the drag blocks
+showed a red line in the shared-state `rotate-and-scale-are-ours` block, A/B'd identical at
+the parent's source; the official run never reproduced it. A shared-state block run out of
+its sequence is not evidence either way — which is the `[*shared-state]` tag's whole meaning,
+and why the checkpoint full runs after Tasks 9 and 12 were kept when every other per-task run
+was cut to filtered blocks for speed.
 
 ### Qt plugin deployment - do not remove
 
