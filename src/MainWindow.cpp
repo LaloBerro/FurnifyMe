@@ -1251,12 +1251,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         myPaintedMoveRefusal = reason;
         statusBar()->showMessage(reason);
     });
-    connect(myItemsPanel, &ItemsPanel::filterChanged, this, [this] {
+    // ...and so does the keys moving to another row (ruling DA1): a step
+    // onto an OUTLINE row changes no body selection, so the bar is not
+    // rewritten by onSelectionChanged() there. One compare-before-clear for
+    // both, so only the sentence this window painted ever comes down.
+    const auto withdrawMoveRefusal = [this] {
         if (myPaintedMoveRefusal.isEmpty()) return;
         const bool showing = statusBar()->currentMessage() == myPaintedMoveRefusal;
         myPaintedMoveRefusal.clear();
         if (showing) showSelectionStatus();
-    });
+    };
+    connect(myItemsPanel, &ItemsPanel::filterChanged, this, withdrawMoveRefusal);
+    connect(myItemsPanel, &ItemsPanel::currentRowChanged, this, withdrawMoveRefusal);
     connect(myItemsPanel, &ItemsPanel::deleteGroupRequested, this,
             &MainWindow::onDeleteGroup);
 

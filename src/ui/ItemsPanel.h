@@ -316,6 +316,10 @@ signals:
     // refusal the old filter caused (ruling D1 - the RF3 sentence stayed up
     // after the filter it blamed was gone).
     void filterChanged();
+    // The keyboard's current row moved to another row - a step, a click, an
+    // outline row included (ruling DA1): MainWindow withdraws a move refusal
+    // written for the row the keys left.
+    void currentRowChanged();
     // A move the list will not make, with the reason for the status bar's left
     // channel - a quiet refusal, not a Failure (ruling RF3: Alt+Up/Down while
     // the filter hides where the row would land).
@@ -651,6 +655,8 @@ private:
     void setTitleLit(bool lit, bool refused);
     void styleTitle();
     void activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods);
+    // activateRow()'s work; activateRow() announces when the keys' row moved.
+    void selectRow(int id, RowKind kind, Qt::KeyboardModifiers mods);
     // Whether the row is already part of what is selected - a body selected,
     // the pending outline, a folder whose every body is selected.
     bool rowInSelection(int id, RowKind kind) const;

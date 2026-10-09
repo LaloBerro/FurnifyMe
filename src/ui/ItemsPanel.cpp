@@ -287,7 +287,11 @@ private:
 };
 
 ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* parent)
-    : QWidget(parent)
+    // The accessibility factory is installed BEFORE QWidget's constructor
+    // runs (the comma operator in the base's argument): this panel answers as
+    // a Tree (F7), and an interface Qt resolved for it during its own
+    // construction would be the generic one, cached for good.
+    : QWidget((ItemsRowWidget::installAccessibility(), parent))
     , myDocument(document)
     , myView(view)
 {
@@ -307,9 +311,6 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     // (fill and bar) is the focus cue (WCAG 2.4.7), because the focused row
     // IS the selected row.
     setFocusPolicy(Qt::ClickFocus);
-    // Before the first row exists, so no row is ever answered by Qt's generic
-    // widget interface and cached that way (finding F7).
-    ItemsRowWidget::installAccessibility();
 
     myOuter = new QVBoxLayout(this);
     myOuter->setContentsMargins(kPad, kPad, kPad, kPad);
@@ -2040,8 +2041,13 @@ QString ItemsPanel::listKeyLabel(const ListKey& entry) { return tr(entry.label);
 QString ItemsPanel::listKeyText(const ListKey& entry)
 {
     QStringList keys;
-    for (const QKeyCombination& key : entry.keys)
+    for (QKeyCombination key : entry.keys) {
+        // "Enter", the app's word for the key (KeyClaim's "Enter applies"),
+        // never NativeText's "Return" - one key, one name on every surface.
+        if (key.key() == Qt::Key_Return)
+            key = QKeyCombination(key.keyboardModifiers(), Qt::Key_Enter);
         keys << QKeySequence(key).toString(QKeySequence::NativeText);
+    }
     return keys.join(QStringLiteral(", "));
 }
 
@@ -2147,12 +2153,20 @@ void ItemsPanel::announceCurrent(bool extend)
 void ItemsPanel::enterListFromFilter()
 {
     // DOWN OR ENTER IN THE FILTER FIELD (ruling D2): the keyboard's way into
-    // the rows, which Tab passes by. Focus lands on the first visible row and
-    // selects it - focus and selection never separate in this list. With no
-    // row to land on the field keeps the keys.
-    if (rowCount() == 0) return;
+    // the rows, which Tab passes by. Focus lands on the first row and selects
+    // it - focus and selection never separate in this list. With no row to
+    // land on the field keeps the keys.
+    //
+    // While a query stands it is the first MATCHING row (ruling DA2), never a
+    // muted ancestor folder: that folder is on screen only because a match
+    // lies beneath it, and selecting it would select every body under it -
+    // including the ones the filter is hiding.
+    int target = -1;
+    for (int v = 0; v < rowCount() && target < 0; ++v)
+        if (!filterActive() || !visibleRow(v)->muted) target = v;
+    if (target < 0) return;
     setFocus(Qt::OtherFocusReason);
-    stepTo(0, Qt::NoModifier);
+    stepTo(target, Qt::NoModifier);
 }
 
 int ItemsPanel::folderAbove(int id) const
@@ -2375,6 +2389,17 @@ void ItemsPanel::showDropTarget(const DropTarget& target)
 }
 
 void ItemsPanel::activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods)
+{
+    // THE KEYS' ROW MOVED - announced whatever kind of row it moved to (ruling
+    // DA1). An outline row changes no body selection, so neither
+    // selectionChanged nor filterChanged fires for it, and a quiet move
+    // refusal written for the row the keys LEFT stood under the next one.
+    const int before = myCurrentId;
+    selectRow(id, kind, mods);
+    if (myCurrentId != before) emit currentRowChanged();
+}
+
+void ItemsPanel::selectRow(int id, RowKind kind, Qt::KeyboardModifiers mods)
 {
     // The row the keys continue from - whichever route selected it. A folder
     // or outline row is always selected by its own activation; a body row is

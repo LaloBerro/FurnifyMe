@@ -7081,6 +7081,19 @@ void drawerBatchABlock(const QString& outDir)
           QStringLiteral("F7: a row is a tree item - Back reads selected and focused under its "
                          "own name (\"%1\"), Shelf neither")
               .arg(backFace ? backFace->text(QAccessible::Name) : QString()));
+    // ...inside a TREE: the drawer's own interface, whose focus child is the
+    // row the Focus event named - the two answers a reader gets agree.
+    QAccessibleInterface* treeFace = QAccessible::queryAccessibleInterface(drawer);
+    QAccessibleInterface* treeFocus = treeFace ? treeFace->focusChild() : nullptr;
+    const bool treeAgrees = treeFace && treeFace->role() == QAccessible::Tree && treeFocus &&
+                            treeFocus->object() == backRow;
+    check(treeAgrees,
+          QStringLiteral("F7: the drawer is a Tree whose focus child is Back, the row the Focus "
+                         "event named (role %1, focus child %2)")
+              .arg(treeFace ? int(treeFace->role()) : -1)
+              .arg(treeFocus && treeFocus->object()
+                       ? treeFocus->object()->property("solidId").toString()
+                       : QStringLiteral("none")));
     g_drawerAccessibleEvents.clear();
     sendKeyTo(&probe, Qt::Key_Up, Qt::ShiftModifier);   // Back + Shelf
     int addOnShelf = 0;
@@ -7163,6 +7176,19 @@ void drawerBatchABlock(const QString& outDir)
             missingFromSheet << label;
     }
     const int itemsListAt = sheetTexts.indexOf(QStringLiteral("Items list"));
+    // "Enter" is the app's word for the key (KeyClaim's "Enter applies"),
+    // never NativeText's "Return" - asked of the Items list group's own rows.
+    QStringList groupKeys;
+    for (int i = itemsListAt + 1; itemsListAt > 0 && i + 1 < sheetTexts.size(); i += 2) {
+        if (i >= sheetTexts.size() - 1) break;
+        groupKeys << sheetTexts.value(i + 1);
+        if (sheetTexts.value(i) == ItemsPanel::listKeyLabel(ItemsPanel::listKeys().back())) break;
+    }
+    const bool saysReturn = groupKeys.join(QLatin1Char('|')).contains(QStringLiteral("Return"));
+    check(groupKeys.contains(QStringLiteral("Down, Enter")) && !saysReturn,
+          QStringLiteral("D19: the Items list group calls the key Enter - \"Down, Enter\" - and "
+                         "never Return (%1)")
+              .arg(groupKeys.join(QStringLiteral(" | "))));
     check(sheet && itemsListAt > 0 && missingFromSheet.isEmpty() &&
               sheetTexts.contains(QStringLiteral("Alt+Right")),
           QStringLiteral("D19: the shortcut sheet has an \"Items list\" group generated from the "
@@ -7201,12 +7227,31 @@ void drawerBatchABlock(const QString& outDir)
         const std::size_t depth = doc.undoDepth();
         sendKeyTo(&probe, Qt::Key_Up, Qt::AltModifier);   // Shelf above Sketch A
         const std::size_t after = doc.undoDepth();
+        // What this proves, and no more: with that menu alive the LIST still
+        // claims Alt+Up at ShortcutOverride, and an Alt+Up delivered to it
+        // moves once without the menu entry firing. A sent key never passes
+        // Qt's shortcut map, so the map half - that the entry cannot match
+        // outside its own menu - is the WidgetShortcut context pinned above.
         check(over.isAccepted() && after == depth + 1 && menuFired == 0,
-              QStringLiteral("D19: showing the key in the menu takes nothing from the list - "
-                             "Alt+Up is still claimed and moves once (%1 checkpoint, the menu "
-                             "entry fired %2 times)")
+              QStringLiteral("D19: with that menu alive the list still claims Alt+Up, and an "
+                             "Alt+Up delivered to the list moves once without the entry firing "
+                             "(%1 checkpoint, the entry fired %2 times)")
                   .arg(static_cast<int>(after - depth))
                   .arg(menuFired));
+        // The menu's shortcut column and the sheet spell each key the same.
+        const auto sheetKeys = [&](ItemsPanel::ListCommand command) {
+            for (const ItemsPanel::ListKey& entry : ItemsPanel::listKeys())
+                if (entry.command == command) return ItemsPanel::listKeyText(entry);
+            return QString();
+        };
+        const QString upColumn = up ? up->shortcut().toString(QKeySequence::NativeText) : QString();
+        const QString downColumn =
+            down ? down->shortcut().toString(QKeySequence::NativeText) : QString();
+        check(!upColumn.isEmpty() && upColumn == sheetKeys(ItemsPanel::ListCommand::MoveUp) &&
+                  downColumn == sheetKeys(ItemsPanel::ListCommand::MoveDown),
+              QStringLiteral("D19: the menu's shortcut column says what the sheet says (\"%1\", "
+                             "\"%2\")")
+                  .arg(upColumn, downColumn));
     }
     if (undo) undo->trigger();
     settle(150);
@@ -7271,6 +7316,19 @@ void drawerBatchABlock(const QString& outDir)
     const QString afterStep = status();
     check(afterStep != noFolderAbove && afterStep.startsWith(QStringLiteral("1 body selected")),
           QStringLiteral("D1: a selection change withdraws it (\"%1\")").arg(afterStep));
+    // RULING DA1: a step onto an OUTLINE row changes no body selection, so
+    // nothing rewrote the bar there - the keys' row moving is what withdraws.
+    clickRow(shelf);
+    sendKeyTo(&probe, Qt::Key_Right, Qt::AltModifier);
+    const bool refusedAgain = status() == noFolderAbove;
+    sendKeyTo(&probe, Qt::Key_Up);   // Shelf -> Sketch A, an outline row
+    const QString afterOutlineStep = status();
+    const int onRow = drawer->currentRowId();
+    check(refusedAgain && onRow == sketch && afterOutlineStep != noFolderAbove &&
+              afterOutlineStep.startsWith(QStringLiteral("1 body selected")),
+          QStringLiteral("DA1: a step onto the OUTLINE row Sketch A withdraws it too - the bar is "
+                         "back on the selection (\"%1\")")
+              .arg(afterOutlineStep));
     // Sketch A under Doors - OPEN, so the rows straight above it are Door
     // left and Door right, deeper: walked past, Doors is the sibling above.
     drawer->setGroupExpanded(doors, true);
@@ -7397,6 +7455,26 @@ void drawerBatchABlock(const QString& outDir)
               QStringLiteral("D2: Enter does the same - with \"Back\" typed, the list takes the "
                              "focus on Back, selected (current %1)")
                   .arg(drawer->currentRowId()));
+        // RULING DA2: a NESTED match. With "Side" typed the first visible row
+        // is Carcass, muted - shown only because Side left and Side right lie
+        // beneath it. Enter lands on the first MATCHING row, never on the
+        // ancestor, which would select every body in Carcass, Top and Drawer
+        // front included, though the filter hides them.
+        field->clear();
+        settle(40);
+        field->setFocus(Qt::OtherFocusReason);
+        settle(30);
+        typeInto(field, QStringLiteral("Side"));
+        const bool ancestorFirst = drawer->rowIdAt(0) == carcass && drawer->rowIsMutedAt(0);
+        sendKeyTo(&probe, Qt::Key_Return);
+        const int landedOn = drawer->currentRowId();
+        const std::vector<int> landedSelection = selected();
+        check(ancestorFirst && drawer->hasFocus() && landedOn == sideLeft &&
+                  landedSelection == std::vector<int>{sideLeft},
+              QStringLiteral("DA2: with \"Side\" typed, Enter lands on Side left, the first "
+                             "match, not the muted Carcass above it (current %1, %2 selected)")
+                  .arg(landedOn)
+                  .arg(static_cast<int>(landedSelection.size())));
         field->clear();
         settle(60);
         QT_WARNING_PUSH

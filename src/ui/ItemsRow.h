@@ -71,9 +71,11 @@ public:
     // the fill's corner radius top and bottom so it stays inside the fill.
     QRect barRect() const;
 
-    // Registers the row's accessibility factory with Qt. Idempotent; the
-    // drawer calls it before it builds its first row, so no row is ever
-    // answered by Qt's generic widget interface first and cached that way.
+    // Registers the accessibility factory with Qt - for the rows (tree items)
+    // and for the drawer itself (the Tree whose focus child is the current
+    // row). Idempotent; the drawer calls it before it builds its first row,
+    // so no row is ever answered by Qt's generic widget interface first and
+    // cached that way.
     static void installAccessibility();
 
 protected:

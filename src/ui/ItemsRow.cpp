@@ -61,10 +61,34 @@ public:
     }
 };
 
+// The drawer itself, as the TREE its rows are items of. Its focus child is
+// the keys' current row while the list holds the keyboard, so the element a
+// reader is told has focus (the row's Focus event) and the element it finds
+// when it asks the tree agree. Exact class match only, like the rows'.
+class ItemsPanelAccessible : public QAccessibleWidget {
+public:
+    explicit ItemsPanelAccessible(QWidget* panel) : QAccessibleWidget(panel, QAccessible::Tree) {}
+
+    QAccessibleInterface* focusChild() const override
+    {
+        const QWidget* panel = widget();
+        const QWidget* top = panel->window();
+        if (top && top->focusWidget() == panel) {
+            for (ItemsRowWidget* row : panel->findChildren<ItemsRowWidget*>())
+                if (row->current() && !row->isHidden())
+                    return QAccessible::queryAccessibleInterface(row);
+        }
+        return QAccessibleWidget::focusChild();
+    }
+};
+
 QAccessibleInterface* itemsRowFactory(const QString& className, QObject* object)
 {
-    if (object && object->isWidgetType() && className == QLatin1String("ItemsRowWidget"))
+    if (!object || !object->isWidgetType()) return nullptr;
+    if (className == QLatin1String("ItemsRowWidget"))
         return new ItemsRowAccessible(static_cast<ItemsRowWidget*>(object));
+    if (className == QLatin1String("ItemsPanel"))
+        return new ItemsPanelAccessible(static_cast<QWidget*>(object));
     return nullptr;
 }
 
