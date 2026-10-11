@@ -9,10 +9,12 @@
   import type { Rect } from './solver';
   import Toast, { type ToastMessage } from './Toast.svelte';
   import StatusStrip from './StatusStrip.svelte';
+  import Settings from './settings/Settings.svelte';
+  import type { CardRect, SettingsApi } from './settings/api';
   import { applyTokens } from '../theme';
   import { reportHitsOnChange } from '../overlay/hits';
 
-  let { chrome, theme }: { chrome: ChromeApi; theme: ThemeApi } = $props();
+  let { chrome, theme, settings }: { chrome: ChromeApi; theme: ThemeApi; settings?: SettingsApi } = $props();
 
   const kStripHeight = 24;
 
@@ -24,6 +26,7 @@
   let viewW = $state(window.innerWidth);
   let viewH = $state(window.innerHeight);
   let toast: Toast | undefined = $state();
+  let cards: Record<string, CardRect> = $state({});
   let seq = 0;
 
   const host = $derived({ w: viewW, h: viewH - (status.shown ? kStripHeight : 0) });
@@ -35,6 +38,13 @@
     chrome.statusChanged.connect(() => (status = { ...chrome.status }));
     chrome.obstaclesChanged.connect(() => (obstacles = [...chrome.obstacles]));
     chrome.undoEnabledChanged.connect((on) => (undoEnabled = on));
+    const readCards = () => {
+      cards = { ...(chrome.cards ?? {}) };
+      // The harness reads where the page was told each card stands.
+      (window as unknown as { __chromeCards?: unknown }).__chromeCards = cards;
+    };
+    readCards();
+    chrome.cardsChanged?.connect(readCards);
     chrome.toast.connect((text, kind, offersUndo, stamp, px = -1, py = -1, undoOpen) => {
       pointer = px >= 0 && py >= 0 ? { x: px, y: py } : null;
       if (undoOpen !== undefined) undoEnabled = undoOpen;
@@ -68,6 +78,9 @@
   onundo={(stamp) => chrome.undo(stamp)}
   ondismissed={() => (message = null)}
 />
+{#if settings && cards.settings?.shown}
+  <Settings {settings} keyboard={chrome} rect={cards.settings} />
+{/if}
 {#if status.shown}
   <StatusStrip {status} />
 {/if}

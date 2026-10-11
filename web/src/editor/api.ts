@@ -2,6 +2,7 @@
 // the web channel (ThemeBridge as `theme` beside it). A mock with the same
 // shape serves the tests and the dev server (mock.ts).
 import type { Rect } from './solver';
+import type { CardRect } from './settings/api';
 
 export interface Signal<A extends unknown[] = []> {
   connect(fn: (...args: A) => void): void;
@@ -31,6 +32,10 @@ export interface ChromeApi {
   obstaclesChanged: Signal;
   status: StatusState;
   statusChanged: Signal;
+  // Where each HTML card's slot stands in the viewport (HtmlCardSlot), by
+  // card name, and whether it is shown - the overlay's call, not the page's.
+  cards: Record<string, CardRect>;
+  cardsChanged: Signal;
   // page -> C++
   reportHitRects(rects: Rect[]): void;
   // stamp: the change the toast names; C++ refuses it once the document has
@@ -40,4 +45,8 @@ export interface ChromeApi {
   // process dies - C++ reports through the Qt toast and status bar, so no
   // Failure can land on a page that is not there.
   ready(): void;
+  // A typed field is being edited: the page takes the keyboard, and gives
+  // it back after (ruling R5 - the view is otherwise Qt::NoFocus).
+  claimKeyboard(): void;
+  releaseKeyboard(): void;
 }

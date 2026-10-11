@@ -11,6 +11,7 @@ export function mockChrome() {
     undoEnabledChanged: MockSignal<[boolean]>;
     obstaclesChanged: MockSignal;
     statusChanged: MockSignal;
+    cardsChanged: MockSignal;
   } = {
     calls,
     toast: new MockSignal<[string, ToastKind, boolean, number, number?, number?, boolean?]>(),
@@ -21,9 +22,13 @@ export function mockChrome() {
     obstaclesChanged: new MockSignal(),
     status: { left: '', right: '', name: '', unsaved: false, shown: true } as StatusState,
     statusChanged: new MockSignal(),
+    cards: {},
+    cardsChanged: new MockSignal(),
     reportHitRects: (rects) => calls.push({ method: 'reportHitRects', args: [rects] }),
     undo: (stamp) => calls.push({ method: 'undo', args: [stamp] }),
     ready: () => calls.push({ method: 'ready', args: [] }),
+    claimKeyboard: () => calls.push({ method: 'claimKeyboard', args: [] }),
+    releaseKeyboard: () => calls.push({ method: 'releaseKeyboard', args: [] }),
   };
   return chrome;
 }
