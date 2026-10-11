@@ -1,9 +1,11 @@
 // Session tests: QtGui on the offscreen platform - no window, no GPU - so
 // they run anywhere Qt does, unlike gui_smoke.
+#include "session/ActionWatch.h"
 #include "session/EditorSession.h"
 #include "ModelingOps.h"
 
 #include <QAction>
+#include <QCoreApplication>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -11,7 +13,9 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -138,6 +142,46 @@ int main(int argc, char* argv[])
         check(!session.actions().trigger(QStringLiteral("fit-all")) && fired == 1,
               "trigger REFUSES a disabled action - QAction::trigger() would not");
         check(!session.actions().trigger(QStringLiteral("no-such-thing")), "an unknown id is refused");
+    }
+
+    {
+        // A FEW actions watched (migration Phase 3b): the Settings card wants
+        // its rows' state, not the whole registry, and a state change that
+        // touches all of them at once must reach the page once.
+        ActionRegistry registry;
+        QObject owner;
+        auto* grid = new QAction(QStringLiteral("Show the &grid"), &owner);
+        grid->setCheckable(true);
+        auto* snap = new QAction(QStringLiteral("Snap to Grid"), &owner);
+        snap->setCheckable(true);
+        registry.adoptChildren(&owner);
+        const QJsonArray two = registry.snapshotOf({QStringLiteral("snap-to-grid"), QStringLiteral("show-the-grid"),
+                                                    QStringLiteral("nope")});
+        check(two.size() == 2 && two[0].toObject().value("id").toString() == QStringLiteral("snap-to-grid"),
+              "snapshotOf answers the ids asked, in that order, skipping unknown ones");
+
+        ActionWatch watch(&registry);
+        watch.setIds({QStringLiteral("show-the-grid"), QStringLiteral("snap-to-grid")});
+        int fired = 0;
+        QObject::connect(&watch, &ActionWatch::changed, [&] { ++fired; });
+        grid->setChecked(true);
+        snap->setChecked(true);
+        grid->setEnabled(false);
+        check(fired == 0, "a watch waits for the event loop");
+        QCoreApplication::processEvents();
+        check(fired == 1, "and then says so once for three changes");
+        check(watch.snapshot().size() == 2 && watch.snapshot()[0].toObject().value("checked").toBool() &&
+                  !watch.snapshot()[0].toObject().value("enabled").toBool(),
+              "its snapshot reads the actions as they are now");
+        auto* other = new QAction(QStringLiteral("Not watched"), &owner);
+        registry.add(other);
+        other->setEnabled(false);
+        QCoreApplication::processEvents();
+        check(fired == 1, "an action nobody watches changes nothing");
+        watch.setIds({QStringLiteral("snap-to-grid")});
+        grid->setEnabled(true);
+        QCoreApplication::processEvents();
+        check(fired == 1 && watch.snapshot().size() == 1, "an id dropped from the watch is not watched any more");
     }
 
     std::printf("%d checks, %d failures\n", gChecks, gFailures);

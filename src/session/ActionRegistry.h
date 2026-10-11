@@ -8,6 +8,7 @@
 
 #include <QHash>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QObject>
 #include <QPointer>
 #include <QStringList>
@@ -32,10 +33,15 @@ public:
     // Per action, in registration order: id, text (no mnemonic), shortcut
     // (portable text), tooltip, enabled, checkable, checked.
     QJsonArray snapshot() const;
+    // The same rows for the ids asked, in the order asked; unknown ids are
+    // skipped.
+    QJsonArray snapshotOf(const QStringList& ids) const;
     // False, and nothing done, for an unknown id or a disabled action.
     bool trigger(const QString& id);
 
 private:
+    static QJsonObject describe(const QString& id, const QAction* action);
+
     QHash<QString, QPointer<QAction>> myActions;
     QStringList myOrder;
 };

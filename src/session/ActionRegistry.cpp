@@ -48,21 +48,29 @@ QAction* ActionRegistry::action(const QString& id) const
     return myActions.value(id).data();
 }
 
+QJsonObject ActionRegistry::describe(const QString& id, const QAction* a)
+{
+    QJsonObject row;
+    row.insert(QStringLiteral("id"), id);
+    row.insert(QStringLiteral("text"), QString(a->text()).remove(QLatin1Char('&')));
+    row.insert(QStringLiteral("shortcut"), a->shortcut().toString(QKeySequence::PortableText));
+    row.insert(QStringLiteral("tooltip"), a->toolTip());
+    row.insert(QStringLiteral("enabled"), a->isEnabled());
+    row.insert(QStringLiteral("checkable"), a->isCheckable());
+    row.insert(QStringLiteral("checked"), a->isChecked());
+    return row;
+}
+
 QJsonArray ActionRegistry::snapshot() const
 {
+    return snapshotOf(myOrder);
+}
+
+QJsonArray ActionRegistry::snapshotOf(const QStringList& ids) const
+{
     QJsonArray rows;
-    for (const QString& id : myOrder) {
-        QAction* a = myActions.value(id).data();
-        if (!a) continue;
-        QJsonObject row;
-        row.insert(QStringLiteral("id"), id);
-        row.insert(QStringLiteral("text"), QString(a->text()).remove(QLatin1Char('&')));
-        row.insert(QStringLiteral("shortcut"), a->shortcut().toString(QKeySequence::PortableText));
-        row.insert(QStringLiteral("tooltip"), a->toolTip());
-        row.insert(QStringLiteral("enabled"), a->isEnabled());
-        row.insert(QStringLiteral("checkable"), a->isCheckable());
-        row.insert(QStringLiteral("checked"), a->isChecked());
-        rows.push_back(row);
+    for (const QString& id : ids) {
+        if (const QAction* a = myActions.value(id).data()) rows.push_back(describe(id, a));
     }
     return rows;
 }
