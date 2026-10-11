@@ -650,9 +650,22 @@ private:
 
 MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& libraryRoot)
     : QMainWindow(parent)
+    , myDocument(mySession.document())
     , myStore(resolveLibraryRoot(libraryRoot))
     , myPersistProgress(persistProgress)
 {
+    // Every outcome the session reports lands in onReported(), and only there.
+    // FIRST, before anything in this constructor can report: a status line
+    // written before the connection existed would simply be lost. Direct, so
+    // the status bar holds the new line before report...() returns - several
+    // callers read currentMessage() straight back.
+    connect(&mySession, &EditorSession::reported, this, &MainWindow::onReported,
+            Qt::DirectConnection);
+    // "Any document-changing action leaves render mode first": the session
+    // announces a checkpoint before it takes one, and this is the leaving.
+    connect(&mySession, &EditorSession::aboutToChangeDocument, this, [this] {
+        if (myRenderModeOn) setRenderModeEnabled(false);
+    }, Qt::DirectConnection);
     if (myPersistProgress) {
         const QSettings settings;
         myProgress.deserialize(
@@ -1249,7 +1262,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // sentence, compared against what the bar is actually showing.
     connect(myItemsPanel, &ItemsPanel::moveRefused, this, [this](const QString& reason) {
         myPaintedMoveRefusal = reason;
-        statusBar()->showMessage(reason);
+        mySession.reportStatus(reason);
     });
     // ...and so does the keys moving to another row (ruling DA1): a step
     // onto an OUTLINE row changes no body selection, so the bar is not
@@ -1363,7 +1376,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
 
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
-    statusBar()->showMessage(tr("Right-drag to orbit, middle-drag to pan, wheel to zoom"));
+    mySession.reportStatus(tr("Right-drag to orbit, middle-drag to pan, wheel to zoom"));
 
     // On launch nothing is open - myShowingInitScreen already starts true -
     // and this establishes that data state (a fresh, empty document) and
@@ -1373,6 +1386,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // constructor - main.cpp's own handoff wiring is what actually shows
     // SelectorWindow, unconditionally, as the real app's boot state.
     showInitScreen();
+
+    // Every command, by id, for the HTML layer (migration Phase 1). Indexed,
+    // not moved: the actions stay this window's, and updateActions() still
+    // decides what is available.
+    mySession.actions().adoptChildren(this);
 }
 
 MainWindow::~MainWindow()
@@ -1899,10 +1917,9 @@ void MainWindow::buildActions()
             tr("PNG image (*.png)"));
         rememberSaveDialogPath(QStringLiteral("paths/screenshot"), path);
         if (!path.isEmpty() && !myView->saveSnapshot(path)) {
-            myToasts->show(tr("Screenshot failed — Couldn't save the image to %1 — "
+            mySession.reportFailure(tr("Screenshot failed — Couldn't save the image to %1 — "
                               "Check that the folder exists and isn't read-only")
-                              .arg(path),
-                          Toast::Kind::Failure, false);
+                              .arg(path), false);
         }
     });
 
@@ -2103,7 +2120,7 @@ QMenuBar* MainWindow::buildMenus()
             QSettings settings;
             settings.setValue(QStringLiteral("progress"), QString());
         }
-        statusBar()->showMessage(tr("Tips reset — the guide and hints will appear again"));
+        mySession.reportStatus(tr("Tips reset — the guide and hints will appear again"));
         // Before appStateChanged, not after: a surface that remembers what it
         // already showed this session has to forget that first, or the
         // reconsider() this emission drives would find every hint still
@@ -2605,7 +2622,7 @@ void MainWindow::buildOverlay()
         // so). A Note carries no Undo for the same reason: there is nothing on
         // the undo stack for one to pop, and the row's own x is how a shot is
         // taken back.
-        reportNote(tr("%1 saved").arg(name));
+        mySession.reportNote(tr("%1 saved").arg(name));
         updateActions();
     });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::shotApplied, this, [this](int index) {
@@ -2613,7 +2630,7 @@ void MainWindow::buildOverlay()
         if (index < 0 || index >= static_cast<int>(shots.size())) return;
         const DocumentModel::Shot shot = shots[static_cast<std::size_t>(index)];
         applyShot(shot);
-        statusBar()->showMessage(tr("%1 — camera, frame, lens and light")
+        mySession.reportStatus(tr("%1 — camera, frame, lens and light")
                                      .arg(QString::fromStdString(shot.name)));
     });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::shotRemoved, this, [this](int index) {
@@ -2622,7 +2639,7 @@ void MainWindow::buildOverlay()
         if (index >= static_cast<int>(shots.size())) return;
         const QString name = QString::fromStdString(shots[static_cast<std::size_t>(index)].name);
         if (myDocument.removeShot(static_cast<std::size_t>(index)))
-            statusBar()->showMessage(tr("%1 forgotten").arg(name));
+            mySession.reportStatus(tr("%1 forgotten").arg(name));
         updateActions();
     });
 
@@ -2774,16 +2791,14 @@ void MainWindow::buildOverlay()
     // be indistinguishable from a colour file with nothing in it.
     connect(myAppearancePanel, &AppearancePanel::colourSaveFailed, this,
             [this](const QString& path) {
-                myToasts->show(tr("Couldn't write the colours to %1 — Check that the "
-                                  "folder exists and isn't read-only").arg(path),
-                              Toast::Kind::Failure, false);
+                mySession.reportFailure(tr("Couldn't write the colours to %1 — Check that the "
+                                  "folder exists and isn't read-only").arg(path), false);
             });
     connect(myAppearancePanel, &AppearancePanel::colourLoadRefused, this,
             [this](const QString& path) {
-                myToasts->show(tr("%1 doesn't hold a look this app can read, so nothing "
+                mySession.reportFailure(tr("%1 doesn't hold a look this app can read, so nothing "
                                   "changed — Pick a file made with Save colours")
-                                   .arg(path),
-                              Toast::Kind::Failure, false);
+                                   .arg(path), false);
             });
 
     // A toast that offers to undo one operation must not survive that
@@ -4028,16 +4043,16 @@ void MainWindow::finishClose(CloseRoute route, const QString& statusMessage)
         // discarded) and the editor stays exactly where it is - no return to
         // the library, no window swap. What is left is the name, and then the
         // new furniture takes this window over.
-        statusBar()->showMessage(statusMessage);
+        mySession.reportStatus(statusMessage);
         askNewFurnitureName();
         return;
     }
     if (route == CloseRoute::Library) {
-        statusBar()->showMessage(statusMessage);
+        mySession.reportStatus(statusMessage);
         showInitScreen();
         return;
     }
-    statusBar()->showMessage(statusMessage);
+    mySession.reportStatus(statusMessage);
     updateActions();
     // Marked BEFORE the quit is requested: the quit's own close event arrives
     // inside that call.
@@ -4080,10 +4095,9 @@ void MainWindow::createAndOpenFurniture(const QString& name)
     // + card keeps).
     const QString id = myStore.createFurniture(name);
     if (id.isEmpty()) {
-        myToasts->show(tr("Couldn't create %1 — Check that the library folder still "
+        mySession.reportFailure(tr("Couldn't create %1 — Check that the library folder still "
                           "exists and isn't read-only")
-                           .arg(name),
-                       Toast::Kind::Failure, false);
+                           .arg(name), false);
         return;
     }
     // openFurniture() is the one path a freshly made furniture and an
@@ -4235,7 +4249,7 @@ void MainWindow::showInitScreen()
     if (myItemsPanel) myItemsPanel->forgetFurniture();
 
     updateActions();
-    statusBar()->showMessage(tr("Choose a furniture to open, or start a new one"));
+    mySession.reportStatus(tr("Choose a furniture to open, or start a new one"));
 
     // Milestone 4 fix round 1 (the CRITICAL quit-trap finding): this window
     // does NOT hide itself here any more. It only announces that it wants
@@ -4279,8 +4293,7 @@ bool MainWindow::openFurniture(const QString& id)
     DocumentModel loaded;
     if (!myStore.loadFurniture(id, loaded, &error)) {
         closeCard();
-        myToasts->show(tr("Couldn't open this furniture — %1").arg(error),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("Couldn't open this furniture — %1").arg(error), false);
         return false;
     }
 
@@ -4338,7 +4351,7 @@ bool MainWindow::openFurniture(const QString& id)
     // emphasis. What the message is actually for is telling the user the open
     // FINISHED and what they got - so it says that instead, and lets the mark
     // do the naming it is there to do.
-    statusBar()->showMessage(
+    mySession.reportStatus(
         myDocument.count() == 1
             ? tr("Opened — 1 body")
             : tr("Opened — %1 bodies").arg(static_cast<int>(myDocument.count())));
@@ -4388,9 +4401,8 @@ bool MainWindow::performSave(bool announce, bool reportFailure)
         // so the law is satisfied by the FIRST failure rather than repeated
         // on every tick - see this method's own header comment.
         if (reportFailure) {
-            myToasts->show(tr("Couldn't save %1 — Check that its folder still exists "
-                              "and isn't read-only").arg(myFurnitureName),
-                          Toast::Kind::Failure, false);
+            mySession.reportFailure(tr("Couldn't save %1 — Check that its folder still exists "
+                              "and isn't read-only").arg(myFurnitureName), false);
         }
         return false;
     }
@@ -4413,7 +4425,7 @@ bool MainWindow::performSave(bool announce, bool reportFailure)
         // Not a document change - no Undo, and no document-revision stamp:
         // a save does not touch the undo stack (see DocumentModel.h), so
         // there is nothing for the pill to take back.
-        reportNote(tr("Saved %1").arg(myFurnitureName));
+        mySession.reportNote(tr("Saved %1").arg(myFurnitureName));
     }
     return true;
 }
@@ -4669,7 +4681,7 @@ void MainWindow::setRenderModeEnabled(bool on)
         // OcctViewWidget::renderModeTier() and Save Screenshot still exports
         // at the chosen tier's real look, so nothing is silently lost, only
         // unannounced.
-        myToasts->show(text, Toast::Kind::Note, false);
+        mySession.reportToastOnly(text, false);
     }
 
     // The single authority: rail, drawers, the axis gizmo card and the three
@@ -4779,16 +4791,15 @@ bool MainWindow::saveVersion(const QString& name)
     // unknown id, so a false from the store means the name is a duplicate -
     // see FurnitureStore::saveVersion()'s own contract.
     if (!myStore.saveVersion(myFurnitureId, name, myDocument, thumbPath)) {
-        myToasts->show(tr("Couldn't save version \"%1\" — a version by that name "
-                          "already exists").arg(name),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("Couldn't save version \"%1\" — a version by that name "
+                          "already exists").arg(name), false);
         return false;
     }
 
     updateActions();   // refreshes the drawer through VersionsPanel::refresh
     // No Undo - versions are file data, not a document edit; there is
     // nothing on the undo stack for a pill to take back.
-    reportNote(tr("Version \"%1\" saved").arg(name));
+    mySession.reportNote(tr("Version \"%1\" saved").arg(name));
     return true;
 }
 
@@ -4803,9 +4814,8 @@ bool MainWindow::restoreVersion(const QString& name)
 
     DocumentModel loaded;
     if (!myStore.loadVersion(myFurnitureId, name, loaded)) {
-        myToasts->show(tr("Couldn't restore \"%1\" — its file is missing or damaged")
-                          .arg(name),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("Couldn't restore \"%1\" — its file is missing or damaged")
+                          .arg(name), false);
         return false;
     }
 
@@ -4823,7 +4833,7 @@ bool MainWindow::restoreVersion(const QString& name)
     updateActions();
     emit documentChanged();
     const QString message = tr("Restored version \"%1\"").arg(name);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -4832,8 +4842,7 @@ bool MainWindow::deleteVersionByName(const QString& name)
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
 
     if (!myStore.deleteVersion(myFurnitureId, name)) {
-        myToasts->show(tr("Couldn't delete \"%1\" — it may already be gone").arg(name),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("Couldn't delete \"%1\" — it may already be gone").arg(name), false);
         return false;
     }
 
@@ -4845,7 +4854,7 @@ bool MainWindow::deleteVersionByName(const QString& name)
     // No Undo - final. Versions are file data, and "Ctrl+Z brings back a
     // deleted file" is not a promise this app makes anywhere else either;
     // the two-click confirmation on the row itself is what stands in for it.
-    reportNote(tr("Deleted version \"%1\"").arg(name));
+    mySession.reportNote(tr("Deleted version \"%1\"").arg(name));
     return true;
 }
 
@@ -4881,9 +4890,8 @@ bool MainWindow::openCompare(const QString& name)
 
     DocumentModel loaded;
     if (!myStore.loadVersion(myFurnitureId, name, loaded)) {
-        myToasts->show(tr("Couldn't compare \"%1\" — its file is missing or damaged")
-                          .arg(name),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("Couldn't compare \"%1\" — its file is missing or damaged")
+                          .arg(name), false);
         return false;
     }
 
@@ -4964,7 +4972,7 @@ bool MainWindow::openCompare(const QString& name)
     myCompareBadge = badge;
 
     updateActions();
-    statusBar()->showMessage(tr("Comparing %1").arg(name));
+    mySession.reportStatus(tr("Comparing %1").arg(name));
     return true;
 }
 
@@ -5417,7 +5425,7 @@ void MainWindow::onIsolate()
         myIsolatedIds.clear();
         myIsolateWatermark = 0;
         applyIsolation();
-        statusBar()->showMessage(tr("Everything is back on screen"));
+        mySession.reportStatus(tr("Everything is back on screen"));
         updateActions();
         return;
     }
@@ -5440,7 +5448,7 @@ void MainWindow::onIsolate()
     for (const DocumentModel::Solid& solid : myDocument.solids())
         myIsolateWatermark = std::max(myIsolateWatermark, solid.id);
     applyIsolation();
-    statusBar()->showMessage(
+    mySession.reportStatus(
         myIsolatedIds.size() == 1
             ? tr("Isolated 1 body — press I to show everything again")
             : tr("Isolated %1 bodies — press I to show everything again")
@@ -5559,7 +5567,7 @@ void MainWindow::onDeleteSelected()
             ? tr("Deleted %1 and %2").arg(QString::fromStdString(twinNameA),
                                           QString::fromStdString(twinNameB))
             : tr("Deleted %1 bodies").arg(toDelete.size());
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
 }
 
 bool MainWindow::deletePendingOutline()
@@ -5593,7 +5601,7 @@ bool MainWindow::deletePendingOutline()
     // "Deleted Outline 01" are one message with one subject, not two messages
     // the user has to learn separately.
     const QString message = tr("Deleted %1").arg(name);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -5698,7 +5706,7 @@ void MainWindow::cancelSlats()
     mySlatsBodies.clear();
     myView->clearModelingPreview();
     updateActions();
-    statusBar()->showMessage(tr("Slats cancelled"));
+    mySession.reportStatus(tr("Slats cancelled"));
 }
 
 bool MainWindow::slatsGestureStillHolds() const
@@ -5789,8 +5797,7 @@ void MainWindow::slatsApply(const ModelingOps::SlatPlan& plan)
         // Never silently: a refusal the user cannot see is the thing this app
         // does not do.
         const QString why = slatsRefusalFor(plan);
-        myToasts->show(why.isEmpty() ? slatsBuildRefusalText() : why,
-                       Toast::Kind::Failure, false);
+        mySession.reportFailure(why.isEmpty() ? slatsBuildRefusalText() : why, false);
         return;
     }
 
@@ -5831,7 +5838,7 @@ void MainWindow::slatsApply(const ModelingOps::SlatPlan& plan)
                                 .arg(made.size())
                                 .arg(QString::fromStdString(Measure::formatLength(plan.width)))
                                 .arg(QString::fromStdString(Measure::formatLength(plan.gap)));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
 }
 
 int MainWindow::folderOfSelection() const
@@ -5899,7 +5906,7 @@ void MainWindow::onGroupSelection()
     emit documentChanged();
     const QString message = ids.size() == 1 ? tr("1 body put in a folder")
                                             : tr("%1 bodies put in a folder").arg(ids.size());
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     // Straight into the rename, over the row that was just made: a folder
     // called "Folder" is a folder nobody named, and the one moment the user
     // knows what it holds is right now. Folders START FOLDED now, but the one
@@ -5946,7 +5953,7 @@ void MainWindow::removeFolderKeepContents(int folder)
     // Named (ruling RF1): the row menu and the Model menu can now remove two
     // different folders from one selection, so the Note says which went.
     const QString message = tr("Removed folder %1 — contents kept").arg(name);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onWrapFolder(int folderId)
@@ -5973,7 +5980,7 @@ void MainWindow::onWrapFolder(int folderId)
     updateActions();
     emit documentChanged();
     const QString message = tr("%1 put in a new folder").arg(name);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     // Straight into the rename, as New Folder with These does - opened, so
     // the folder it swallowed is still in sight.
     if (myItemsPanel && myItemsPanel->isVisible()) {
@@ -6106,7 +6113,7 @@ void MainWindow::onDeleteGroup(int groupId)
                                        ? tr("Folder deleted — 1 body with it")
                                        : tr("Folder deleted — %1 bodies with it")
                                              .arg(bodies.size()));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onGroupActivated(int groupId)
@@ -6130,7 +6137,7 @@ void MainWindow::onGroupRenameCommitted(int groupId, QString newName)
     updateActions();
     emit documentChanged();
     const QString message = tr("Renamed to \"%1\"").arg(newName.trimmed());
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onItemsMoveRequested(const std::vector<int>& ids, int parent, int beforeId)
@@ -6143,14 +6150,14 @@ void MainWindow::onItemsMoveRequested(const std::vector<int>& ids, int parent, i
     const DocumentModel::MoveResult dry = myDocument.checkMove(ids, parent, beforeId);
     if (dry.check == DocumentModel::MoveCheck::NoChange) return;
     if (dry.check != DocumentModel::MoveCheck::Moved) {
-        myToasts->show(ItemMoveText::refusal(myDocument, dry), Toast::Kind::Failure, false);
+        mySession.reportFailure(ItemMoveText::refusal(myDocument, dry), false);
         return;
     }
     checkpointDocument();
     const DocumentModel::MoveResult done = myDocument.moveItems(ids, parent, beforeId);
     updateActions();
     emit documentChanged();
-    reportNote(ItemMoveText::sentence(myDocument, done, ItemMoveText::Tense::Past), true,
+    mySession.reportNote(ItemMoveText::sentence(myDocument, done, ItemMoveText::Tense::Past), true,
                myDocument.revision());
 }
 
@@ -6178,7 +6185,7 @@ void MainWindow::onItemRenameCommitted(int id, bool isOutline, QString newName)
     updateActions();
     emit documentChanged();
     const QString message = tr("Renamed to \"%1\"").arg(newName.trimmed());
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onUndo()
@@ -6205,7 +6212,7 @@ void MainWindow::onUndo()
     }
 
     const std::vector<int> outlinesBefore = outlineIds();
-    if (!myDocument.undo()) return;
+    if (!mySession.undo()) return;
     recordProgress("undo.used");
 
     // An outline the undo handed back is the thing the user just took back,
@@ -6226,9 +6233,7 @@ void MainWindow::onUndo()
     restoreSelectedJointPieces();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(myDocument.count() == 1
-                                 ? tr("Undone — 1 body in the document")
-                                 : tr("Undone — %1 bodies in the document").arg(myDocument.count()));
+    mySession.reportStatus(EditorSession::undoneStatusText(myDocument.count()));
 }
 
 void MainWindow::onRedo()
@@ -6237,7 +6242,7 @@ void MainWindow::onRedo()
     if (myRenderModeOn) setRenderModeEnabled(false);
 
     const std::vector<int> outlinesBefore = outlineIds();
-    if (!myDocument.redo()) return;
+    if (!mySession.redo()) return;
     recordProgress("undo.used");
 
     // The same rule the other way: a redo that brings an outline back is the
@@ -6251,15 +6256,13 @@ void MainWindow::onRedo()
     restoreSelectedJointPieces();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(myDocument.count() == 1
-                                 ? tr("Redone — 1 body in the document")
-                                 : tr("Redone — %1 bodies in the document").arg(myDocument.count()));
+    mySession.reportStatus(EditorSession::redoneStatusText(myDocument.count()));
 }
 
 void MainWindow::onSnapToggled(bool enabled)
 {
     myView->setSnap(enabled, 10.0);
-    statusBar()->showMessage(
+    mySession.reportStatus(
         enabled ? tr("Snapping to the %1 grid")
                       .arg(QString::fromStdString(Measure::formatLength(10.0)))
                 : tr("Snapping off — points land exactly where you click"));
@@ -6268,7 +6271,7 @@ void MainWindow::onSnapToggled(bool enabled)
 void MainWindow::onMagnetToggled(bool enabled)
 {
     myView->setMagnetEnabled(enabled);
-    statusBar()->showMessage(
+    mySession.reportStatus(
         enabled ? tr("Magnet on — a moved body sticks when it lines up with another")
                 : tr("Magnet off — moves pass alignments without sticking"));
 }
@@ -6290,7 +6293,7 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
     // and on the ground plane (u, v) is (X, Y), so nothing changes there.
     Standard_Real u = 0.0, v = 0.0;
     ElSLib::Parameters(mySketch.plane(), point, u, v);
-    statusBar()->showMessage(tr("Cursor at %1, %2")
+    mySession.reportStatus(tr("Cursor at %1, %2")
                                  .arg(QString::fromStdString(Measure::formatLength(u)),
                                       QString::fromStdString(Measure::formatLength(v))));
 
@@ -6378,7 +6381,7 @@ void MainWindow::onStartSketch()
     myView->setSketchMode(true, mySketch.plane());
     myView->setPreview(TopoDS_Shape());
     updateActions();
-    statusBar()->showMessage(
+    mySession.reportStatus(
         myFaceLocked
             ? tr("Click points on the locked face to draw an outline — "
                  "Enter closes it, Backspace undoes a point, Esc cancels")
@@ -6408,7 +6411,7 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
     myView->setSketchPointMarkers(mySketch.points());
     syncSketchConstraints();
     updateActions();
-    statusBar()->showMessage(
+    mySession.reportStatus(
         mySketch.pointCount() == 1
             ? tr("1 point placed")
             : tr("%1 points placed").arg(mySketch.pointCount()));
@@ -6461,7 +6464,7 @@ void MainWindow::onCancelSketch()
     myView->clearPreview();
     syncSketchConstraints();
     updateActions();
-    statusBar()->showMessage(tr("Sketch cancelled"));
+    mySession.reportStatus(tr("Sketch cancelled"));
 }
 
 int MainWindow::pendingOutlineId() const
@@ -6532,10 +6535,9 @@ void MainWindow::onFinishSketch()
 {
     const TopoDS_Face face = mySketch.closedFace();
     if (face.IsNull()) {
-        myToasts->show(tr("This outline can't close into a flat face. It probably "
+        mySession.reportFailure(tr("This outline can't close into a flat face. It probably "
                           "crosses itself — Press Backspace to undo the last point and "
-                          "redraw it, or Esc to start over"),
-                      Toast::Kind::Failure, false);
+                          "redraw it, or Esc to start over"), false);
         return;
     }
 
@@ -6570,7 +6572,7 @@ void MainWindow::onFinishSketch()
         tr("%1 created — %2")
             .arg(QString::fromStdString(myDocument.outlineNameOf(id)),
                  QString::fromStdString(Measure::formatFaceExtents(face, mySketch.plane())));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::addPrimitiveShape(ModelingOps::PrimitiveKind kind)
@@ -6626,7 +6628,7 @@ void MainWindow::addPrimitiveShape(ModelingOps::PrimitiveKind kind)
                    : tr("%1 created — %2")
                          .arg(QString::fromStdString(myDocument.nameOf(id)),
                               QString::fromStdString(Measure::formatDimensions(shape)));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
 }
 
 void MainWindow::onExtrude()
@@ -6656,10 +6658,9 @@ bool MainWindow::extrudePendingFace(double height)
 
     const TopoDS_Shape solid = ModelingOps::extrude(face, plane.Axis().Direction(), height);
     if (solid.IsNull()) {
-        myToasts->show(tr("This face couldn't be extruded into a body — "
+        mySession.reportFailure(tr("This face couldn't be extruded into a body — "
                           "The outline may cross itself or be too small to have an "
-                          "inside. Try redrawing it with Ctrl+K"),
-                      Toast::Kind::Failure, false);
+                          "inside. Try redrawing it with Ctrl+K"), false);
         return false;
     }
 
@@ -6718,7 +6719,7 @@ bool MainWindow::extrudePendingFace(double height)
             : tr("%1 created — %2")
                   .arg(QString::fromStdString(myDocument.nameOf(id)),
                        QString::fromStdString(Measure::formatDimensions(solid)));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -6806,8 +6807,10 @@ void MainWindow::checkpointDocument()
     // render mode clears and deactivates all selection on entry), and
     // unlockFace() only moves the sketch plane back to the ground - neither
     // is a change a render-mode shot would visibly disagree with.
-    if (myRenderModeOn) setRenderModeEnabled(false);
-    myDocument.checkpoint();
+    //
+    // The exit itself is the aboutToChangeDocument listener now (migration
+    // Phase 1): EditorSession::checkpoint() emits it before checkpointing.
+    mySession.checkpoint();
 }
 
 void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed,
@@ -6894,11 +6897,10 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
         // Never present a failed kernel operation as a success, and never
         // show its error text: it is written for this file, not for the user.
         qWarning("Pull failed: %s", result.error.c_str());
-        myToasts->show(tr("This face can't be pulled that far — a carve deeper than the "
+        mySession.reportFailure(tr("This face can't be pulled that far — a carve deeper than the "
                           "body removes the whole thing, so there is no wood left to "
                           "take out. Try a smaller distance, or drag the "
-                          "arrow the other way"),
-                      Toast::Kind::Failure, false);
+                          "arrow the other way"), false);
         return false;
     }
 
@@ -6923,7 +6925,7 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -7017,7 +7019,7 @@ bool MainWindow::beginMitreEnd()
     if (!canMitreSelectedFace()) {
         // trigger() does not consult isEnabled(), so the gesture asks for
         // itself - and says why in the one place a key press can be answered.
-        statusBar()->showMessage(mySketching        ? tr("Unavailable while you're drawing")
+        mySession.reportStatus(mySketching        ? tr("Unavailable while you're drawing")
                                  : hasPendingFace() ? tr("Unavailable while an outline is waiting")
                                                     : mitreUnavailableReason());
         return false;
@@ -7040,7 +7042,7 @@ void MainWindow::cancelMitreEnd()
     myMitreFace.Nullify();
     myMitreBodyId = 0;
     updateActions();
-    statusBar()->showMessage(tr("Mitre cancelled — nothing was changed"));
+    mySession.reportStatus(tr("Mitre cancelled — nothing was changed"));
 }
 
 void MainWindow::setMitreLiveValue(double angleDeg, ModelingOps::MitreSide side)
@@ -7080,7 +7082,7 @@ bool MainWindow::mitreEndBy(double angleDeg, ModelingOps::MitreSide side)
         qWarning("Mitre failed: %s", result.error.c_str());
         QString why = mitreRefusalFor(angleDeg, side);
         if (why.isEmpty()) why = mitreKernelRefusalText();
-        myToasts->show(why, Toast::Kind::Failure, false);
+        mySession.reportFailure(why, false);
         return false;
     }
 
@@ -7108,7 +7110,7 @@ bool MainWindow::mitreEndBy(double angleDeg, ModelingOps::MitreSide side)
                                QString::fromStdString(Measure::formatAngle(angleDeg)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -7194,7 +7196,7 @@ bool MainWindow::beginReMeasure(int index)
     if (!canReMeasureSize(index)) {
         // The one place a gesture that cannot begin can be answered - never a
         // modal, and never a Failure toast: nothing failed.
-        statusBar()->showMessage(
+        mySession.reportStatus(
             mySketching          ? tr("Unavailable while you're drawing")
             : hasPendingFace()   ? tr("Unavailable while an outline is waiting")
             : myView->selectionKind() == OcctViewWidget::PickKind::Body &&
@@ -7243,7 +7245,7 @@ void MainWindow::cancelReMeasure()
     myResizeSizeIndex = -1;
     myView->clearResizePin();
     updateActions();
-    statusBar()->showMessage(tr("Re-measure cancelled — nothing was changed"));
+    mySession.reportStatus(tr("Re-measure cancelled — nothing was changed"));
 }
 
 void MainWindow::setReMeasureAnchor(int mark)
@@ -7295,7 +7297,7 @@ bool MainWindow::reMeasureTo(double newSizeMm)
     // the same line Save and visibility already draw against checkpoint().
     if (std::fabs(newSizeMm - before) < ModelingOps::kResizeNoChange) {
         cancelReMeasure();
-        statusBar()->showMessage(tr("%1 is already %2")
+        mySession.reportStatus(tr("%1 is already %2")
                                      .arg(QString::fromStdString(myDocument.nameOf(id)),
                                           QString::fromStdString(Measure::formatLength(before))));
         return true;
@@ -7306,7 +7308,7 @@ bool MainWindow::reMeasureTo(double newSizeMm)
         // Never a failed operation surfaced as a success, and never the
         // kernel's own string: it is written for ModelingOps, not the user.
         qWarning("Re-measure failed: %s", result.error.c_str());
-        myToasts->show(reMeasureRefusalFor(newSizeMm), Toast::Kind::Failure, false);
+        mySession.reportFailure(reMeasureRefusalFor(newSizeMm), false);
         return false;
     }
 
@@ -7335,7 +7337,7 @@ bool MainWindow::reMeasureTo(double newSizeMm)
                                QString::fromStdString(Measure::formatLength(newSizeMm)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -7660,7 +7662,7 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
         // rather than this ever reading a kernel error string.
         if (sameLinkGroupRefused) {
             qWarning("Bevel refused: two edited bodies share a link group");
-            myToasts->show(bevelLinkGroupRefusalText(fillet), Toast::Kind::Failure, false);
+            mySession.reportFailure(bevelLinkGroupRefusalText(fillet), false);
         } else {
             qWarning("Bevel failed");
             // How many DISTINCT bodies this gesture named, for
@@ -7674,11 +7676,10 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
                     distinctBodies.end())
                     distinctBodies.push_back(id);
             }
-            myToasts->show(combinationRefused
+            mySession.reportFailure(combinationRefused
                               ? bevelCombinationRefusalText(
                                     fillet, static_cast<int>(distinctBodies.size()))
-                              : bevelRefusalText(fillet),
-                          Toast::Kind::Failure, false);
+                              : bevelRefusalText(fillet), false);
         }
         return false;
     }
@@ -7751,7 +7752,7 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
     }
     if (anyTwinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -7873,7 +7874,7 @@ void MainWindow::onNextTool()
     // a sentence rather than a change three words deep in a line they were not
     // reading. Not a toast: nothing changed in the document, and a toast that
     // offers no Undo for a state that is not an edit would be the wrong shape.
-    statusBar()->showMessage(tr("%1 — drag a handle, Space for the next tool")
+    mySession.reportStatus(tr("%1 — drag a handle, Space for the next tool")
                                  .arg(bodyToolName(myBodyTool)));
 }
 
@@ -7915,11 +7916,10 @@ bool MainWindow::transformBodies(const std::vector<int>& ids, const gp_Trsf& del
     const QString operation = transformOperationName(delta);
 
     if (scale <= kMinScale || scale >= kMaxScale) {
-        myToasts->show(tr("That's too big a change of size to make at once — anything "
+        mySession.reportFailure(tr("That's too big a change of size to make at once — anything "
                           "under a twentieth or over twenty times leaves a body you "
                           "can't see or can't fit on screen. Drag the handle back "
-                          "toward the body and scale it in smaller steps"),
-                      Toast::Kind::Failure, false);
+                          "toward the body and scale it in smaller steps"), false);
         return false;
     }
 
@@ -7938,7 +7938,7 @@ bool MainWindow::transformBodies(const std::vector<int>& ids, const gp_Trsf& del
             // show its error text - it is written for this file, not for the
             // user.
             qWarning("Transform failed: %s", result.error.c_str());
-            myToasts->show(transformRefusalText(delta), Toast::Kind::Failure, false);
+            mySession.reportFailure(transformRefusalText(delta), false);
             return false;
         }
         results.emplace_back(bodyId, result.shape);
@@ -7990,7 +7990,7 @@ bool MainWindow::transformBodies(const std::vector<int>& ids, const gp_Trsf& del
             : tr("%1 bodies %2").arg(results.size()).arg(transformPastVerb(delta));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -8113,7 +8113,7 @@ bool MainWindow::beginBoolean(int kind)
     // reach this.
     if (!canBeginBoolean(kind)) {
         const QString why = booleanUnavailableReason();
-        if (!why.isEmpty()) statusBar()->showMessage(why);
+        if (!why.isEmpty()) mySession.reportStatus(why);
         return false;
     }
 
@@ -8303,10 +8303,9 @@ bool MainWindow::booleanApply()
         if (myDocument.linkAnchorOf(keepId) != myDocument.linkAnchorOf(id)) continue;
         // Not "refused": the banned-word sweep matches bare substrings, and
         // that word carries "fuse" inside it.
-        myToasts->show(tr("%1 can't combine two copies of the same linked group — "
+        mySession.reportFailure(tr("%1 can't combine two copies of the same linked group — "
                           "Unlink one first, then try again")
-                           .arg(operationName),
-                       Toast::Kind::Failure, false);
+                           .arg(operationName), false);
         return false;
     }
 
@@ -8318,7 +8317,7 @@ bool MainWindow::booleanApply()
         // gets the one sentence booleanRefusalFor() authors, which is the
         // same sentence the chip is already showing.
         qWarning("%s failed: %s", qPrintable(operationName), result.error.c_str());
-        myToasts->show(booleanRefusalFor(), Toast::Kind::Failure, false);
+        mySession.reportFailure(booleanRefusalFor(), false);
         // The gesture stays LIVE, the mitre's own rule: the user's next move
         // is to pick a different body to keep or to Escape, and both need the
         // badges still on screen.
@@ -8406,7 +8405,7 @@ bool MainWindow::booleanApply()
                                          Measure::formatDimensions(result.shape)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -8459,13 +8458,12 @@ void MainWindow::onExportStep()
 
     if (!result.ok) {
         qWarning("STEP export failed: %s", result.error.c_str());
-        myToasts->show(tr("Export failed — Couldn't write the STEP file — "
+        mySession.reportFailure(tr("Export failed — Couldn't write the STEP file — "
                           "Check that the folder exists and isn't read-only, then "
-                          "try a different location"),
-                      Toast::Kind::Failure, false);
+                          "try a different location"), false);
         return;
     }
-    statusBar()->showMessage(myDocument.count() == 1
+    mySession.reportStatus(myDocument.count() == 1
                                  ? tr("Exported 1 body to %1").arg(path)
                                  : tr("Exported %1 bodies to %2")
                                        .arg(myDocument.count()).arg(path));
@@ -8490,7 +8488,7 @@ void MainWindow::onPickRefused(const QString& reason)
     // status bar is a shared line and this window must only ever clear its
     // OWN sentence off it. See onPickRefusalWithdrawn().
     myPaintedPickRefusal = reason;
-    statusBar()->showMessage(reason);
+    mySession.reportStatus(reason);
 }
 
 void MainWindow::onPickRefusalWithdrawn()
@@ -8558,10 +8556,9 @@ bool MainWindow::canChangeSketchPlane()
     // Punctuation, per CLAUDE.md and per every other failure sentence in this
     // file: no trailing period, an em dash between the clauses. This one
     // carried a period and a full stop where the dash belonged.
-    myToasts->show(tr("There's an outline waiting to be extruded, and it belongs to the "
+    mySession.reportFailure(tr("There's an outline waiting to be extruded, and it belongs to the "
                       "plane it was drawn on — press E to turn it into a body, or Delete "
-                      "to discard it, before you change the face you draw on"),
-                  Toast::Kind::Failure, false);
+                      "to discard it, before you change the face you draw on"), false);
     return false;
 }
 
@@ -8579,9 +8576,8 @@ bool MainWindow::lockToFace(const TopoDS_Face& face)
 
     const BRepAdaptor_Surface surface(face);
     if (surface.GetType() != GeomAbs_Plane) {
-        myToasts->show(tr("This face isn't flat, so it can't hold an outline. "
-                          "Pick a flat face and try again."),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("This face isn't flat, so it can't hold an outline. "
+                          "Pick a flat face and try again."), false);
         return false;
     }
 
@@ -8628,7 +8624,7 @@ bool MainWindow::lockToFace(const TopoDS_Face& face)
     recordProgress("faceLock.used");
 
     updateActions();
-    statusBar()->showMessage(tr("Locked to this face — outlines you draw now sit on it, "
+    mySession.reportStatus(tr("Locked to this face — outlines you draw now sit on it, "
                                 "and extrude square to it"));
     return true;
 }
@@ -8680,7 +8676,7 @@ void MainWindow::unlockFace()
     myView->setWorkPlane(ground);
 
     updateActions();
-    statusBar()->showMessage(tr("Back to the ground — outlines are drawn flat again"));
+    mySession.reportStatus(tr("Back to the ground — outlines are drawn flat again"));
 }
 
 void MainWindow::setSymmetryEnabled(bool on)
@@ -8707,7 +8703,7 @@ void MainWindow::setSymmetryEnabled(bool on)
 
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(
+    mySession.reportStatus(
         on ? tr("Mirror on — new bodies get a mirrored twin")
            : tr("Mirror off — bodies keep their own shape now"));
 }
@@ -8718,9 +8714,8 @@ bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
 
     const BRepAdaptor_Surface surface(face);
     if (surface.GetType() != GeomAbs_Plane) {
-        myToasts->show(tr("This face isn't flat, so it can't hold the mirror plane. "
-                          "Pick a flat face and try again."),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("This face isn't flat, so it can't hold the mirror plane. "
+                          "Pick a flat face and try again."), false);
         return false;
     }
 
@@ -8766,8 +8761,8 @@ bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
     // No checkpoint behind this (a plane change is a mode switch, not an
     // edit - the same rule turning symmetry off follows), so no Undo either.
     // Only an unpairing is worth a toast; a plane simply set is the bar's.
-    if (hadPairings) reportNote(message);
-    else statusBar()->showMessage(message);
+    if (hadPairings) mySession.reportNote(message);
+    else mySession.reportStatus(message);
     return true;
 }
 
@@ -8933,7 +8928,7 @@ void MainWindow::onSymmetryActionTriggered()
     // mySymmetryOffAction's job alone (see buildActions()).
     if (!canBeginMirrorPlacement()) {
         const QString reason = mirrorPlacementRefusalText();
-        if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
+        if (myToasts) mySession.reportFailure(reason, false);
         // Reverts the action's own optimistic checked-flash: nothing about
         // document().symmetryOn() changed, so the resync inside
         // updateActions() puts the checkbox back to unchecked.
@@ -8948,7 +8943,7 @@ void MainWindow::onSymmetryActionTriggered()
     // gesture - the floating plane and its chip are the gesture's real
     // visual cue, not the menu checkmark.
     updateActions();
-    statusBar()->showMessage(
+    mySession.reportStatus(
         tr("Placing the mirror plane — X Y Z aim, drag to move, Enter mirrors, Esc cancels"));
 }
 
@@ -8996,7 +8991,7 @@ bool MainWindow::confirmMirrorPlacement()
         const QString reason =
             tr("Nothing to mirror — every body picked sits on the plane, is "
               "already paired, is already linked, or couldn't be mirrored");
-        if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
+        if (myToasts) mySession.reportFailure(reason, false);
         updateActions();
         // Fix round 1 (Task 3.2 review, Finding 4): NO documentChanged()
         // here - pairWithMirror() took no checkpoint and changed nothing on
@@ -9060,7 +9055,7 @@ bool MainWindow::confirmMirrorPlacement()
     // to exactly the state it held before this call - "one undo removes
     // everything" (this task's own requirement), because the checkpoint
     // covers every twin the call built in one commit.
-    reportNote(message, true);
+    mySession.reportNote(message, true);
     return true;
 }
 
@@ -9069,7 +9064,7 @@ void MainWindow::cancelMirrorPlacement()
     if (!myView->mirrorPlacementActive()) return;
     myView->cancelMirrorPlacement();
     updateActions();
-    statusBar()->showMessage(tr("Mirror placement cancelled"));
+    mySession.reportStatus(tr("Mirror placement cancelled"));
 }
 
 // --- plain duplicate (Milestone 5, item 8) ----------------------------------
@@ -9161,9 +9156,8 @@ bool MainWindow::duplicateSelectedBody()
             ModelingOps::transformShape(sourceShape, gp_Trsf());
         if (!transformed.ok) {
             qWarning("Duplicate failed: %s", transformed.error.c_str());
-            myToasts->show(tr("Couldn't duplicate that body — the copy came back empty — "
-                              "Try a different body"),
-                          Toast::Kind::Failure, false);
+            mySession.reportFailure(tr("Couldn't duplicate that body — the copy came back empty — "
+                              "Try a different body"), false);
             return false;
         }
         copies.emplace_back(sourceId, transformed.shape);
@@ -9335,7 +9329,7 @@ bool MainWindow::duplicateSelectedBody()
                                   .arg(twins)
                             : tr("%1 bodies duplicated").arg(made.size());
     }
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9364,7 +9358,7 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
 
     // Every refusal is a Failure toast - never a modal, never silent.
     const auto refuse = [this](const QString& message) {
-        myToasts->show(message, Toast::Kind::Failure, false);
+        mySession.reportFailure(message, false);
         return false;
     };
     const auto cannotTake = [&refuse, this](const std::string& why) {
@@ -9466,7 +9460,7 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
     // or nowhere.
     const std::string caveat = Joinery::caveatsFor(kind, found.contact);
     if (!caveat.empty()) message += tr(" — %1").arg(QString::fromStdString(caveat));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9703,7 +9697,7 @@ bool MainWindow::deleteJoint(int jointId)
     updateActions();
     emit documentChanged();
     const QString message = tr("Deleted the %1 between %2 and %3").arg(kind, nameA, nameB);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9805,7 +9799,7 @@ bool MainWindow::jointContact(int jointId, Joinery::ContactResult& out) const
 
 void MainWindow::refuseJointEdit(const QString& why)
 {
-    myToasts->show(why, Toast::Kind::Failure, false);
+    mySession.reportFailure(why, false);
 }
 
 bool MainWindow::setJointKind(int jointId, Joinery::Kind kind)
@@ -9847,7 +9841,7 @@ bool MainWindow::setJointKind(int jointId, Joinery::Kind kind)
             .arg(QString::fromStdString(myDocument.nameOf(joint.bodyA)),
                  QString::fromStdString(myDocument.nameOf(joint.bodyB)),
                  QString::fromStdString(Joinery::kindName(kind)).toLower());
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9898,7 +9892,7 @@ bool MainWindow::setJointHost(int jointId, int hostBodyId)
         tr("The %1 is now cut into %2")
             .arg(QString::fromStdString(Joinery::kindName(joint.kind)).toLower(),
                  QString::fromStdString(myDocument.nameOf(hostBodyId)));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -9975,7 +9969,7 @@ bool MainWindow::editJointParameters(int jointId, const Joinery::Parameters& par
             .arg(QString::fromStdString(Joinery::kindName(joint.kind)).toLower(),
                  QString::fromStdString(myDocument.nameOf(joint.bodyA)),
                  QString::fromStdString(myDocument.nameOf(joint.bodyB)));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -10064,10 +10058,9 @@ bool MainWindow::duplicateLinkedCopy()
         // tooltip already says.
         const std::vector<int> ids = myView->selectedSolidIds();
         if (ids.size() == 1 && myDocument.symmetryOn() && myDocument.twinOf(ids.front()) > 0) {
-            myToasts->show(tr("Couldn't duplicate that body linked — it's mirrored, and a "
+            mySession.reportFailure(tr("Couldn't duplicate that body linked — it's mirrored, and a "
                               "body can't be both at once. Turn mirroring off first, or "
-                              "duplicate its twin instead"),
-                          Toast::Kind::Failure, false);
+                              "duplicate its twin instead"), false);
         }
         return false;
     }
@@ -10093,9 +10086,8 @@ bool MainWindow::duplicateLinkedCopy()
         // "unreachable in practice, kept defensive" idiom
         // commitReplaceBody()'s own twin-mirror comment follows.
         qWarning("Duplicate linked failed: %s", result.error.c_str());
-        myToasts->show(tr("Couldn't duplicate that body — the copy came back empty — "
-                          "Try a different body"),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("Couldn't duplicate that body — the copy came back empty — "
+                          "Try a different body"), false);
         return false;
     }
 
@@ -10118,7 +10110,7 @@ bool MainWindow::duplicateLinkedCopy()
     const QString message = tr("%1 duplicated — %2 bodies now linked")
                                  .arg(QString::fromStdString(myDocument.nameOf(result.id)))
                                  .arg(memberCount);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -10140,9 +10132,8 @@ bool MainWindow::linkSelectedBodies()
         // kernel's own error string is logged, never shown - it is written
         // for this file, not for the user.
         qWarning("Link selected failed: %s", result.error.c_str());
-        myToasts->show(tr("Couldn't link those bodies — the copy came back empty — "
-                          "Try moving them closer together first"),
-                      Toast::Kind::Failure, false);
+        mySession.reportFailure(tr("Couldn't link those bodies — the copy came back empty — "
+                          "Try moving them closer together first"), false);
         return false;
     }
 
@@ -10163,7 +10154,7 @@ bool MainWindow::linkSelectedBodies()
         tr("%1 bodies linked — every copy now matches %2")
             .arg(static_cast<int>(ids.size()))
             .arg(QString::fromStdString(myDocument.nameOf(result.id)));
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -10196,7 +10187,7 @@ bool MainWindow::unlinkSelectedBody()
         groupSizeBefore > 2
             ? tr("%1 unlinked — %2 bodies remain linked").arg(name).arg(groupSizeBefore - 1)
             : tr("%1 unlinked — no bodies remain linked").arg(name);
-    reportNote(message, true, myDocument.revision());
+    mySession.reportNote(message, true, myDocument.revision());
     return true;
 }
 
@@ -10258,25 +10249,36 @@ void MainWindow::showSelectionStatus()
     statusBar()->showMessage(myLastSelectionStatus);
 }
 
-void MainWindow::reportNote(const QString& text, bool undo, int documentStamp)
+void MainWindow::onReported(const Outcome& outcome)
 {
-    myToasts->show(text, Toast::Kind::Note, undo, documentStamp);
-    // NOT ALSO ON THE LEFT (the 2026-10 review's F9): the bar repeated every
-    // Note word for word under the toast saying it. While the toast carries
-    // the report, the left channel goes back to the selection. With
-    // notifications off the toast was dropped, and the bar is then the quiet
-    // record of what happened - the only place it is written at all.
-    if (myToasts->isShowing() && myToasts->currentText() == text) showSelectionStatus();
-    else statusBar()->showMessage(statusLineFor(text));
+    // The ONE renderer of everything the session reports (migration Phase 1).
+    switch (outcome.kind) {
+    case Outcome::Kind::Note:
+        myToasts->show(outcome.text, Toast::Kind::Note, outcome.offersUndo, outcome.documentStamp);
+        if (!outcome.writesStatus) break;
+        // NOT ALSO ON THE LEFT (the 2026-10 review's F9): the bar repeated every
+        // Note word for word under the toast saying it. While the toast carries
+        // the report, the left channel goes back to the selection. With
+        // notifications off the toast was dropped, and the bar is then the quiet
+        // record of what happened - the only place it is written at all.
+        if (myToasts->isShowing() && myToasts->currentText() == outcome.text) showSelectionStatus();
+        else statusBar()->showMessage(statusLineFor(outcome.text));
+        break;
+    case Outcome::Kind::Failure:
+        // Its status line follows through ToastHost::failureShown, as before.
+        myToasts->show(outcome.text, Toast::Kind::Failure, outcome.offersUndo, outcome.documentStamp);
+        break;
+    case Outcome::Kind::Status:
+        statusBar()->showMessage(outcome.text);
+        break;
+    }
 }
 
 QString MainWindow::statusLineFor(const QString& sentence)
 {
-    // Status-bar copy takes no trailing period; a toast's sentence may end in
-    // one, and the bar is where the same words have to read as a status line.
-    QString line = sentence.trimmed();
-    while (line.endsWith(QLatin1Char('.'))) line.chop(1);
-    return line;
+    // One implementation, the session's; this name stays because the suite
+    // asks the window for it.
+    return EditorSession::statusLineFor(sentence);
 }
 
 bool MainWindow::selectionSizesVisible() const
@@ -10390,7 +10392,7 @@ void MainWindow::refreshSelectionSizes()
         const QString now = selectionStatusText();
         if (now != myLastSelectionStatus) {
             myLastSelectionStatus = now;
-            statusBar()->showMessage(now);
+            mySession.reportStatus(now);
         }
     }
 }

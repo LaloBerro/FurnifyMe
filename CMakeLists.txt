@@ -149,6 +149,34 @@ if(FURNIFYME_BUILD_APP)
     # path, so the app stays self-contained wherever it is copied.
     set(CMAKE_AUTORCC ON)
 
+    # The editor session (migration Phase 1): the document, its checkpoints,
+    # the outcome channel and the action registry - everything the HTML layer
+    # will talk to. Core and Gui ONLY: a QtWidgets include in here fails to
+    # compile, which is the structural guard furnify_geometry gives the kernel.
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui)
+    add_library(furnify_session STATIC
+      src/session/EditorSession.cpp
+      src/session/EditorSession.h
+      src/session/Outcome.h
+      src/session/ActionRegistry.cpp
+      src/session/ActionRegistry.h
+    )
+    target_include_directories(furnify_session PUBLIC src)
+    target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)
+
+    add_executable(session_tests tests/session.cpp)
+    target_link_libraries(session_tests PRIVATE furnify_session)
+    add_test(NAME session COMMAND session_tests)
+    # The tests run on Qt's offscreen platform (no window, no GPU), which has
+    # to sit in platforms/ beside the exe like every other Qt plugin here.
+    if(TARGET Qt6::QOffscreenIntegrationPlugin)
+      add_custom_command(TARGET session_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:session_tests>/platforms"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:Qt6::QOffscreenIntegrationPlugin>"
+                "$<TARGET_FILE_DIR:session_tests>/platforms/")
+    endif()
+
     add_library(furnify_app STATIC
       resources.qrc
       src/MainWindow.cpp
@@ -210,6 +238,7 @@ if(FURNIFYME_BUILD_APP)
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC
       furnify_geometry
+      furnify_session
       Qt6::Widgets
       Qt6::OpenGLWidgets
       TKService TKV3d TKOpenGl

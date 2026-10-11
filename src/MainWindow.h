@@ -14,6 +14,7 @@
 #include <set>
 
 #include "DocumentModel.h"
+#include "session/EditorSession.h"
 // For MaterialCard::Look, which is a NESTED type and so cannot be
 // forward-declared - the one reason this header is included rather than the
 // class being named ahead.
@@ -1372,6 +1373,8 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private slots:
+    // Renders one outcome the session reported - see EditorSession::reported.
+    void onReported(const Outcome& outcome);
     void onStartSketch();
     void onFinishSketch();
     void onUndoSketchPoint();
@@ -1902,7 +1905,12 @@ private:
     void syncCamera(OcctViewWidget* from, OcctViewWidget* to);
 
     OcctViewWidget* myView = nullptr;
-    DocumentModel myDocument;
+    // The document lives in the session (migration Phase 1). The alias keeps
+    // every existing myDocument. call site as it was; it is bound in the
+    // constructor's init list to mySession.document(), and mySession is
+    // declared first so it exists when the alias is bound.
+    EditorSession mySession;
+    DocumentModel& myDocument;
     SketchController mySketch;
 
     // The managed library - see FurnitureStore.h. A plain value member, not
@@ -2155,11 +2163,9 @@ private:
     // Writes selectionStatusText() to the left channel and remembers it as
     // this window's own sentence - the one writer of myLastSelectionStatus.
     void showSelectionStatus();
-    // A success report: the Note toast, and the left channel back to the
-    // selection rather than a second copy of the toast's words - unless
-    // notifications are off, when the bar is the only record. See its
-    // definition.
-    void reportNote(const QString& text, bool undo = false, int documentStamp = -1);
+    // (A success report is mySession.reportNote() now; onReported() renders
+    // it - the Note toast, and the left channel back to the selection unless
+    // notifications are off, when the bar is the only record.)
     // Checkable, and the single source of the bottom bar's own visibility,
     // exactly as myItemsPanelAction is for the drawer - statusBar()'s shown
     // state is DERIVED from this action's checked state, both directions, in

@@ -312,6 +312,9 @@ Source files under `src/`, plus `tests/`:
 | `MainWindow.{h,cpp}` | menus, toolbar, mode switching |
 | `OcctViewWidget.{h,cpp}` | the Qt↔OCCT bridge — the only genuinely tricky file |
 | `DocumentModel.{h,cpp}` | owns the list of solids |
+| `session/EditorSession.{h,cpp}` | the document, checkpoints, undo/redo and the ONE outcome channel; Core + Gui only (`furnify_session`), tested by `session_tests` |
+| `session/Outcome.h` | one thing to tell the user, as a value: Note, Failure or Status |
+| `session/ActionRegistry.{h,cpp}` | every `QAction` by a stable id, a JSON snapshot, and a `trigger()` that obeys `isEnabled()` |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |
 | `ui/Theme.{h,cpp}` | colour tokens, the `Fixed` colours + the app stylesheet; the only place hex lives (`headless_colour_literals` enforces it) |
 | `ui/IconSet.{h,cpp}` | glyphs painted with QPainter (no qtsvg installed) |
@@ -657,6 +660,15 @@ delivers no `QHideEvent` for. `syncSkipGeometry()` therefore sets `mySkip->setVi
 itself, so the control's hidden state never depends on an event arriving.
 
 ### Reporting outcomes
+
+**Every outcome goes through the session** (migration Phase 1, slice A). `MainWindow` never
+calls `myToasts->show()` or `statusBar()->showMessage()` to report something: it calls
+`mySession.reportNote()` / `reportFailure()` / `reportStatus()` (and `reportToastOnly()` for the
+one Note that never wrote the status line), and `MainWindow::onReported()` is the only code that
+turns the resulting `Outcome` into a toast or a status line. `showSelectionStatus()` and the
+`failureShown` relay still write the bar directly - they are the renderer. The connection is made
+first thing in the constructor and is Direct, because callers read `currentMessage()` straight
+back. The HTML layer will subscribe to the same `reported` signal.
 
 **The app has no modal dialogs.** Nothing it has to say requires an answer, so nothing
 blocks. Seven `QMessageBox` calls and one `QInputDialog` were removed and none should come
