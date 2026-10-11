@@ -49,4 +49,7 @@ export interface ChromeApi {
   // it back after (ruling R5 - the view is otherwise Qt::NoFocus).
   claimKeyboard(): void;
   releaseKeyboard(): void;
+  // A card that sizes itself (the Versions drawer, Phase 3c) says how tall it
+  // is; its slot takes the height and the overlay re-stacks around it.
+  reportCardHeight(name: string, height: number): void;
 }

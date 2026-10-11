@@ -11,10 +11,17 @@
   import StatusStrip from './StatusStrip.svelte';
   import Settings from './settings/Settings.svelte';
   import type { CardRect, SettingsApi } from './settings/api';
+  import Versions from './versions/Versions.svelte';
+  import type { VersionsApi } from './versions/api';
   import { applyTokens } from '../theme';
   import { reportHitsOnChange } from '../overlay/hits';
 
-  let { chrome, theme, settings }: { chrome: ChromeApi; theme: ThemeApi; settings?: SettingsApi } = $props();
+  let {
+    chrome,
+    theme,
+    settings,
+    versions,
+  }: { chrome: ChromeApi; theme: ThemeApi; settings?: SettingsApi; versions?: VersionsApi } = $props();
 
   const kStripHeight = 24;
 
@@ -27,6 +34,10 @@
   let viewH = $state(window.innerHeight);
   let toast: Toast | undefined = $state();
   let cards: Record<string, CardRect> = $state({});
+  // File -> Save version... asked for a pending version (Phase 3c, ruling
+  // R4). Kept here, where something is always listening, until the card takes
+  // it - the request can arrive before the card has mounted.
+  let versionsRequest = $state(0);
   let seq = 0;
 
   const host = $derived({ w: viewW, h: viewH - (status.shown ? kStripHeight : 0) });
@@ -54,6 +65,7 @@
       // A toast that offers to undo one change must not outlive it.
       if (message && message.stamp >= 0 && stamp !== message.stamp) toast?.dismiss();
     });
+    versions?.newRequested.connect(() => versionsRequest++);
     applyTokens(theme.tokens);
     theme.changed.connect(() => applyTokens(theme.tokens));
     const resize = () => {
@@ -78,6 +90,16 @@
   onundo={(stamp) => chrome.undo(stamp)}
   ondismissed={() => (message = null)}
 />
+{#if versions && cards.versions?.shown}
+  <Versions
+    {versions}
+    keyboard={chrome}
+    rect={cards.versions}
+    report={(name, height) => chrome.reportCardHeight(name, height)}
+    newRequest={versionsRequest}
+    onrequesthandled={() => (versionsRequest = 0)}
+  />
+{/if}
 {#if settings && cards.settings?.shown}
   <Settings {settings} keyboard={chrome} rect={cards.settings} />
 {/if}
