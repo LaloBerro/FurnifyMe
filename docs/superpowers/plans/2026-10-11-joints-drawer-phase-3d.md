@@ -324,9 +324,9 @@ The Qt drawer and the new `session/JointsModel` both read `JointRows`, so the tw
 
 | Gate | Result |
 |---|---|
-| ctest (both presets) | |
-| vitest / svelte-check | |
-| chrome_smoke | |
-| hub_smoke | |
-| gui_smoke run 1 | |
-| gui_smoke run 2 | |
+| ctest (both presets) | 21/21 in windows-web and in windows (vcpkg) |
+| vitest / svelte-check | 143/143; 0 errors, 0 warnings |
+| chrome_smoke | 176/176 |
+| hub_smoke | 36/36 |
+| gui_smoke run 1 | PASS 6448 + 1 skip, floor 6449 |
+| gui_smoke run 2 | PASS 6448 + 1 skip, floor 6449 |
