@@ -487,6 +487,19 @@ private:
     class ItemsFilterField* myFilter = nullptr;
     class QAction* myClearFilterAction = nullptr;
     class QLabel* myNoMatch = nullptr;
+    // A theme's ledger (themes part 2, Ultraviolet): the body count in the
+    // title row, a rule under it, the column headings and the footer. Hidden
+    // in every theme whose list does not ask for them.
+    class QLabel* myBodyCount = nullptr;
+    class QWidget* myTitleRule = nullptr;
+    class QWidget* myHeadings = nullptr;
+    class QLabel* myHeadName = nullptr;
+    class QLabel* myHeadTools = nullptr;
+    class QWidget* myLedgerFoot = nullptr;
+    class QLabel* myLedgerSelected = nullptr;
+    class QLabel* myLedgerKeys = nullptr;
+    void updateLedger();
+    void styleLedger();
     QString myFilterText;
     void setFilter(const QString& text);
     bool rowMatches(const Row& row) const;

@@ -2,6 +2,7 @@
 
 #include "IconSet.h"
 #include "Theme.h"
+#include "Themes.h"
 
 #include <QCoreApplication>
 #include <QEvent>
@@ -106,7 +107,19 @@ void WindowButtons::paintEvent(QPaintEvent*)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     const ButtonMetrics m = metricsFor(myLook);
-    if (myLook == Look::Card) Theme::paintSurfaceOn(painter, rect(), 10, myGround);
+    if (myLook == Look::Card) {
+        // A theme's mockup can draw these buttons with no card (Aurora) or
+        // behind two hairlines (Ultraviolet) - themes part 2.
+        const Themes::Card& card = Themes::shell().card;
+        if (card.on && card.windowButtons == QLatin1String("bare")) {
+        } else if (card.on && card.windowButtons == QLatin1String("rule")) {
+            painter.setPen(QPen(card.edge.isValid() ? card.edge : Theme::border(), 1.0));
+            painter.drawLine(QPointF(0.5, 0), QPointF(0.5, height()));
+            painter.drawLine(QPointF(0, height() - 0.5), QPointF(width(), height() - 0.5));
+        } else {
+            Theme::paintSurfaceOn(painter, rect(), 10, myGround);
+        }
+    }
 
     for (int i = 0; i < 3; ++i) {
         const QRect chip = chipRect(i);

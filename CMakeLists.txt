@@ -237,6 +237,8 @@ if(FURNIFYME_BUILD_APP)
       src/ui/Themes.h
       src/ui/ThemeShell.cpp
       src/ui/ThemeShell.h
+      src/ui/ThemeDecor.cpp
+      src/ui/ThemeDecor.h
       src/ui/HtmlCardSlot.cpp
       src/web/SettingsBridge.cpp
       src/web/SettingsBridge.h

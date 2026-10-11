@@ -76,6 +76,12 @@ struct Card {
     std::vector<std::pair<double, QColor>> rim;   // a gradient rim over the edge (Violet's specular)
     double rimAngle = 145.0;
     double rimWidth = 1.2;
+    // The rail runs the viewport's full height, its tools at the top
+    // (Aurora, Nightshade, Ultraviolet); off, it is as tall as its tools.
+    bool railFull = false;
+    // The window buttons' own card: card (default), bare (Aurora: no card)
+    // or rule (Ultraviolet: a hairline down its left and along its bottom).
+    QString windowButtons = QStringLiteral("card");
 };
 
 struct Chip {
@@ -103,6 +109,14 @@ struct List {
     int nameWeight = 400, selWeight = 400, folderWeight = 400;
     int titleWeight = 600;
     bool titleBright = false;   // the title in text(), not textMuted()
+    double titlePx = 0.0;       // the title's size in CSS px; 0 keeps Theme::titleFont()
+    QString titleFamily;        // a display face for the title (Aurora's Sora); empty keeps the body face
+    int width = 0;              // the card's width, CSS px; 0 keeps the derived width
+    // Ultraviolet's ledger: the body count beside the title, a rule under the
+    // title, column headings over the rows and a footer under them, in mono.
+    bool headings = false;
+    QColor rule, ruleHi;
+    QString monoFamily;
     int fieldRadius = 0;
     QColor fieldFill, fieldEdge, fieldEditEdge;
     bool fieldSearch = false;   // a magnifier at the field's start
@@ -126,6 +140,21 @@ struct Gizmo {
     bool labelUpper = false;
     bool labelRule = false;  // a hairline above the label (Ultraviolet)
     int labelWeight = 600;
+    // The mockup's strokes and marks, number for number.
+    double armWidth = 2.5;
+    QColor armInk;           // invalid: each axis's own colour (Ultraviolet draws them white)
+    QColor boxFill, boxEdge; // Ultraviolet's letter boxes; invalid: panel and text
+    double hubRadius = 4.0;
+    QColor hubInk;           // invalid: the fixed hub grey
+    bool hubSquare = false;
+    double negRadius = 5.0;  // a negative ring's or dot's radius, or a square's half side
+    double negStroke = 1.5;
+    double negOpacity = 0.6;
+    QColor negInk;           // invalid: the axis colour
+    QColor negLine;          // a stem to each negative (Nightshade, Ultraviolet); invalid: none
+    double negLineWidth = 1.5;
+    double ring = 0.0;       // a faint orbit ring's radius around the hub (Nightshade)
+    QColor ringInk;
 };
 
 // The boxed numbers on the selection's dimension lines, as the mockup draws
@@ -161,6 +190,18 @@ struct Menu {
     int wordmarkWeight = 700;
 };
 
+// What a mockup draws over the viewport that belongs to no card (ThemeDecor):
+// Ultraviolet's registration crosshairs and its grid readout.
+struct Decor {
+    bool on = false;
+    bool marks = false;
+    QColor markInk;
+    int markSize = 9;
+    bool readout = false;
+    QString monoFamily;
+    double textPx = 11.0;
+};
+
 struct Shell {
     Backdrop backdrop;
     Card card;
@@ -169,6 +210,7 @@ struct Shell {
     Gizmo gizmo;
     Label label;
     Menu menu;
+    Decor decor;
 };
 
 // Parses a theme's "shell" object; an empty object gives every part off.

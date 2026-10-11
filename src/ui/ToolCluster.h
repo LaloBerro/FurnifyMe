@@ -27,6 +27,10 @@ public:
     // the two go together, and separating them would let a caller add a
     // stretch that silently does nothing.
     void addStretch();
+    // Lets the cluster be made taller than its chips, which stay at the top
+    // (themes part 2: a theme whose mockup runs the rail the viewport's full
+    // height). Off again, it is pinned to its chips as before.
+    void setLoose(bool loose);
 
     // The chips, in the order they were added. The suite walks this and
     // compares QAction pointers: asserting the rail's contents by their
@@ -42,5 +46,7 @@ protected:
 
 private:
     QVBoxLayout* myLayout = nullptr;
+    bool myLoose = false;
+    bool myLooseStretchAdded = false;
     QVector<ToolChip*> myChips;
 };

@@ -93,6 +93,9 @@ public:
     bool dimensionLine(int index, gp_Pnt& start, gp_Pnt& end, gp_Dir& outward) const;
     // How many times anything was actually rebuilt - the suite's count.
     int buildCount() const { return myBuilds; }
+    // The viewport's device pixel ratio, for a theme's label sizes. True when
+    // it changed - the caller clears, so the next show() rebuilds at it.
+    bool setDeviceRatio(double ratio);
 
 private:
     bool showOutline(const ModelingOps::MeasuredBox& box);
@@ -105,6 +108,7 @@ private:
     Handle(AIS_InteractiveObject) myOutline;
     ModelingOps::MeasuredBox myOutlineBox;
     Kind myKind = Kind::OneBody;
+    double myDeviceRatio = 1.0;
     bool myShowing = false;
     Measure::Unit myUnit = Measure::Unit::Millimetres;
     int myBuilds = 0;

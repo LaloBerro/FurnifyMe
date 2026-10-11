@@ -210,11 +210,22 @@ void AxisGizmo::computeTips(Tip tips[6]) const
     AxisCard::computeTips(cam.rightVector(), cam.upVector(), cam.viewDirection(), projected);
 
     const QPointF centre = hubCenter(*this);
+    // A THEME'S CARD draws its longest arm at the mockup's length (themes
+    // part 2): the mockups draw all three near full length, which no true
+    // projection gives, so the arms keep their true directions and ratios
+    // and the card is scaled to its longest. Graphite keeps the plain rule.
+    double reach = armPx();
+    if (Themes::shell().gizmo.on) {
+        double longest = 0.0;
+        for (const AxisCard::Tip& t : projected)
+            longest = std::max(longest, std::hypot(t.right, t.up));
+        if (longest > 0.5) reach /= longest;
+    }
     for (int i = 0; i < 6; ++i) {
         tips[i].axis = projected[i].axis;
         tips[i].positive = projected[i].positive;
         tips[i].screen =
-            centre + QPointF(projected[i].right * armPx(), -projected[i].up * armPx());
+            centre + QPointF(projected[i].right * reach, -projected[i].up * reach);
         tips[i].depth = projected[i].depth;
     }
 }
@@ -224,12 +235,23 @@ void AxisGizmo::paintThemed(QPainter& painter, const Themes::Gizmo& g, Tip* cons
     const QColor letterInk = g.letterInk.isValid() ? g.letterInk : Theme::text();
     QFont letter = Theme::badgeFont();
     letter.setBold(true);
-    // Stems first, under every ball - the mockup draws its lines to the hub.
+    // The orbit ring (Nightshade), then the negatives' stems, then the
+    // positives' - all under every ball, as the mockup draws its lines.
+    if (g.ring > 0.0) {
+        painter.setPen(QPen(g.ringInk.isValid() ? g.ringInk : Theme::border(), 1.0));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(centre, g.ring, g.ring);
+    }
+    if (g.negLine.isValid()) {
+        painter.setPen(QPen(g.negLine, g.negLineWidth, Qt::SolidLine, Qt::FlatCap));
+        for (int i = 0; i < 6; ++i)
+            if (!order[i]->positive) painter.drawLine(centre, order[i]->screen);
+    }
     for (int i = 0; i < 6; ++i) {
         const Tip* tip = order[i];
         if (!tip->positive) continue;
-        QColor colour = axisColor(tip->axis);
-        painter.setPen(QPen(colour, g.boxes ? 1.0 : 2.5, Qt::SolidLine, Qt::RoundCap));
+        const QColor colour = g.armInk.isValid() ? g.armInk : axisColor(tip->axis);
+        painter.setPen(QPen(colour, g.armWidth, Qt::SolidLine, g.boxes ? Qt::FlatCap : Qt::RoundCap));
         painter.drawLine(centre, tip->screen);
     }
     for (int i = 0; i < 6; ++i) {
@@ -241,10 +263,11 @@ void AxisGizmo::paintThemed(QPainter& painter, const Themes::Gizmo& g, Tip* cons
             const QChar ch = QChar::fromLatin1(char(kAxisLetter[tip->axis] - 'a' + 'A'));
             if (g.boxes) {
                 const QRectF box(tip->screen.x() - g.ball, tip->screen.y() - g.ball, 2 * g.ball, 2 * g.ball);
-                painter.setPen(QPen(Theme::text(), 1.0));
-                painter.setBrush(Theme::panel());
-                painter.drawRect(box);
-                painter.setPen(Theme::text());
+                const QColor edge = g.boxEdge.isValid() ? g.boxEdge : Theme::text();
+                painter.setPen(QPen(hovered ? edge.lighter(125) : edge, 1.0));
+                painter.setBrush(g.boxFill.isValid() ? g.boxFill : Theme::panel());
+                painter.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5));
+                painter.setPen(edge);
                 painter.setFont(letter);
                 painter.drawText(box, Qt::AlignCenter, QString(ch));
             } else {
@@ -256,27 +279,31 @@ void AxisGizmo::paintThemed(QPainter& painter, const Themes::Gizmo& g, Tip* cons
                 painter.drawText(QRectF(tip->screen.x() - g.ball, tip->screen.y() - g.ball, 2 * g.ball, 2 * g.ball),
                                  Qt::AlignCenter, QString(ch));
             }
-        } else if (g.negative == QLatin1String("square")) {
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(Theme::textMuted());
-            painter.drawRect(QRectF(tip->screen.x() - 2.5, tip->screen.y() - 2.5, 5.0, 5.0));
-            painter.setPen(QPen(Theme::textMuted(), 1.0));
-            painter.drawLine(centre, tip->screen);
-        } else if (g.negative == QLatin1String("dot")) {
-            QColor dim = colour;
-            dim.setAlphaF(0.45f);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(dim);
-            painter.drawEllipse(tip->screen, g.ball * 0.6, g.ball * 0.6);
         } else {
-            painter.setPen(QPen(colour, 1.5));
-            painter.setBrush(Qt::NoBrush);
-            painter.drawEllipse(tip->screen, g.ball * 0.6, g.ball * 0.6);
+            QColor ink = g.negInk.isValid() ? g.negInk : colour;
+            ink.setAlphaF(float(ink.alphaF() * g.negOpacity));
+            const double r = g.negRadius;
+            if (g.negative == QLatin1String("square")) {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(ink);
+                painter.drawRect(QRectF(tip->screen.x() - r, tip->screen.y() - r, 2 * r, 2 * r));
+            } else if (g.negative == QLatin1String("dot")) {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(ink);
+                painter.drawEllipse(tip->screen, r, r);
+            } else {
+                painter.setPen(QPen(ink, g.negStroke));
+                painter.setBrush(Qt::NoBrush);
+                painter.drawEllipse(tip->screen, r, r);
+            }
         }
     }
     painter.setPen(Qt::NoPen);
-    painter.setBrush(g.boxes ? Theme::text() : Theme::Fixed::gizmoHub());
-    painter.drawEllipse(centre, g.boxes ? 2.5 : 4.0, g.boxes ? 2.5 : 4.0);
+    painter.setBrush(g.hubInk.isValid() ? g.hubInk : Theme::Fixed::gizmoHub());
+    if (g.hubSquare)
+        painter.drawRect(QRectF(centre.x() - g.hubRadius, centre.y() - g.hubRadius, 2 * g.hubRadius, 2 * g.hubRadius));
+    else
+        painter.drawEllipse(centre, g.hubRadius, g.hubRadius);
 
     if (g.label) {
         const QRectF band(0, height() - kLabelBand - 2.0, width(), kLabelBand);

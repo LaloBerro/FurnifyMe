@@ -3,6 +3,8 @@
 #include <QDebug>
 
 #include "Theme.h"
+#include "Themes.h"
+#include "ToolCluster.h"
 
 #include <QEvent>
 #include <QWidget>
@@ -43,6 +45,10 @@ ViewportOverlay::ViewportOverlay(QWidget* viewport)
     , myViewport(viewport)
 {
     myViewport->installEventFilter(this);
+    // A theme can change the rail's height (themes part 2) - queued, so the
+    // chips have taken their new sizes first.
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &ViewportOverlay::relayout,
+            Qt::QueuedConnection);
 }
 
 void ViewportOverlay::addWidget(QWidget* widget, Anchor anchor)
@@ -411,7 +417,15 @@ void ViewportOverlay::relayout()
                     // Through wholeDevicePixels() as before - a card's own
                     // size still has to land on whole device rows, which is
                     // what the black-run sweep caught this card on.
-                    placed->resize(cw, Theme::wholeDevicePixels(ch));
+                    // A theme whose mockup draws the rail as a full-height
+                    // column (themes part 2) gets it back, tools still at
+                    // the top: the empty run below is the mockup's.
+                    const bool full = Themes::shell().card.railFull;
+                    if (auto* cluster = qobject_cast<ToolCluster*>(placed)) cluster->setLoose(full);
+                    const int railH = full
+                                          ? std::max(placed->sizeHint().height(), h - leftEdgeY - kEdgeMargin)
+                                          : ch;
+                    placed->resize(cw, Theme::wholeDevicePixels(railH));
                 }
                 // Advances the column's cursor by this entry's REAL, final
                 // height - already the stretched one for the spine, since

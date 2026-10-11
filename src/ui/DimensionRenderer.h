@@ -44,6 +44,11 @@ public:
         QColor (*lineColour)() = nullptr;   // null: Theme::accent()
         bool boxedLabel = false;            // border in lineColour, centred on the line
         QString caption;                    // a theme's KPI caption ("Width") - themes part 2
+        // The VIEWPORT's device pixel ratio: a theme's label sizes are CSS
+        // pixels and this frame's unit is a device pixel. The view's own
+        // ratio, never the primary screen's - a window on a 100% monitor
+        // beside a 150% primary drew every label half as large again.
+        double deviceRatio = 1.0;
     };
     void setStyle(const Style& style) { myStyle = style; }
 

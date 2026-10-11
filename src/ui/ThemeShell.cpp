@@ -107,6 +107,8 @@ Shell parseShell(const QJsonObject& o)
         }
         k.rimAngle = numberOf(c, "rimAngle", 145.0);
         k.rimWidth = numberOf(c, "rimWidth", 1.2);
+        k.railFull = c.value(QStringLiteral("railFull")).toBool(false);
+        if (c.contains(QStringLiteral("windowButtons"))) k.windowButtons = c.value(QStringLiteral("windowButtons")).toString();
     }
     const QJsonObject h = o.value(QStringLiteral("chip")).toObject();
     if (!h.isEmpty()) {
@@ -147,6 +149,13 @@ Shell parseShell(const QJsonObject& o)
         t.folderWeight = int(numberOf(l, "folderWeight", t.nameWeight));
         t.titleWeight = int(numberOf(l, "titleWeight", 600));
         t.titleBright = l.value(QStringLiteral("titleBright")).toBool();
+        t.titlePx = numberOf(l, "titlePx", 0.0);
+        t.titleFamily = l.value(QStringLiteral("titleFamily")).toString();
+        t.width = int(numberOf(l, "width", 0));
+        t.headings = l.value(QStringLiteral("headings")).toBool(false);
+        t.rule = colourOf(l, "rule");
+        t.ruleHi = colourOf(l, "ruleHi");
+        t.monoFamily = l.value(QStringLiteral("monoFamily")).toString();
         t.fieldRadius = int(numberOf(l, "fieldRadius", 0));
         t.fieldFill = colourOf(l, "fieldFill");
         t.fieldEdge = colourOf(l, "fieldEdge");
@@ -172,6 +181,21 @@ Shell parseShell(const QJsonObject& o)
         g.labelUpper = z.value(QStringLiteral("labelUpper")).toBool();
         g.labelRule = z.value(QStringLiteral("labelRule")).toBool();
         g.labelWeight = int(numberOf(z, "labelWeight", 600));
+        g.armWidth = numberOf(z, "armWidth", 2.5);
+        g.armInk = colourOf(z, "armInk");
+        g.boxFill = colourOf(z, "boxFill");
+        g.boxEdge = colourOf(z, "boxEdge");
+        g.hubRadius = numberOf(z, "hubRadius", 4.0);
+        g.hubInk = colourOf(z, "hubInk");
+        g.hubSquare = z.value(QStringLiteral("hubSquare")).toBool();
+        g.negRadius = numberOf(z, "negRadius", 5.0);
+        g.negStroke = numberOf(z, "negStroke", 1.5);
+        g.negOpacity = numberOf(z, "negOpacity", 0.6);
+        g.negInk = colourOf(z, "negInk");
+        g.negLine = colourOf(z, "negLine");
+        g.negLineWidth = numberOf(z, "negLineWidth", 1.5);
+        g.ring = numberOf(z, "ring", 0.0);
+        g.ringInk = colourOf(z, "ringInk");
     }
     const QJsonObject b2 = o.value(QStringLiteral("label")).toObject();
     if (!b2.isEmpty()) {
@@ -189,6 +213,17 @@ Shell parseShell(const QJsonObject& o)
         t.kpiTextPx = numberOf(b2, "kpiTextPx", 32.0);
         t.captionPx = numberOf(b2, "captionPx", 11.0);
         t.captionFontFile = b2.value(QStringLiteral("captionFontFile")).toString();
+    }
+    const QJsonObject dc = o.value(QStringLiteral("decor")).toObject();
+    if (!dc.isEmpty()) {
+        Decor& t = s.decor;
+        t.on = true;
+        t.marks = dc.value(QStringLiteral("marks")).toBool(false);
+        t.markInk = colourOf(dc, "markInk");
+        t.markSize = int(numberOf(dc, "markSize", 9));
+        t.readout = dc.value(QStringLiteral("readout")).toBool(false);
+        t.monoFamily = dc.value(QStringLiteral("monoFamily")).toString();
+        t.textPx = numberOf(dc, "textPx", 11.0);
     }
     const QJsonObject m = o.value(QStringLiteral("menu")).toObject();
     if (!m.isEmpty()) {

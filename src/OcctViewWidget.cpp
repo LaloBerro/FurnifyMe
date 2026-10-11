@@ -3037,6 +3037,7 @@ void OcctViewWidget::updateSelectionSizes()
     const double step = std::log(1.05);
     const double quantized =
         raw > 0.0 ? std::exp(std::round(std::log(raw) / step) * step) : worldPerPixel();
+    if (mySelectionSizes.setDeviceRatio(devicePixelRatioF())) mySelectionSizes.clear();
     if (mySelectionSizes.show(mySizesBox, mySizesKind, myCamera.viewDirection(),
                               myCamera.upVector(), quantized))
         scheduleRedraw();

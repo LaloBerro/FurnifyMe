@@ -36,7 +36,9 @@
     "card": {
       "radius": 0,
       "fill": "#030305",
-      "edge": "#3B3A47"
+      "edge": "#3B3A47",
+      "railFull": true,
+      "windowButtons": "rule"
     },
     "chip": {
       "size": 40,
@@ -76,18 +78,36 @@
       "badgeRadius": 0,
       "badgeEdge": "#9466FF",
       "badgeInk": "#B79BFF",
-      "badgeWeight": 500
+      "badgeWeight": 500,
+      "width": 256,
+      "titlePx": 16,
+      "headings": true,
+      "rule": "#2A2933",
+      "ruleHi": "#5A5866",
+      "monoFamily": "IBM Plex Mono"
     },
     "gizmo": {
       "style": "boxes",
-      "width": 120,
-      "height": 132,
+      "width": 96,
+      "height": 128,
       "arm": 30,
-      "ball": 7.5,
+      "ball": 9,
       "negative": "square",
       "labelUpper": true,
       "labelRule": true,
-      "labelWeight": 500
+      "labelWeight": 500,
+      "armWidth": 1.5,
+      "armInk": "#F5F4FA",
+      "boxFill": "#030305",
+      "boxEdge": "#F5F4FA",
+      "hubRadius": 3,
+      "hubSquare": true,
+      "hubInk": "#A9A7B8",
+      "negRadius": 3,
+      "negOpacity": 1.0,
+      "negInk": "#5A5866",
+      "negLine": "#5A5866",
+      "negLineWidth": 1.5
     },
     "label": {
       "radius": 0,
@@ -112,6 +132,14 @@
       "itemPadX": 8,
       "wordmarkPx": 15,
       "wordmarkWeight": 600
+    },
+    "decor": {
+      "marks": true,
+      "markInk": "#5A5866",
+      "markSize": 9,
+      "readout": true,
+      "monoFamily": "IBM Plex Mono",
+      "textPx": 11
     }
   }
 }

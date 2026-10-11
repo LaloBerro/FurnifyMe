@@ -2,6 +2,8 @@
 
 #include "Theme.h"
 
+#include <cmath>
+
 #include <Graphic3d_ArrayOfSegments.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_Group.hxx>
@@ -75,11 +77,20 @@ void SelectionSizesRenderer::setZLayer(Graphic3d_ZLayerId layer)
     for (DimensionRenderer& d : myDims) d.setZLayer(layer);
 }
 
+bool SelectionSizesRenderer::setDeviceRatio(double ratio)
+{
+    if (ratio <= 0.0 || std::abs(ratio - myDeviceRatio) < 1e-6) return false;
+    myDeviceRatio = ratio;
+    applyStyle();
+    return true;
+}
+
 void SelectionSizesRenderer::applyStyle()
 {
     DimensionRenderer::Style style;
     style.lineColour = myKind == Kind::Group ? &Theme::sizesGroup : &Theme::sizesOneBody;
     style.boxedLabel = true;
+    style.deviceRatio = myDeviceRatio;
     // Width, depth, height - MeasuredBox's axis order (see the header); a
     // theme's KPI label says which (themes part 2).
     const QString captions[3] = {QObject::tr("Width"), QObject::tr("Depth"), QObject::tr("Height")};

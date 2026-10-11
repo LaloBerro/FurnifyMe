@@ -128,6 +128,28 @@ void ToolCluster::addSeparator()
     adjustSize();
 }
 
+void ToolCluster::setLoose(bool loose)
+{
+    if (loose == myLoose) return;
+    myLoose = loose;
+    if (loose) {
+        // addStretch()'s own reasons: clear the bounds SetFixedSize wrote,
+        // then a trailing stretch takes the slack so the chips stay on top.
+        // The stretch stays when the cluster is pinned again - pinned, a
+        // stretch has nothing to distribute and changes nothing.
+        setMinimumSize(0, 0);
+        setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        myLayout->setSizeConstraint(QLayout::SetMinimumSize);
+        if (!myLooseStretchAdded) {
+            myLayout->addStretch(1);
+            myLooseStretchAdded = true;
+        }
+    } else {
+        myLayout->setSizeConstraint(QLayout::SetFixedSize);
+    }
+    adjustSize();
+}
+
 void ToolCluster::addStretch()
 {
     // SetFixedSize pins the widget to sizeHint() in both directions, which

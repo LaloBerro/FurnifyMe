@@ -109,7 +109,9 @@
     "card": {
       "radius": 20,
       "fill": "rgba(14,14,32,.64)",
-      "edge": "rgba(255,255,255,.10)"
+      "edge": "rgba(255,255,255,.10)",
+      "railFull": true,
+      "windowButtons": "bare"
     },
     "chip": {
       "size": 40,
@@ -147,17 +149,26 @@
       "badgeRadius": 9,
       "badgeFill": "rgba(167,139,250,.12)",
       "badgeInk": "#C4B5FD",
-      "badgeWeight": 600
+      "badgeWeight": 600,
+      "width": 252,
+      "titlePx": 26,
+      "titleFamily": "Sora"
     },
     "gizmo": {
       "style": "balls",
       "width": 116,
-      "height": 118,
-      "arm": 28,
-      "ball": 8.5,
+      "height": 120,
+      "arm": 30,
+      "ball": 9.5,
       "letterInk": "#0B0B1A",
       "negative": "ring",
-      "labelWeight": 500
+      "labelWeight": 500,
+      "armWidth": 2.2,
+      "hubRadius": 3,
+      "hubInk": "#F5F5FA",
+      "negRadius": 5,
+      "negStroke": 1.4,
+      "negOpacity": 0.7
     },
     "label": {
       "radius": 11,

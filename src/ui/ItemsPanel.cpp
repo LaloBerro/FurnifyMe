@@ -336,8 +336,16 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myTitleRow = titleRow;
     myTitle = new QLabel(tr("Items"), this);
     titleRow->addWidget(myTitle, 1);
+    myBodyCount = new QLabel(this);
+    myBodyCount->hide();
+    titleRow->addWidget(myBodyCount, 0, Qt::AlignVCenter);
     myOuter->addLayout(titleRow);
     myTitle->show();   // measured immediately, same reason as the rows in refresh()
+    myTitleRule = new QWidget(this);
+    myTitleRule->setFixedHeight(1);
+    myTitleRule->setAttribute(Qt::WA_StyledBackground);
+    myTitleRule->hide();
+    myOuter->addWidget(myTitleRule);
 
     // The filter (T-063): permanent, under the title. Escape in it, and the
     // hidden-pick line's Clear filter (Task 8), trigger ONE action.
@@ -354,6 +362,22 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     connect(myFilter, &QLineEdit::textChanged, this, &ItemsPanel::setFilter);
     connect(myFilter, &ItemsFilterField::escapePressed, myClearFilterAction, &QAction::trigger);
     connect(myFilter, &ItemsFilterField::listRequested, this, &ItemsPanel::enterListFromFilter);
+
+    // A theme's column headings (Ultraviolet): what each column of a row is.
+    myHeadings = new QWidget(this);
+    myHeadings->setObjectName(QStringLiteral("ledgerHead"));
+    myHeadings->setAttribute(Qt::WA_StyledBackground);
+    {
+        auto* row = new QHBoxLayout(myHeadings);
+        row->setContentsMargins(kRowInset + 8, 0, kRowInset + 4, 4);
+        row->setSpacing(8);
+        myHeadName = new QLabel(myHeadings);
+        myHeadTools = new QLabel(myHeadings);
+        row->addWidget(myHeadName, 1);
+        row->addWidget(myHeadTools, 0);
+    }
+    myHeadings->hide();
+    myOuter->addWidget(myHeadings);
 
     // The rows live inside a scroll area now (improvements item 12: "the items
     // list is too long and it does not have a scroll bar, can you add an
@@ -451,6 +475,23 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     myFoot->hide();
     myOuter->addWidget(myFoot);
 
+    // A theme's footer (Ultraviolet): how many are selected, and the key that
+    // moves them.
+    myLedgerFoot = new QWidget(this);
+    myLedgerFoot->setObjectName(QStringLiteral("ledgerFoot"));
+    myLedgerFoot->setAttribute(Qt::WA_StyledBackground);
+    {
+        auto* row = new QHBoxLayout(myLedgerFoot);
+        row->setContentsMargins(kRowInset + 8, 8, kRowInset + 4, 0);
+        row->setSpacing(8);
+        myLedgerSelected = new QLabel(myLedgerFoot);
+        myLedgerKeys = new QLabel(myLedgerFoot);
+        row->addWidget(myLedgerSelected, 1);
+        row->addWidget(myLedgerKeys, 0);
+    }
+    myLedgerFoot->hide();
+    myOuter->addWidget(myLedgerFoot);
+
     // refresh() FIRST and applyTheme() second, and the order is load-bearing
     // both ways: refresh() builds the rows applyTheme() then restyles, and
     // applyTheme() walks myRowList, which refresh() is what fills. FORCED,
@@ -482,7 +523,11 @@ int ItemsPanel::cardWidth()
     };
     const int now = measure(Theme::bodyFont());
     const int atShippedScale = measure(Theme::bodyFontFor(shipped));
-    return std::max(kBaseWidth, kBaseWidth + now - atShippedScale);
+    // A theme's mockup sets the drawer's width outright (themes part 2) -
+    // still grown by what a larger type scale costs, the same delta.
+    const int base = Themes::shell().list.on && Themes::shell().list.width > 0 ? Themes::shell().list.width
+                                                                               : kBaseWidth;
+    return std::max(base, base + now - atShippedScale);
 }
 
 qint64 ItemsPanel::rowKey(RowKind kind, int id)
@@ -961,6 +1006,7 @@ void ItemsPanel::applyTheme()
     // once per mouse move inside the colour picker, and rebuilding every row
     // per frame is work that changes nothing about which bodies exist.
     styleTitle();
+    styleLedger();
 
     // The chevrons are pixels rasterised from text(): re-rasterised from the
     // new tokens and handed to every twisty.
@@ -1076,11 +1122,16 @@ void ItemsPanel::styleTitle()
     const QColor ink = !myTitleLit     ? rest
                        : myTitleRefused ? Theme::dangerText()
                                         : Theme::accentText();
+    const QString size = l.on && l.titlePx > 0.0 ? QStringLiteral("%1px").arg(l.titlePx)
+                                                 : QStringLiteral("%1pt").arg(Theme::titleFont().pointSizeF());
+    const QString family = l.on && !l.titleFamily.isEmpty()
+                               ? QStringLiteral(" font-family: '%1'; letter-spacing: -0.5px;").arg(l.titleFamily)
+                               : QString();
     myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                          "font-weight: %3; font-size: %2pt;")
-                               .arg(ink.name())
-                               .arg(Theme::titleFont().pointSizeF())
-                               .arg(l.on ? l.titleWeight : 600));
+                                          "font-weight: %3; font-size: %2;%4")
+                               .arg(ink.name(), size)
+                               .arg(l.on ? l.titleWeight : 600)
+                               .arg(family));
 }
 
 void ItemsPanel::setTitleLit(bool lit, bool refused)
@@ -1150,6 +1201,8 @@ QSize ItemsPanel::sizeHint() const
     if (myFilter) wanted += myFilter->sizeHint().height() + gap;
     if (myNoMatch && !myNoMatch->isHidden()) wanted += myNoMatch->height() + gap;
     if (myFoot && !myFoot->isHidden()) wanted += myFoot->sizeHint().height() + gap;
+    for (const QWidget* ledger : {myTitleRule, myHeadings, myLedgerFoot})
+        if (ledger && !ledger->isHidden()) wanted += ledger->sizeHint().height() + gap;
     wanted = std::max(wanted, kMinHeight);
     // CAPPED (improvements item 12): past this the rows scroll inside the
     // card rather than the card running off the bottom of the viewport, which
@@ -2903,6 +2956,49 @@ void ItemsPanel::applySelection(const std::vector<int>& ids)
 {
     mySelectedIds = ids;
     restyleRows();
+    updateLedger();
+}
+
+void ItemsPanel::styleLedger()
+{
+    const Themes::List& l = Themes::shell().list;
+    const bool on = l.on && l.headings;
+    const QString family = l.monoFamily.isEmpty() ? QStringLiteral("monospace") : l.monoFamily;
+    const QString mono = QStringLiteral("background: transparent; color: %1; font-family: '%2'; "
+                                        "font-size: 11px; font-weight: 500;")
+                             .arg(Theme::textMuted().name(), family);
+    for (QLabel* label : {myBodyCount, myHeadName, myHeadTools, myLedgerSelected, myLedgerKeys})
+        if (label) label->setStyleSheet(mono);
+    if (myTitleRule) myTitleRule->setStyleSheet(QStringLiteral("background: %1;").arg(l.rule.name()));
+    if (myHeadings)
+        myHeadings->setStyleSheet(QStringLiteral("QWidget#ledgerHead { background: transparent; "
+                                                 "border-bottom: 1px solid %1; }")
+                                      .arg(l.ruleHi.name()));
+    if (myLedgerFoot)
+        myLedgerFoot->setStyleSheet(QStringLiteral("QWidget#ledgerFoot { background: transparent; "
+                                                   "border-top: 1px solid %1; }")
+                                        .arg(l.rule.name()));
+    for (QWidget* w : {static_cast<QWidget*>(myBodyCount), myTitleRule, myHeadings, myLedgerFoot})
+        if (w) w->setVisible(on);
+    updateLedger();
+}
+
+void ItemsPanel::updateLedger()
+{
+    if (!myBodyCount || myBodyCount->isHidden()) return;
+    const int bodies = myDocument ? static_cast<int>(myDocument->solids().size()) : 0;
+    // The mockup sets these in capitals; the accessible names keep sentence
+    // case, which is what a screen reader should read.
+    const QString count = bodies == 1 ? tr("1 body") : tr("%1 bodies").arg(bodies);
+    myBodyCount->setText(count.toUpper());
+    myBodyCount->setAccessibleName(count);
+    const QString selected = tr("%1 selected").arg(mySelectedIds.size());
+    myLedgerSelected->setText(selected.toUpper());
+    myLedgerSelected->setAccessibleName(selected);
+    myHeadName->setText(tr("Name").toUpper());
+    //: The two columns at a row's end - the grain mark and the eye.
+    myHeadTools->setText(tr("Grain · Eye").toUpper());
+    myLedgerKeys->setText(tr("Alt+↑↓ moves").toUpper());
 }
 
 void ItemsPanel::requestSelection(const std::vector<int>& ids)
@@ -3091,6 +3187,7 @@ void ItemsPanel::beginRenameForGroup(int groupId)
 
 void ItemsPanel::restyleRows()
 {
+    updateLedger();   // the body count follows a rebuild
     // The two looks a row can wear, built ONCE per call rather than once per
     // row, and each row's stylesheet set only when its look actually CHANGED
     // (review ruling R5a): setStyleSheet() re-polishes the whole row subtree

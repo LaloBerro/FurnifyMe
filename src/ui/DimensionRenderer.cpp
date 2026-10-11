@@ -476,7 +476,7 @@ bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
             // The mockup's sizes are CSS pixels, and this frame's unit is a
             // DEVICE pixel - so they are scaled by the display's ratio, or a
             // 150% display draws every label at two thirds of its size.
-            const double dpr = qGuiApp ? qGuiApp->devicePixelRatio() : 1.0;
+            const double dpr = myStyle.deviceRatio > 0.0 ? myStyle.deviceRatio : 1.0;
             std::string faceName = t.fontFile.isEmpty() ? fontFamily() : resolveBundledFont(t.fontFile);
             if (faceName.empty()) faceName = fontFamily();
             QFont measured(QString::fromStdString(faceName));

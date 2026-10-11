@@ -6,6 +6,8 @@
 #include "session/VersionsModel.h"
 #include "session/JointsModel.h"
 #include "ui/HtmlCardSlot.h"
+#include "ui/ThemeDecor.h"
+#include "GridRenderer.h"
 #ifdef FURNIFYME_WEB_UI
 #include "web/EditorChrome.h"
 #include "web/SettingsBridge.h"
@@ -2434,6 +2436,27 @@ void MainWindow::buildOverlay()
     // The title row's New folder is a chip mirroring the Model menu's New
     // Folder with These - one action, so the menu, Ctrl+G and the chip agree.
     myItemsPanel->setNewFolderAction(myGroupAction);
+
+    // A theme's decoration over the viewport (themes part 2): Ultraviolet's
+    // crosshairs at every card's corners and its grid readout beside the
+    // drawer - or beside the rail while the drawer is shut. Hidden in every
+    // other theme.
+    auto* decor = new ThemeDecor(
+        myView, myOverlay,
+        [this]() -> QRect {
+            if (myItemsPanel && myItemsPanel->isVisible()) return myItemsPanel->geometry();
+            if (myRail && myRail->isVisible()) return myRail->geometry();
+            return QRect();
+        },
+        [this]() -> QString {
+            const double minor = GridRenderer::minorStepFor(myView->camera().state().distance, Theme::gridDensity());
+            QString text = tr("Grid %1").arg(QString::fromStdString(Measure::formatLength(minor * 10.0)));
+            if (myView->snapEnabled())
+                text += QLatin1Char('\t') + tr("Snap %1").arg(QString::fromStdString(Measure::formatLength(myView->snapStep())));
+            return text.toUpper();
+        });
+    connect(myView, &OcctViewWidget::cameraChanged, decor, &ThemeDecor::refresh);
+    connect(this, &MainWindow::appStateChanged, decor, &ThemeDecor::refresh);
 
     // The versions drawer, same anchor - TopLeft entries stack downward in
     // the order they are added (see ViewportOverlay::relayout()), so this

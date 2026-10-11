@@ -82,7 +82,8 @@
       "sheenAngle": 165,
       "sheenStop": 0.38,
       "edge": "rgba(236,228,255,.14)",
-      "innerTop": "rgba(255,255,255,.10)"
+      "innerTop": "rgba(255,255,255,.10)",
+      "railFull": true
     },
     "chip": {
       "size": 36,
@@ -120,17 +121,28 @@
       "fieldSearch": true,
       "badgeRadius": 0,
       "badgeInk": "#C9B1FF",
-      "badgeWeight": 600
+      "badgeWeight": 600,
+      "width": 236,
+      "titlePx": 16
     },
     "gizmo": {
       "style": "balls",
-      "width": 100,
+      "width": 98,
       "height": 98,
-      "arm": 24,
-      "ball": 7,
-      "letterInk": "#FFFFFF",
+      "arm": 30,
+      "ball": 8,
+      "letterInk": "#08060E",
       "negative": "dot",
-      "labelWeight": 600
+      "labelWeight": 600,
+      "armWidth": 2.2,
+      "hubRadius": 4.5,
+      "hubInk": "#C8C8CC",
+      "negRadius": 4,
+      "negOpacity": 0.32,
+      "negLine": "rgba(236,228,255,.14)",
+      "negLineWidth": 1.5,
+      "ring": 31,
+      "ringInk": "rgba(236,228,255,.08)"
     },
     "label": {
       "radius": 7,

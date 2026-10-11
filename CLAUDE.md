@@ -464,7 +464,25 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
     each page), each with its OFL licence.
   - `settings_tests` holds every theme to readable words (4.5:1), its viewport inks apart
     from each other (60) and from the bodies (80), and its grid axes quieter than the
-    gizmo arms.
+    gizmo arms. That rule moved Nightshade's lavender selection to `#CFB1FF` (the mockup's
+    `#C9B1FF` sits 79 from the grey bodies) and its size inks off it.
+- **Themes part 2 (T-076, branch `themes-shell`): the Qt surfaces as each mockup draws
+  them.** Part 1 only recoloured them, and the user rejected that outright ("they doesnt
+  look exacly how you show me"). Each theme's JSON now carries a `"shell"` block
+  (`ui/ThemeShell.h`, `Themes::shell()`) whose every number is the mockup's own CSS:
+  the viewport backdrop (glows blurred and grained in a `QImage`, set as OCCT's
+  background image, dropped in render mode), the cards' fill, sheen, rim and radius
+  (`Theme::paintSurface()` defers to it), the chips per state, the Items rows, title,
+  width, filter and badge, the axis card, the size labels (in the VIEWPORT's device
+  ratio - `qGuiApp`'s is the primary screen's, which drew them 1.5× on a 100% monitor),
+  the menu words, a full-height rail (`ToolCluster::setLoose()`), the window buttons, and
+  Ultraviolet's ledger, grid readout and crosshairs (`ui/ThemeDecor`, one transparent
+  layer marking `occupiedRects()`). **Graphite has no shell block, so every painter takes
+  its old branch and the suites, which run in Graphite, see nothing change** - gui_smoke
+  is the proof, unchanged at its floor. `theme_shots <dir>` (web preset) captures the
+  mockups' scene in each theme for a side-by-side; it asserts nothing. The one thing a
+  Qt surface cannot copy is the glass themes' backdrop BLUR of the live 3D view: the
+  tint, sheen and rim carry the look, and a body behind a card shows through unblurred.
 - **Saving never moves `revision()`.** `setActiveMaterial()`/`setWoodTextureFile()`
   record the wood at a save, and a save is not an edit; they bumped the revision, which
   autosave then did 400 ms after every edit - killing the HTML toast's Undo (its stamp is
@@ -505,6 +523,8 @@ Source files under `src/`, plus `tests/`:
 | `web/HubWindow.{h,cpp}` | the HTML hub's frameless window: page + `HubModel` + window controls; `WindowChrome` hit-tests from rects the page reports |
 | `ui/SettingsEdits.{h,cpp}` | the Settings drawer's model: tabs, rows, number fields, token names and headings, the colour picker, and every `Theme::Spec` edit - read by both drawers; no widgets |
 | `ui/Themes.{h,cpp}` | the five themes as data (`assets/themes/*.json`): base specs, the theme in use, per-theme deltas through an injected store |
+| `ui/ThemeShell.{h,cpp}` | a theme's `"shell"`: the mockup's backdrop, cards, chips, list, axis card, labels and menu as numbers; `paintCard()`, `renderBackdrop()` |
+| `ui/ThemeDecor.{h,cpp}` | what a mockup draws over the viewport outside any card: Ultraviolet's crosshairs and grid readout; hidden in every other theme |
 | `ui/HtmlCardSlot.{h,cpp}` | an HTML card's place in the overlay: the card's size (its height the page's, for a card that sizes itself), painting nothing, taking no click |
 | `session/ActionWatch.{h,cpp}` | a few actions' state for a page, one `changed()` per event-loop turn |
 | `web/SettingsBridge.{h,cpp}` | the page's `settings` object: layout, live spec, the rows' actions; edits land in `SettingsEdits`; triggers only its rows' actions |
