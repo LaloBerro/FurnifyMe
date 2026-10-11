@@ -218,6 +218,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/AppearancePanel.cpp
       src/ui/SettingsEdits.cpp
       src/ui/Themes.cpp
+      src/ui/Themes.h
       src/ui/HtmlCardSlot.cpp
       src/web/SettingsBridge.cpp
       src/web/SettingsBridge.h
