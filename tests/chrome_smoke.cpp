@@ -43,6 +43,7 @@
 #include <QColorDialog>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -217,6 +218,17 @@ int main(int argc, char* argv[])
         doc.addSolid(ModelingOps::makeBox(gp_Pnt(0, 0, 18), 18, 300, 400));
         doc.addSolid(ModelingOps::makeBox(gp_Pnt(582, 0, 18), 18, 300, 400));
         store.saveFurniture(furnitureId, doc, QImage());
+    }
+    // A side panel and a shelf in a T, with a dowel joint (Phase 3d).
+    QString shelfUnitId;
+    {
+        FurnitureStore store(library.path());
+        shelfUnitId = store.createFurniture(QStringLiteral("Shelf unit"));
+        DocumentModel doc;
+        const int sidePanel = doc.addSolid(ModelingOps::makeBox(gp_Pnt(0, 0, 0), 18, 300, 800));
+        const int shelf = doc.addSolid(ModelingOps::makeBox(gp_Pnt(18, 0, 400), 600, 300, 18));
+        doc.addJoint(Joinery::Kind::Dowel, sidePanel, shelf, Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0));
+        store.saveFurniture(shelfUnitId, doc, QImage());
     }
 
     MainWindow window(nullptr, /*persistProgress=*/false, library.path());
@@ -1055,6 +1067,122 @@ int main(int argc, char* argv[])
         QCoreApplication::setApplicationName(app);
         check(Themes::currentId() == Themes::graphiteId() && Theme::spec() == Theme::defaultSpec(),
               "each window gave the theme back when it closed");
+    }
+
+    // --- the Joints card, end to end (Phase 3d) ------------------------------------
+    {
+        check(window.openFurniture(shelfUnitId), "the shelf unit opens");
+        pump(300);
+        check(window.document().joints().size() == 1, "with its one dowel joint");
+        const int jointId = window.document().joints().empty() ? 0 : window.document().joints().front().id;
+        const int shelfId = window.document().joints().empty() ? 0 : window.document().joints().front().bodyB;
+        jointsAction->trigger();
+        waitFor([&] { return js(page, "!!document.querySelector('.joints-card .joint')").toBool(); }, 3000);
+        const QString cardRect = QStringLiteral(
+            "JSON.stringify((() => { const c = document.querySelector('.joints-card'); if (!c) return {}; "
+            "const r = c.getBoundingClientRect(); return {x: Math.round(r.left), y: Math.round(r.top), "
+            "w: Math.round(r.width), h: Math.round(r.height)}; })())");
+        auto drawn = [&] {
+            const QJsonObject o = QJsonDocument::fromJson(jsString(page, cardRect).toUtf8()).object();
+            return QRect(o.value("x").toInt(), o.value("y").toInt(), o.value("w").toInt(), o.value("h").toInt());
+        };
+        auto settled = [&] {
+            const int h = js(page, "window.__jointsHeight || 0").toInt();
+            return h > 0 && jointsSlot->height() == Theme::wholeDevicePixels(h) && drawn() == jointsSlot->geometry();
+        };
+        waitFor(settled, 3000);
+        check(settled(), QStringLiteral("the card reports its height and covers its slot exactly (%1x%2)")
+                             .arg(drawn().width()).arg(drawn().height()));
+        const QVariantMap modelRow = window.jointsModel()->rows().value(0).toMap();
+        const QString row = QStringLiteral("document.querySelector('.joint[data-joint=\"%1\"]%2')").arg(jointId);
+        check(js(page, "document.querySelectorAll('.joints-card .joint').length").toInt() == 1 &&
+                  jsString(page, row.arg(QStringLiteral(" .kind")) + ".textContent") == modelRow.value("kindLine").toString(),
+              "one row, saying what JointRows says - \"" + modelRow.value("kindLine").toString() + "\"");
+
+        // A click opens it and selects the joint.
+        js(page, row.arg(QString()) + ".click()");
+        waitFor([&] { return js(page, "!!" + row.arg(QStringLiteral(".open .strip"))).toBool(); }, 3000);
+        check(window.selectedJointId() == jointId, "a click on the row selects its joint");
+        const QVariantList pieces = window.jointsModel()->rows().value(0).toMap().value("pieces").toList();
+        const int dowels = pieces.value(0).toMap().value("marks").toList().size();
+        check(js(page, "document.querySelectorAll('.joint.open .strip').length").toInt() == pieces.size() &&
+                  js(page, "document.querySelector('.joint.open .strip').querySelectorAll('.tick').length").toInt() == dowels &&
+                  dowels > 0,
+              QStringLiteral("the open row draws a ruler per drilled piece, a tick per dowel (%1 pieces, %2 dowels)")
+                  .arg(pieces.size()).arg(dowels));
+        check(jsString(page, "(document.querySelector('.joint.open .shared') || {}).textContent || ''") ==
+                  window.jointsModel()->rows().value(0).toMap().value("sharedDrawn").toString(),
+              "and the shared line under it");
+        {
+            // Labels on one line keep apart, inside the strip (the ruler's own law).
+            const bool apart = js(page, "(() => { for (const s of document.querySelectorAll('.joint.open .ruler')) { "
+                                        "const r = s.getBoundingClientRect(); let last = -1e9; "
+                                        "for (const l of [...s.querySelectorAll('.tick-label:not(.low)')]) { const b = l.getBoundingClientRect(); "
+                                        "if (b.left < last + 2.5 || b.left < r.left - 0.5 || b.right > r.right + 0.5) return false; last = b.right; } } "
+                                        "return true; })()").toBool();
+            check(apart, "every tick label stands clear of the last one on its line, inside the strip");
+        }
+        waitFor(settled, 3000);
+        check(settled(), "the slot grows with the open row and the card still covers it");
+#ifdef _WIN32
+        for (const Themes::Info& theme : Themes::all()) {
+            Themes::select(theme.id);
+            waitFor([&] { return jsString(page, "document.documentElement.dataset.theme") == theme.id; }, 3000);
+            pump(400);
+            capture(&window, outDir + "/chrome-joints-" + theme.id + ".png");
+            check(js(page, "!!document.querySelector('.joint.open .strip')").toBool() &&
+                      js(page, "document.querySelectorAll('.joint.open .tick-label').length").toInt() >= dowels,
+                  "the ruler is laid out again in " + theme.name);
+        }
+        Themes::select(Themes::graphiteId());
+        pump(300);
+#endif
+
+        // The shelf moves away: the joint breaks, keeps its row open, and shows no number.
+        gp_Trsf away;
+        // Sideways, clear of the panel - a shelf lifted along it would still meet it.
+        away.SetTranslation(gp_Vec(100, 0, 0));
+        window.transformBody(shelfId, away);
+        waitFor([&] { return js(page, "!!" + row.arg(QStringLiteral(".broken"))).toBool(); }, 3000);
+        check(js(page, "!!" + row.arg(QStringLiteral(".broken.open"))).toBool(),
+              "a joint whose pieces part reads broken - and its row stays open (Review Focus 3)");
+        check(!js(page, "!!" + row.arg(QStringLiteral(" .strip"))).toBool() &&
+                  !QRegularExpression(QStringLiteral("\\d")).match(jsString(page, row.arg(QStringLiteral(" .kind")) + ".textContent")).hasMatch(),
+              "with no ruler and no number - \"" + jsString(page, row.arg(QStringLiteral(" .kind")) + ".textContent") + "\" (Review Focus 2)");
+        const int openHeight = jointsSlot->height();
+        waitFor([&] { return jointsSlot->height() < openHeight && settled(); }, 3000);
+        check(jointsSlot->height() < openHeight && settled(),
+              QStringLiteral("and the card shrinks to the broken row, still covering its slot (%1 -> %2)").arg(openHeight).arg(jointsSlot->height()));
+#ifdef _WIN32
+        capture(&window, outDir + "/chrome-joints-broken.png");
+#endif
+        actionNamed(&window, QStringLiteral("Undo"))->trigger();
+        waitFor([&] { return js(page, "!!" + row.arg(QStringLiteral(".open .strip"))).toBool(); }, 3000);
+        check(js(page, "!!" + row.arg(QStringLiteral(".open .strip"))).toBool(), "Undo makes it whole again, still open");
+
+        // Delete from the open row: one checkpoint, a Note with Undo.
+        js(page, row.arg(QStringLiteral(" .delete")) + ".click()");
+        waitFor([&] { return window.document().joints().empty(); }, 3000);
+        check(window.document().joints().empty(), "the row's delete deletes the joint");
+        waitFor([&] { return !toastText(page).isEmpty(); }, 2000);
+        check(jsString(page, "(document.querySelector('.toast .undo') || {}).textContent || ''") == QStringLiteral("Undo"),
+              "and its Note offers Undo - \"" + toastText(page) + "\"");
+        waitFor([&] { return js(page, "!!document.querySelector('.joints-card .empty')").toBool(); }, 3000);
+        check(js(page, "!!document.querySelector('.joints-card .empty')").toBool(), "the card shows its empty state");
+        js(page, "document.querySelector('.toast .undo').click()");
+        waitFor([&] { return window.document().joints().size() == 1; }, 3000);
+        check(window.document().joints().size() == 1, "and the Note's Undo brings the joint back");
+
+        // Joints off: the slot goes, and nothing of it takes the pointer.
+        const QRect last = jointsSlot->geometry();
+        jointsAction->trigger();
+        pump(400);
+        check(!jointsSlot->isVisible() && !js(page, "!!document.querySelector('.joints-card')").toBool(),
+              "Joints off takes the card away");
+        waitFor([&] { return !chrome->hitRegion().contains(last.center()); }, 2000);
+        check(!chrome->hitRegion().contains(last.center()), "and where it stood, a press reaches the viewport (Review Focus 5)");
+        window.openFurniture(furnitureId);
+        pump(300);
     }
 
     // --- a page that is not there reports through Qt (review I3) ---------------------
