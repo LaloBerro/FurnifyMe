@@ -46280,7 +46280,7 @@ int main(int argc, char* argv[])
             return ModelingOps::centreOfMass(s).X();
         };
         // Where a size label is on screen, or an off-screen sentinel.
-        const auto labelAt = [&](int index) {
+        const auto labelAt = [&](int index, bool gestureCanBegin = true) {
             // THE LABEL HAS TO BE LAID OUT BEFORE IT CAN BE CLICKED. The
             // selection sizes are placed from applyCameraState(), so straight
             // after a pick or a camera move the annotation may not exist yet -
@@ -46293,11 +46293,27 @@ int main(int argc, char* argv[])
             // failed the next. A bounded wait rather than a longer settle
             // everywhere - it costs nothing when the label is already there,
             // which is almost always.
+            //
+            // AND IT HAS TO BE THE CURRENT LAYOUT, with the gesture able to
+            // begin (T-070). After an Undo and a re-pick the label from the
+            // layout before is still recorded, so "a point exists" answered at
+            // once - under CPU load (a compile running beside the suite) the
+            // right-click then landed on where the number USED to be, the
+            // gesture did not open, and the same nine checks failed behind it.
+            // So: the window must be able to begin re-measure on this number
+            // (unless the caller is about to pin a REFUSAL, as the group case
+            // is), and the point must hold still across two reads.
             QPoint at;
             QElapsedTimer waiting;
             waiting.start();
-            while (waiting.elapsed() < 2000) {
-                if (rv->selectionSizeLabelPoint(index, at)) return at;
+            while (waiting.elapsed() < 3000) {
+                QPoint again;
+                if ((!gestureCanBegin || mw.canReMeasureSize(index)) &&
+                    rv->selectionSizeLabelPoint(index, at)) {
+                    waitFully(50);
+                    if (rv->selectionSizeLabelPoint(index, again) && again == at) return at;
+                    continue;
+                }
                 waitFully(50);
             }
             return QPoint(-1000, -1000);
@@ -46577,7 +46593,7 @@ int main(int argc, char* argv[])
                   "re-measure: the group's overall sizes are drawn");
             const int revisionBefore = mw.document().revision();
             const double widthBefore = sizeOf(b1, 0);
-            const QPoint groupLabel = labelAt(0);
+            const QPoint groupLabel = labelAt(0, /*gestureCanBegin=*/false);
             check(rv->rect().contains(groupLabel),
                   "re-measure: the group's width number is on screen");
             pressThenReleaseAt(rv, QPointF(groupLabel), QPointF(groupLabel), Qt::RightButton);
