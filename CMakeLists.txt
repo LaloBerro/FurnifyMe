@@ -175,6 +175,8 @@ if(FURNIFYME_BUILD_APP)
       # The Joints drawer's content and model (Phase 3d).
       src/session/JointRows.cpp
       src/session/JointRows.h
+      src/session/JointsModel.cpp
+      src/session/JointsModel.h
     )
     target_include_directories(furnify_session PUBLIC src)
     target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)

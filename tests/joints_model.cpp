@@ -6,6 +6,7 @@
 #include "DocumentModel.h"
 #include "Measure.h"
 #include "session/JointRows.h"
+#include "session/JointsModel.h"
 
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -128,6 +129,109 @@ int main(int argc, char* argv[])
                   QStringLiteral("No joints yet.\n\nSelect two pieces that meet and press J to plan one.") &&
               JointRows::deleteTooltip() == QStringLiteral("Delete this joint\nOne undo brings it back."),
           "the drawer's words, verbatim");
+
+    // --- JointsModel: the drawer's model for the page ----------------------------
+    {
+        // A far piece with a joint to the panel: broken from the start.
+        const int far = doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(900.0, 0.0, 0.0), 18.0, 300.0, 300.0).Shape());
+        const int brokenId = doc.addJoint(Joinery::Kind::Dowel, panel, far, Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0));
+        auto derivations = [&] {
+            std::vector<Joinery::Derivation> out;
+            for (const DocumentModel::Joint& j : doc.joints()) out.push_back(deriveOf(doc, j));
+            return out;
+        };
+
+        QList<int> selected, removed;
+        int closes = 0;
+        bool removeAnswer = true;
+        JointsModel::Hooks hooks;
+        hooks.select = [&](int id) { selected << id; };
+        hooks.remove = [&](int id) { removed << id; return removeAnswer; };
+        hooks.close = [&] { ++closes; };
+        JointsModel model(hooks);
+        int changes = 0;
+        QObject::connect(&model, &JointsModel::changed, [&] { ++changes; });
+        const auto idAt = [&](int i) { return model.rows().value(i).toMap().value("id").toInt(); };
+        const auto rowOf = [&](int id) {
+            for (const QVariant& v : model.rows())
+                if (v.toMap().value("id").toInt() == id) return v.toMap();
+            return QVariantMap();
+        };
+
+        model.setState(&doc, derivations(), 0, true, true, true);
+        check(model.rows().size() == 2 && idAt(0) == brokenId && idAt(1) == dowelId,
+              "broken joints first, each group in document order");
+        check(model.live() && model.enabled(), "a live, enabled drawer");
+        const QVariantMap first = model.rows().value(1).toMap();
+        check(first.value("kindLine").toString() == row.kindLine &&
+                  first.value("sharedDrawn").toString() == row.sharedDrawn &&
+                  first.value("pieces").toList().size() == 2,
+              "a row carries JointRows' content");
+        const QVariantMap mark =
+            first.value("pieces").toList().value(0).toMap().value("marks").toList().value(0).toMap();
+        check(mark.contains("at") && mark.contains("text") && mark.value("text").toString() == row.pieces[0].marks[0].text,
+              "and each mark crosses as its fraction and its label");
+        check(rowOf(brokenId).value("broken").toBool() && rowOf(brokenId).value("pieces").toList().isEmpty(),
+              "a broken row crosses with no pieces");
+
+        // Open by a click, by id.
+        model.activate(dowelId);
+        check(model.isExpanded(dowelId) && selected == QList<int>{dowelId} &&
+                  rowOf(dowelId).value("expanded").toBool(),
+              "a click opens the row and selects its joint");
+        model.setState(&doc, derivations(), dowelId, true, true, true);
+        check(rowOf(dowelId).value("selected").toBool(), "the selected joint reads selected");
+
+        // The dowel's shelf moves away: it breaks, moves up the list, and stays open.
+        gp_Trsf away;
+        away.SetTranslation(gp_Vec(0.0, 0.0, 600.0));
+        doc.replaceSolid(shelf, BRepBuilderAPI_Transform(doc.shapeOf(shelf), away, true).Shape());
+        model.setState(&doc, derivations(), dowelId, true, true, true);
+        check(rowOf(dowelId).value("broken").toBool() && rowOf(dowelId).value("expanded").toBool() &&
+                  !rowOf(brokenId).value("expanded").toBool(),
+              "a joint that breaks keeps ITS row open, by id, as it moves (Review Focus 3)");
+        away.SetTranslation(gp_Vec(0.0, 0.0, -600.0));
+        doc.replaceSolid(shelf, BRepBuilderAPI_Transform(doc.shapeOf(shelf), away, true).Shape());
+
+        model.activate(dowelId);
+        check(!model.isExpanded(dowelId) && selected.size() == 2, "a second click closes it, and selects again");
+
+        model.remove(dowelId);
+        check(removed == QList<int>{dowelId}, "delete reaches the window's hook");
+        model.setState(&doc, derivations(), 0, true, /*enabled=*/false, true);
+        model.remove(dowelId);
+        check(removed.size() == 1, "and not while the drawer is shut for sketching or render mode");
+
+        // A gone joint leaves the open set.
+        model.setState(&doc, derivations(), 0, true, true, true);
+        model.activate(brokenId);
+        doc.removeJoint(brokenId);
+        model.setState(&doc, derivations(), 0, true, true, true);
+        check(!model.isExpanded(brokenId) && model.rows().size() == 1, "a deleted joint leaves the drawer, and the open set");
+
+        // Hidden: nothing is read (Review Focus 5).
+        const QVariantList before = model.rows();
+        model.setState(&doc, derivations(), 0, true, true, false);
+        const int hiddenChanges = changes;
+        doc.addJoint(Joinery::Kind::Dowel, panel, far, Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0));
+        model.setState(&doc, derivations(), 0, true, true, false);
+        check(model.rows() == before && changes == hiddenChanges, "a hidden drawer reads nothing and says nothing");
+        model.setState(&doc, derivations(), 0, true, true, true);
+        check(model.rows().size() == 2 && changes == hiddenChanges + 1, "showing it reads the joints again, once");
+        model.setState(&doc, derivations(), 0, true, true, true);
+        check(changes == hiddenChanges + 1, "an identical state says nothing");
+
+        model.setState(&doc, derivations(), 0, /*live=*/false, false, true);
+        check(model.rows().isEmpty() && !model.live(), "at the library the drawer lists nothing");
+
+        model.close();
+        check(closes == 1, "the close x reaches the window");
+        const QVariantMap w = model.words();
+        check(w.value("title") == QStringLiteral("Joints") && w.value("empty") == JointRows::emptyText() &&
+                  w.value("deleteTip") == JointRows::deleteTooltip() &&
+                  w.value("close") == QStringLiteral("Close this panel"),
+              "the drawer's words, verbatim");
+    }
 
     std::printf("\n%s (%d failures, %d checks)\n", gFailures ? "FAIL" : "PASS", gFailures, gChecks);
     return gFailures == 0 ? 0 : 1;
