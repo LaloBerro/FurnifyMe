@@ -31,7 +31,7 @@
   {/if}
   {#if status.right}
     <span class="rule" aria-hidden="true"></span>
-    <span class="right">{status.right}</span>
+    <span class="right" title={status.right}>{status.right}</span>
   {/if}
 </footer>
 
@@ -76,7 +76,13 @@
     border-radius: 50%;
     background: var(--caution);
   }
+  /* Capped at half the strip and elided, as Qt's showStateLine() caps the
+     state label (review I4): a long hint must not squeeze the left channel
+     to nothing or run past the window's edge. */
   .right {
     flex: none;
+    max-width: 50%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

@@ -417,7 +417,7 @@ public:
         x = std::clamp(x, kEdgeInset, std::max(kEdgeInset, myView->width() - width() - kEdgeInset));
         int y = at.y() - height() / 2;
         y = std::clamp(y, kEdgeInset,
-                       std::max(kEdgeInset, myView->height() - height() - kEdgeInset));
+                       std::max(kEdgeInset, ViewportOverlay::usableHeight(myView) - height() - kEdgeInset));
 
         // Whole DEVICE pixels, Theme's position rule - PullArrow's own
         // closing lines.
@@ -1085,7 +1085,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // alone.
         if (myBottomBarAction)
             statusBar()->setVisible(myBottomBarAction->isChecked() && !hiddenForRenderMode &&
-                                    !myHtmlChrome);   // the page's strip draws it instead
+                                    !htmlChromeLive());   // the page's strip draws it instead
+        syncHtmlChromeInset();
         // The rail and the axis gizmo card have no action of their own to be
         // derived FROM - they are always on outside render mode - so this is
         // simply their whole predicate rather than one term of it.
@@ -2294,9 +2295,9 @@ void MainWindow::buildOverlay()
     // disagree with what relayout() actually places against, and a control
     // that grows a pixel raises this floor for free rather than reopening
     // the clip CLAUDE.md already tells this story about once.
-    myView->setMinimumHeight(
-        myAppBar->sizeHint().height() + ViewportOverlay::kStackGap +
-        rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin);
+    myViewMinimumHeight = myAppBar->sizeHint().height() + ViewportOverlay::kStackGap +
+                          rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin;
+    myView->setMinimumHeight(myViewMinimumHeight);
 
     myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
     // Render mode hides the rail, and it leaves the way it arrived - off the
@@ -5337,6 +5338,9 @@ void MainWindow::showStateLine(const QString& state)
     const int room = std::max(160, width() / 2);
     myStateLabel->setMaximumWidth(room);
     myStateLabel->setText(myStateLabel->fontMetrics().elidedText(state, Qt::ElideRight, room));
+    // Every route that writes the state line reaches the page - not only the
+    // ones that also emit appStateChanged (review I4).
+    syncHtmlChrome();
 }
 
 QString MainWindow::faceOnDirectionLabel(const gp_Dir& normal) const
@@ -10268,21 +10272,50 @@ void MainWindow::useHtmlChrome()
     myHtmlChrome = new EditorChrome(myView, this);
     // The page's Undo pill: through the ACTION, with the same two guards the
     // Qt toast's pill keeps (see the ToastHost::undoRequested connection).
-    connect(myHtmlChrome, &EditorChrome::undoRequested, this, [this] {
+    connect(myHtmlChrome, &EditorChrome::undoRequested, this, [this](int stamp) {
         if (mySketching) return;
+        // The pill names ONE change. A click that reaches here after the
+        // document has moved past it - the pill's second click, or a Ctrl+Z
+        // that beat the page's documentMoved - would otherwise pop the
+        // checkpoint BEFORE the one it names (review I1). Toast.cpp keeps
+        // the same promise with myDismissing; this keeps it whatever order
+        // the channel delivers in.
+        if (stamp >= 0 && stamp != myDocument.revision()) return;
         if (myUndoAction->isEnabled()) myUndoAction->trigger();
     });
     // The strip is 24 px along the viewport's bottom; the Qt cards anchored
-    // there stand above it.
-    if (myOverlay) {
-        myOverlay->setBottomInset(24);
-        connect(myOverlay, &ViewportOverlay::laidOut, this, &MainWindow::syncHtmlChrome);
-    }
+    // there stand above it while it shows (syncHtmlChromeInset()).
+    if (myOverlay) connect(myOverlay, &ViewportOverlay::laidOut, this, &MainWindow::syncHtmlChrome);
+    // Until the page says it is listening, and for good once it dies, the
+    // Qt toast and status bar carry every report (review I3).
+    connect(myHtmlChrome, &EditorChrome::liveChanged, this, [this] {
+        updateActions();
+        syncHtmlChrome();
+    });
     connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);
     updateActions();
     syncHtmlChrome();
 #endif
+}
+
+bool MainWindow::htmlChromeLive() const
+{
+#ifdef FURNIFYME_WEB_UI
+    return myHtmlChrome && myHtmlChrome->isLive();
+#else
+    return false;
+#endif
+}
+
+void MainWindow::syncHtmlChromeInset()
+{
+    if (!myHtmlChrome) return;
+    const bool stripShown = htmlChromeLive() && myBottomBarAction && myBottomBarAction->isChecked() &&
+                            !myRenderModeOn;
+    const int inset = stripShown ? kHtmlStripHeight : 0;
+    if (myOverlay) myOverlay->setBottomInset(inset);
+    if (myViewMinimumHeight > 0) myView->setMinimumHeight(myViewMinimumHeight + inset);
 }
 
 void MainWindow::syncHtmlChrome()
@@ -10310,7 +10343,7 @@ void MainWindow::onReported(const Outcome& outcome)
 {
     // The ONE renderer of everything the session reports (migration Phase 1).
 #ifdef FURNIFYME_WEB_UI
-    if (myHtmlChrome) {
+    if (htmlChromeLive()) {
         // The same rules ToastHost keeps, with the page drawing: a Note is
         // DROPPED with notifications off (a Failure never is), a Note that is
         // shown leaves the left channel to the selection, and a Failure's

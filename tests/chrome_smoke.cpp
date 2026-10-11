@@ -20,6 +20,9 @@
 #include "OcctViewWidget.h"
 #include "Theme.h"
 #include "ViewportOverlay.h"
+#include "ui/GestureChip.h"
+#include "ui/ItemsPanel.h"
+#include "ui/Toast.h"
 #include "web/EditorChrome.h"
 #include "web/WebHost.h"
 
@@ -30,6 +33,7 @@
 #include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMouseEvent>
 #include <QStatusBar>
 #include <QSurfaceFormat>
 #include <QTemporaryDir>
@@ -196,6 +200,7 @@ int main(int argc, char* argv[])
         DocumentModel doc;
         doc.addSolid(ModelingOps::makeBox(gp_Pnt(0, 0, 0), 600, 300, 18));
         doc.addSolid(ModelingOps::makeBox(gp_Pnt(0, 0, 18), 18, 300, 400));
+        doc.addSolid(ModelingOps::makeBox(gp_Pnt(582, 0, 18), 18, 300, 400));
         store.saveFurniture(furnitureId, doc, QImage());
     }
 
@@ -324,12 +329,159 @@ int main(int argc, char* argv[])
     pump(4600);
     check(toastText(page).isEmpty(), "and goes once the pointer leaves");
 
+    // --- a stale Undo is refused (review I1) --------------------------------------------
+    // The pill's Undo names one change. A click that reaches C++ after the
+    // document has moved past it - a double-click, or a Ctrl+Z racing the
+    // page's documentMoved - must not pop the checkpoint BEFORE it.
+    {
+        window.view()->setSelectedSolids({window.document().solids().front().id});
+        pump(200);
+        if (del) del->trigger();
+        waitFor([&] { return !toastText(page).isEmpty(); }, 3000);
+        const int staleStamp = window.document().revision();
+        actionNamed(&window, QStringLiteral("Undo"))->trigger();   // Ctrl+Z
+        pump(100);
+        const int restored = static_cast<int>(window.document().solids().size());
+        const int revision = window.document().revision();
+        chrome->bridge()->undo(staleStamp);
+        pump(100);
+        check(static_cast<int>(window.document().solids().size()) == restored &&
+                  window.document().revision() == revision,
+              "an Undo naming a change the document has moved past is refused");
+    }
+
+    // --- the strip follows the state line on every route (review I4) ---------------------
+    if (QAction* items = actionNamed(&window, QStringLiteral("Items")); items && !items->isChecked())
+        items->trigger();
+    pump(300);
+    if (ItemsPanel* drawer = window.itemsPanel(); drawer && drawer->rowCount() >= 2) {
+        QWidget* row = drawer->rowWidgetAt(0);
+        QWidget* target = drawer->rowWidgetAt(1);
+        auto send = [&](QEvent::Type type, const QPoint& inDrawer) {
+            const QPoint local = row->mapFrom(drawer, inDrawer);
+            QMouseEvent e(type, QPointF(local), QPointF(row->mapToGlobal(local)),
+                          type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton, Qt::LeftButton,
+                          Qt::NoModifier);
+            QCoreApplication::sendEvent(row, &e);
+        };
+        const QPoint from = row->mapTo(drawer, QPoint(row->width() / 3, row->height() / 2));
+        const QPoint to = target->mapTo(drawer, QPoint(target->width() / 3, target->height() - 3));
+        send(QEvent::MouseButtonPress, from);
+        for (int i = 1; i <= 4; ++i) send(QEvent::MouseMove, from + (to - from) * i / 4);
+        pump(200);
+        const QString line = drawer->dragStatusText();
+        const QString rightTitle = QStringLiteral("(document.querySelector('.strip .right') || {}).title || ''");
+        waitFor([&] { return jsString(page, rightTitle) == line; }, 1500);
+        check(!line.isEmpty() && jsString(page, rightTitle) == line,
+              "a drawer drag's line reaches the strip's right channel - \"" + line + "\"");
+        drawer->cancelDrag();
+        pump(200);
+    } else {
+        check(false, "the Items drawer lists the two seeded bodies");
+    }
+    {
+        // A long state line is capped at half the strip, as Qt caps the label.
+        const int stripW = js(page, "document.querySelector('.strip').getBoundingClientRect().width").toInt();
+        js(page, "document.querySelector('.strip .right').textContent = 'x'.repeat(600)");
+        pump(100);
+        const int rightW = js(page, "document.querySelector('.strip .right').getBoundingClientRect().width").toInt();
+        check(stripW > 0 && rightW <= stripW / 2 + 1,
+              QStringLiteral("a long state line takes at most half the strip (%1 of %2)").arg(rightW).arg(stripW));
+        window.view()->setSelectedSolids({});   // a sync puts the real line back
+        pump(200);
+    }
+
+    // --- the inset follows the strip (review I5) -----------------------------------------
+    {
+        ViewportOverlay* overlay = window.findChild<ViewportOverlay*>();
+        QAction* bar = actionNamed(&window, QStringLiteral("Show bottom bar"));
+        check(bar != nullptr && bar->isChecked() && overlay && overlay->bottomInset() == 24,
+              "with the strip up, the overlay keeps 24 px for it");
+        const int minimumWithStrip = window.view()->minimumHeight();
+        if (bar) bar->trigger();
+        pump(200);
+        check(overlay && overlay->bottomInset() == 0, "with Bottom bar off, the overlay keeps nothing back");
+        check(window.view()->minimumHeight() == minimumWithStrip - 24,
+              QStringLiteral("and the viewport's minimum height counts the strip only while it is up (%1 vs %2)")
+                  .arg(window.view()->minimumHeight()).arg(minimumWithStrip));
+        if (bar) bar->trigger();
+        pump(200);
+    }
+
+    // --- a chip placed near the bottom stays above the strip (review I6) ------------------
+    {
+        QWidget chip(window.view());
+        chip.resize(120, 40);
+        const QPoint at = GestureChip::placeBeside(&chip, window.view(), QPoint(300, window.view()->height() - 2));
+        check(at.y() + chip.height() <= window.view()->height() - 24 - GestureChip::kEdgeInset + 1,
+              QStringLiteral("a gesture chip clamped to the bottom stands above the strip (bottom %1, strip at %2)")
+                  .arg(at.y() + chip.height()).arg(window.view()->height() - 24));
+        check(ViewportOverlay::usableHeight(window.view()) == window.view()->height() - 24,
+              "the viewport's usable height leaves the strip's band out");
+    }
+
+    // --- the page takes no keyboard focus (review I7) --------------------------------------
+    check(page->focusPolicy() == Qt::NoFocus &&
+              (!page->focusProxy() || page->focusProxy()->focusPolicy() == Qt::NoFocus),
+          "the chrome page and its render widget take no keyboard focus");
+
     // --- the page's words ----------------------------------------------------------------
     {
         QString text = jsString(page, "document.body.innerText");
         text.replace(QStringLiteral("Bench"), QStringLiteral(" "));
         check(bannedIn(text).isEmpty(), "no word the page shows is banned - found: " + bannedIn(text).join(", "));
     }
+
+    // --- a page that is not there reports through Qt (review I3) ---------------------
+    check(chrome->isLive(), "the page said it is listening");
+    {
+        // A page that never loads: the Qt toast and status bar carry the report.
+        qputenv("FURNIFY_WEB_URL", "file:///C:/furnifyme-no-such-pages");
+        MainWindow broken(nullptr, /*persistProgress=*/false, library.path());
+        broken.setAttribute(Qt::WA_ShowWithoutActivating);
+        broken.resize(1000, 700);
+        broken.useHtmlChrome();
+        broken.show();
+        broken.openFurniture(furnitureId);
+        qunsetenv("FURNIFY_WEB_URL");
+        waitFor([&] { return broken.htmlChrome() && broken.htmlChrome()->host()->loaded(); }, 10000);
+        pump(300);
+        check(broken.htmlChrome() && !broken.htmlChrome()->isLive(), "a page that never loaded is not live");
+        check(broken.statusBar()->isVisible(), "so the Qt status bar stays up");
+        TopoDS_Face f;
+        for (TopExp_Explorer e(broken.document().solids().front().shape, TopAbs_FACE); e.More(); e.Next()) {
+            f = TopoDS::Face(e.Current());
+            break;
+        }
+        broken.pullFaceBy(f, -100000.0);
+        ToastHost* toasts = broken.findChild<ToastHost*>();
+        check(toasts && toasts->isShowing(), "and a Failure is shown by the Qt toast, never nowhere");
+        broken.close();
+        pump(200);
+    }
+#ifdef _WIN32
+    {
+        // A render process that dies: the same fallback, from then on.
+        const qint64 pid = page->page()->renderProcessPid();
+        if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
+            TerminateProcess(h, 1);
+            CloseHandle(h);
+        }
+        waitFor([&] { return !chrome->isLive(); }, 5000);
+        check(!chrome->isLive(), "a page whose render process died is no longer live");
+        pump(200);
+        check(window.statusBar()->isVisible() && !page->isVisible(),
+              "the Qt status bar comes back and the dead page leaves the viewport");
+        TopoDS_Face live;
+        for (TopExp_Explorer e(window.document().solids().front().shape, TopAbs_FACE); e.More(); e.Next()) {
+            live = TopoDS::Face(e.Current());
+            break;
+        }
+        window.pullFaceBy(live, -100000.0);
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(toasts && toasts->isShowing(), "and the next Failure is shown by the Qt toast");
+    }
+#endif
 
     std::printf("\n%s (%d failures, %d checks)\n", gFailures ? "FAIL" : "PASS", gFailures, gChecks);
     std::fflush(stdout);

@@ -52,6 +52,8 @@
     };
     window.addEventListener('resize', resize);
     reportHitsOnChange(chrome);
+    // Last: every signal above is connected, so C++ may start talking here.
+    chrome.ready();
     return () => window.removeEventListener('resize', resize);
   });
 </script>
@@ -63,7 +65,7 @@
   {obstacles}
   {host}
   {pointer}
-  onundo={() => chrome.undo()}
+  onundo={(stamp) => chrome.undo(stamp)}
   ondismissed={() => (message = null)}
 />
 {#if status.shown}

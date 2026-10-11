@@ -579,11 +579,11 @@ void JointChip::placeKindMenu()
                             myView->width() - myKindMenu->width() - GestureChip::kEdgeInset));
     // Above the button when there is no room below it, rather than clamped over
     // the card it belongs to.
-    if (y + myKindMenu->height() > myView->height() - GestureChip::kEdgeInset)
+    if (y + myKindMenu->height() > ViewportOverlay::usableHeight(myView) - GestureChip::kEdgeInset)
         y = anchor.y() - myKindButton->height() - kMenuGapUnderButton - myKindMenu->height();
     y = std::clamp(y, GestureChip::kEdgeInset,
                    std::max(GestureChip::kEdgeInset,
-                            myView->height() - myKindMenu->height() - GestureChip::kEdgeInset));
+                            ViewportOverlay::usableHeight(myView) - myKindMenu->height() - GestureChip::kEdgeInset));
     const QPoint origin = myView->mapTo(myView->window(), QPoint(0, 0));
     const double dpr = devicePixelRatioF();
     myKindMenu->move(Theme::snapToDevicePixels(x, origin.x(), dpr),

@@ -304,7 +304,13 @@ the measured spike are in the report linked from the board (T-066). **Phase 2 ha
 shipped the library hub as a page**: `HubWindow` is the hub in a web build, and
 `furnifyme --qt-hub` brings back the Qt `SelectorWindow`, which stays in the tree -
 and under `gui_smoke` - until Phase 6 deletes it. `EditorSelectorHandoff::wire` is a
-template over the hub type, so both hubs share one wiring.
+template over the hub type, so both hubs share one wiring. **Phase 3a moved the
+editor's toasts and status bar onto a page too**: `MainWindow::useHtmlChrome()` (on in a
+web build unless `--qt-chrome` or the page is missing; `gui_smoke` never calls it, so
+the Qt path stays the one it gates) puts `EditorChrome` - one transparent page the
+viewport's size - over the 3D view. `MainWindow::onReported()` is still the one author:
+it sends Notes and Failures to the page under ToastHost's rules, keeps writing the
+hidden Qt status bar as the STATE, and mirrors it to the page's strip.
 
 - **Build:** `cmake --preset windows-web && cmake --build --preset windows-web`. It
   uses the INSTALLER Qt 6.11.1 in `C:/Qt/6.11.1/msvc2022_64` (WebEngine; vcpkg's Qt
@@ -333,12 +339,34 @@ template over the hub type, so both hubs share one wiring.
   window whose title strip is the page's stays movable before the page reports
   (`HubWindow::hitTest`'s default 32 px band), and `main.cpp` falls back to the Qt hub
   when the page file is missing.
+- **What a page over the viewport owes, learned on the chrome (its review's fix pass):**
+  - **It may be absent, so it must say it is listening.** The page calls `ready()` once
+    every signal is connected; `htmlChromeLive()` is the one term every HTML branch reads,
+    and until then - or for good once the render process dies or the load fails - reports
+    go to the Qt toast and the status bar comes back. A Failure sent to a page that is
+    not there is shown nowhere.
+  - **State that must arrive WITH a message rides as a signal argument**: QWebChannel
+    batches a property's NOTIFY on a timer while a plain signal goes at once.
+  - **A fade is a timer, and a new message cancels it** - every commit moves the document
+    before it reports, so the next toast always lands inside the last one's fade.
+  - **The Undo pill passes the stamp of the change it names** and C++ refuses any other
+    revision, so a double-click or a Ctrl+Z racing `documentMoved` cannot pop the
+    checkpoint before it; a fading toast drops `data-hit` and so leaves the mask.
+  - **The view and its focus proxy are `Qt::NoFocus`** - `use:chip` keeps DOM focus,
+    not Qt's, and a click on the page otherwise takes keys out of the field being typed
+    in.
+  - **The strip's band is the overlay's `bottomInset`, derived from whether it shows**,
+    added to the viewport's minimum height while it does, and every widget that places
+    itself near the bottom clamps to `ViewportOverlay::usableHeight()`, never `height()`.
+  - **The state line reaches the page from `showStateLine()`**, not only on
+    `appStateChanged` - a route that writes it without one would leave the strip stale.
 - **The vocabulary law covers pages:** `web/test/banned.ts` is `usesBannedWord()`
   ported rule for rule, swept over every string in a page's `copy.ts` and over its
   rendered text, user names exempt; `hub_smoke` sweeps the live hub too.
 - **Tests:** `hub_model_tests` (ctest, offscreen), `npm test` (vitest + jsdom, a mock
-  bridge), `hub_smoke.exe [out]` (the real app driven through in-page DOM events -
-  never OS input - and composited captures to look at).
+  bridge), `hub_smoke.exe [out]` and `chrome_smoke.exe [out]` (the real app driven
+  through in-page DOM events and Qt actions - never OS input - and composited captures
+  to look at).
 
 ## Architecture
 
@@ -362,6 +390,7 @@ Source files under `src/`, plus `tests/`:
 | `web/WebHost.{h,cpp}` | one HTML page in a `QWebEngineView`: profile, channel, qwebchannel.js, `pageUrl()`; `prepareApplication()` puts Qt Quick on OpenGL |
 | `web/ThemeBridge.{h,cpp}` | `Theme::Spec` as CSS custom properties, re-sent on every Theme change |
 | `web/HubWindow.{h,cpp}` | the HTML hub's frameless window: page + `HubModel` + window controls; `WindowChrome` hit-tests from rects the page reports |
+| `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast + status strip today; `ChromeBridge` is its channel object, the page's hit rects its mask |
 | `web/WebOverlay.{h,cpp}` | the Phase 0 spike's overlay over the viewport (`--web-spike`), on `WebHost` |
 | `web/` (repo root) | the pages: Svelte 5 + Vite, one self-contained file per page (`build.mjs`), vitest page tests in `web/test` |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |

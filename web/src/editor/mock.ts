@@ -22,7 +22,8 @@ export function mockChrome() {
     status: { left: '', right: '', name: '', unsaved: false, shown: true } as StatusState,
     statusChanged: new MockSignal(),
     reportHitRects: (rects) => calls.push({ method: 'reportHitRects', args: [rects] }),
-    undo: () => calls.push({ method: 'undo', args: [] }),
+    undo: (stamp) => calls.push({ method: 'undo', args: [stamp] }),
+    ready: () => calls.push({ method: 'ready', args: [] }),
   };
   return chrome;
 }

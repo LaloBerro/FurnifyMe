@@ -447,7 +447,7 @@ void SlatsTool::reposition()
     // A fixed spot, so it does not move while the camera does - which is also
     // why this no longer projects anything.
     const int x = (myView->width() - width()) / 2;
-    const int y = myView->height() - height() - kBottomMargin;
+    const int y = ViewportOverlay::usableHeight(myView) - height() - kBottomMargin;
     // Whole DEVICE pixels, in the window's own coordinates - the position
     // half of Theme's rule, the same snap ToastHost::reposition() ends with.
     const QPoint origin = myView->mapTo(myView->window(), QPoint(0, 0));

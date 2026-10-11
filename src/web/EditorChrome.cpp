@@ -6,6 +6,7 @@
 
 #include <QEvent>
 #include <QMouseEvent>
+#include <QWebEnginePage>
 #include <QWebEngineView>
 
 // --- the page's `chrome` object ---------------------------------------------
@@ -44,9 +45,14 @@ void ChromeBridge::reportHitRects(const QVariantList& rects)
     emit hitRectsChanged();
 }
 
-void ChromeBridge::undo()
+void ChromeBridge::undo(int stamp)
 {
-    emit undoRequested();
+    emit undoRequested(stamp);
+}
+
+void ChromeBridge::ready()
+{
+    emit pageReady();
 }
 
 // --- the chrome --------------------------------------------------------------
@@ -75,6 +81,17 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     applyMask();
     connect(myBridge, &ChromeBridge::hitRectsChanged, this, &EditorChrome::applyMask);
     connect(myBridge, &ChromeBridge::undoRequested, this, &EditorChrome::undoRequested);
+    connect(myBridge, &ChromeBridge::pageReady, this, [this] {
+        refuseFocus();
+        setLive(true);
+    });
+    connect(myHost, &WebHost::loadFinished, this, [this](bool ok) {
+        refuseFocus();
+        if (!ok) setLive(false);
+    });
+    connect(myHost->view()->page(), &QWebEnginePage::renderProcessTerminated, this,
+            [this] { setLive(false); });
+    refuseFocus();
 
     viewport->installEventFilter(this);
     myHost->view()->show();
@@ -123,6 +140,27 @@ void EditorChrome::setStatus(const QString& left, const QString& right, const QS
                             {QStringLiteral("name"), name},
                             {QStringLiteral("unsaved"), unsaved},
                             {QStringLiteral("shown"), shown}});
+}
+
+void EditorChrome::setLive(bool live)
+{
+    if (myLive == live) return;
+    myLive = live;
+    // A dead page leaves the viewport outright: its mask would otherwise
+    // keep swallowing presses on the strip's band over nothing at all.
+    if (!live) myHost->view()->hide();
+    emit liveChanged(live);
+}
+
+void EditorChrome::refuseFocus()
+{
+    // No chip takes keyboard focus (F17), and that has to hold at the Qt
+    // level too: a press on the pill or the strip moved focus out of the
+    // Re-measure field or the Items list into Chromium (review I7). The
+    // render widget behind the view is its focus proxy, created at load.
+    QWebEngineView* view = myHost->view();
+    view->setFocusPolicy(Qt::NoFocus);
+    if (QWidget* proxy = view->focusProxy()) proxy->setFocusPolicy(Qt::NoFocus);
 }
 
 void EditorChrome::applyMask()

@@ -56,13 +56,15 @@ signals:
     void obstaclesChanged();
     void statusChanged();
     // Observed on the C++ side
-    void undoRequested();
+    void undoRequested(int stamp);
     void hitRectsChanged();
+    void pageReady();
 
 public slots:
     // page -> C++
     void reportHitRects(const QVariantList& rects);
-    void undo();
+    void undo(int stamp);
+    void ready();
 
 private:
     bool myUndoEnabled = true;
@@ -91,14 +93,24 @@ public:
     QWebEngineView* view() const;
     QRegion hitRegion() const { return myHitRegion; }
 
+    // The page is LISTENING: it loaded, its script ran, and it said so
+    // (ChromeBridge::ready()). False until then, false for good once its
+    // render process dies or the load fails - and while false, MainWindow
+    // reports through the Qt toast and status bar instead (review I3: a
+    // Failure sent to a page that is not there is shown nowhere).
+    bool isLive() const { return myLive; }
+
 signals:
-    void undoRequested();
+    void undoRequested(int stamp);
+    void liveChanged(bool live);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void applyMask();
+    void setLive(bool live);
+    void refuseFocus();
 
     QPointer<OcctViewWidget> myViewport;
     WebHost* myHost = nullptr;
@@ -106,4 +118,5 @@ private:
     ThemeBridge* myTheme = nullptr;
     QRegion myHitRegion;
     QPoint myPointer{-1, -1};
+    bool myLive = false;
 };

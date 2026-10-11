@@ -33,5 +33,11 @@ export interface ChromeApi {
   statusChanged: Signal;
   // page -> C++
   reportHitRects(rects: Rect[]): void;
-  undo(): void;
+  // stamp: the change the toast names; C++ refuses it once the document has
+  // moved past that change.
+  undo(stamp: number): void;
+  // The page is listening: until this arrives - and again after its render
+  // process dies - C++ reports through the Qt toast and status bar, so no
+  // Failure can land on a page that is not there.
+  ready(): void;
 }

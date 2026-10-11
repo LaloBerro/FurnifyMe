@@ -4,6 +4,7 @@
 #include "KeyClaim.h"
 #include "../OcctViewWidget.h"
 #include "Theme.h"
+#include "ViewportOverlay.h"
 
 #include <QCheckBox>
 #include <QCoreApplication>
@@ -147,7 +148,7 @@ void BooleanTool::replace()
 {
     if (!myView || isHidden()) return;
     const int x = (myView->width() - width()) / 2;
-    const int y = myView->height() - height() - kBottomMargin;
+    const int y = ViewportOverlay::usableHeight(myView) - height() - kBottomMargin;
     const QPoint origin = myView->mapTo(myView->window(), QPoint(0, 0));
     const double dpr = myView->devicePixelRatioF();
     move(Theme::snapToDevicePixels(std::max(0, x), origin.x(), dpr),

@@ -77,6 +77,7 @@ void ViewportOverlay::setBottomInset(int px)
 {
     if (myBottomInset == px) return;
     myBottomInset = px;
+    if (myViewport) myViewport->setProperty("furnifyBottomInset", px);
     relayout();
 }
 
@@ -415,4 +416,9 @@ void ViewportOverlay::relayout()
     // themselves here, now that every anchored widget is at its final
     // rectangle. See the comment on this signal in the header.
     emit laidOut();
+}
+
+int ViewportOverlay::usableHeight(const QWidget* viewport)
+{
+    return viewport->height() - viewport->property("furnifyBottomInset").toInt();
 }

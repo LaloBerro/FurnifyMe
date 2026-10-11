@@ -446,9 +446,9 @@ void MitreTool::reposition()
 
     int x = extent.center().x() - width() / 2;
     int y = extent.bottom() + kDialGap;
-    if (y + height() > myView->height() - kEdgeInset) y = extent.top() - kDialGap - height();
+    if (y + height() > ViewportOverlay::usableHeight(myView) - kEdgeInset) y = extent.top() - kDialGap - height();
     x = std::clamp(x, kEdgeInset, std::max(kEdgeInset, myView->width() - width() - kEdgeInset));
-    y = std::clamp(y, kEdgeInset, std::max(kEdgeInset, myView->height() - height() - kEdgeInset));
+    y = std::clamp(y, kEdgeInset, std::max(kEdgeInset, ViewportOverlay::usableHeight(myView) - height() - kEdgeInset));
     const QPoint origin = myView->mapTo(myView->window(), QPoint(0, 0));
     const double dpr = devicePixelRatioF();
     move(Theme::snapToDevicePixels(x, origin.x(), dpr),

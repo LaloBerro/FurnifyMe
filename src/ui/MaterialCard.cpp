@@ -1,6 +1,7 @@
 #include "MaterialCard.h"
 
 #include "Theme.h"
+#include "ViewportOverlay.h"
 
 #include <QColorDialog>
 #include <QCoreApplication>
@@ -300,7 +301,7 @@ void MaterialCard::replace()
     const double dpr = devicePixelRatioF();
     const int x = Theme::snapToDevicePixels(kEdgeMargin, origin.x(), dpr);
     const int y = Theme::snapToDevicePixels(
-        std::max(0, parentWidget()->height() - this->height() - kEdgeMargin), origin.y(), dpr);
+        std::max(0, ViewportOverlay::usableHeight(parentWidget()) - this->height() - kEdgeMargin), origin.y(), dpr);
     move(x, y);
     layoutCard();
     if (!isHidden()) raise();

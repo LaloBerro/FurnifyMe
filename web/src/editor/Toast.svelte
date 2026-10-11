@@ -35,7 +35,7 @@
     obstacles: Rect[];
     host: { w: number; h: number };
     pointer: { x: number; y: number } | null;
-    onundo: () => void;
+    onundo: (stamp: number) => void;
     ondismissed: () => void;
   } = $props();
 
@@ -50,6 +50,15 @@
   let width = $state(0);
   let height = $state(0);
   let timer = 0;
+  // The fade's own timer: a message arriving mid-fade cancels it, or the
+  // fade that was ending the OLD toast would sweep the new one away (review
+  // C1 - Qt's fadeTo() stops a running fade the same way).
+  let fadeTimer = 0;
+  // Undo is taken once per message: a second click inside the fade, or one
+  // landing before documentMoved has arrived, would otherwise pop the
+  // checkpoint BEFORE the one this toast names (review I1 - Toast.cpp's
+  // myDismissing). C++ also refuses a stamp the document has moved past.
+  let undoTaken = $state(false);
   let deadline = 0;
   let remaining = 0;
   let paused = false;
@@ -82,7 +91,8 @@
     if (!shown || leaving) return;
     clearTimeout(timer);
     leaving = true;
-    window.setTimeout(() => {
+    fadeTimer = window.setTimeout(() => {
+      fadeTimer = 0;
       shown = null;
       leaving = false;
       paused = false;
@@ -95,12 +105,18 @@
     if (!m || m.id === lastId) return;
     lastId = m.id;
     const wasShown = shown !== null && !leaving;
+    clearTimeout(fadeTimer);
+    fadeTimer = 0;
     shown = m;
     leaving = false;
     paused = false;
+    undoTaken = false;
     arriving = !wasShown;
     if (arriving) window.setTimeout(() => (arriving = false), 0);
     arm(m.kind === 'failure' ? kFailureMs : kNoteMs);
+    // A replacement under a pointer that is ALREADY resting on the card is
+    // being read too (review I2 - ToastHost::show() ends in syncHoverPause()).
+    if (over) pause();
     // A message landing under a pointer that already rests there is being
     // read from its first frame - decided once it is laid out, against the
     // box it actually landed in.
@@ -122,8 +138,12 @@
     resume();
   }
 
+  const undoOpen = $derived(undoEnabled && !leaving && !undoTaken);
+
   function undo() {
-    if (undoEnabled) onundo();
+    if (!undoOpen || !shown) return;
+    undoTaken = true;
+    onundo(shown.stamp);
   }
 </script>
 
@@ -134,7 +154,7 @@
       class:failure={shown.kind === 'failure'}
       class:arriving
       class:leaving
-      data-hit
+      data-hit={leaving ? undefined : ''}
       role="status"
       aria-label={shown.text}
       aria-describedby="toast-kind"
@@ -155,7 +175,7 @@
       <span id="toast-kind" class="hidden">{shown.kind === 'failure' ? copy.failure : copy.note}</span>
       <span class="text">{shown.text}</span>
       {#if shown.offersUndo}
-        <button use:chip class="undo" aria-disabled={!undoEnabled} onclick={undo}>{copy.undo}</button>
+        <button use:chip class="undo" aria-disabled={!undoOpen} onclick={undo}>{copy.undo}</button>
       {/if}
     </div>
   {/if}

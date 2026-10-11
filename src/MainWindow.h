@@ -2346,6 +2346,17 @@ private:
     ToastHost* myToasts = nullptr;
     EditorChrome* myHtmlChrome = nullptr;   // see useHtmlChrome()
     void syncHtmlChrome();
+    // The page is up AND listening - the one term every HTML-chrome branch
+    // reads, so a page that never loaded or whose render process died hands
+    // its job straight back to the Qt toast and status bar (review I3).
+    bool htmlChromeLive() const;
+    // The strip's band, kept back from the overlay and added to the
+    // viewport's minimum height while - and only while - the strip shows
+    // (review I5).
+    void syncHtmlChromeInset();
+    static constexpr int kHtmlStripHeight = 24;
+    // The viewport's minimum height without the strip; see buildOverlay().
+    int myViewMinimumHeight = 0;
     ExtrudePreview* myExtrudePreview = nullptr;
     PullArrow* myPullArrow = nullptr;
     BevelArrow* myBevelArrow = nullptr;

@@ -12,6 +12,7 @@
 // width policy - because flattening those would change pixels the suite
 // pins, not remove duplication.
 #include "Theme.h"
+#include "ViewportOverlay.h"
 
 #include <QPainter>
 #include <QPainterPath>
@@ -50,7 +51,7 @@ inline QPoint placeBeside(const QWidget* chip, const QWidget* viewport, const QP
                    std::max(kEdgeInset, viewport->width() - chip->width() - kEdgeInset));
     int y = at.y() - chip->height() / 2;
     y = std::clamp(y, kEdgeInset,
-                   std::max(kEdgeInset, viewport->height() - chip->height() - kEdgeInset));
+                   std::max(kEdgeInset, ViewportOverlay::usableHeight(viewport) - chip->height() - kEdgeInset));
     const QPoint origin = viewport->mapTo(viewport->window(), QPoint(0, 0));
     const double dpr = chip->devicePixelRatioF();
     return QPoint(Theme::snapToDevicePixels(x, origin.x(), dpr),

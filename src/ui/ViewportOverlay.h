@@ -120,6 +120,12 @@ public:
     // bottom-anchored card and the stretched rail end above it. 0 by default.
     void setBottomInset(int px);
     int bottomInset() const { return myBottomInset; }
+    // The viewport's height less that band: what every widget that places
+    // ITSELF near the bottom edge (the gesture chips, the joint chip's
+    // kind menu, the slats and boolean chips, the material card) clamps
+    // against (review I6). Read off the viewport, so a caller needs no
+    // pointer to the overlay.
+    static int usableHeight(const QWidget* viewport);
 
 signals:
     // Emitted once relayout() has moved and raise()d every anchored entry.
