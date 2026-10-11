@@ -27,6 +27,7 @@
 #include <vector>
 
 class QAction;
+class QColorDialog;
 class QWidget;
 
 namespace SettingsEdits {
@@ -97,6 +98,15 @@ QString familyDisplayName(const QString& family);
 // (shown name, real family): the bundled family first, then every installed
 // one, each shown name once.
 QVector<QPair<QString, QString>> fontFamilies();
+// THE colour picker, for a token, over `parent`: Qt's QColorDialog, MODELESS
+// (show(), never open() - open() forces window modality, and nothing in this
+// app blocks), live on every move inside it, Cancel putting back the colour
+// it opened on. One picker at a time across both drawers: a second call
+// closes the first. Returns the picker.
+QColorDialog* openColourPicker(const QString& id, QWidget* parent);
+// The picker that is open now, or null.
+QColorDialog* activeColourPicker();
+
 // Back to Theme::defaultSpec() - every colour, the text size and font, the
 // line widths, Grid detail and Gizmo size.
 void reset();

@@ -218,6 +218,8 @@ if(FURNIFYME_BUILD_APP)
       src/ui/AppearancePanel.cpp
       src/ui/SettingsEdits.cpp
       src/ui/HtmlCardSlot.cpp
+      src/web/SettingsBridge.cpp
+      src/web/SettingsBridge.h
       src/ui/AxisGizmo.cpp
       src/ui/CardSlide.cpp
       src/ui/DimensionRenderer.cpp

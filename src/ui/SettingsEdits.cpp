@@ -1,6 +1,8 @@
 #include "SettingsEdits.h"
 
+#include <QColorDialog>
 #include <QCoreApplication>
+#include <QPointer>
 #include <QFile>
 #include <QFontDatabase>
 #include <QHash>
@@ -26,6 +28,12 @@ QString tr(const char* text)
 // than a trusting readAll(): Load colours takes a path from a file dialog,
 // which is to say from anywhere, and a serialised spec is a few hundred bytes.
 constexpr qint64 kMaxColourFileBytes = 64 * 1024;
+
+QPointer<QColorDialog>& pickerSlot()
+{
+    static QPointer<QColorDialog> slot;
+    return slot;
+}
 
 double Theme::Spec::*memberFor(const QString& id)
 {
@@ -219,6 +227,37 @@ QVector<QPair<QString, QString>> fontFamilies()
         out.push_back({shown, family});
     }
     return out;
+}
+
+QColorDialog* activeColourPicker()
+{
+    return pickerSlot().data();
+}
+
+QColorDialog* openColourPicker(const QString& id, QWidget* parent)
+{
+    QColor current;
+    for (const Theme::ColourToken& token : Theme::colourTokens())
+        if (token.id == id) current = Theme::spec().*(token.member);
+    if (!current.isValid()) return nullptr;
+
+    // One picker at a time - a pile of pickers is a dialog with extra steps.
+    if (QColorDialog* open = pickerSlot().data()) open->close();
+
+    auto* dialog = new QColorDialog(current, parent);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QCoreApplication::translate("AppearancePanel", "%1 colour").arg(tokenName(id)));
+    // GENUINELY modeless: show(), never open(), which forces Qt::WindowModal
+    // on the way past and would lock the viewport while a colour is chosen -
+    // and the live preview exists so the user can look at their model.
+    dialog->setModal(false);
+    QObject::connect(dialog, &QColorDialog::currentColorChanged, dialog,
+                     [id](const QColor& colour) { setTokenColour(id, colour); });
+    // Cancel puts back what was there when the picker opened.
+    QObject::connect(dialog, &QColorDialog::rejected, dialog, [id, current] { setTokenColour(id, current); });
+    pickerSlot() = dialog;
+    dialog->show();
+    return dialog;
 }
 
 void reset()

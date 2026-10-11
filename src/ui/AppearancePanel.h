@@ -337,7 +337,7 @@ public:
     // suite can assert it is modeless and close it - a dialog left open would
     // trip the "no QDialog after an outcome" checks elsewhere in the suite,
     // and that check has to stay meaningful.
-    QColorDialog* activeColourDialog() const { return myDialog; }
+    QColorDialog* activeColourDialog() const { return SettingsEdits::activeColourPicker(); }
 
 signals:
     // A colour file that could not be written, and one that was not a colour
@@ -450,7 +450,6 @@ private:
     void fitResetWidth();
     class QPushButton* mySave = nullptr;
     class QPushButton* myLoad = nullptr;
-    QColorDialog* myDialog = nullptr;
     // The family the combo's popup opened over, so Escape can put it back.
     // Empty when no popup preview is in flight - which is also the flag, so
     // there is no second boolean to keep in step with it.

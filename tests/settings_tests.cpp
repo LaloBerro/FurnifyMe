@@ -8,9 +8,13 @@
 
 #include "HtmlCardSlot.h"
 #include "SettingsEdits.h"
+#include "session/ActionRegistry.h"
+#include "web/SettingsBridge.h"
 #include "ViewportOverlay.h"
 #include "Theme.h"
 
+#include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QFile>
 #include <QTemporaryDir>
@@ -117,6 +121,75 @@ int main(int argc, char* argv[])
         check(slot.testAttribute(Qt::WA_TransparentForMouseEvents), "and takes no click itself");
         check(slot.objectName() == QStringLiteral("htmlCardSlot_settings"), "a slot is found by its card's name");
         check(!overlay.replaceWidget(&card, &slot), "a widget that is not an entry is refused");
+    }
+
+    // --- the page's settings object ---------------------------------------------
+    {
+        ActionRegistry registry;
+        QObject owner;
+        auto* grid = new QAction(QStringLiteral("Show the &grid"), &owner);
+        grid->setCheckable(true);
+        auto* mm = new QAction(QStringLiteral("Millimetres"), &owner);
+        auto* cm = new QAction(QStringLiteral("Centimetres"), &owner);
+        for (QAction* unit : {mm, cm}) unit->setCheckable(true);
+        auto* units = new QActionGroup(&owner);
+        units->addAction(mm);
+        units->addAction(cm);
+        mm->setChecked(true);
+        int cmTriggered = 0;
+        QObject::connect(cm, &QAction::triggered, [&] { ++cmTriggered; });
+        // An action the registry knows and no row names: the page must not
+        // reach it.
+        auto* deleteSelected = new QAction(QStringLiteral("Delete Selected"), &owner);
+        int deletes = 0;
+        QObject::connect(deleteSelected, &QAction::triggered, [&] { ++deletes; });
+        registry.adoptChildren(&owner);
+        using Row = SettingsEdits::Row;
+        std::vector<Row> rows;
+        rows.push_back(Row{Row::Kind::Toggle, SettingsEdits::Tab::Viewport, QStringLiteral("Show the grid"),
+                           {grid}, {}, false, {}});
+        rows.push_back(Row{Row::Kind::Number, SettingsEdits::Tab::Viewport, QStringLiteral("Gizmo size"), {}, {},
+                           false, QStringLiteral("gizmoScale")});
+        rows.push_back(Row{Row::Kind::Choice, SettingsEdits::Tab::UnitsSaving, QStringLiteral("Sizes in"),
+                           {mm, cm}, {QStringLiteral("Millimetres"), QStringLiteral("Centimetres")}, false, {}});
+        SettingsBridge bridge(&registry, rows);
+
+        const QVariantList layoutRows = bridge.layout().value(QStringLiteral("rows")).toList();
+        check(layoutRows.size() == 3 &&
+                  layoutRows[2].toMap().value(QStringLiteral("actions")).toStringList() ==
+                      QStringList({QStringLiteral("millimetres"), QStringLiteral("centimetres")}),
+              "the layout names each row's actions by id");
+        check(layoutRows[1].toMap().value(QStringLiteral("kind")).toString() == QStringLiteral("number") &&
+                  layoutRows[1].toMap().value(QStringLiteral("number")).toString() == QStringLiteral("gizmoScale"),
+              "a number row names its field");
+        check(bridge.layout().value(QStringLiteral("tokens")).toList().size() ==
+                  Theme::colourTokens().size() - 2,
+              "every token but the two retired ones has a row");
+        check(bridge.layout().value(QStringLiteral("numbers")).toList().size() == SettingsEdits::numberFields().size(),
+              "every number field is described");
+        check(bridge.spec().value(QStringLiteral("colours")).toMap().value(QStringLiteral("accent")).toString() ==
+                  Theme::spec().accent.name(),
+              "the spec carries the live colours");
+        check(bridge.actions().size() == 3, "the watched actions are the rows' own");
+        bridge.setNumber(QStringLiteral("gizmoScale"), 1.5);
+        check(Theme::spec().gizmoScale == 1.5, "a number from the page lands through SettingsEdits");
+        check(bridge.trigger(QStringLiteral("centimetres")) && cmTriggered == 1,
+              "a trigger from the page runs the action");
+        grid->setEnabled(false);
+        check(!bridge.trigger(QStringLiteral("show-the-grid")), "a disabled action refuses the page's trigger");
+        check(!bridge.trigger(QStringLiteral("delete-selected")) && deletes == 0,
+              "an action no row names is not the page's to trigger");
+        bridge.allowAction(QStringLiteral("delete-selected"));
+        check(bridge.trigger(QStringLiteral("delete-selected")) && deletes == 1, "unless it is allowed by name");
+        int specs = 0;
+        QObject::connect(&bridge, &SettingsBridge::specChanged, [&] { ++specs; });
+        SettingsEdits::setTokenColour(QStringLiteral("accent"), QColor(1, 2, 3));
+        check(specs == 1, "an edit made anywhere else reaches the page");
+        int actionChanges = 0;
+        QObject::connect(&bridge, &SettingsBridge::actionsChanged, [&] { ++actionChanges; });
+        grid->setChecked(true);
+        QCoreApplication::processEvents();
+        check(actionChanges == 1, "and so does an action's change");
     }
 
     std::printf("\n%s (%d failures, %d checks)\n", gFailures ? "FAIL" : "PASS", gFailures, gChecks);

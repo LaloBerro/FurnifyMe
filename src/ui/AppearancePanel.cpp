@@ -1244,49 +1244,8 @@ bool AppearancePanel::eventFilter(QObject* watched, QEvent* event)
 
 void AppearancePanel::openColourDialog(const QString& id)
 {
-    QColor current;
-    for (const Row& row : myRows) {
-        if (row.id == id && row.swatch) current = row.swatch->colour();
-    }
-
-    // One picker at a time. A second swatch clicked while one is open
-    // replaces it rather than stacking - the same rule ToastHost applies to
-    // messages, and for the same reason: a pile of pickers is a dialog with
-    // extra steps.
-    if (myDialog) {
-        myDialog->close();
-        myDialog = nullptr;
-    }
-
-    auto* dialog = new QColorDialog(current, this);
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(tr("%1 colour").arg(nameForToken(id)));
-    // GENUINELY modeless, and it is show() rather than open() that makes it
-    // so. Both return immediately - neither spins exec()'s nested event loop -
-    // but QDialog::open() FORCES Qt::WindowModal on the way past, which locks
-    // the rail, the viewport and the toast's Undo pill for as long as a
-    // colour is being chosen. That is a dialog blocking the user to ask a
-    // question, which is the thing this app does not do; and it is
-    // self-defeating besides, since the live preview exists precisely so the
-    // user can look at their model while they choose. setModal(false) alone
-    // does not survive open(), which is why this is a different call and not
-    // an extra line.
-    dialog->setModal(false);
-
-    // Live on every move inside the picker, not only on OK: this is the one
-    // place in the app where a user judges a value by what it looks like.
-    connect(dialog, &QColorDialog::currentColorChanged, this,
-            [this, id](const QColor& colour) { setTokenColour(id, colour); });
-    // Cancel puts back what was there when the picker opened. Without this a
-    // cancelled pick would keep whichever colour the cursor last passed over.
-    connect(dialog, &QColorDialog::rejected, this,
-            [this, id, current] { setTokenColour(id, current); });
-    connect(dialog, &QObject::destroyed, this, [this, dialog] {
-        if (myDialog == dialog) myDialog = nullptr;
-    });
-
-    myDialog = dialog;
-    dialog->show();
+    // SettingsEdits owns the picker (Phase 3b) - one picker for both drawers.
+    SettingsEdits::openColourPicker(id, this);
 }
 
 QWidget* AppearancePanel::swatchFor(const QString& id) const
