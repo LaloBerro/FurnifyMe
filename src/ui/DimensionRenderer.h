@@ -43,6 +43,7 @@ public:
     struct Style {
         QColor (*lineColour)() = nullptr;   // null: Theme::accent()
         bool boxedLabel = false;            // border in lineColour, centred on the line
+        QString caption;                    // a theme's KPI caption ("Width") - themes part 2
     };
     void setStyle(const Style& style) { myStyle = style; }
 

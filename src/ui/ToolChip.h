@@ -113,6 +113,14 @@ private:
     // colours. The QIcon this widget holds is the cache; this is the source
     // it was built from. Meaningless while myUsesTextGlyph is true.
     IconSet::Glyph myGlyph = IconSet::Glyph::Items;
+    // The glyph a themed shell draws instead (themes part 2), when it differs.
+    IconSet::Glyph myThemedGlyph = IconSet::Glyph::Items;
+    bool myHasThemedGlyph = false;
+public:
+    // A glyph to wear while the theme has a shell - the Items drawer's header
+    // is a "+" in every mockup and a folder in Graphite.
+    void setThemedGlyph(IconSet::Glyph glyph);
+private:
     // The text-glyph variant's own state - see the constructor's comment.
     bool myUsesTextGlyph = false;
     QString myTextGlyph;

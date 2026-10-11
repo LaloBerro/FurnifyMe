@@ -21,15 +21,15 @@
     "gridMajor": "#2B2542",
     "body": "#B3B3B3",
     "highlightHover": "#5EE4F0",
-    "highlightSelected": "#FFA500",
-    "sizesOneBody": "#9AB4FF",
+    "highlightSelected": "#CFB1FF",
+    "sizesOneBody": "#7FAEFF",
     "dimensionLine": "#8A4DFF",
     "axisX": "#6A2B2B",
     "gizmoAxisX": "#E0564A",
     "axisY": "#3F5E2D",
     "gizmoAxisY": "#7FC84E",
     "gizmoAxisZ": "#4A80E0",
-    "sizesGroup": "#E8A6FF"
+    "sizesGroup": "#F4C783"
   },
   "page": {},
   "shell": {
@@ -121,6 +121,36 @@
       "badgeRadius": 0,
       "badgeInk": "#C9B1FF",
       "badgeWeight": 600
+    },
+    "gizmo": {
+      "style": "balls",
+      "width": 100,
+      "height": 98,
+      "arm": 24,
+      "ball": 7,
+      "letterInk": "#FFFFFF",
+      "negative": "dot",
+      "labelWeight": 600
+    },
+    "label": {
+      "radius": 7,
+      "fill": "rgba(13,10,22,.86)",
+      "edgeWidth": 1.5,
+      "bold": true,
+      "height": 22,
+      "textPx": 12,
+      "padX": 8,
+      "fontFile": "PlusJakartaSans.ttf"
+    },
+    "menu": {
+      "weight": 500,
+      "textPx": 13,
+      "ink": "#DCD6EA",
+      "hover": "rgba(255,255,255,.07)",
+      "itemRadius": 8,
+      "itemPadX": 9,
+      "wordmarkPx": 13,
+      "wordmarkWeight": 800
     }
   }
 }

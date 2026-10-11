@@ -77,6 +77,41 @@
       "badgeEdge": "#9466FF",
       "badgeInk": "#B79BFF",
       "badgeWeight": 500
+    },
+    "gizmo": {
+      "style": "boxes",
+      "width": 120,
+      "height": 132,
+      "arm": 30,
+      "ball": 7.5,
+      "negative": "square",
+      "labelUpper": true,
+      "labelRule": true,
+      "labelWeight": 500
+    },
+    "label": {
+      "radius": 0,
+      "fill": "#030305",
+      "edgeWidth": 1,
+      "bold": false,
+      "height": 64,
+      "textPx": 13,
+      "padX": 12,
+      "kpi": true,
+      "kpiTextPx": 32,
+      "captionPx": 11,
+      "fontFile": "InterTight.ttf",
+      "captionFontFile": "IBMPlexMono-Medium.ttf"
+    },
+    "menu": {
+      "weight": 500,
+      "textPx": 14,
+      "ink": "#CFCDDA",
+      "hover": "#14131C",
+      "itemRadius": 0,
+      "itemPadX": 8,
+      "wordmarkPx": 15,
+      "wordmarkWeight": 600
     }
   }
 }

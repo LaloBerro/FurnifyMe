@@ -80,7 +80,15 @@ void SelectionSizesRenderer::applyStyle()
     DimensionRenderer::Style style;
     style.lineColour = myKind == Kind::Group ? &Theme::sizesGroup : &Theme::sizesOneBody;
     style.boxedLabel = true;
-    for (DimensionRenderer& d : myDims) d.setStyle(style);
+    // Width, depth, height - MeasuredBox's axis order (see the header); a
+    // theme's KPI label says which (themes part 2).
+    const QString captions[3] = {QObject::tr("Width"), QObject::tr("Depth"), QObject::tr("Height")};
+    int axis = 0;
+    for (DimensionRenderer& d : myDims) {
+        style.caption = axis < 3 ? captions[axis] : QString();
+        d.setStyle(style);
+        ++axis;
+    }
 }
 
 std::array<std::string, 3> SelectionSizesRenderer::labelTexts() const

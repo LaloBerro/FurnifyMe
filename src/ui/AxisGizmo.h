@@ -42,6 +42,9 @@
 #include <QWidget>
 
 class OcctViewWidget;
+namespace Themes {
+struct Gizmo;
+}
 
 // THE CARD'S OWN DRAWING, as numbers - and the reason they live in a header
 // rather than in AxisGizmo.cpp's anonymous namespace where they started.
@@ -167,7 +170,9 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void leaveEvent(QEvent* event) override;
-    QSize sizeHint() const override { return QSize(120, kHeight); }
+    QSize sizeHint() const override;
+    // A theme's projection label - "Persp" or "Ortho" (themes part 2).
+    QString projectionWord() const;
 
 private:
     // The whole widget now: the projected axes and nothing under them.
@@ -182,6 +187,8 @@ private:
 
     // The six tips for the current camera pose, unsorted.
     void computeTips(Tip tips[6]) const;
+    // A theme's own card - balls or boxes and the projection label (themes part 2).
+    void paintThemed(class QPainter& painter, const Themes::Gizmo& g, Tip* const* order, const QPointF& centre);
     void snapToAxis(int axis, bool positive);
     // The two appearance values this card cannot re-derive inside
     // paintEvent(): its per-widget font-size stylesheet, and its FIXED size -

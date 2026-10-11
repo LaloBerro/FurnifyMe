@@ -111,11 +111,64 @@ struct List {
     int badgeWeight = 400;
 };
 
+// The axis card as the mockup draws it: coloured balls with their letters
+// (the glass themes) or boxed letters (Ultraviolet), and the projection's
+// name under them.
+struct Gizmo {
+    bool on = false;
+    bool boxes = false;      // Ultraviolet's boxed letters
+    QSize size{120, 118};
+    double arm = 30.0;       // hub to a positive tip
+    double ball = 8.5;       // a positive ball's radius, or half a box's side
+    QColor letterInk;        // invalid: the text colour
+    QString negative = QStringLiteral("ring");   // ring | dot | square
+    bool label = true;
+    bool labelUpper = false;
+    bool labelRule = false;  // a hairline above the label (Ultraviolet)
+    int labelWeight = 600;
+};
+
+// The boxed numbers on the selection's dimension lines, as the mockup draws
+// them: a pill or a rounded box with a thicker rim (the glass themes), or
+// Ultraviolet's KPI - a caption over a large numeral with a small unit.
+struct Label {
+    bool on = false;
+    double radius = 0.0;     // half the height makes a pill
+    QColor fill;
+    double edgeWidth = 2.0;
+    bool bold = true;
+    double heightPx = 24.0;
+    double textPx = 13.0;
+    double padX = 9.0;
+    QString fontFile;        // a bundled face in :/fonts; empty keeps DM Sans
+    bool kpi = false;
+    double kpiTextPx = 32.0;
+    double captionPx = 11.0;
+    QString captionFontFile;
+};
+
+// The menu pill's words as the mockup sets them: the titles' weight, size and
+// ink, their hover shape, and the wordmark beside the mark.
+struct Menu {
+    bool on = false;
+    int weight = 400;
+    double textPx = 13.0;
+    QColor ink;
+    QColor hover;
+    int itemRadius = 6;
+    int itemPadX = 9;
+    double wordmarkPx = 14.0;
+    int wordmarkWeight = 700;
+};
+
 struct Shell {
     Backdrop backdrop;
     Card card;
     Chip chip;
     List list;
+    Gizmo gizmo;
+    Label label;
+    Menu menu;
 };
 
 // Parses a theme's "shell" object; an empty object gives every part off.

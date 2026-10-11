@@ -1,4 +1,8 @@
 #include "DimensionRenderer.h"
+#include "Themes.h"
+#include <QHash>
+#include <QGuiApplication>
+#include <vector>
 
 #include "Measure.h"
 #include "Theme.h"
@@ -48,6 +52,30 @@ Quantity_Color toOcct(const QColor& c)
 // face if the resource or the registration is ever unavailable - never
 // silently back to whatever OCCT's own default happens to be, which is a
 // serif face.
+// A bundled face (":/fonts/<file>") registered with OCCT once, by its file
+// name - a theme's labels are drawn in its own typeface (themes part 2).
+// Empty when the face cannot be registered: the caller keeps DM Sans.
+std::string resolveBundledFont(const QString& file)
+{
+    static QHash<QString, std::string> known;
+    if (known.contains(file)) return known.value(file);
+    std::string name;
+    QFile resource(QStringLiteral(":/fonts/") + file);
+    if (resource.exists() && resource.open(QIODevice::ReadOnly)) {
+        const QByteArray bytes = resource.readAll();
+        const QString diskPath = QDir::tempPath() + QStringLiteral("/FurnifyMe-") + file;
+        if (!QFileInfo::exists(diskPath) || QFileInfo(diskPath).size() != bytes.size()) {
+            QFile disk(diskPath);
+            if (disk.open(QIODevice::WriteOnly)) disk.write(bytes);
+        }
+        const Handle(Font_FontMgr) mgr = Font_FontMgr::GetInstance();
+        const Handle(Font_SystemFont) sysFont = mgr->CheckFont(diskPath.toUtf8().constData());
+        if (!sysFont.IsNull() && mgr->RegisterFont(sysFont, Standard_True)) name = sysFont->FontName().ToCString();
+    }
+    known.insert(file, name);
+    return name;
+}
+
 const std::string& resolveFontFamily()
 {
     static const std::string family = [] {
@@ -121,6 +149,20 @@ public:
 // test (see OcctViewWidget's sizes layer), so display order IS paint order.
 class BoxedLabel : public AIS_InteractiveObject {
 public:
+    // A theme's shape (themes part 2): corner radius, rim width, bold text,
+    // and Ultraviolet's KPI layout - a caption over a large numeral.
+    double radiusPx = 0.0;
+    double edgeWidth = 2.0;
+    bool bold = false;
+    bool kpi = false;
+    std::string caption;
+    std::string captionFont;
+    float captionHeight = 11.0f;
+    std::string number;
+    std::string unit;
+    float numberHeight = 32.0f;
+    double padX = 12.0;
+    double scale = 1.0;   // device pixels per CSS pixel, for the KPI's own offsets
     std::string text;
     double halfWidthPx = 30.0;
     double halfHeightPx = 11.0;
@@ -135,6 +177,22 @@ public:
                  const Standard_Integer) override
     {
         const double hw = halfWidthPx, hh = halfHeightPx;
+        // The outline: a rectangle, or its corners rounded (8 steps each) - a
+        // convex shape, so the fill is a fan from the centre.
+        std::vector<gp_Pnt> outline;
+        const double r = std::min(radiusPx, std::min(hw, hh));
+        if (r > 0.5) {
+            const double cx[4] = {hw - r, -hw + r, -hw + r, hw - r};
+            const double cy[4] = {hh - r, hh - r, -hh + r, -hh + r};
+            for (int corner = 0; corner < 4; ++corner) {
+                for (int step = 0; step <= 8; ++step) {
+                    const double a = (corner * 90.0 + step * 90.0 / 8.0) * 3.14159265358979323846 / 180.0;
+                    outline.emplace_back(cx[corner] + r * std::cos(a), cy[corner] + r * std::sin(a), 0.0);
+                }
+            }
+        } else {
+            outline = {gp_Pnt(hw, hh, 0.0), gp_Pnt(-hw, hh, 0.0), gp_Pnt(-hw, -hh, 0.0), gp_Pnt(hw, -hh, 0.0)};
+        }
 
         Handle(Graphic3d_Group) fillGroup = presentation->NewGroup();
         Handle(Graphic3d_AspectFillArea3d) fillAspect = new Graphic3d_AspectFillArea3d();
@@ -146,38 +204,53 @@ public:
         fillAspect->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_DoubleSided);
         fillAspect->SetEdgeOff();
         fillGroup->SetGroupPrimitivesAspect(fillAspect);
-        Handle(Graphic3d_ArrayOfTriangles) quad = new Graphic3d_ArrayOfTriangles(4, 6);
-        quad->AddVertex(gp_Pnt(-hw, -hh, 0.0));
-        quad->AddVertex(gp_Pnt(hw, -hh, 0.0));
-        quad->AddVertex(gp_Pnt(hw, hh, 0.0));
-        quad->AddVertex(gp_Pnt(-hw, hh, 0.0));
-        quad->AddEdges(1, 2, 3);
-        quad->AddEdges(1, 3, 4);
-        fillGroup->AddPrimitiveArray(quad);
+        const int n = int(outline.size());
+        Handle(Graphic3d_ArrayOfTriangles) fan = new Graphic3d_ArrayOfTriangles(n + 1, 3 * n);
+        fan->AddVertex(gp_Pnt(0.0, 0.0, 0.0));
+        for (const gp_Pnt& p : outline) fan->AddVertex(p);
+        for (int i = 0; i < n; ++i) fan->AddEdges(1, 2 + i, 2 + (i + 1) % n);
+        fillGroup->AddPrimitiveArray(fan);
 
         Handle(Graphic3d_Group) borderGroup = presentation->NewGroup();
         borderGroup->SetGroupPrimitivesAspect(
-            new Graphic3d_AspectLine3d(border, Aspect_TOL_SOLID, 2.0));
-        Handle(Graphic3d_ArrayOfSegments) rim = new Graphic3d_ArrayOfSegments(8);
-        const gp_Pnt c[4] = {gp_Pnt(-hw, -hh, 0.0), gp_Pnt(hw, -hh, 0.0), gp_Pnt(hw, hh, 0.0),
-                             gp_Pnt(-hw, hh, 0.0)};
-        for (int i = 0; i < 4; ++i) {
-            rim->AddVertex(c[i]);
-            rim->AddVertex(c[(i + 1) % 4]);
+            new Graphic3d_AspectLine3d(border, Aspect_TOL_SOLID, edgeWidth));
+        Handle(Graphic3d_ArrayOfSegments) rim = new Graphic3d_ArrayOfSegments(2 * n);
+        for (int i = 0; i < n; ++i) {
+            rim->AddVertex(outline[size_t(i)]);
+            rim->AddVertex(outline[size_t((i + 1) % n)]);
         }
         borderGroup->AddPrimitiveArray(rim);
 
-        Handle(Graphic3d_Group) textGroup = presentation->NewGroup();
-        Handle(Graphic3d_AspectText3d) textAspect =
-            new Graphic3d_AspectText3d(ink, font.c_str(), 1.0, 0.0);
-        textGroup->SetGroupPrimitivesAspect(textAspect);
-        Handle(Graphic3d_Text) label = new Graphic3d_Text(textHeight);
-        label->SetText(text.c_str());
-        label->SetPosition(gp_Pnt(0.0, 0.0, 0.0));
-        label->SetHorizontalAlignment(Graphic3d_HTA_CENTER);
-        label->SetVerticalAlignment(Graphic3d_VTA_CENTER);
-        textGroup->AddText(label, false);
+        auto addText = [&](const std::string& s, const std::string& face, float height, const gp_Pnt& at,
+                           Graphic3d_HorizontalTextAlignment h, Graphic3d_VerticalTextAlignment v, bool strong,
+                           const Quantity_Color& colour) {
+            Handle(Graphic3d_Group) group = presentation->NewGroup();
+            Handle(Graphic3d_AspectText3d) aspect = new Graphic3d_AspectText3d(colour, face.c_str(), 1.0, 0.0);
+            if (strong) aspect->SetTextFontAspect(Font_FA_Bold);
+            group->SetGroupPrimitivesAspect(aspect);
+            Handle(Graphic3d_Text) t = new Graphic3d_Text(height);
+            t->SetText(s.c_str());
+            t->SetPosition(at);
+            t->SetHorizontalAlignment(h);
+            t->SetVerticalAlignment(v);
+            group->AddText(t, false);
+        };
+        if (kpi) {
+            // Ultraviolet's KPI: the caption up top, the numeral and its unit
+            // below, all from the left padding.
+            addText(caption, captionFont, captionHeight, gp_Pnt(-hw + padX, hh - 10.0 * scale, 0.0), Graphic3d_HTA_LEFT,
+                    Graphic3d_VTA_CENTER, false, captionInk);
+            addText(number, font, numberHeight, gp_Pnt(-hw + padX, -hh + 10.0 * scale, 0.0), Graphic3d_HTA_LEFT,
+                    Graphic3d_VTA_BOTTOM, false, ink);
+            addText(unit, captionFont, captionHeight, gp_Pnt(-hw + padX + numberWidth + 4.0 * scale, -hh + 12.0 * scale, 0.0),
+                    Graphic3d_HTA_LEFT, Graphic3d_VTA_BOTTOM, false, captionInk);
+        } else {
+            addText(text, font, textHeight, gp_Pnt(0.0, 0.0, 0.0), Graphic3d_HTA_CENTER, Graphic3d_VTA_CENTER, bold,
+                    ink);
+        }
     }
+    Quantity_Color captionInk;
+    double numberWidth = 0.0;
 
     void ComputeSelection(const Handle(SelectMgr_Selection)&, const Standard_Integer) override
     {
@@ -397,6 +470,55 @@ bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
         boxed->halfWidthPx = 0.5 * textWidth + 8.0;
         boxed->halfHeightPx = 11.0;
         boxed->fill = toOcct(Theme::panel());
+        // A THEME'S LABEL (themes part 2): the mockup's pill or box, in its
+        // own face; Ultraviolet's KPI with its caption.
+        if (const Themes::Label& t = Themes::shell().label; t.on) {
+            // The mockup's sizes are CSS pixels, and this frame's unit is a
+            // DEVICE pixel - so they are scaled by the display's ratio, or a
+            // 150% display draws every label at two thirds of its size.
+            const double dpr = qGuiApp ? qGuiApp->devicePixelRatio() : 1.0;
+            std::string faceName = t.fontFile.isEmpty() ? fontFamily() : resolveBundledFont(t.fontFile);
+            if (faceName.empty()) faceName = fontFamily();
+            QFont measured(QString::fromStdString(faceName));
+            measured.setBold(t.bold);
+            boxed->font = faceName;
+            boxed->bold = t.bold;
+            boxed->radiusPx = t.radius * dpr;
+            boxed->edgeWidth = t.edgeWidth * dpr;
+            boxed->padX = t.padX * dpr;
+            boxed->scale = dpr;
+            if (t.fill.isValid()) boxed->fill = toOcct(t.fill);
+            if (t.kpi) {
+                const QString full = QString::fromStdString(myLabelText);
+                const int space = full.lastIndexOf(QLatin1Char(' '));
+                const QString number = space > 0 ? full.left(space) : full;
+                const QString unit = space > 0 ? full.mid(space + 1).toUpper() : QString();
+                std::string capFace = t.captionFontFile.isEmpty() ? faceName : resolveBundledFont(t.captionFontFile);
+                if (capFace.empty()) capFace = faceName;
+                boxed->kpi = true;
+                boxed->number = number.toStdString();
+                boxed->unit = unit.toStdString();
+                boxed->caption = myStyle.caption.toUpper().toStdString();
+                boxed->captionFont = capFace;
+                boxed->captionHeight = float(t.captionPx * dpr);
+                boxed->numberHeight = float(t.kpiTextPx * dpr);
+                boxed->captionInk = toOcct(Theme::textMuted());
+                measured.setPixelSize(int(std::lround(t.kpiTextPx * dpr)));
+                QFont cap(QString::fromStdString(capFace));
+                cap.setPixelSize(int(std::lround(t.captionPx * dpr)));
+                boxed->numberWidth = QFontMetricsF(measured).horizontalAdvance(number);
+                const double inner = std::max(QFontMetricsF(cap).horizontalAdvance(QString::fromStdString(boxed->caption)),
+                                              boxed->numberWidth + 4.0 * dpr + QFontMetricsF(cap).horizontalAdvance(unit));
+                boxed->halfWidthPx = 0.5 * inner + t.padX * dpr;
+                boxed->halfHeightPx = 0.5 * t.heightPx * dpr;
+            } else {
+                boxed->textHeight = float(t.textPx * dpr);
+                measured.setPixelSize(int(std::lround(t.textPx * dpr)));
+                boxed->halfWidthPx =
+                    0.5 * QFontMetricsF(measured).horizontalAdvance(QString::fromStdString(myLabelText)) + t.padX * dpr;
+                boxed->halfHeightPx = 0.5 * t.heightPx * dpr;
+            }
+        }
         boxed->border =
             toOcct(myStyle.lineColour ? myStyle.lineColour() : Theme::dimensionLine());
         boxed->ink = toOcct(Theme::text());

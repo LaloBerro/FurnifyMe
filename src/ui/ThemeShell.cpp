@@ -158,6 +158,51 @@ Shell parseShell(const QJsonObject& o)
         t.badgeInk = colourOf(l, "badgeInk");
         t.badgeWeight = int(numberOf(l, "badgeWeight", 400));
     }
+    const QJsonObject z = o.value(QStringLiteral("gizmo")).toObject();
+    if (!z.isEmpty()) {
+        Gizmo& g = s.gizmo;
+        g.on = true;
+        g.boxes = z.value(QStringLiteral("style")).toString() == QLatin1String("boxes");
+        g.size = QSize(int(numberOf(z, "width", 120)), int(numberOf(z, "height", 118)));
+        g.arm = numberOf(z, "arm", 30.0);
+        g.ball = numberOf(z, "ball", 8.5);
+        g.letterInk = colourOf(z, "letterInk");
+        if (z.contains(QStringLiteral("negative"))) g.negative = z.value(QStringLiteral("negative")).toString();
+        g.label = z.value(QStringLiteral("label")).toBool(true);
+        g.labelUpper = z.value(QStringLiteral("labelUpper")).toBool();
+        g.labelRule = z.value(QStringLiteral("labelRule")).toBool();
+        g.labelWeight = int(numberOf(z, "labelWeight", 600));
+    }
+    const QJsonObject b2 = o.value(QStringLiteral("label")).toObject();
+    if (!b2.isEmpty()) {
+        Label& t = s.label;
+        t.on = true;
+        t.radius = numberOf(b2, "radius", 0.0);
+        t.fill = colourOf(b2, "fill");
+        t.edgeWidth = numberOf(b2, "edgeWidth", 2.0);
+        t.bold = b2.value(QStringLiteral("bold")).toBool(true);
+        t.heightPx = numberOf(b2, "height", 24.0);
+        t.textPx = numberOf(b2, "textPx", 13.0);
+        t.padX = numberOf(b2, "padX", 9.0);
+        t.fontFile = b2.value(QStringLiteral("fontFile")).toString();
+        t.kpi = b2.value(QStringLiteral("kpi")).toBool();
+        t.kpiTextPx = numberOf(b2, "kpiTextPx", 32.0);
+        t.captionPx = numberOf(b2, "captionPx", 11.0);
+        t.captionFontFile = b2.value(QStringLiteral("captionFontFile")).toString();
+    }
+    const QJsonObject m = o.value(QStringLiteral("menu")).toObject();
+    if (!m.isEmpty()) {
+        Menu& t = s.menu;
+        t.on = true;
+        t.weight = int(numberOf(m, "weight", 400));
+        t.textPx = numberOf(m, "textPx", 13.0);
+        t.ink = colourOf(m, "ink");
+        t.hover = colourOf(m, "hover");
+        t.itemRadius = int(numberOf(m, "itemRadius", 6));
+        t.itemPadX = int(numberOf(m, "itemPadX", 9));
+        t.wordmarkPx = numberOf(m, "wordmarkPx", 14.0);
+        t.wordmarkWeight = int(numberOf(m, "wordmarkWeight", 700));
+    }
     return s;
 }
 

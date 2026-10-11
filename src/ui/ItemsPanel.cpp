@@ -1027,6 +1027,21 @@ void ItemsPanel::applyTheme()
     if (myView) applySelection(myView->selectedSolidIds());
 }
 
+void ItemsPanel::orderRowButtons(Row& row)
+{
+    // Every mockup puts the grain mark BEFORE the eye (themes part 2); Graphite
+    // keeps the eye first. A no-op when the order already holds.
+    if (!row.grain || !row.eye || !row.widget) return;
+    auto* box = qobject_cast<QBoxLayout*>(row.widget->layout());
+    if (!box) return;
+    const bool grainFirst = Themes::shell().list.on;
+    const int eyeAt = box->indexOf(row.eye);
+    const int grainAt = box->indexOf(row.grain);
+    if (eyeAt < 0 || grainAt < 0 || (grainAt < eyeAt) == grainFirst) return;
+    box->removeWidget(row.grain);
+    box->insertWidget(grainFirst ? box->indexOf(row.eye) : box->indexOf(row.eye) + 1, row.grain);
+}
+
 QString ItemsPanel::countSheet()
 {
     // The partly-selected count: words in accentText, or - in a theme that
@@ -1449,6 +1464,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
         }
         entry.parentId = parentId;
         nameRow(entry, visible, visible);
+        orderRowButtons(entry);
         myRowList.push_back(entry);
         return;
     }
@@ -1565,6 +1581,7 @@ void ItemsPanel::addItemRow(int id, const QString& itemName, bool visible, bool 
     entry.grainAcross = across;
     entry.text = name->text();
     nameRow(entry, visible, visible);
+    orderRowButtons(entry);
     myRowList.push_back(entry);
 }
 
@@ -1805,6 +1822,8 @@ void ItemsPanel::setNewFolderAction(QAction* action)
     // column: two right-aligned buttons of different widths centre their
     // icons in different columns even when their edges line up.
     myNewFolderChip->setFixedSize(kRowButtonPx, kRowButtonPx);
+    // Every mockup's header is a "+" (themes part 2); Graphite keeps the folder.
+    myNewFolderChip->setThemedGlyph(IconSet::Glyph::Add);
     myNewFolderChip->setFocusPolicy(Qt::NoFocus);
     myTitleRow->addWidget(myNewFolderChip);
     myNewFolderChip->show();   // measured immediately, as the title is
@@ -3156,6 +3175,7 @@ void ItemsPanel::restyleRows()
         row.widget->setMarked(marked);
         row.widget->setCurrent(row.id == myCurrentId);
         if (Themes::shell().list.on) styleNameColour(row);   // the selected name's weight
+        orderRowButtons(row);
         // WHAT A DRAG CARRIES (T-063): its name at 45% (nameColour()), and its
         // buttons out of reach for as long as the hand holds it. Each set only
         // when it changes, by the same rule as the look below - a drag begins

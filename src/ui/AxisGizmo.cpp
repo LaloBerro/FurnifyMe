@@ -2,6 +2,7 @@
 
 #include "OcctViewWidget.h"
 #include "Theme.h"
+#include "Themes.h"
 
 #include <QFont>
 #include <QFontInfo>
@@ -55,9 +56,20 @@ constexpr int kCardRadius = Theme::Space::Tight;
 // label chip, which needed the chip's height repeated here; with the chip gone
 // the axes have the whole widget, so this reads the height rather than keeping
 // a second copy of the number AxisGizmo::kHeight already holds.
+// The band a theme's projection label takes at the card's foot.
+constexpr double kLabelBand = 24.0;
+
 QPointF hubCenter(const QWidget& w)
 {
+    const Themes::Gizmo& g = Themes::shell().gizmo;
+    if (g.on && g.label) return QPointF(w.width() / 2.0, (w.height() - kLabelBand) / 2.0 + 2.0);
     return QPointF(w.width() / 2.0, w.height() / 2.0);
+}
+
+double armPx()
+{
+    const Themes::Gizmo& g = Themes::shell().gizmo;
+    return g.on ? g.arm : kRadius;
 }
 
 }  // namespace
@@ -156,6 +168,12 @@ AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
             static_cast<void (QWidget::*)()>(&QWidget::update));
 }
 
+QSize AxisGizmo::sizeHint() const
+{
+    const Themes::Gizmo& g = Themes::shell().gizmo;
+    return g.on ? g.size : QSize(120, kHeight);
+}
+
 void AxisGizmo::applyTheme()
 {
     // Through Theme::wholeDevicePixels() - see Theme.h, and see
@@ -196,9 +214,91 @@ void AxisGizmo::computeTips(Tip tips[6]) const
         tips[i].axis = projected[i].axis;
         tips[i].positive = projected[i].positive;
         tips[i].screen =
-            centre + QPointF(projected[i].right * kRadius, -projected[i].up * kRadius);
+            centre + QPointF(projected[i].right * armPx(), -projected[i].up * armPx());
         tips[i].depth = projected[i].depth;
     }
+}
+
+void AxisGizmo::paintThemed(QPainter& painter, const Themes::Gizmo& g, Tip* const* order, const QPointF& centre)
+{
+    const QColor letterInk = g.letterInk.isValid() ? g.letterInk : Theme::text();
+    QFont letter = Theme::badgeFont();
+    letter.setBold(true);
+    // Stems first, under every ball - the mockup draws its lines to the hub.
+    for (int i = 0; i < 6; ++i) {
+        const Tip* tip = order[i];
+        if (!tip->positive) continue;
+        QColor colour = axisColor(tip->axis);
+        painter.setPen(QPen(colour, g.boxes ? 1.0 : 2.5, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(centre, tip->screen);
+    }
+    for (int i = 0; i < 6; ++i) {
+        const Tip* tip = order[i];
+        QColor colour = axisColor(tip->axis);
+        const bool hovered = tip->axis == myHoverAxis && tip->positive == myHoverPositive;
+        if (hovered) colour = colour.lighter(125);
+        if (tip->positive) {
+            const QChar ch = QChar::fromLatin1(char(kAxisLetter[tip->axis] - 'a' + 'A'));
+            if (g.boxes) {
+                const QRectF box(tip->screen.x() - g.ball, tip->screen.y() - g.ball, 2 * g.ball, 2 * g.ball);
+                painter.setPen(QPen(Theme::text(), 1.0));
+                painter.setBrush(Theme::panel());
+                painter.drawRect(box);
+                painter.setPen(Theme::text());
+                painter.setFont(letter);
+                painter.drawText(box, Qt::AlignCenter, QString(ch));
+            } else {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(colour);
+                painter.drawEllipse(tip->screen, g.ball, g.ball);
+                painter.setPen(letterInk);
+                painter.setFont(letter);
+                painter.drawText(QRectF(tip->screen.x() - g.ball, tip->screen.y() - g.ball, 2 * g.ball, 2 * g.ball),
+                                 Qt::AlignCenter, QString(ch));
+            }
+        } else if (g.negative == QLatin1String("square")) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(Theme::textMuted());
+            painter.drawRect(QRectF(tip->screen.x() - 2.5, tip->screen.y() - 2.5, 5.0, 5.0));
+            painter.setPen(QPen(Theme::textMuted(), 1.0));
+            painter.drawLine(centre, tip->screen);
+        } else if (g.negative == QLatin1String("dot")) {
+            QColor dim = colour;
+            dim.setAlphaF(0.45f);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(dim);
+            painter.drawEllipse(tip->screen, g.ball * 0.6, g.ball * 0.6);
+        } else {
+            painter.setPen(QPen(colour, 1.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(tip->screen, g.ball * 0.6, g.ball * 0.6);
+        }
+    }
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(g.boxes ? Theme::text() : Theme::Fixed::gizmoHub());
+    painter.drawEllipse(centre, g.boxes ? 2.5 : 4.0, g.boxes ? 2.5 : 4.0);
+
+    if (g.label) {
+        const QRectF band(0, height() - kLabelBand - 2.0, width(), kLabelBand);
+        if (g.labelRule) {
+            painter.setPen(QPen(Theme::border(), 1.0));
+            painter.drawLine(QPointF(8, band.top() + 0.5), QPointF(width() - 8, band.top() + 0.5));
+        }
+        QFont font = Theme::labelFont();
+        font.setWeight(QFont::Weight(g.labelWeight));
+        if (g.labelUpper) {
+            font.setCapitalization(QFont::AllUppercase);
+            font.setLetterSpacing(QFont::AbsoluteSpacing, 1.0);
+        }
+        painter.setFont(font);
+        painter.setPen(Theme::textMuted());
+        painter.drawText(band, Qt::AlignCenter, projectionWord());
+    }
+}
+
+QString AxisGizmo::projectionWord() const
+{
+    return myView && myView->camera().effectiveOrtho() ? tr("Ortho") : tr("Persp");
 }
 
 QPointF AxisGizmo::tipCenter(int axis, bool positive) const
@@ -365,6 +465,13 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
               [](const Tip* a, const Tip* b) { return a->depth > b->depth; });
 
     const QPointF centre = hubCenter(*this);
+
+    // A THEME'S CARD (themes part 2): balls or boxes with their letters, and
+    // the projection's name at the foot - the mockup's own drawing.
+    if (const Themes::Gizmo& g = Themes::shell().gizmo; g.on) {
+        paintThemed(painter, g, order, centre);
+        return;
+    }
 
     for (const Tip* tip : order) {
         QColor colour = axisColor(tip->axis);

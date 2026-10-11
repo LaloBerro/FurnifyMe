@@ -147,6 +147,35 @@
       "badgeEdge": "rgba(187,156,255,.48)",
       "badgeInk": "#BB9CFF",
       "badgeWeight": 700
+    },
+    "gizmo": {
+      "style": "balls",
+      "width": 128,
+      "height": 118,
+      "arm": 30,
+      "ball": 8.5,
+      "letterInk": "#FFFFFF",
+      "negative": "ring",
+      "labelWeight": 600
+    },
+    "label": {
+      "radius": 12,
+      "fill": "rgba(12,10,22,.86)",
+      "edgeWidth": 2,
+      "bold": true,
+      "height": 24,
+      "textPx": 13,
+      "padX": 9
+    },
+    "menu": {
+      "weight": 700,
+      "textPx": 13,
+      "ink": "#F4F1FB",
+      "hover": "rgba(255,255,255,.08)",
+      "itemRadius": 999,
+      "itemPadX": 9,
+      "wordmarkPx": 17,
+      "wordmarkWeight": 700
     }
   }
 }

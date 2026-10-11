@@ -110,13 +110,21 @@ void ToolChip::setTextGlyph(const QString& text)
     update();
 }
 
+void ToolChip::setThemedGlyph(IconSet::Glyph glyph)
+{
+    myThemedGlyph = glyph;
+    myHasThemedGlyph = true;
+    applyTheme();
+}
+
 void ToolChip::applyTheme()
 {
     // Rasterised from Theme::text()/textDisabled() at this moment - a QIcon
     // is pixels, not a description, so it is stale the instant either colour
     // moves. Skipped for the text-glyph variant: there is no icon to
     // rasterise, and setIcon(QIcon()) would only cost a paint nothing reads.
-    if (!myUsesTextGlyph) setIcon(IconSet::icon(myGlyph));
+    if (!myUsesTextGlyph)
+        setIcon(IconSet::icon(myHasThemedGlyph && Themes::shell().chip.on ? myThemedGlyph : myGlyph));
     // Baseline for this widget's own font() (what the sweep in gui_smoke
     // checks): the chip's own text is a chip label. A per-widget stylesheet
     // wins over the app-wide one regardless of selector specificity, so this

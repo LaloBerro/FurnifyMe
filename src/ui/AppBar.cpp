@@ -1,4 +1,5 @@
 #include "AppBar.h"
+#include "Themes.h"
 
 #include "IconSet.h"
 #include "Theme.h"
@@ -35,6 +36,11 @@ QFont wordmarkFont()
 {
     QFont f = Theme::bodyFont();
     f.setBold(true);
+    // A theme's own wordmark (themes part 2): its mockup's size and weight.
+    if (const Themes::Menu& m = Themes::shell().menu; m.on) {
+        f.setPixelSize(int(m.wordmarkPx));
+        f.setWeight(QFont::Weight(m.wordmarkWeight));
+    }
     return f;
 }
 
@@ -101,6 +107,26 @@ AppBar::AppBar(QMenuBar* menuBar, QWidget* parent)
 void AppBar::applyTheme()
 {
     if (!myMarkSpace) return;
+    // A theme's menu titles (themes part 2): the mockup's weight, size, ink and
+    // hover shape. Graphite keeps the app stylesheet's rule.
+    if (myMenus && !myGround.isValid()) {
+        if (const Themes::Menu& m = Themes::shell().menu; m.on) {
+            myMenus->setStyleSheet(
+                QStringLiteral("QMenuBar { background: transparent; border: none; padding: 0; color: %1; "
+                               "font-weight: %2; font-size: %3px; } "
+                               "QMenuBar::item { background: transparent; color: %1; padding: 6px %4px; "
+                               "border-radius: %5px; } "
+                               "QMenuBar::item:selected { background-color: %6; }")
+                    .arg(m.ink.name())
+                    .arg(m.weight)
+                    .arg(m.textPx)
+                    .arg(m.itemPadX)
+                    .arg(m.itemRadius >= 999 ? 13 : m.itemRadius)
+                    .arg(m.hover.name(QColor::HexArgb)));
+        } else {
+            myMenus->setStyleSheet(QStringLiteral("QMenuBar { background: transparent; border: none; padding: 0; }"));
+        }
+    }
     // Measured with the font paintEvent() actually draws the wordmark in -
     // bold, and bold is wider than regular.
     const QFontMetrics metrics(wordmarkFont());
