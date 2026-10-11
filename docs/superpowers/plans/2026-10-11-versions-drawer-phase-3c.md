@@ -1644,9 +1644,9 @@ Expected: every new check passes; if one fails, debug with superpowers:systemati
 
 | Gate | Result |
 |---|---|
-| ctest | |
-| vitest / svelte-check | |
-| chrome_smoke | |
-| hub_smoke | |
-| gui_smoke run 1 | |
-| gui_smoke run 2 | |
+| ctest | 20/20 in windows-web and in windows (vcpkg) |
+| vitest / svelte-check | 115/115; 0 errors, 0 warnings |
+| chrome_smoke | 147/147 |
+| hub_smoke | 36/36 |
+| gui_smoke run 1 | PASS 6448 + 1 skip, floor 6449 |
+| gui_smoke run 2 | PASS 6448 + 1 skip, floor 6449 |
