@@ -799,9 +799,10 @@ void AppearancePanel::appendRow(Tab tab, QWidget* row)
     const int index = static_cast<int>(tab);
     if (index < 0 || index >= kTabCount || !myPageLayouts[index] || !row) return;
     QVBoxLayout* box = myPageLayouts[index];
-    // Colours ends in its own scroll area rather than a stretch, so its rows
-    // simply append; every other page keeps the stretch last.
-    const int at = (tab == Tab::Colours) ? box->count() : std::max(0, box->count() - 1);
+    // A row on Colours (the Theme row, T-072) goes ABOVE the colour list, in
+    // the order rows were added - the colours it governs follow it. Every
+    // other page keeps its stretch last.
+    const int at = (tab == Tab::Colours) ? myColoursRowsAdded++ : std::max(0, box->count() - 1);
     box->insertWidget(at, row);
 }
 

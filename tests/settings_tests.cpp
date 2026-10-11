@@ -18,6 +18,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QFile>
+#include <QHash>
 #include <QFontDatabase>
 #include <QTemporaryDir>
 
@@ -117,6 +118,69 @@ int main(int argc, char* argv[])
     check(!Themes::exists(QStringLiteral("nope")) &&
               Themes::baseSpec(QStringLiteral("nope")) == Themes::baseSpec(Themes::defaultId()),
           "an unknown id answers the default");
+
+    // --- switching themes ------------------------------------------------------------
+    {
+        QHash<QString, QString> saved;
+        Themes::setStore({[&](const QString& id) { return saved.value(id); },
+                          [&](const QString& id, const QString& spec) { saved.insert(id, spec); }});
+        QString announced;
+        QObject::connect(Themes::notifier(), &Themes::Notifier::currentChanged,
+                         [&](const QString& id) { announced = id; });
+        check(Themes::currentId() == Themes::graphiteId(), "a window starts on Graphite until a theme is chosen");
+        check(Themes::select(QStringLiteral("nightshade-glass")) &&
+                  Theme::spec() == Themes::baseSpec(QStringLiteral("nightshade-glass")),
+              "choosing a theme installs its base");
+        check(announced == QStringLiteral("nightshade-glass"), "and says so");
+        SettingsEdits::setTokenColour(QStringLiteral("accent"), QColor(1, 2, 3));
+        Themes::select(Themes::graphiteId());
+        check(Theme::spec().accent != QColor(1, 2, 3), "another theme does not wear that edit");
+        check(saved.contains(QStringLiteral("nightshade-glass")), "the theme left behind is stored");
+        Themes::select(QStringLiteral("nightshade-glass"));
+        check(Theme::spec().accent == QColor(1, 2, 3), "coming back brings the edit back (Review Focus 2)");
+        SettingsEdits::reset();
+        check(Theme::spec() == Themes::baseSpec(QStringLiteral("nightshade-glass")),
+              "Reset puts back the theme's own base");
+        announced.clear();
+        check(!Themes::select(QStringLiteral("from-a-newer-build")) &&
+                  Themes::currentId() == QStringLiteral("nightshade-glass") && announced.isEmpty(),
+              "an unknown theme changes nothing (Review Focus 3)");
+        check(Themes::select(QStringLiteral("nightshade-glass")) && announced.isEmpty(),
+              "choosing the theme already on changes nothing either");
+        // A colour picker open across a switch: it closes, and its Cancel
+        // restore does not write into the theme that arrives (Review Focus 1).
+        QWidget host;
+        SettingsEdits::openColourPicker(QStringLiteral("accent"), &host);
+        check(SettingsEdits::activeColourPicker() != nullptr, "a picker is open");
+        Themes::select(QStringLiteral("aurora-mesh-gradient"));
+        QCoreApplication::processEvents();
+        check(SettingsEdits::activeColourPicker() == nullptr, "switching theme closes the picker");
+        check(Theme::spec() == Themes::baseSpec(QStringLiteral("aurora-mesh-gradient")),
+              "and its Cancel wrote nothing into the new theme");
+        Themes::select(Themes::graphiteId());
+        Themes::setStore({});
+    }
+    {
+        // STARTUP: the user's stored Graphite edits must survive the first
+        // choice of a theme - a select() from the window's starting Graphite
+        // would store the untouched default over them first.
+        QHash<QString, QString> saved;
+        Theme::Spec mine = Theme::defaultSpec();
+        mine.accent = QColor(9, 8, 7);
+        saved.insert(Themes::graphiteId(), Theme::serializeSpec(mine));
+        Themes::setStore({[&](const QString& id) { return saved.value(id); },
+                          [&](const QString& id, const QString& spec) { saved.insert(id, spec); }});
+        Themes::start(Themes::defaultId());
+        check(Themes::currentId() == Themes::defaultId() && Theme::spec() == Themes::baseSpec(Themes::defaultId()),
+              "starting a window puts its theme on");
+        Themes::select(Themes::graphiteId());
+        check(Theme::spec().accent == QColor(9, 8, 7), "and the user's Graphite edits are still theirs");
+        Themes::start(QStringLiteral("not-a-theme"));
+        check(Themes::currentId() == Themes::defaultId(), "a stored id that is not a theme starts the default");
+        Themes::select(Themes::graphiteId());
+        Themes::setStore({});
+        SettingsEdits::reset();
+    }
 
     // --- the edits ----------------------------------------------------------
     SettingsEdits::setNumber(QStringLiteral("basePt"), 99);

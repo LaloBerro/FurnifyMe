@@ -12,9 +12,12 @@
 
 #include "Theme.h"
 
+#include <QObject>
 #include <QString>
 #include <QVariantMap>
 #include <QVector>
+
+#include <functional>
 
 namespace Themes {
 
@@ -34,5 +37,43 @@ bool exists(const QString& id);
 Theme::Spec baseSpec(const QString& id);
 // The page-only tokens (CSS custom properties without the leading "--").
 QVariantMap pageTokens(const QString& id);
+
+// --- the theme in use ---------------------------------------------------------
+//
+// Where each theme's own edits live: QSettings in the app ("appearance/<id>"),
+// a map in the tests, nothing at all in a window built with persistence off -
+// an empty store simply keeps nothing, so every theme comes back at its base.
+// The same injection UserProgress uses, for the same reason: a suite whose
+// result depended on how the developer last left the app would not be a suite.
+struct Store {
+    std::function<QString(const QString& id)> load;
+    std::function<void(const QString& id, const QString& spec)> save;
+};
+void setStore(Store store);
+// Graphite until select() runs - so a window that never chooses (gui_smoke)
+// wears exactly defaultSpec().
+QString currentId();
+// Puts `id` on: closes an open colour picker FIRST (its Cancel restores into
+// the theme being left, never the one arriving), stores the leaving theme's
+// live spec, installs the arriving theme's stored edits or its base, and
+// announces it. False, and nothing changed, for an unknown id; true and
+// nothing changed for the theme already on.
+bool select(const QString& id);
+// The window's FIRST choice: puts `id` on (an unknown id puts the default on)
+// WITHOUT storing the theme being left - at startup that is the untouched
+// default spec, and storing it would overwrite the user's own Graphite edits.
+void start(const QString& id);
+// Stores the live spec as the current theme's edits (the debounced save).
+void storeCurrent();
+
+class Notifier : public QObject
+{
+    Q_OBJECT
+public:
+    using QObject::QObject;
+signals:
+    void currentChanged(const QString& id);
+};
+Notifier* notifier();
 
 }  // namespace Themes

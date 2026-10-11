@@ -1,6 +1,7 @@
 #include "ThemeBridge.h"
 
 #include "Theme.h"
+#include "Themes.h"
 
 #include <QFont>
 
@@ -17,6 +18,7 @@ ThemeBridge::ThemeBridge(QObject* parent)
     : QObject(parent)
 {
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &ThemeBridge::changed);
+    connect(Themes::notifier(), &Themes::Notifier::currentChanged, this, &ThemeBridge::changed);
 }
 
 QVariantMap ThemeBridge::tokens() const
@@ -46,5 +48,11 @@ QVariantMap ThemeBridge::tokens() const
     // resources.
     t.insert(QStringLiteral("--font-family"),
              QStringLiteral("'%1'").arg(Theme::bodyFont().family()));
+    // The theme in use (T-072): its id, which the page puts on <html> for the
+    // whole style in themes.css, and its page-only tokens.
+    t.insert(QStringLiteral("--theme"), Themes::currentId());
+    const QVariantMap page = Themes::pageTokens(Themes::currentId());
+    for (auto it = page.cbegin(); it != page.cend(); ++it)
+        t.insert(QStringLiteral("--") + it.key(), it.value().toString());
     return t;
 }

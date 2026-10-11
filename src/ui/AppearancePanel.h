@@ -426,6 +426,8 @@ private:
     QWidget* myTabPages[kTabCount] = {};
     QVBoxLayout* myPageLayouts[kTabCount] = {};
     Tab myTab = Tab::Colours;
+    // Rows added to the Colours tab sit above its colour list, in order.
+    int myColoursRowsAdded = 0;
     QLabel* myTitle = nullptr;
     QLabel* mySizeLabel = nullptr;
     QLabel* myGridDensityLabel = nullptr;

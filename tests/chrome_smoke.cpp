@@ -23,6 +23,7 @@
 #include "ui/AppearancePanel.h"
 #include "ui/GestureChip.h"
 #include "ui/SettingsEdits.h"
+#include "ui/Themes.h"
 #include "ui/ItemsPanel.h"
 #include "ui/Toast.h"
 #include "web/EditorChrome.h"
@@ -35,6 +36,7 @@
 #include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QColorDialog>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
@@ -108,7 +110,10 @@ QRect toastRect(QWebEngineView* page)
         jsString(page, "JSON.stringify((() => { const t = document.querySelector('.toast'); if (!t) "
                        "return {}; const r = t.getBoundingClientRect(); return {x: r.left, y: r.top, "
                        "w: r.width, h: r.height}; })())").toUtf8()).object();
-    return QRect(o.value("x").toInt(), o.value("y").toInt(), o.value("w").toInt(), o.value("h").toInt());
+    // Rounded doubles, never toInt(): QJsonValue::toInt() answers 0 for a
+    // non-integral number, and at 150% a toast is 51.33 px tall.
+    auto n = [&](const char* key) { return qRound(o.value(QLatin1String(key)).toDouble()); };
+    return QRect(n("x"), n("y"), n("w"), n("h"));
 }
 
 QAction* actionNamed(QWidget* window, const QString& text)
@@ -283,6 +288,28 @@ int main(int argc, char* argv[])
     check(static_cast<int>(window.document().solids().size()) == bodies, "the toast's Undo undoes the delete");
     waitFor([&] { return toastText(page).isEmpty(); }, 1500);
     check(toastText(page).isEmpty(), "and the toast that named the delete is gone once the document moved on");
+
+    // --- Undo still works after autosave has written the furniture -------------------
+    // Saving records the furniture's wood and texture, which moves the
+    // document's revision with no change to the document; a toast's Undo
+    // must still take back the change it names after that. (Found at 150%,
+    // where the capture above outlasted the 400 ms autosave debounce.)
+    {
+        window.view()->setSelectedSolids({window.document().solids().front().id});
+        pump(200);
+        const int before = static_cast<int>(window.document().solids().size());
+        if (del) del->trigger();
+        waitFor([&] { return !toastText(page).isEmpty(); }, 3000);
+        const int revisionAtDelete = window.document().revision();
+        pump(900);   // past the autosave debounce
+        std::printf("[info] revision at the delete %d, after autosave %d\n", revisionAtDelete,
+                    window.document().revision());
+        js(page, "document.querySelector('.toast .undo').click()");
+        waitFor([&] { return static_cast<int>(window.document().solids().size()) == before; }, 3000);
+        check(static_cast<int>(window.document().solids().size()) == before,
+              "the toast's Undo still works once autosave has saved the furniture");
+        waitFor([&] { return toastText(page).isEmpty(); }, 1500);
+    }
 
     // --- notifications off: no Note, the sentence on the strip ------------------------
     QAction* notes = actionNamed(&window, QStringLiteral("Show notifications"));
@@ -626,6 +653,40 @@ int main(int argc, char* argv[])
                   !js(page, "!!document.querySelector('.settings-card')").toBool(),
               "Settings off takes the card away");
         check(!chrome->holdsKeyboard(), "and gives the keyboard back mid-edit");
+    }
+    // --- the theme, chosen on the card (T-072) ------------------------------------
+    {
+        if (!settingsSlot->isVisible()) settingsAction->trigger();
+        pump(300);
+        js(page, "document.querySelector('[data-tab=\"0\"]').click()");
+        pump(200);
+        const int options = js(page, "document.querySelectorAll('[data-row=\"Theme\"] [role=\"radio\"]').length").toInt();
+        check(options == 5, QStringLiteral("the Colours tab opens with the five themes (%1)").arg(options));
+        check(jsString(page, "document.querySelector('[data-action=\"graphite\"]').getAttribute('aria-checked')") ==
+                  QStringLiteral("true"),
+              "a window with persistence off is on Graphite");
+        SettingsEdits::openColourPicker(QStringLiteral("accent"), &window);
+        check(SettingsEdits::activeColourPicker() != nullptr, "a colour picker is open");
+        js(page, "document.querySelector('[data-action=\"aurora-mesh-gradient\"]').click()");
+        waitFor([&] { return Themes::currentId() == QStringLiteral("aurora-mesh-gradient"); }, 2000);
+        check(Themes::currentId() == QStringLiteral("aurora-mesh-gradient"), "a click on Aurora puts it on");
+        check(Theme::spec() == Themes::baseSpec(QStringLiteral("aurora-mesh-gradient")),
+              "and the app wears its colours - the open picker's Cancel wrote nothing into it");
+        pump(100);
+        check(SettingsEdits::activeColourPicker() == nullptr, "the picker closed with the switch (Review Focus 1)");
+        waitFor([&] { return jsString(page, "document.documentElement.dataset.theme") == QStringLiteral("aurora-mesh-gradient"); }, 2000);
+        check(jsString(page, "document.documentElement.dataset.theme") == QStringLiteral("aurora-mesh-gradient"),
+              "the page wears the theme's id");
+        QAction* auroraAction = actionNamed(&window, QStringLiteral("Aurora / Mesh Gradient"));
+        check(auroraAction && auroraAction->isChecked(), "and View -> Theme marks it");
+        if (QAction* graphite = actionNamed(&window, QStringLiteral("Graphite"))) graphite->trigger();
+        pump(300);
+        check(Themes::currentId() == Themes::graphiteId() &&
+                  jsString(page, "document.querySelector('[data-action=\"graphite\"]').getAttribute('aria-checked')") ==
+                      QStringLiteral("true"),
+              "the menu switches back, and the card follows");
+        settingsAction->trigger();
+        pump(200);
     }
 #ifdef _WIN32
     for (int tab = 0; tab < 4; ++tab) {

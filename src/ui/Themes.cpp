@@ -2,6 +2,7 @@
 
 #include "SettingsEdits.h"
 
+#include <QColorDialog>
 #include <QFile>
 #include <QHash>
 #include <QJsonDocument>
@@ -87,6 +88,77 @@ Theme::Spec baseSpec(const QString& id)
 QVariantMap pageTokens(const QString& id)
 {
     return data().value(exists(id) ? id : defaultId()).page;
+}
+
+namespace {
+Store& store()
+{
+    static Store s;
+    return s;
+}
+QString& current()
+{
+    static QString id = graphiteId();
+    return id;
+}
+}  // namespace
+
+namespace {
+void install(const QString& id);
+}
+
+void setStore(Store s)
+{
+    store() = std::move(s);
+}
+
+QString currentId()
+{
+    return current();
+}
+
+void storeCurrent()
+{
+    if (store().save) store().save(current(), Theme::serializeSpec());
+}
+
+bool select(const QString& id)
+{
+    if (!exists(id)) return false;
+    if (id == current()) return true;
+    // The picker first: closing it runs its Cancel, which restores the colour
+    // it opened on - into the theme being LEFT, which is then stored with it.
+    if (QColorDialog* picker = SettingsEdits::activeColourPicker()) picker->close();
+    storeCurrent();
+    install(id);
+    return true;
+}
+
+namespace {
+// Installs `id`'s stored edits, or its base, and announces it.
+void install(const QString& id)
+{
+    Theme::Spec next = baseSpec(id);
+    if (store().load) {
+        Theme::Spec stored;
+        const QString text = store().load(id);
+        if (!text.isEmpty() && Theme::deserializeSpec(text, stored)) next = stored;
+    }
+    current() = id;
+    Theme::setSpec(next);
+    emit notifier()->currentChanged(id);
+}
+}  // namespace
+
+void start(const QString& id)
+{
+    install(exists(id) ? id : defaultId());
+}
+
+Notifier* notifier()
+{
+    static Notifier* n = new Notifier();
+    return n;
 }
 
 }  // namespace Themes

@@ -117,6 +117,20 @@ describe('the tabs', () => {
   });
 });
 
+describe('the theme', () => {
+  it('a Theme row heads the Colours tab, above the colour list (T-072)', async () => {
+    const { settings } = mount();
+    const row = q('[data-row="Theme"]')!;
+    expect(row).not.toBeNull();
+    const list = q('.colours')!;
+    expect(row.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(q('[data-row="Theme"] .options')!.classList.contains('stacked')).toBe(true);
+    expect(q('[data-action="violet-glass-float"]')!.getAttribute('aria-checked')).toBe('true');
+    await fireEvent.click(q('[data-action="graphite"]')!);
+    expect(calls(settings, 'trigger').map((c) => c.args[0])).toEqual(['graphite']);
+  });
+});
+
 describe('the colours', () => {
   it('a swatch shows the live colour and asks C++ for the picker', async () => {
     const { settings } = mount();

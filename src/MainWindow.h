@@ -2140,6 +2140,15 @@ private:
     QMenu* myAutosaveMenu = nullptr;
     QAction* myAutosaveMenuAction = nullptr;
     QActionGroup* myAutosaveGroup = nullptr;
+    // View -> Theme (T-072): one checkable action per theme, in Themes::all()
+    // order; Settings mirrors them. Checked follows Themes::currentId().
+    QVector<QAction*> myThemeActions;
+    // What a PERSISTED window found when it took the app-wide theme over,
+    // given back when it closes (its store goes with it) - so a store that
+    // writes QSettings never outlives the window, or the settings scope a
+    // test built it in.
+    QString myThemeBeforeWindow;
+    Theme::Spec mySpecBeforeWindow;
     QAction* myAutosaveModeActions[5] = {};
     QAction* myCloseFurnitureAction = nullptr;
     // Checkable, and the single source of the base projection's truth: the
@@ -2348,6 +2357,10 @@ private:
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
     EditorChrome* myHtmlChrome = nullptr;   // see useHtmlChrome()
+    // The revision at the last documentChanged() - what a toast's stamp is
+    // compared against. The raw revision also moves with presentation
+    // writes (a save records the wood), which change nothing to undo.
+    int myLastDocumentChange = -1;
     // The Settings card's place in HTML-chrome mode (Phase 3b): it takes the
     // Qt drawer's anchor, and settingsSurface() is whichever of the two is
     // the one shown and hidden off the Settings action.

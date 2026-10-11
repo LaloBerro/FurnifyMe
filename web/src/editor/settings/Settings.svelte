@@ -99,6 +99,34 @@
   }
 </script>
 
+{#snippet rowView(row: RowSpec)}
+  {#if row.kind === 'number'}
+    {#if numbers[row.number]}
+      <NumberField
+        field={numbers[row.number]}
+        value={spec.numbers[row.number]}
+        {keyboard}
+        onchange={(v) => settings.setNumber(row.number, v)}
+      />
+    {/if}
+  {:else}
+    <div class="row" class:stacked-row={row.stacked} data-row={row.label}>
+      <span class="label">{row.label}</span>
+      {#if row.kind === 'toggle'}
+        <Switch
+          id={row.actions[0]}
+          checked={actionOf(row.actions[0]).checked}
+          enabled={actionOf(row.actions[0]).enabled}
+          tip={actionOf(row.actions[0]).tooltip}
+          onpress={() => settings.trigger(row.actions[0])}
+        />
+      {:else}
+        <Segments segments={segmentsFor(row)} stacked={row.stacked} onpick={(i) => pick(row, i)} />
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
 <section
   class="settings-card"
   data-hit
@@ -136,6 +164,11 @@
 
   <div class="page" role="tabpanel">
     {#if tab === 0}
+      <!-- The Colours tab's own rows (the Theme row, T-072) head it: the
+           colours below are the chosen theme's. -->
+      {#each rowsOn(0) as row (row.label)}
+        {@render rowView(row)}
+      {/each}
       <ColourList
         tokens={layout.tokens}
         colours={spec.colours}
@@ -184,31 +217,7 @@
       {/each}
     {:else}
       {#each rowsOn(tab) as row (row.label)}
-        {#if row.kind === 'number'}
-          {#if numbers[row.number]}
-            <NumberField
-              field={numbers[row.number]}
-              value={spec.numbers[row.number]}
-              {keyboard}
-              onchange={(v) => settings.setNumber(row.number, v)}
-            />
-          {/if}
-        {:else}
-          <div class="row" class:stacked-row={row.stacked} data-row={row.label}>
-            <span class="label">{row.label}</span>
-            {#if row.kind === 'toggle'}
-              <Switch
-                id={row.actions[0]}
-                checked={actionOf(row.actions[0]).checked}
-                enabled={actionOf(row.actions[0]).enabled}
-                tip={actionOf(row.actions[0]).tooltip}
-                onpress={() => settings.trigger(row.actions[0])}
-              />
-            {:else}
-              <Segments segments={segmentsFor(row)} stacked={row.stacked} onpick={(i) => pick(row, i)} />
-            {/if}
-          </div>
-        {/if}
+        {@render rowView(row)}
       {/each}
     {/if}
   </div>

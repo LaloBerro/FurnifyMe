@@ -1,5 +1,7 @@
 #include "SettingsEdits.h"
 
+#include "Themes.h"
+
 #include <QColorDialog>
 #include <QCoreApplication>
 #include <QPointer>
@@ -262,7 +264,8 @@ QColorDialog* openColourPicker(const QString& id, QWidget* parent)
 
 void reset()
 {
-    Theme::setSpec(Theme::defaultSpec());
+    // The CURRENT theme's base (themes ruling R5) - Graphite's is defaultSpec().
+    Theme::setSpec(Themes::baseSpec(Themes::currentId()));
 }
 
 bool saveColoursTo(const QString& path)

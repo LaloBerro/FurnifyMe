@@ -32,6 +32,7 @@ export function mockLayout(): SettingsLayout {
       { shown: 'Georgia', family: 'Georgia' },
     ],
     rows: [
+      { kind: 'choice', tab: 0, label: 'Theme', actions: ['violet-glass-float', 'graphite'], options: ['Violet Glass Float', 'Graphite'], stacked: true, number: '' },
       { kind: 'toggle', tab: 2, label: 'Show the grid', actions: ['show-the-grid'], options: [], stacked: false, number: '' },
       { kind: 'number', tab: 2, label: 'Grid detail', actions: [], options: [], stacked: false, number: 'gridDensity' },
       { kind: 'binary', tab: 2, label: 'Projection', actions: ['orthographic'], options: ['Perspective', 'Orthographic'], stacked: false, number: '' },
@@ -87,6 +88,8 @@ export function mockSettings() {
     spec: mockSpec(),
     specChanged: new MockSignal(),
     actions: [
+      action('violet-glass-float', 'Violet Glass Float', true),
+      action('graphite', 'Graphite', false),
       action('show-the-grid', 'Show the grid', true),
       action('orthographic', 'Orthographic', false),
       action('millimetres', 'Millimetres', true),

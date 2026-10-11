@@ -13,6 +13,7 @@
 
 #include "AppBar.h"
 #include "AppearancePanel.h"
+#include "Themes.h"
 #include "RenderFrameGuides.h"
 #include "RenderStudio.h"
 #include "RenderSettingsPanel.h"
@@ -749,10 +750,43 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // before this window is built), so a garbage or absent setting simply
         // leaves the app at its shipped appearance - deserializeSpec()
         // guarantees `stored` is untouched when it refuses.
-        Theme::Spec stored;
-        if (Theme::deserializeSpec(
-                settings.value(QStringLiteral("appearance")).toString(), stored))
-            Theme::setSpec(stored);
+        // THE THEME (T-072). Each theme keeps its own edits under
+        // "appearance/<id>"; the colours a user had before themes existed
+        // were Graphite's, so they move there once. Then the window starts on
+        // the stored theme - or Violet Glass Float, the default - through
+        // start(), which must not store the untouched default over those
+        // edits on the way in.
+        //
+        // "appearance" stays the LIVE spec, written and read exactly as it
+        // always was (a returning user gets their colours back); a window
+        // with a "theme" key starts that theme and then installs it. A window
+        // with none - a fresh install, or the colours of a build before
+        // themes, which were Graphite's - starts the default and keeps those
+        // colours as Graphite's own edits.
+        myThemeBeforeWindow = Themes::currentId();
+        mySpecBeforeWindow = Theme::spec();
+        Themes::setStore({[](const QString& id) {
+                              return QSettings().value(QStringLiteral("appearance/") + id).toString();
+                          },
+                          [](const QString& id, const QString& spec) {
+                              QSettings().setValue(QStringLiteral("appearance/") + id, spec);
+                          }});
+        const QString storedTheme = settings.value(QStringLiteral("theme")).toString();
+        if (!storedTheme.isEmpty()) {
+            Themes::start(storedTheme);
+            Theme::Spec stored;
+            if (Theme::deserializeSpec(settings.value(QStringLiteral("appearance")).toString(), stored))
+                Theme::setSpec(stored);
+        } else {
+            if (!settings.contains(QStringLiteral("appearance/graphite")) &&
+                settings.contains(QStringLiteral("appearance")))
+                QSettings().setValue(QStringLiteral("appearance/graphite"),
+                                     settings.value(QStringLiteral("appearance")));
+            Themes::start(Themes::defaultId());
+        }
+        QSettings().setValue(QStringLiteral("theme"), Themes::currentId());
+        connect(Themes::notifier(), &Themes::Notifier::currentChanged, this,
+                [](const QString& id) { QSettings().setValue(QStringLiteral("theme"), id); });
 
         // The six render-settings values (Task 7.2), on myStartOrthographic's
         // own terms - read here, before the viewport exists, applied to it
@@ -1414,6 +1448,17 @@ MainWindow::~MainWindow()
         const QSignalBlocker quiet(myItemsPanel);
         myItemsPanel->cancelDrag();
     }
+    // THE THEME IS GIVEN BACK (T-072). A persisted window took the app-wide
+    // theme over and installed a store that writes QSettings; neither may
+    // outlive it - in the app this is the exit, in gui_smoke a window built
+    // inside a test settings scope that is about to close. Its own "theme"
+    // writer is cut first, so the restore writes nothing.
+    if (myPersistProgress && !myThemeBeforeWindow.isEmpty()) {
+        QObject::disconnect(Themes::notifier(), nullptr, this, nullptr);
+        Themes::setStore({});
+        Themes::start(myThemeBeforeWindow);
+        Theme::setSpec(mySpecBeforeWindow);
+    }
 }
 
 void MainWindow::buildActions()
@@ -1978,6 +2023,28 @@ void MainWindow::buildActions()
             [this] { setDisplayUnit(Measure::Unit::Millimetres); });
     connect(myUnitsCentimetresAction, &QAction::triggered, this,
             [this] { setDisplayUnit(Measure::Unit::Centimetres); });
+
+    // View -> Theme (T-072). Each theme is a whole style (DESIGN.md); the
+    // action carries the theme's own name and a click puts it on. Checked is
+    // DERIVED from Themes::currentId() - set here and on every change - so a
+    // switch made from anywhere (Settings, a test) moves the mark.
+    auto* themeGroup = new QActionGroup(this);
+    themeGroup->setExclusive(true);
+    for (const Themes::Info& theme : Themes::all()) {
+        auto* action = new QAction(theme.name, this);
+        action->setCheckable(true);
+        action->setToolTip(tr("Dress the app in %1 - each theme keeps your own colour edits").arg(theme.name));
+        action->setChecked(theme.id == Themes::currentId());
+        themeGroup->addAction(action);
+        const QString id = theme.id;
+        connect(action, &QAction::triggered, this, [id] { Themes::select(id); });
+        myThemeActions.push_back(action);
+    }
+    connect(Themes::notifier(), &Themes::Notifier::currentChanged, this, [this](const QString& id) {
+        const QVector<Themes::Info>& themes = Themes::all();
+        for (int i = 0; i < myThemeActions.size() && i < themes.size(); ++i)
+            myThemeActions[i]->setChecked(themes[i].id == id);
+    });
 }
 
 QMenuBar* MainWindow::buildMenus()
@@ -2109,6 +2176,8 @@ QMenuBar* MainWindow::buildMenus()
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
     unitsMenu->addAction(myUnitsMillimetresAction);
     unitsMenu->addAction(myUnitsCentimetresAction);
+    QMenu* themeMenu = viewMenu->addMenu(tr("Theme"));
+    for (QAction* theme : myThemeActions) themeMenu->addAction(theme);
     viewMenu->addAction(myAppearanceAction);
 
     QMenu* helpMenu = bar->addMenu(tr("&Help"));
@@ -2770,6 +2839,7 @@ void MainWindow::buildOverlay()
     // operation - see ToastHost::documentMovedTo().
     connect(this, &MainWindow::documentChanged, this,
             [this] {
+                myLastDocumentChange = myDocument.revision();
                 myToasts->documentMovedTo(myDocument.revision());
 #ifdef FURNIFYME_WEB_UI
                 if (myHtmlChrome) myHtmlChrome->documentMovedTo(myDocument.revision());
@@ -3857,6 +3927,9 @@ void MainWindow::writeAppearanceNow()
     // to include.
     QSettings settings;
     settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
+    // And as the CURRENT theme's own edits (T-072) - Themes owns that key; a
+    // window with persistence off set no store, and this writes nothing more.
+    Themes::storeCurrent();
 }
 
 void MainWindow::persistRenderSettings()
@@ -10239,6 +10312,13 @@ std::vector<SettingsEdits::Row> MainWindow::settingsRows() const
     using Kind = Row::Kind;
     using Tab = SettingsEdits::Tab;
     std::vector<Row> rows;
+    // The theme first, at the top of the Colours tab: the colours below it
+    // are the chosen theme's (T-072).
+    {
+        QStringList names;
+        for (const Themes::Info& theme : Themes::all()) names << theme.name;
+        rows.push_back(Row{Kind::Choice, Tab::Colours, tr("Theme"), myThemeActions, names, true, {}});
+    }
     auto toggle = [&](Tab tab, const QString& label, QAction* action) {
         rows.push_back(Row{Kind::Toggle, tab, label, {action}, {}, false, {}});
     };
@@ -10287,7 +10367,12 @@ void MainWindow::useHtmlChrome()
         // checkpoint BEFORE the one it names (review I1). Toast.cpp keeps
         // the same promise with myDismissing; this keeps it whatever order
         // the channel delivers in.
-        if (stamp >= 0 && stamp != myDocument.revision()) return;
+        // Against the last DOCUMENT CHANGE, never the raw revision: saving
+        // the furniture records its wood and texture, which moves the revision
+        // with nothing to undo - and autosave does that 400 ms after every
+        // edit, so the raw revision refused every Undo read for longer than
+        // that (found at 150%, where a slower capture outlasted the debounce).
+        if (stamp >= 0 && stamp != myLastDocumentChange) return;
         if (myUndoAction->isEnabled()) myUndoAction->trigger();
     });
     // The strip is 24 px along the viewport's bottom; the Qt cards anchored
