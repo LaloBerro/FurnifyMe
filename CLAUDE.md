@@ -367,6 +367,19 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   pending card. While Delete is armed, Compare and Restore step aside: beside them its
   sentence does not fit the card (the scene window's Remove rule - it widens leftward, the
   second click lands where the first did).
+- **The Joints card (Phase 3d, branch `joints-drawer`): content in C++ once, layout in
+  the page.** What a joint's row SAYS and MEASURES - names, the kind line or the reason,
+  the caveat, depth texts, marks, the written and shared lines - moved out of
+  `JointsPanel.cpp` into `session/JointRows`, which the Qt drawer and `session/JointsModel`
+  both read (the `SettingsEdits` precedent: two drawers cannot word a joint differently).
+  WHERE a label goes is each drawer's own: `web/src/editor/joints/ruler.ts` is a port of
+  `layoutStrip()` - labels greedily on two lines, the edge word where it fits, `null` (the
+  row writes its numbers) when they collide even staggered - tested with a fake measurer.
+  Marks cross as FRACTIONS of the run, so the page never sees a millimetre. Which rows are
+  open is the model's, by joint id, so a joint that breaks and moves to the top keeps its
+  own row open. The rulers re-lay out when a hidden probe set in the badge font changes
+  width (a theme, a font, a type scale). A double-click toggles once (`detail >= 2` is
+  ignored), and the row's delete stops its click from reaching the row.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a
@@ -483,6 +496,8 @@ Source files under `src/`, plus `tests/`:
 | `session/EditorSession.{h,cpp}` | the document, checkpoints, undo/redo and the ONE outcome channel; Core + Gui only (`furnify_session`), tested by `session_tests`; `session_no_widgets` fails on any Widgets include reached from `src/session` |
 | `session/Outcome.h` | one thing to tell the user, as a value: Note, Failure or Status |
 | `session/ActionRegistry.{h,cpp}` | every `QAction` by a stable id, a JSON snapshot, and a `trigger()` that obeys `isEnabled()` |
+| `session/JointRows.{h,cpp}` | what a joint's row says and measures - shared by the Qt joints drawer and the page's; `reasonText()` lives here |
+| `session/JointsModel.{h,cpp}` | the Joints drawer's model for the HTML card - rows broken first, open rows by joint id, hooks; Core + OCCT, tested by `joints_model_tests` |
 | `session/VersionsModel.{h,cpp}` | the Versions drawer's model for the HTML card - list, thumbnail URLs, default name, words, gates; the four requests through hooks; Core + Gui, tested by `versions_model_tests` |
 | `session/HubModel.{h,cpp}` | the library hub's logic for the HTML hub - lists, dates, create/rename/delete and their sentences; Core + Gui, tested by `hub_model_tests` |
 | `web/WebHost.{h,cpp}` | one HTML page in a `QWebEngineView`: profile, channel, qwebchannel.js, `pageUrl()`; `prepareApplication()` puts Qt Quick on OpenGL |
@@ -493,7 +508,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/HtmlCardSlot.{h,cpp}` | an HTML card's place in the overlay: the card's size (its height the page's, for a card that sizes itself), painting nothing, taking no click |
 | `session/ActionWatch.{h,cpp}` | a few actions' state for a page, one `changed()` per event-loop turn |
 | `web/SettingsBridge.{h,cpp}` | the page's `settings` object: layout, live spec, the rows' actions; edits land in `SettingsEdits`; triggers only its rows' actions |
-| `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast, status strip, the Settings and Versions cards; `ChromeBridge` is its channel object, the page's hit rects its mask |
+| `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast, status strip, the Settings, Versions and Joints cards; `ChromeBridge` is its channel object, the page's hit rects its mask |
 | `web/WebOverlay.{h,cpp}` | the Phase 0 spike's overlay over the viewport (`--web-spike`), on `WebHost` |
 | `web/` (repo root) | the pages: Svelte 5 + Vite, one self-contained file per page (`build.mjs`), vitest page tests in `web/test` |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |
