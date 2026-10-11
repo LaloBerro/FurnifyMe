@@ -89,6 +89,13 @@ int main(int argc, char* argv[])
     // to realize before it is genuinely needed broke startup determinism
     // once already).
     MainWindow window;
+#ifdef FURNIFYME_WEB_UI
+    // The editor's toasts and status bar as HTML (migration Phase 3a) unless
+    // asked for the Qt ones - or unless the page is missing beside the app.
+    if (!QCoreApplication::arguments().contains(QStringLiteral("--qt-chrome")) &&
+        WebHost::pageAvailable(QStringLiteral("editor")))
+        window.useHtmlChrome();
+#endif
     // THE HUB: the HTML one (migration Phase 2) wherever the app is built with
     // the web UI, the Qt one otherwise - and `--qt-hub` asks for the Qt one
     // in a web build, for comparing the two side by side until Phase 6

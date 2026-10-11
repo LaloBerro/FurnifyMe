@@ -1,10 +1,15 @@
-import type { Bridge, Rect } from './bridge';
+import type { Rect } from './bridge';
+
+// Anything that can be told where the page takes the pointer.
+export interface HitSink {
+  reportHitRects(rects: Rect[]): void;
+}
 
 // The page's root takes no pointer; only elements marked data-hit do. C++ cannot
 // ask the page "is there a card here?" synchronously, so the page TELLS it,
 // whenever layout changes, which rectangles take the pointer - and C++ answers
 // every press from that list on its own side, with no hop to the browser.
-export function reportHitsOnChange(bridge: Bridge) {
+export function reportHitsOnChange(bridge: HitSink) {
   let scheduled = false;
   let last = '';
 

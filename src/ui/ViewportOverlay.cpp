@@ -73,6 +73,13 @@ void ViewportOverlay::addFloatingObstacle(QWidget* widget)
     myObstacles.push_back(widget);
 }
 
+void ViewportOverlay::setBottomInset(int px)
+{
+    if (myBottomInset == px) return;
+    myBottomInset = px;
+    relayout();
+}
+
 std::vector<QRect> ViewportOverlay::occupiedRects() const
 {
     std::vector<QRect> rects;
@@ -111,7 +118,7 @@ void ViewportOverlay::relayout()
     } guard{myLayingOut};
 
     const int w = myViewport->width();
-    const int h = myViewport->height();
+    const int h = myViewport->height() - myBottomInset;
 
     // The SPINE among however many entries share Anchor::LeftEdge - the
     // last one added, structurally, regardless of which ones are visible

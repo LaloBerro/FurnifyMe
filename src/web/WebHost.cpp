@@ -122,8 +122,9 @@ bool WebHost::eventFilter(QObject* watched, QEvent* event)
 WebHost::~WebHost()
 {
     // The view must go before the profile its page was built on, which Qt
-    // WebEngine requires; the view is a child of some widget, not of this.
-    delete myView;
+    // WebEngine requires. It is a child of some widget, not of this, and that
+    // widget may already have deleted it - the QPointer says so.
+    delete myView.data();
 }
 
 void WebHost::registerObject(const QString& name, QObject* object)

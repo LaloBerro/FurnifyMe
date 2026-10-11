@@ -16,11 +16,12 @@
 //   does not draw shows the widget underneath.
 
 #include <QObject>
+#include <QPointer>
 #include <QUrl>
 
 class QWebChannel;
 class QWebEngineProfile;
-class QWebEngineView;
+#include <QWebEngineView>
 class QWidget;
 
 class WebHost : public QObject
@@ -66,7 +67,10 @@ private:
     void watchRenderWidget();
 
     QWebEngineProfile* myProfile = nullptr;
-    QWebEngineView* myView = nullptr;
+    // Guarded: the view is a child of some widget, which may delete it first
+    // (EditorChrome's view goes with the viewport), and deleting it again
+    // here crashed the app at exit.
+    QPointer<QWebEngineView> myView;
     QWebChannel* myChannel = nullptr;
     bool myLoaded = false;
     bool myLoadOk = false;

@@ -1,4 +1,7 @@
 #include "MainWindow.h"
+#ifdef FURNIFYME_WEB_UI
+#include "web/EditorChrome.h"
+#endif
 
 #include <cstdio>
 
@@ -1081,7 +1084,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // never a one-shot hide()/show() called from the toggle handler
         // alone.
         if (myBottomBarAction)
-            statusBar()->setVisible(myBottomBarAction->isChecked() && !hiddenForRenderMode);
+            statusBar()->setVisible(myBottomBarAction->isChecked() && !hiddenForRenderMode &&
+                                    !myHtmlChrome);   // the page's strip draws it instead
         // The rail and the axis gizmo card have no action of their own to be
         // derived FROM - they are always on outside render mode - so this is
         // simply their whole predicate rather than one term of it.
@@ -2804,7 +2808,12 @@ void MainWindow::buildOverlay()
     // A toast that offers to undo one operation must not survive that
     // operation - see ToastHost::documentMovedTo().
     connect(this, &MainWindow::documentChanged, this,
-            [this] { myToasts->documentMovedTo(myDocument.revision()); });
+            [this] {
+                myToasts->documentMovedTo(myDocument.revision());
+#ifdef FURNIFYME_WEB_UI
+                if (myHtmlChrome) myHtmlChrome->documentMovedTo(myDocument.revision());
+#endif
+            });
 
     // The "After every change" mode's own arm: documentChanged fires after
     // every committed change to the document (every commit path checkpoints
@@ -3564,6 +3573,9 @@ void MainWindow::updateActions()
     // the one place that decides what is available, and still pushed out
     // rather than re-derived at the toast.
     if (myToasts) myToasts->setUndoEnabled(!mySketching && !atInit && myDocument.canUndo());
+#ifdef FURNIFYME_WEB_UI
+    if (myHtmlChrome) myHtmlChrome->setUndoEnabled(!mySketching && !atInit && myDocument.canUndo());
+#endif
     // View -> Show notifications, pushed the same way and for the same reason:
     // this is the one place that decides it, and the host reads it rather than
     // re-deriving it from an action it would otherwise have to know about.
@@ -10249,9 +10261,88 @@ void MainWindow::showSelectionStatus()
     statusBar()->showMessage(myLastSelectionStatus);
 }
 
+void MainWindow::useHtmlChrome()
+{
+#ifdef FURNIFYME_WEB_UI
+    if (myHtmlChrome) return;
+    myHtmlChrome = new EditorChrome(myView, this);
+    // The page's Undo pill: through the ACTION, with the same two guards the
+    // Qt toast's pill keeps (see the ToastHost::undoRequested connection).
+    connect(myHtmlChrome, &EditorChrome::undoRequested, this, [this] {
+        if (mySketching) return;
+        if (myUndoAction->isEnabled()) myUndoAction->trigger();
+    });
+    // The strip is 24 px along the viewport's bottom; the Qt cards anchored
+    // there stand above it.
+    if (myOverlay) {
+        myOverlay->setBottomInset(24);
+        connect(myOverlay, &ViewportOverlay::laidOut, this, &MainWindow::syncHtmlChrome);
+    }
+    connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);
+    updateActions();
+    syncHtmlChrome();
+#endif
+}
+
+void MainWindow::syncHtmlChrome()
+{
+#ifdef FURNIFYME_WEB_UI
+    if (!myHtmlChrome) return;
+    // The status bar, as the hidden Qt bar holds it. The state label's
+    // TOOLTIP is its whole sentence (its text is elided to the Qt bar's room;
+    // the strip elides for itself).
+    const bool shown = myBottomBarAction && myBottomBarAction->isChecked() && !myRenderModeOn;
+    myHtmlChrome->setStatus(statusBar()->currentMessage(),
+                            myStateLabel ? myStateLabel->toolTip() : QString(),
+                            myNameMark ? myNameMark->name() : QString(),
+                            myNameMark && myNameMark->showsUnsavedDot(), shown);
+    // What the toast must stand clear of: every card the overlay anchored,
+    // and the hint balloon, which places itself.
+    std::vector<QRect> obstacles = myOverlay ? myOverlay->occupiedRects() : std::vector<QRect>();
+    if (const auto* balloon = myView->findChild<HintBalloon*>())
+        if (balloon->isVisible()) obstacles.push_back(balloon->geometry());
+    myHtmlChrome->setObstacles(obstacles);
+#endif
+}
+
 void MainWindow::onReported(const Outcome& outcome)
 {
     // The ONE renderer of everything the session reports (migration Phase 1).
+#ifdef FURNIFYME_WEB_UI
+    if (myHtmlChrome) {
+        // The same rules ToastHost keeps, with the page drawing: a Note is
+        // DROPPED with notifications off (a Failure never is), a Note that is
+        // shown leaves the left channel to the selection, and a Failure's
+        // reason is written to the status line at once - the relay
+        // ToastHost::failureShown performs in Qt mode.
+        // Undo's state rides WITH the message: updateActions() pushes it a
+        // moment later, and a pill that arrived first read as closed until
+        // then - measured, a click inside that gap did nothing.
+        myHtmlChrome->setUndoEnabled(!mySketching && !myShowingInitScreen && !isAskingBeforeClose() &&
+                                     myDocument.canUndo());
+        switch (outcome.kind) {
+        case Outcome::Kind::Note:
+            if (!myToasts->notesEnabled()) {
+                if (outcome.writesStatus) statusBar()->showMessage(statusLineFor(outcome.text));
+                break;
+            }
+            myHtmlChrome->showToast(outcome.text, EditorChrome::Kind::Note, outcome.offersUndo,
+                                    outcome.documentStamp);
+            if (outcome.writesStatus) showSelectionStatus();
+            break;
+        case Outcome::Kind::Failure:
+            myHtmlChrome->showToast(outcome.text, EditorChrome::Kind::Failure, outcome.offersUndo,
+                                    outcome.documentStamp);
+            statusBar()->showMessage(statusLineFor(outcome.text));
+            break;
+        case Outcome::Kind::Status:
+            statusBar()->showMessage(outcome.text);
+            break;
+        }
+        return;
+    }
+#endif
     switch (outcome.kind) {
     case Outcome::Kind::Note:
         myToasts->show(outcome.text, Toast::Kind::Note, outcome.offersUndo, outcome.documentStamp);

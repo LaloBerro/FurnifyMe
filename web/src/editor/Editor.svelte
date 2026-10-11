@@ -1,0 +1,71 @@
+<script lang="ts">
+  // The editor's chrome as a page over the viewport (migration Phase 3a): the
+  // toast and the status strip, for now. The page is see-through and takes
+  // the pointer only where it draws (data-hit), which it reports to C++ so
+  // every other press goes straight to the 3D view in the same event.
+  import { onMount } from 'svelte';
+  import type { ChromeApi, StatusState } from './api';
+  import type { ThemeApi } from '../hub/api';
+  import type { Rect } from './solver';
+  import Toast, { type ToastMessage } from './Toast.svelte';
+  import StatusStrip from './StatusStrip.svelte';
+  import { applyTokens } from '../theme';
+  import { reportHitsOnChange } from '../overlay/hits';
+
+  let { chrome, theme }: { chrome: ChromeApi; theme: ThemeApi } = $props();
+
+  const kStripHeight = 24;
+
+  let status: StatusState = $state({ left: '', right: '', name: '', unsaved: false, shown: true });
+  let obstacles: Rect[] = $state([]);
+  let undoEnabled = $state(true);
+  let message: ToastMessage | null = $state(null);
+  let pointer: { x: number; y: number } | null = $state(null);
+  let viewW = $state(window.innerWidth);
+  let viewH = $state(window.innerHeight);
+  let toast: Toast | undefined = $state();
+  let seq = 0;
+
+  const host = $derived({ w: viewW, h: viewH - (status.shown ? kStripHeight : 0) });
+
+  onMount(() => {
+    status = { ...chrome.status };
+    obstacles = [...chrome.obstacles];
+    undoEnabled = chrome.undoEnabled;
+    chrome.statusChanged.connect(() => (status = { ...chrome.status }));
+    chrome.obstaclesChanged.connect(() => (obstacles = [...chrome.obstacles]));
+    chrome.undoEnabledChanged.connect((on) => (undoEnabled = on));
+    chrome.toast.connect((text, kind, offersUndo, stamp, px = -1, py = -1, undoOpen) => {
+      pointer = px >= 0 && py >= 0 ? { x: px, y: py } : null;
+      if (undoOpen !== undefined) undoEnabled = undoOpen;
+      message = { id: ++seq, text, kind, offersUndo, stamp };
+    });
+    chrome.documentMoved.connect((stamp) => {
+      // A toast that offers to undo one change must not outlive it.
+      if (message && message.stamp >= 0 && stamp !== message.stamp) toast?.dismiss();
+    });
+    applyTokens(theme.tokens);
+    theme.changed.connect(() => applyTokens(theme.tokens));
+    const resize = () => {
+      viewW = window.innerWidth;
+      viewH = window.innerHeight;
+    };
+    window.addEventListener('resize', resize);
+    reportHitsOnChange(chrome);
+    return () => window.removeEventListener('resize', resize);
+  });
+</script>
+
+<Toast
+  bind:this={toast}
+  {message}
+  {undoEnabled}
+  {obstacles}
+  {host}
+  {pointer}
+  onundo={() => chrome.undo()}
+  ondismissed={() => (message = null)}
+/>
+{#if status.shown}
+  <StatusStrip {status} />
+{/if}

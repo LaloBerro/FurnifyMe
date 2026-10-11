@@ -285,6 +285,7 @@ if(FURNIFYME_BUILD_APP)
         src/web/WebHost.cpp
         src/web/ThemeBridge.cpp
         src/web/HubWindow.cpp
+        src/web/EditorChrome.cpp
         src/web/WebOverlay.cpp
       )
       target_link_libraries(furnify_app PUBLIC Qt6::WebEngineWidgets Qt6::WebChannel Qt6::Quick)
@@ -306,7 +307,8 @@ if(FURNIFYME_BUILD_APP)
         DEPENDS "${web_dir}/package.json" "${web_dir}/package-lock.json"
         COMMENT "Installing the web build's packages (npm ci)")
       file(GLOB_RECURSE web_sources CONFIGURE_DEPENDS "${web_dir}/src/*" "${web_dir}/*.html")
-      set(web_pages_built "${web_dir}/dist/hub/index.html" "${web_dir}/dist/overlay/index.html")
+      set(web_pages_built "${web_dir}/dist/hub/index.html" "${web_dir}/dist/overlay/index.html"
+          "${web_dir}/dist/editor/index.html")
       add_custom_command(
         OUTPUT ${web_pages_built}
         COMMAND "${NPM_EXECUTABLE}" run build
@@ -332,6 +334,8 @@ if(FURNIFYME_BUILD_APP)
       target_link_libraries(web_probe PRIVATE furnify_app)
       add_executable(hub_smoke tests/hub_smoke.cpp)
       target_link_libraries(hub_smoke PRIVATE furnify_app)
+      add_executable(chrome_smoke tests/chrome_smoke.cpp)
+      target_link_libraries(chrome_smoke PRIVATE furnify_app)
     endif()
 
     add_executable(furnifyme src/main.cpp)
@@ -486,7 +490,7 @@ if(FURNIFYME_BUILD_APP)
       set(windeployqt "${qt_bin}/windeployqt.exe")
       file(GLOB vcpkg_runtime_dlls "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/*.dll")
       list(FILTER vcpkg_runtime_dlls EXCLUDE REGEX "/Qt6[^/]*\.dll$")
-      foreach(web_target furnifyme web_spike hub_smoke gui_smoke)
+      foreach(web_target furnifyme web_spike hub_smoke chrome_smoke gui_smoke)
         add_dependencies(${web_target} web_pages)
         add_custom_command(TARGET ${web_target} POST_BUILD
           COMMAND "${windeployqt}" --release --no-translations --no-compiler-runtime

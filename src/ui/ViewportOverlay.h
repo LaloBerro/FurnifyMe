@@ -115,6 +115,11 @@ public:
     // Registering twice is harmless, and a widget that goes away is dropped by
     // the QPointer rather than needing to be unregistered.
     void addFloatingObstacle(QWidget* widget);
+    // A band along the viewport's bottom edge that belongs to something else -
+    // the HTML status strip, in HTML-chrome mode (migration Phase 3a). Every
+    // bottom-anchored card and the stretched rail end above it. 0 by default.
+    void setBottomInset(int px);
+    int bottomInset() const { return myBottomInset; }
 
 signals:
     // Emitted once relayout() has moved and raise()d every anchored entry.
@@ -146,4 +151,5 @@ private:
     std::vector<Entry> myEntries;
     // See relayout(): one pass at a time, never nested.
     bool myLayingOut = false;
+    int myBottomInset = 0;
 };

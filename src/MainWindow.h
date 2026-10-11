@@ -25,6 +25,7 @@
 #include "UserProgress.h"
 
 class AppBar;
+class EditorChrome;
 class AppearancePanel;
 class AxisGizmo;
 class BevelArrow;
@@ -67,6 +68,17 @@ public:
     // already established for QSettings.
     explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true,
                         const QString& libraryRoot = defaultLibraryRoot());
+
+    // HTML-CHROME MODE (migration Phase 3a; web builds only, a no-op
+    // otherwise): the toasts and the status bar are drawn by EditorChrome's
+    // page over the viewport. Everything that decides WHAT is said stays
+    // here: onReported() sends Notes and Failures to the page instead of
+    // ToastHost, and the Qt status bar - hidden - stays the state that every
+    // showMessage() writes and the refusal withdrawal reads back, mirrored to
+    // the page by syncHtmlChrome(). main.cpp turns it on; gui_smoke never
+    // does, so the Qt chrome stays the tested path until Phase 6.
+    void useHtmlChrome();
+    EditorChrome* htmlChrome() const { return myHtmlChrome; }
     // Not = default (M1): a drawer drag still live when the window dies is
     // ended HERE, while the document and every member it reads are alive.
     // Left to member order, ~QWidget's own hide would reach
@@ -2332,6 +2344,8 @@ private:
     // The polish ticker lives in RenderStudio now; this window answers its tierTick().
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
+    EditorChrome* myHtmlChrome = nullptr;   // see useHtmlChrome()
+    void syncHtmlChrome();
     ExtrudePreview* myExtrudePreview = nullptr;
     PullArrow* myPullArrow = nullptr;
     BevelArrow* myBevelArrow = nullptr;
