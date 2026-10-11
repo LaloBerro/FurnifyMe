@@ -813,7 +813,7 @@ void skipByEnvironment(int checks, const QString& why)
 // keeping a folder's order, and C4's library guard made structural. TWO
 // consecutive unfiltered runs on one binary measured 6323 checks + 1
 // environment skip, agreeing to the digit; the floor is their sum, 6324.
-constexpr int kCheckFloor = 6324;
+constexpr int kCheckFloor = 6449;
 
 void check(bool condition, const QString& what)
 {

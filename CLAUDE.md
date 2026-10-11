@@ -196,7 +196,8 @@ alignment sweep and folder-duplicate block, **5278** after the scene editor and 
 phase, **5374** after the board sweep that worked every open card to a close, **5927**
 after the review-fixes branch worked the 2026-10 whole-app review's 26 cards, **6298**
 after the items-drawer branch (T-063), and **6324** after that branch's final-review fix wave
-(RF1-RF5, M1-M6). The floor
+(RF1-RF5, M1-M6), and **6449** on the `themes` branch (6448 checks + 1 skip, twice; the
++78 are the six new theme strings through the banned-word sweep, 13 times each). The floor
 has never been computed from a predicted delta at any of those steps, which is the whole
 point of the paragraph below.
 
@@ -385,6 +386,45 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
     itself near the bottom clamps to `ViewportOverlay::usableHeight()`, never `height()`.
   - **The state line reaches the page from `showStateLine()`**, not only on
     `appStateChanged` - a route that writes it without one would leave the strip stale.
+- **Themes (T-072, branch `themes`): five whole styles, DESIGN.md is the contract.**
+  Violet Glass Float (the default), Aurora / Mesh Gradient, Nightshade Glass, Ultraviolet
+  Grid and Graphite, chosen from View → Theme or the Theme row heading Settings → Colours
+  (both drawers; the rows mirror one checkable action per theme).
+  - **A theme is DATA**, `assets/themes/<id>.json` compiled in as `:/themes/<id>.json`:
+    its name, typeface, the `Theme::Spec` colours it sets - so no hex enters `src/`.
+    A theme's base is `defaultSpec()` + those colours, and **Graphite sets none: Graphite
+    IS `defaultSpec()`**, so a window with persistence off (`gui_smoke`, `chrome_smoke`,
+    `hub_smoke`) and every colour file from before themes mean what they always did.
+  - **Each theme keeps the user's own edits, as a DELTA** from its base under
+    `appearance/<id>` (`Themes::storeEdits()`), loaded over the CURRENT base - so a base
+    fixed in a later build still reaches a theme the user visited. `Themes::select()`
+    closes an open colour picker first (its Cancel lands in the theme being left),
+    stores the leaving theme, installs the arriving one. Reset puts back the current
+    theme's base.
+  - **Startup, persisted:** a `theme` key starts that theme from its own slot ONLY -
+    `appearance` (still written as the live spec) is never read back once a theme
+    exists, or a migrating user's old colours came back on the second launch wearing
+    the new theme's name (the review's C1). No `theme` key: the old `appearance` becomes
+    Graphite's edits and Violet Glass Float starts. `Themes::start()` stores nothing on
+    the way in. A persisted window gives the theme and its QSettings store back when it
+    closes, so no store outlives the window - or a test's settings scope.
+  - **What a surface takes:** an HTML page the whole style - `web/src/themes.css` sets
+    corner, surface, shadow, rim, title and label variables per theme, every component
+    reads them with today's value as its fallback (Graphite has no block); a Qt surface
+    and the viewport the theme's colours and typeface, until it moves to HTML. Glass on
+    a page is a tinted, nearly opaque fill with its rim, never a backdrop blur (a page
+    over the GL viewport has nothing behind it to blur).
+  - **The typefaces ship**: Sora, Outfit, Plus Jakarta Sans, Inter Tight and IBM Plex
+    Mono beside DM Sans, in the Qt resources and in `web/public/fonts` (copied beside
+    each page), each with its OFL licence.
+  - `settings_tests` holds every theme to readable words (4.5:1), its viewport inks apart
+    from each other (60) and from the bodies (80), and its grid axes quieter than the
+    gizmo arms.
+- **Saving never moves `revision()`.** `setActiveMaterial()`/`setWoodTextureFile()`
+  record the wood at a save, and a save is not an edit; they bumped the revision, which
+  autosave then did 400 ms after every edit - killing the HTML toast's Undo (its stamp is
+  compared with the last `documentChanged()` revision now, never the raw one) and once
+  reddening a refusal's "wrote nothing" check mid-gate.
 - **The vocabulary law covers pages:** `web/test/banned.ts` is `usesBannedWord()`
   ported rule for rule, swept over every string in a page's `copy.ts` and over its
   rendered text, user names exempt; `hub_smoke` sweeps the live hub too.
@@ -416,6 +456,7 @@ Source files under `src/`, plus `tests/`:
 | `web/ThemeBridge.{h,cpp}` | `Theme::Spec` as CSS custom properties, re-sent on every Theme change |
 | `web/HubWindow.{h,cpp}` | the HTML hub's frameless window: page + `HubModel` + window controls; `WindowChrome` hit-tests from rects the page reports |
 | `ui/SettingsEdits.{h,cpp}` | the Settings drawer's model: tabs, rows, number fields, token names and headings, the colour picker, and every `Theme::Spec` edit - read by both drawers; no widgets |
+| `ui/Themes.{h,cpp}` | the five themes as data (`assets/themes/*.json`): base specs, the theme in use, per-theme deltas through an injected store |
 | `ui/HtmlCardSlot.{h,cpp}` | an HTML card's place in the overlay: the card's size, painting nothing, taking no click |
 | `session/ActionWatch.{h,cpp}` | a few actions' state for a page, one `changed()` per event-loop turn |
 | `web/SettingsBridge.{h,cpp}` | the page's `settings` object: layout, live spec, the rows' actions; edits land in `SettingsEdits`; triggers only its rows' actions |

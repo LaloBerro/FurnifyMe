@@ -219,3 +219,11 @@ The variables every component reads instead of a literal: `--radius-card`, `--ra
 
 | When | Checks | Skips | Failures | Run |
 | --- | --- | --- | --- | --- |
+| dab7161 (Tasks 1-4), quiet, run 1 | 6448 | 1 | 1 (a refusal's "wrote nothing" - a save moved revision(); root-fixed in 3c35779) | dab7161 |
+| dab7161, quiet, run 2 | 6448 | 1 | 0 | dab7161 |
+| 3c35779 (review fixes), quiet, run 1 | 6448 | 1 | 0 | 3c35779 |
+| 3c35779, quiet, run 2 | 6448 | 1 | 0 | 3c35779 |
+
+The count rose 6370 -> 6448: six new strings (five theme names and "Theme") through the
+banned-word sweep, 13 times each, found by diffing the check names of two runs.
+kCheckFloor re-ratcheted to the measured 6449.
