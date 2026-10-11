@@ -25,6 +25,7 @@ class OcctViewWidget;
 class ThemeBridge;
 class WebHost;
 class QWebEngineView;
+class HtmlCardSlot;
 
 // The page's `chrome` object.
 class ChromeBridge : public QObject
@@ -33,16 +34,19 @@ class ChromeBridge : public QObject
     Q_PROPERTY(bool undoEnabled READ undoEnabled NOTIFY undoEnabledChanged)
     Q_PROPERTY(QVariantList obstacles READ obstacles NOTIFY obstaclesChanged)
     Q_PROPERTY(QVariantMap status READ status NOTIFY statusChanged)
+    Q_PROPERTY(QVariantMap cards READ cards NOTIFY cardsChanged)
 public:
     using QObject::QObject;
     bool undoEnabled() const { return myUndoEnabled; }
     QVariantList obstacles() const { return myObstacles; }
     QVariantMap status() const { return myStatus; }
+    QVariantMap cards() const { return myCards; }
     const QVector<QRect>& hitRects() const { return myHitRects; }
 
     void setUndoEnabledState(bool on);
     void setObstacleList(const QVariantList& list);
     void setStatusMap(const QVariantMap& map);
+    void setCardMap(const QVariantMap& map);
 
 signals:
     // C++ -> page
@@ -55,21 +59,27 @@ signals:
     void undoEnabledChanged(bool enabled);
     void obstaclesChanged();
     void statusChanged();
+    void cardsChanged();
     // Observed on the C++ side
     void undoRequested(int stamp);
     void hitRectsChanged();
     void pageReady();
+    void keyboardClaimed();
+    void keyboardReleased();
 
 public slots:
     // page -> C++
     void reportHitRects(const QVariantList& rects);
     void undo(int stamp);
     void ready();
+    void claimKeyboard();
+    void releaseKeyboard();
 
 private:
     bool myUndoEnabled = true;
     QVariantList myObstacles;
     QVariantMap myStatus;
+    QVariantMap myCards;
     QVector<QRect> myHitRects;
 };
 
@@ -77,7 +87,20 @@ class EditorChrome : public QObject
 {
     Q_OBJECT
 public:
+    // The page is not loaded until start(), so objects registered between
+    // the two (the Settings card's `settings`) are there when it connects.
     EditorChrome(OcctViewWidget* viewport, QObject* parent = nullptr);
+    void start();
+    void registerObject(const QString& name, QObject* object);
+    // An HTML card's place (Phase 3b): the page is told where the slot
+    // stands and whether it shows, every time it moves, shows or hides.
+    void addCard(HtmlCardSlot* slot);
+    // A typed field on the page holds the keyboard (ruling R5). While it
+    // does, the view claims every ShortcutOverride, so Delete, Ctrl+Z or a
+    // digit in a field never reaches a window shortcut.
+    void claimKeyboard();
+    void releaseKeyboard();
+    bool holdsKeyboard() const { return myHoldsKeyboard; }
     ~EditorChrome() override;
 
     enum class Kind { Note, Failure };
@@ -111,6 +134,8 @@ private:
     void applyMask();
     void setLive(bool live);
     void refuseFocus();
+    void syncCards();
+    void watchFocusProxy();
 
     QPointer<OcctViewWidget> myViewport;
     WebHost* myHost = nullptr;
@@ -119,4 +144,8 @@ private:
     QRegion myHitRegion;
     QPoint myPointer{-1, -1};
     bool myLive = false;
+    bool myHoldsKeyboard = false;
+    QPointer<QWidget> myFocusBefore;
+    QPointer<QWidget> myWatchedProxy;
+    std::vector<QPointer<HtmlCardSlot>> myCards;
 };

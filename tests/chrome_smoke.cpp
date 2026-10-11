@@ -20,7 +20,9 @@
 #include "OcctViewWidget.h"
 #include "Theme.h"
 #include "ViewportOverlay.h"
+#include "ui/AppearancePanel.h"
 #include "ui/GestureChip.h"
+#include "ui/SettingsEdits.h"
 #include "ui/ItemsPanel.h"
 #include "ui/Toast.h"
 #include "web/EditorChrome.h"
@@ -33,7 +35,9 @@
 #include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QStatusBar>
 #include <QSurfaceFormat>
 #include <QTemporaryDir>
@@ -425,9 +429,198 @@ int main(int argc, char* argv[])
               (!page->focusProxy() || page->focusProxy()->focusPolicy() == Qt::NoFocus),
           "the chrome page and its render widget take no keyboard focus");
 
+    // --- the Settings card's place (Phase 3b) ------------------------------------------
+    QAction* settingsAction = actionNamed(&window, QStringLiteral("Settings..."));
+    check(settingsAction != nullptr, "the editor has Settings...");
+    if (settingsAction && !settingsAction->isChecked()) settingsAction->trigger();
+    pump(400);
+    QWidget* settingsSlot = window.findChild<QWidget*>(QStringLiteral("htmlCardSlot_settings"));
+    {
+        const QJsonObject card = QJsonDocument::fromJson(
+            jsString(page, "JSON.stringify((window.__chromeCards || {}).settings || {})").toUtf8()).object();
+        check(settingsSlot && settingsSlot->isVisible(), "Settings shows the card's slot");
+        check(settingsSlot && card.value("x").toInt() == settingsSlot->x() &&
+                  card.value("y").toInt() == settingsSlot->y() && card.value("shown").toBool(),
+              QStringLiteral("the page is told where the slot stands (%1,%2)")
+                  .arg(card.value("x").toInt()).arg(card.value("y").toInt()));
+        check(!window.findChild<AppearancePanel*>()->isVisible(), "and the Qt drawer stays hidden");
+        waitFor([&] { return js(page, "!!document.querySelector('.settings-card')").toBool(); }, 3000);
+        const QRect drawn = QRect(js(page, "Math.round(document.querySelector('.settings-card').getBoundingClientRect().left)").toInt(),
+                                  js(page, "Math.round(document.querySelector('.settings-card').getBoundingClientRect().top)").toInt(),
+                                  js(page, "Math.round(document.querySelector('.settings-card').getBoundingClientRect().width)").toInt(),
+                                  js(page, "Math.round(document.querySelector('.settings-card').getBoundingClientRect().height)").toInt());
+        check(settingsSlot && drawn == settingsSlot->geometry(),
+              QStringLiteral("the page draws the card exactly over its slot (%1,%2 %3x%4)")
+                  .arg(drawn.x()).arg(drawn.y()).arg(drawn.width()).arg(drawn.height()));
+        pump(200);
+        check(settingsSlot && chrome->hitRegion().contains(settingsSlot->geometry().center()),
+              "and a press on the card reaches the page");
+        // The colour list scrolls, and says so with the app's scrollbar, as
+        // the Qt card's does - not a list whose last row is simply cut off.
+        const int bar = js(page, "(() => { const l = document.querySelector('.settings-card .colours'); "
+                                 "return l.scrollHeight > l.clientHeight ? l.offsetWidth - l.clientWidth : -1; })()").toInt();
+        check(bar > 0, QStringLiteral("the colour list shows its scrollbar (%1 px)").arg(bar));
+    }
+
+    // --- typing in a field keeps every key (Review Focus 1) ----------------------------
+    {
+        const int before = static_cast<int>(window.document().solids().size());
+        window.view()->setSelectedSolids({window.document().solids().front().id});
+        pump(100);
+        js(page, "document.querySelector('[data-tab=\"1\"]').click()");
+        pump(150);
+        js(page, "(() => { const f = document.querySelector('[data-number=\"basePt\"] input'); "
+                 "f.dispatchEvent(new MouseEvent('mousedown', {bubbles: true})); f.focus(); })()");
+        waitFor([&] { return chrome->holdsKeyboard(); }, 2000);
+        check(chrome->holdsKeyboard(), "pressing a typed field gives the page the keyboard");
+        QWidget* proxy = page->focusProxy() ? page->focusProxy() : page;
+        for (int key : {int(Qt::Key_Delete), int(Qt::Key_Backspace), int(Qt::Key_1)}) {
+            QKeyEvent over(QEvent::ShortcutOverride, key, Qt::NoModifier);
+            over.ignore();
+            QCoreApplication::sendEvent(proxy, &over);
+            check(over.isAccepted(), QStringLiteral("the page claims key %1 before any shortcut").arg(key));
+        }
+        QKeyEvent undo(QEvent::ShortcutOverride, Qt::Key_Z, Qt::ControlModifier);
+        undo.ignore();
+        QCoreApplication::sendEvent(proxy, &undo);
+        check(undo.isAccepted(), "and Ctrl+Z");
+        // WebEngine claims editing keys for a focused field on its own; the
+        // window's OTHER shortcuts - Duplicate, Settings - are the ones only
+        // the chrome's claim keeps from firing while a field is typed in.
+        for (const QKeySequence& shortcut : {QKeySequence(Qt::CTRL | Qt::Key_D),
+                                             QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_A)}) {
+            const QKeyCombination combo = shortcut[0];
+            QKeyEvent over(QEvent::ShortcutOverride, combo.key(), combo.keyboardModifiers());
+            over.ignore();
+            QCoreApplication::sendEvent(proxy, &over);
+            check(over.isAccepted(),
+                  "the page claims " + shortcut.toString() + " too, so no window shortcut fires");
+        }
+        check(static_cast<int>(window.document().solids().size()) == before, "so nothing was deleted");
+        js(page, "document.querySelector('[data-number=\"basePt\"] input').dispatchEvent("
+                 "new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+        waitFor([&] { return !chrome->holdsKeyboard(); }, 2000);
+        check(!chrome->holdsKeyboard() && page->focusPolicy() == Qt::NoFocus &&
+                  (!page->focusProxy() || page->focusProxy()->focusPolicy() == Qt::NoFocus),
+              "Escape gives the keyboard back");
+        QKeyEvent after(QEvent::ShortcutOverride, Qt::Key_Delete, Qt::NoModifier);
+        after.ignore();
+        QCoreApplication::sendEvent(proxy, &after);
+        check(!after.isAccepted(), "and afterwards the page claims nothing");
+    }
+
+    // --- a wheel over the card never zooms (Review Focus 2) -----------------------------
+    if (settingsSlot) {
+        const double distance = window.view()->camera().state().distance;
+        const QPoint at = settingsSlot->geometry().topLeft() + QPoint(40, 16);   // the title
+        // What WebEngine does with a wheel the page did not consume: hands it
+        // to the view's parent - here, sent straight there.
+        QWheelEvent bounced(QPointF(at), QPointF(window.view()->mapToGlobal(at)), QPoint(), QPoint(0, 120),
+                            Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(window.view(), &bounced);
+        pump(150);
+        check(std::abs(window.view()->camera().state().distance - distance) < 1e-6,
+              "a wheel coming back from the card leaves the camera alone");
+        // And end to end, into the page's own widget.
+        if (QWidget* target = window.view()->childAt(at)) {
+            const QPoint local = target->mapFrom(window.view(), at);
+            QWheelEvent wheel(QPointF(local), QPointF(target->mapToGlobal(local)), QPoint(), QPoint(0, 120),
+                              Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(target, &wheel);
+        }
+        pump(300);
+        check(std::abs(window.view()->camera().state().distance - distance) < 1e-6,
+              "a wheel over the card's title leaves the camera alone");
+        const QPoint outside = settingsSlot->geometry().topLeft() - QPoint(60, -60);
+        QWheelEvent open(QPointF(outside), QPointF(window.view()->mapToGlobal(outside)), QPoint(), QPoint(0, 120),
+                         Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(window.view(), &open);
+        pump(150);
+        check(std::abs(window.view()->camera().state().distance - distance) > 1e-6,
+              "while a wheel beside the card still zooms");
+    }
+
+    // --- the drawer, end to end -----------------------------------------------------------
+    {
+        js(page, "document.querySelector('[data-tab=\"2\"]').click()");
+        pump(200);
+        QAction* gridAction = actionNamed(&window, QStringLiteral("Grid"));
+        check(gridAction != nullptr, "the editor has Grid");
+        if (!gridAction) return 1;
+        const bool gridWas = gridAction && gridAction->isChecked();
+        js(page, "document.querySelector('[data-action=\"grid\"]').click()");
+        pump(300);
+        check(gridAction && gridAction->isChecked() != gridWas, "the grid switch triggers the View menu's action");
+        const QString switchState = QStringLiteral(
+            "document.querySelector('[data-action=\"grid\"]').getAttribute('aria-checked')");
+        waitFor([&] { return jsString(page, switchState) == (gridAction->isChecked() ? "true" : "false"); }, 2000);
+        check(jsString(page, switchState) == (gridAction->isChecked() ? "true" : "false"),
+              "and the switch reads the action back");
+        gridAction->trigger();   // the menu moves the switch
+        waitFor([&] { return jsString(page, switchState) == (gridAction->isChecked() ? "true" : "false"); }, 2000);
+        check(jsString(page, switchState) == (gridAction->isChecked() ? "true" : "false"),
+              "a change made from the menu reaches the switch");
+
+        const double gizmoWas = Theme::spec().gizmoScale;
+        js(page, "document.querySelector('[data-number=\"gizmoScale\"] .up').click()");
+        pump(300);
+        check(std::abs(Theme::spec().gizmoScale - std::min(2.0, gizmoWas + 0.1)) < 1e-9,
+              QStringLiteral("Gizmo size steps by 0.1 into the live spec (%1)").arg(Theme::spec().gizmoScale));
+
+        SettingsEdits::setTokenColour(QStringLiteral("accent"), QColor(200, 40, 90));   // made elsewhere
+        js(page, "document.querySelector('[data-tab=\"0\"]').click()");
+        const QString swatch = QStringLiteral(
+            "getComputedStyle(document.querySelector('[data-swatch=\"accent\"]')).backgroundColor");
+        waitFor([&] { return jsString(page, swatch) == QStringLiteral("rgb(200, 40, 90)"); }, 2000);
+        check(jsString(page, swatch) == QStringLiteral("rgb(200, 40, 90)"),
+              "an edit made elsewhere re-dresses the open card - \"" + jsString(page, swatch) + "\"");
+
+        js(page, "document.querySelector('.settings-card .reset').click()");
+        pump(200);
+        check(Theme::spec().accent == QColor(200, 40, 90), "one click on Reset changes nothing");
+        js(page, "document.querySelector('.settings-card .reset').click()");
+        pump(300);
+        check(Theme::spec() == Theme::defaultSpec(), "the second click resets");
+
+        js(page, "document.querySelector('[data-tab=\"1\"]').click()");
+        pump(150);
+        js(page, "(() => { const f = document.querySelector('[data-number=\"basePt\"] input'); "
+                 "f.dispatchEvent(new MouseEvent('mousedown', {bubbles: true})); f.focus(); })()");
+        waitFor([&] { return chrome->holdsKeyboard(); }, 2000);
+        settingsAction->trigger();   // hidden mid-edit (Review Focus 4)
+        pump(300);
+        check(settingsSlot && !settingsSlot->isVisible() &&
+                  !js(page, "!!document.querySelector('.settings-card')").toBool(),
+              "Settings off takes the card away");
+        check(!chrome->holdsKeyboard(), "and gives the keyboard back mid-edit");
+    }
+#ifdef _WIN32
+    for (int tab = 0; tab < 4; ++tab) {
+        settingsAction->trigger();
+        pump(300);
+        js(page, QStringLiteral("document.querySelector('[data-tab=\"%1\"]').click()").arg(tab));
+        pump(400);
+        capture(&window, outDir + QStringLiteral("/settings-tab-%1.png").arg(tab));
+        settingsAction->trigger();
+        pump(200);
+    }
+#endif
+
     // --- the page's words ----------------------------------------------------------------
     {
+        // The card's words too: open it on each tab and read everything shown.
         QString text = jsString(page, "document.body.innerText");
+        if (settingsAction) {
+            settingsAction->trigger();
+            pump(300);
+            for (int tab = 0; tab < 4; ++tab) {
+                js(page, QStringLiteral("document.querySelector('[data-tab=\"%1\"]').click()").arg(tab));
+                pump(150);
+                text += QLatin1Char(' ') + jsString(page, "document.body.innerText");
+            }
+            settingsAction->trigger();
+            pump(200);
+        }
         text.replace(QStringLiteral("Bench"), QStringLiteral(" "));
         check(bannedIn(text).isEmpty(), "no word the page shows is banned - found: " + bannedIn(text).join(", "));
     }

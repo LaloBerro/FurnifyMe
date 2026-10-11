@@ -1,6 +1,8 @@
 #include "MainWindow.h"
 #ifdef FURNIFYME_WEB_UI
 #include "web/EditorChrome.h"
+#include "ui/HtmlCardSlot.h"
+#include "web/SettingsBridge.h"
 #endif
 
 #include <cstdio>
@@ -1073,8 +1075,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // drawer above is and for exactly the same reason - a one-shot hide
         // is not a state, and QWidget::showChildren() on the window's first
         // show will happily undo one.
-        if (myAppearancePanel)
-            myAppearancePanel->setVisible(myAppearanceAction->isChecked() && !hiddenForRenderMode);
+        if (QWidget* settings = settingsSurface())
+            settings->setVisible(myAppearanceAction->isChecked() && !hiddenForRenderMode);
         if (myVersionsPanel)
             myVersionsPanel->setVisible(myVersionsPanelAction->isChecked() && !hiddenForRenderMode);
         if (myJointsPanel)
@@ -1329,7 +1331,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
 
     // The Appearance card on the same terms - see the drawer's toggle above.
     connect(myAppearanceAction, &QAction::toggled, this, [this](bool shown) {
-        if (myAppearancePanel) myAppearancePanel->setVisible(shown);
+        if (QWidget* settings = settingsSurface()) settings->setVisible(shown);
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -2760,16 +2762,9 @@ void MainWindow::buildOverlay()
     // (see ToastHost::show): a Load that changed nothing and said nothing would
     // be indistinguishable from a colour file with nothing in it.
     connect(myAppearancePanel, &AppearancePanel::colourSaveFailed, this,
-            [this](const QString& path) {
-                mySession.reportFailure(tr("Couldn't write the colours to %1 — Check that the "
-                                  "folder exists and isn't read-only").arg(path), false);
-            });
+            &MainWindow::reportColourSaveFailed);
     connect(myAppearancePanel, &AppearancePanel::colourLoadRefused, this,
-            [this](const QString& path) {
-                mySession.reportFailure(tr("%1 doesn't hold a look this app can read, so nothing "
-                                  "changed — Pick a file made with Save colours")
-                                   .arg(path), false);
-            });
+            &MainWindow::reportColourLoadRefused);
 
     // A toast that offers to undo one operation must not survive that
     // operation - see ToastHost::documentMovedTo().
@@ -10304,11 +10299,46 @@ void MainWindow::useHtmlChrome()
         updateActions();
         syncHtmlChrome();
     });
+
+    // THE SETTINGS CARD (Phase 3b): its slot takes the Qt drawer's place in
+    // the overlay, and the page draws the card there. The Qt drawer stays
+    // built - gui_smoke drives it - and simply never shows in this mode.
+    if (myOverlay && myAppearancePanel) {
+        mySettingsSlot = new HtmlCardSlot(QStringLiteral("settings"), myAppearancePanel->size(), myView);
+        myOverlay->replaceWidget(myAppearancePanel, mySettingsSlot);
+        myHtmlChrome->addCard(mySettingsSlot);
+    }
+    auto* settings = new SettingsBridge(&mySession.actions(), settingsRows(), myHtmlChrome);
+    // The card's close x triggers the Settings action itself.
+    settings->allowAction(ActionRegistry::idFor(myAppearanceAction->text()));
+    settings->setDialogParent(this);
+    connect(settings, &SettingsBridge::colourSaveFailed, this, &MainWindow::reportColourSaveFailed);
+    connect(settings, &SettingsBridge::colourLoadRefused, this, &MainWindow::reportColourLoadRefused);
+    myHtmlChrome->registerObject(QStringLiteral("settings"), settings);
+    myHtmlChrome->start();
     connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);
     updateActions();
     syncHtmlChrome();
 #endif
+}
+
+void MainWindow::reportColourSaveFailed(const QString& path)
+{
+    mySession.reportFailure(tr("Couldn't write the colours to %1 — Check that the "
+                               "folder exists and isn't read-only").arg(path), false);
+}
+
+void MainWindow::reportColourLoadRefused(const QString& path)
+{
+    mySession.reportFailure(tr("%1 doesn't hold a look this app can read, so nothing "
+                               "changed — Pick a file made with Save colours").arg(path), false);
+}
+
+QWidget* MainWindow::settingsSurface() const
+{
+    if (mySettingsSlot) return mySettingsSlot;
+    return myAppearancePanel;
 }
 
 bool MainWindow::htmlChromeLive() const

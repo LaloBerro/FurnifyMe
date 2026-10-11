@@ -80,6 +80,7 @@ SettingsBridge::SettingsBridge(ActionRegistry* registry, const std::vector<Setti
     // The drawer's own words, verbatim from the Qt drawer.
     const QVariantMap words{
         {QStringLiteral("title"), tr("Settings")},
+        {QStringLiteral("close"), QCoreApplication::translate("PanelCloseButton", "Close this panel")},
         {QStringLiteral("save"), tr("Save colours...")},
         {QStringLiteral("saveTip"),
          tr("Write the colours and text size to a file\nKeep colours you like, or hand them to somebody else.")},

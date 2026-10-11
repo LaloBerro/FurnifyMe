@@ -1,10 +1,14 @@
 #include "EditorChrome.h"
 
+#include "HtmlCardSlot.h"
 #include "OcctViewWidget.h"
 #include "ThemeBridge.h"
 #include "WebHost.h"
 
+#include <QApplication>
 #include <QEvent>
+#include <QKeyEvent>
+#include <QWheelEvent>
 #include <QMouseEvent>
 #include <QWebEnginePage>
 #include <QWebEngineView>
@@ -30,6 +34,23 @@ void ChromeBridge::setStatusMap(const QVariantMap& map)
     if (myStatus == map) return;
     myStatus = map;
     emit statusChanged();
+}
+
+void ChromeBridge::setCardMap(const QVariantMap& map)
+{
+    if (myCards == map) return;
+    myCards = map;
+    emit cardsChanged();
+}
+
+void ChromeBridge::claimKeyboard()
+{
+    emit keyboardClaimed();
+}
+
+void ChromeBridge::releaseKeyboard()
+{
+    emit keyboardReleased();
 }
 
 void ChromeBridge::reportHitRects(const QVariantList& rects)
@@ -81,12 +102,16 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     applyMask();
     connect(myBridge, &ChromeBridge::hitRectsChanged, this, &EditorChrome::applyMask);
     connect(myBridge, &ChromeBridge::undoRequested, this, &EditorChrome::undoRequested);
+    connect(myBridge, &ChromeBridge::keyboardClaimed, this, &EditorChrome::claimKeyboard);
+    connect(myBridge, &ChromeBridge::keyboardReleased, this, &EditorChrome::releaseKeyboard);
     connect(myBridge, &ChromeBridge::pageReady, this, [this] {
         refuseFocus();
+        watchFocusProxy();
         setLive(true);
     });
     connect(myHost, &WebHost::loadFinished, this, [this](bool ok) {
         refuseFocus();
+        watchFocusProxy();
         if (!ok) setLive(false);
     });
     connect(myHost->view()->page(), &QWebEnginePage::renderProcessTerminated, this,
@@ -96,7 +121,74 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     viewport->installEventFilter(this);
     myHost->view()->show();
     myHost->view()->raise();
+}
+
+void EditorChrome::start()
+{
+    if (myHost->loaded()) return;
     myHost->load(WebHost::pageUrl(QStringLiteral("editor")));
+}
+
+void EditorChrome::registerObject(const QString& name, QObject* object)
+{
+    myHost->registerObject(name, object);
+}
+
+void EditorChrome::addCard(HtmlCardSlot* slot)
+{
+    if (!slot) return;
+    myCards.push_back(slot);
+    connect(slot, &HtmlCardSlot::placed, this, &EditorChrome::syncCards);
+    syncCards();
+}
+
+void EditorChrome::syncCards()
+{
+    QVariantMap map;
+    bool anyHidden = false;
+    for (const QPointer<HtmlCardSlot>& slot : myCards) {
+        if (!slot) continue;
+        QVariantMap card = rectMap(slot->geometry());
+        card.insert(QStringLiteral("shown"), slot->isVisible());
+        anyHidden = anyHidden || !slot->isVisible();
+        map.insert(slot->name(), card);
+    }
+    // A card going away mid-edit gives the keyboard back from here too,
+    // not only from the page (Review Focus 4).
+    if (anyHidden && myHoldsKeyboard) releaseKeyboard();
+    myBridge->setCardMap(map);
+}
+
+void EditorChrome::claimKeyboard()
+{
+    if (myHoldsKeyboard || !myLive) return;
+    QWebEngineView* view = myHost->view();
+    QWidget* proxy = view->focusProxy() ? view->focusProxy() : view;
+    myFocusBefore = QApplication::focusWidget();
+    myHoldsKeyboard = true;
+    watchFocusProxy();
+    view->setFocusPolicy(Qt::StrongFocus);
+    proxy->setFocusPolicy(Qt::StrongFocus);
+    proxy->setFocus(Qt::OtherFocusReason);
+}
+
+void EditorChrome::releaseKeyboard()
+{
+    if (!myHoldsKeyboard) return;
+    myHoldsKeyboard = false;
+    refuseFocus();
+    if (myFocusBefore) myFocusBefore->setFocus(Qt::OtherFocusReason);
+    else myHost->view()->clearFocus();
+    myFocusBefore = nullptr;
+}
+
+void EditorChrome::watchFocusProxy()
+{
+    QWidget* proxy = myHost->view()->focusProxy();
+    if (!proxy || proxy == myWatchedProxy) return;
+    if (myWatchedProxy) myWatchedProxy->removeEventFilter(this);
+    myWatchedProxy = proxy;
+    proxy->installEventFilter(this);
 }
 
 EditorChrome::~EditorChrome()
@@ -148,7 +240,10 @@ void EditorChrome::setLive(bool live)
     myLive = live;
     // A dead page leaves the viewport outright: its mask would otherwise
     // keep swallowing presses on the strip's band over nothing at all.
-    if (!live) myHost->view()->hide();
+    if (!live) {
+        releaseKeyboard();
+        myHost->view()->hide();
+    }
     emit liveChanged(live);
 }
 
@@ -158,6 +253,9 @@ void EditorChrome::refuseFocus()
     // level too: a press on the pill or the strip moved focus out of the
     // Re-measure field or the Items list into Chromium (review I7). The
     // render widget behind the view is its focus proxy, created at load.
+    // Not while a typed field holds the keyboard - releaseKeyboard() comes
+    // back here when it ends.
+    if (myHoldsKeyboard) return;
     QWebEngineView* view = myHost->view();
     view->setFocusPolicy(Qt::NoFocus);
     if (QWidget* proxy = view->focusProxy()) proxy->setFocusPolicy(Qt::NoFocus);
@@ -175,6 +273,25 @@ void EditorChrome::applyMask()
 
 bool EditorChrome::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == myWatchedProxy && event->type() == QEvent::ShortcutOverride && myHoldsKeyboard) {
+        // Every key is the field's while it holds the keyboard: claimed
+        // here, before QShortcutMap can hand it to a window shortcut.
+        event->accept();
+        return true;
+    }
+    if (watched == myViewport && event->type() == QEvent::Wheel) {
+        // THE WHEEL SHIELD (Review Focus 2). A wheel the page did not consume
+        // - over a card's title, or a list already at its end - is handed by
+        // WebEngine to the view's PARENT, the viewport, which would zoom the
+        // camera. The mask sends every wheel outside the page's rectangles to
+        // the viewport directly, so one inside them can only have come back
+        // from the page: it stops here.
+        const QPoint at = static_cast<QWheelEvent*>(event)->position().toPoint();
+        if (myHitRegion.contains(at)) {
+            event->accept();
+            return true;
+        }
+    }
     if (watched == myViewport) {
         switch (event->type()) {
         case QEvent::Resize:

@@ -2348,6 +2348,13 @@ private:
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
     EditorChrome* myHtmlChrome = nullptr;   // see useHtmlChrome()
+    // The Settings card's place in HTML-chrome mode (Phase 3b): it takes the
+    // Qt drawer's anchor, and settingsSurface() is whichever of the two is
+    // the one shown and hidden off the Settings action.
+    class HtmlCardSlot* mySettingsSlot = nullptr;
+    QWidget* settingsSurface() const;
+    void reportColourSaveFailed(const QString& path);
+    void reportColourLoadRefused(const QString& path);
     void syncHtmlChrome();
     // The page is up AND listening - the one term every HTML-chrome branch
     // reads, so a page that never loaded or whose render process died hands

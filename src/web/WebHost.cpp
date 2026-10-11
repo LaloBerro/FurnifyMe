@@ -75,8 +75,9 @@ WebHost::WebHost(QWidget* parent, Ground ground, QObject* owner)
     if (ground == Ground::Transparent) {
         page->setBackgroundColor(Qt::transparent);
         myView->setAttribute(Qt::WA_TranslucentBackground);
-        // An overlay over the viewport scrolls nothing of its own.
-        page->settings()->setAttribute(QWebEngineSettings::ShowScrollBars, false);
+        // Scrollbars stay ON: a page over the viewport has lists that scroll
+        // and must show it (the Settings card's colour list, Phase 3b). Its
+        // body is overflow: hidden, so the page itself never grows one.
     } else {
         // The window's own ground until the page paints - not a white flash.
         page->setBackgroundColor(Theme::chrome());
