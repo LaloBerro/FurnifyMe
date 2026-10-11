@@ -739,7 +739,7 @@ bool ActionRegistry::trigger(const QString& id)
 
 | When | Checks | Skips | Failures | Run |
 | --- | --- | --- | --- | --- |
-| Baseline 1 | | | | |
-| Baseline 2 | | | | |
-| After slice A, run 1 | | | | |
-| After slice A, run 2 | | | | |
+| Baseline 1 | 6370 | 1 | 1 (C4 foreground check; a stray dialog was on screen) | 20e4aac |
+| Baseline 2 | 6370 | 1 | 0 | 20e4aac |
+| After slice A, run 1 | 6370 | 1 | 0 | 8a4eb59 |
+| After slice A, run 2 | 6370 | 1 | 0 | 8a4eb59 |
