@@ -4,6 +4,13 @@
     <!-- Aliased: the real filename contains a comma (the variable font's axis
          list), which is awkward to reference in code. -->
     <file alias="DMSans.ttf">assets/fonts/DMSans-VariableFont_opsz,wght.ttf</file>
+    <!-- The themes' typefaces (T-072), each with its OFL licence in assets/fonts/OFL. -->
+    <file alias="Sora.ttf">assets/fonts/Sora.ttf</file>
+    <file alias="Outfit.ttf">assets/fonts/Outfit.ttf</file>
+    <file alias="PlusJakartaSans.ttf">assets/fonts/PlusJakartaSans.ttf</file>
+    <file alias="InterTight.ttf">assets/fonts/InterTight.ttf</file>
+    <file alias="IBMPlexMono-Regular.ttf">assets/fonts/IBMPlexMono-Regular.ttf</file>
+    <file alias="IBMPlexMono-Medium.ttf">assets/fonts/IBMPlexMono-Medium.ttf</file>
   </qresource>
   <!-- The themes (T-072): each a whole style, as data - DESIGN.md is the
        contract. Hex lives here and in Theme.cpp, never elsewhere in src/. -->

@@ -730,6 +730,12 @@ void apply(QApplication& app)
         const QStringList families = QFontDatabase::applicationFontFamilies(fontId);
         if (!families.isEmpty()) g_bundledFamily = families.first();
     }
+    // Every theme's typeface ships too (T-072, DESIGN.md: a page or a widget
+    // never depends on a font being installed). Registered, not applied - a
+    // theme's spec names the family it uses.
+    for (const char* face : {"Sora.ttf", "Outfit.ttf", "PlusJakartaSans.ttf", "InterTight.ttf",
+                             "IBMPlexMono-Regular.ttf", "IBMPlexMono-Medium.ttf"})
+        QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/") + QLatin1String(face));
 
     // Now that the bundled family is known, the live spec IS the default one -
     // which is what makes `spec() == defaultSpec()` true for a user who has

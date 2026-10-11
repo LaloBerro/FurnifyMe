@@ -18,6 +18,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QFile>
+#include <QFontDatabase>
 #include <QTemporaryDir>
 
 #include <cmath>
@@ -108,6 +109,7 @@ int main(int argc, char* argv[])
               "selection, hover, sizes and axes are told apart: " + id);
         check(s.body.hsvSaturationF() < 0.1, "bodies stay grey: " + id);
         check(s.fontFamily == info.fontFamily, "the theme's typeface is its spec's: " + id);
+        check(QFontDatabase::families().contains(info.fontFamily), "the theme's typeface is installed: " + id);
     }
     check(Themes::baseSpec(QStringLiteral("aurora-mesh-gradient")).highlightSelected !=
               Themes::baseSpec(Themes::graphiteId()).highlightSelected,

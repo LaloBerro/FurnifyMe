@@ -6,6 +6,39 @@
   src: url('./assets/DMSans.ttf') format('truetype');
   font-weight: 100 1000;
 }
+/* The themes' typefaces (T-072), shipped beside each page (web/public/fonts,
+   copied next to dist/<page>/), never fetched: DESIGN.md - a page never
+   loads a font from the network. */
+@font-face {
+  font-family: 'Sora';
+  src: url('/fonts/Sora.ttf') format('truetype');
+  font-weight: 100 800;
+}
+@font-face {
+  font-family: 'Outfit';
+  src: url('/fonts/Outfit.ttf') format('truetype');
+  font-weight: 100 900;
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('/fonts/PlusJakartaSans.ttf') format('truetype');
+  font-weight: 200 800;
+}
+@font-face {
+  font-family: 'Inter Tight';
+  src: url('/fonts/InterTight.ttf') format('truetype');
+  font-weight: 100 900;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('/fonts/IBMPlexMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('/fonts/IBMPlexMono-Medium.ttf') format('truetype');
+  font-weight: 500;
+}
 
 :root {
   --chrome: #1b1b1d;
