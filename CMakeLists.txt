@@ -169,6 +169,9 @@ if(FURNIFYME_BUILD_APP)
       src/FurnitureStore.h
       src/session/HubModel.cpp
       src/session/HubModel.h
+      # The Versions drawer's model (Phase 3c).
+      src/session/VersionsModel.cpp
+      src/session/VersionsModel.h
     )
     target_include_directories(furnify_session PUBLIC src)
     target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)
@@ -194,6 +197,10 @@ if(FURNIFYME_BUILD_APP)
     add_executable(hub_model_tests tests/hub_model.cpp)
     target_link_libraries(hub_model_tests PRIVATE furnify_session)
     add_test(NAME hub_model COMMAND hub_model_tests)
+
+    add_executable(versions_model_tests tests/versions_model.cpp)
+    target_link_libraries(versions_model_tests PRIVATE furnify_session)
+    add_test(NAME versions_model COMMAND versions_model_tests)
 
     add_executable(session_tests tests/session.cpp)
     target_link_libraries(session_tests PRIVATE furnify_session)
