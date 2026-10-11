@@ -85,6 +85,9 @@ public:
     // The Versions drawer's model on the chrome page (Phase 3c); null until
     // useHtmlChrome().
     class VersionsModel* versionsModel() const { return myVersionsModel; }
+    // The Joints drawer's model on the chrome page (Phase 3d); null until
+    // useHtmlChrome().
+    class JointsModel* jointsModel() const { return myJointsModel; }
     // Not = default (M1): a drawer drag still live when the window dies is
     // ended HERE, while the document and every member it reads are alive.
     // Left to member order, ~QWidget's own hide would reach
@@ -2375,6 +2378,11 @@ private:
     class VersionsModel* myVersionsModel = nullptr;
     QWidget* versionsSurface() const;
     void syncVersionsModel();
+    // The Joints card's place and model (Phase 3d), on the same terms.
+    class HtmlCardSlot* myJointsSlot = nullptr;
+    class JointsModel* myJointsModel = nullptr;
+    QWidget* jointsSurface() const;
+    void syncJointsModel();
     void reportColourSaveFailed(const QString& path);
     void reportColourLoadRefused(const QString& path);
     void syncHtmlChrome();

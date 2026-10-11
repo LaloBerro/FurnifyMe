@@ -23,6 +23,8 @@
 #include "ui/AppearancePanel.h"
 #include "ui/VersionsPanel.h"
 #include "session/VersionsModel.h"
+#include "session/JointsModel.h"
+#include "ui/JointsPanel.h"
 #include "ui/GestureChip.h"
 #include "ui/SettingsEdits.h"
 #include "ui/Themes.h"
@@ -905,6 +907,19 @@ int main(int argc, char* argv[])
         pump(300);
         check(!versionsAction->isChecked() && !versionsSlot->isVisible(), "the close x closes the drawer");
     }
+
+    // --- the Joints card's place (Phase 3d) ---------------------------------------
+    QAction* jointsAction = actionNamed(&window, QStringLiteral("Joints"));
+    check(jointsAction != nullptr, "the editor has Joints");
+    if (jointsAction && !jointsAction->isChecked()) jointsAction->trigger();
+    pump(400);
+    QWidget* jointsSlot = window.findChild<QWidget*>(QStringLiteral("htmlCardSlot_joints"));
+    check(jointsSlot && jointsSlot->isVisible(), "Joints shows the card's slot");
+    check(!window.findChild<JointsPanel*>()->isVisible(), "and the Qt drawer stays hidden");
+    check(window.jointsModel() && window.jointsModel()->live(), "the page's joints object is there, live");
+    if (!jointsSlot || !jointsAction) return 1;
+    jointsAction->trigger();
+    pump(200);
 
     // --- each theme on the editor's chrome (T-072): a capture of each ----------------
     {

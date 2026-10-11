@@ -73,6 +73,9 @@ class JointsPanel : public QWidget {
 public:
     JointsPanel(MainWindow* window, OcctViewWidget* view, QWidget* parent = nullptr);
     ~JointsPanel() override;
+    // The drawer's width at the live type scale - public so the HTML card's
+    // slot (Phase 3d) is exactly as wide as this drawer.
+    static int cardWidth();
 
     // Re-reads MainWindow::document().joints() and MainWindow::jointDerivations()
     // (a COPY - nothing here holds a reference across a document change) and
@@ -199,7 +202,6 @@ protected:
 
 private:
     void applyTheme();
-    static int cardWidth();
 
     struct Row {
         QWidget* widget = nullptr;

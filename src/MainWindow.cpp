@@ -4,6 +4,7 @@
 // use them in every build (Phase 3c review C1 - the vcpkg build had not
 // compiled since the Settings card, because only build-web was built).
 #include "session/VersionsModel.h"
+#include "session/JointsModel.h"
 #include "ui/HtmlCardSlot.h"
 #ifdef FURNIFYME_WEB_UI
 #include "web/EditorChrome.h"
@@ -1118,8 +1119,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             settings->setVisible(myAppearanceAction->isChecked() && !hiddenForRenderMode);
         if (QWidget* versions = versionsSurface())
             versions->setVisible(myVersionsPanelAction->isChecked() && !hiddenForRenderMode);
-        if (myJointsPanel)
-            myJointsPanel->setVisible(myJointsPanelAction->isChecked() && !hiddenForRenderMode);
+        if (QWidget* joints = jointsSurface())
+            joints->setVisible(myJointsPanelAction->isChecked() && !hiddenForRenderMode);
         // The status bar's own shown state, on the same derived-not-stored
         // terms - View -> Show bottom bar's checked state IS the answer,
         // never a one-shot hide()/show() called from the toggle handler
@@ -1362,10 +1363,10 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // it moves the drawing gate's first term (see refreshJoints()), and a
     // toggle runs no updateActions(), so the viewport is told here.
     connect(myJointsPanelAction, &QAction::toggled, this, [this](bool shown) {
-        if (myJointsPanel) {
-            myJointsPanel->setVisible(shown && !myRenderModeOn);
-            myJointsPanel->refresh();
-        }
+        if (QWidget* joints = jointsSurface()) joints->setVisible(shown && !myRenderModeOn);
+        if (myJointsPanel) myJointsPanel->refresh();
+        // At once: a toggle runs no updateActions() (Phase 3d).
+        syncJointsModel();
         if (myOverlay) myOverlay->relayout();
         refreshJoints();
     });
@@ -10407,6 +10408,10 @@ void MainWindow::useHtmlChrome()
             if (live) myOverlay->replaceWidget(myVersionsPanel, myVersionsSlot);
             else myOverlay->replaceWidget(myVersionsSlot, myVersionsPanel);
         }
+        if (myOverlay && myJointsSlot && myJointsPanel) {
+            if (live) myOverlay->replaceWidget(myJointsPanel, myJointsSlot);
+            else myOverlay->replaceWidget(myJointsSlot, myJointsPanel);
+        }
         updateActions();
         syncHtmlChrome();
     });
@@ -10456,6 +10461,31 @@ void MainWindow::useHtmlChrome()
     myHtmlChrome->registerObject(QStringLiteral("versions"), myVersionsModel);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncVersionsModel);
     syncVersionsModel();
+
+    // THE JOINTS CARD (Phase 3d): the Versions card's shape - a slot whose
+    // height is the page's - over JointsModel, which reads JointRows as the
+    // Qt drawer does.
+    if (myOverlay && myJointsPanel) {
+        myJointsSlot = new HtmlCardSlot(QStringLiteral("joints"), QSize(JointsPanel::cardWidth(), 60), myView);
+        myJointsSlot->hide();
+        myHtmlChrome->addCard(myJointsSlot);
+        connect(myJointsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+            if (myOverlay) myOverlay->relayout();
+        });
+        connect(Theme::notifier(), &Theme::Notifier::changed, myJointsSlot, [this] {
+            myJointsSlot->setFixedWidth(Theme::wholeDevicePixels(JointsPanel::cardWidth()));
+        });
+    }
+    JointsModel::Hooks jointHooks;
+    jointHooks.select = [this](int id) { setSelectedJoint(id); };
+    jointHooks.remove = [this](int id) { return deleteJoint(id); };
+    jointHooks.close = [this] {
+        if (myJointsPanelAction) myJointsPanelAction->setChecked(false);
+    };
+    myJointsModel = new JointsModel(jointHooks, myHtmlChrome);
+    myHtmlChrome->registerObject(QStringLiteral("joints"), myJointsModel);
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncJointsModel);
+    syncJointsModel();
     myHtmlChrome->start();
     connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);
@@ -10503,6 +10533,25 @@ void MainWindow::syncVersionsModel()
     QWidget* surface = versionsSurface();
     myVersionsModel->setState(myShowingInitScreen ? QString() : myFurnitureId, canOpenSaveVersion(),
                               !myShowingInitScreen && !mySketching, surface && surface->isVisible());
+}
+
+QWidget* MainWindow::jointsSurface() const
+{
+    // settingsSurface()'s rule: the page's card only while the page can draw it.
+    if (myJointsSlot && htmlChromeLive()) return myJointsSlot;
+    return myJointsPanel;
+}
+
+void MainWindow::syncJointsModel()
+{
+    if (!myJointsModel) return;
+    QWidget* surface = jointsSurface();
+    const bool shown = surface && surface->isVisible();
+    const bool live = !myShowingInitScreen;
+    // Derivations only for a drawer on screen - the cache is per revision,
+    // but a hidden drawer asks for nothing at all (JointsModel reads nothing).
+    myJointsModel->setState(&myDocument, shown ? jointDerivations() : std::vector<Joinery::Derivation>(),
+                            selectedJointId(), live, live && !mySketching && !myRenderModeOn, shown);
 }
 
 bool MainWindow::htmlChromeLive() const
