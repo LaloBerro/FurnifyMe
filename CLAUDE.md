@@ -352,6 +352,26 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   only while the page is live (`liveChanged`): before it says it is listening, and for good
   once it dies, the Qt card is back in its anchor - a slot with no page behind it is an
   invisible card that swallows nothing and shows nothing. Every later card follows this.
+- **The Versions card (Phase 3c, branch `versions-drawer`) is the Settings card's shape
+  with one difference: its HEIGHT is the page's.** The list grows, so the card measures an
+  inner wrapper that does not depend on the rectangle it is drawn at and reports it
+  (`chrome.reportCardHeight(name, h)`); the named slot takes it through
+  `HtmlCardSlot::setContentHeight()` (whole device pixels) and `contentHeightChanged()`
+  relays the overlay out, so whatever stacks below follows. `session/VersionsModel` is the
+  drawer's model - the list with stamped thumbnail URLs, the default "Version N", the words,
+  the two gates - and reaches `saveVersion`/`restoreVersion`/`openCompare`/
+  `deleteVersionByName` through injected hooks, so it is tested headless; a gate is the
+  model's as well as the page's. File -> Save version... asks the page through
+  `newRequested`, which `Editor.svelte` keeps until the card takes it (a request can arrive
+  before the card mounts) and the card acknowledges, so a later reopen opens no stale
+  pending card. While Delete is armed, Compare and Restore step aside: beside them its
+  sentence does not fit the card (the scene window's Remove rule - it widens leftward, the
+  second click lands where the first did).
+- **A card going away takes the keyboard back; a card merely HIDDEN does not.**
+  `EditorChrome::syncCards()` dropped the keyboard whenever any card was hidden, which was
+  right with one card and wrong with two: the closed Settings card took the keyboard from
+  the Versions name field on the relayout a refused save causes. It drops it now only when
+  a card that WAS shown goes away.
 - **A typed field takes the keyboard and gives it back** (ruling R5). The view is
   `Qt::NoFocus`; a field calls `claimKeyboard()` when pressed and `releaseKeyboard()` on
   Enter, Escape, blur or unmount, and while held the view accepts every `ShortcutOverride`
@@ -451,16 +471,17 @@ Source files under `src/`, plus `tests/`:
 | `session/EditorSession.{h,cpp}` | the document, checkpoints, undo/redo and the ONE outcome channel; Core + Gui only (`furnify_session`), tested by `session_tests`; `session_no_widgets` fails on any Widgets include reached from `src/session` |
 | `session/Outcome.h` | one thing to tell the user, as a value: Note, Failure or Status |
 | `session/ActionRegistry.{h,cpp}` | every `QAction` by a stable id, a JSON snapshot, and a `trigger()` that obeys `isEnabled()` |
+| `session/VersionsModel.{h,cpp}` | the Versions drawer's model for the HTML card - list, thumbnail URLs, default name, words, gates; the four requests through hooks; Core + Gui, tested by `versions_model_tests` |
 | `session/HubModel.{h,cpp}` | the library hub's logic for the HTML hub - lists, dates, create/rename/delete and their sentences; Core + Gui, tested by `hub_model_tests` |
 | `web/WebHost.{h,cpp}` | one HTML page in a `QWebEngineView`: profile, channel, qwebchannel.js, `pageUrl()`; `prepareApplication()` puts Qt Quick on OpenGL |
 | `web/ThemeBridge.{h,cpp}` | `Theme::Spec` as CSS custom properties, re-sent on every Theme change |
 | `web/HubWindow.{h,cpp}` | the HTML hub's frameless window: page + `HubModel` + window controls; `WindowChrome` hit-tests from rects the page reports |
 | `ui/SettingsEdits.{h,cpp}` | the Settings drawer's model: tabs, rows, number fields, token names and headings, the colour picker, and every `Theme::Spec` edit - read by both drawers; no widgets |
 | `ui/Themes.{h,cpp}` | the five themes as data (`assets/themes/*.json`): base specs, the theme in use, per-theme deltas through an injected store |
-| `ui/HtmlCardSlot.{h,cpp}` | an HTML card's place in the overlay: the card's size, painting nothing, taking no click |
+| `ui/HtmlCardSlot.{h,cpp}` | an HTML card's place in the overlay: the card's size (its height the page's, for a card that sizes itself), painting nothing, taking no click |
 | `session/ActionWatch.{h,cpp}` | a few actions' state for a page, one `changed()` per event-loop turn |
 | `web/SettingsBridge.{h,cpp}` | the page's `settings` object: layout, live spec, the rows' actions; edits land in `SettingsEdits`; triggers only its rows' actions |
-| `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast, status strip and the Settings card; `ChromeBridge` is its channel object, the page's hit rects its mask |
+| `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast, status strip, the Settings and Versions cards; `ChromeBridge` is its channel object, the page's hit rects its mask |
 | `web/WebOverlay.{h,cpp}` | the Phase 0 spike's overlay over the viewport (`--web-spike`), on `WebHost` |
 | `web/` (repo root) | the pages: Svelte 5 + Vite, one self-contained file per page (`build.mjs`), vitest page tests in `web/test` |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |
