@@ -66,6 +66,7 @@ signals:
     void pageReady();
     void keyboardClaimed();
     void keyboardReleased();
+    void cardHeightReported(const QString& name, int height);
 
 public slots:
     // page -> C++
@@ -74,6 +75,9 @@ public slots:
     void ready();
     void claimKeyboard();
     void releaseKeyboard();
+    // A card that sizes itself (the Versions drawer, Phase 3c) says how tall
+    // it is; its slot takes the height.
+    void reportCardHeight(const QString& name, int height);
 
 private:
     bool myUndoEnabled = true;

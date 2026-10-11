@@ -53,6 +53,11 @@ void ChromeBridge::releaseKeyboard()
     emit keyboardReleased();
 }
 
+void ChromeBridge::reportCardHeight(const QString& name, int height)
+{
+    emit cardHeightReported(name, height);
+}
+
 void ChromeBridge::reportHitRects(const QVariantList& rects)
 {
     QVector<QRect> parsed;
@@ -104,6 +109,12 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     connect(myBridge, &ChromeBridge::undoRequested, this, &EditorChrome::undoRequested);
     connect(myBridge, &ChromeBridge::keyboardClaimed, this, &EditorChrome::claimKeyboard);
     connect(myBridge, &ChromeBridge::keyboardReleased, this, &EditorChrome::releaseKeyboard);
+    // A card that sizes itself tells us its height; its slot takes it, and
+    // the overlay re-stacks around it (Phase 3c).
+    connect(myBridge, &ChromeBridge::cardHeightReported, this, [this](const QString& name, int height) {
+        for (const QPointer<HtmlCardSlot>& slot : myCards)
+            if (slot && slot->name() == name) slot->setContentHeight(height);
+    });
     connect(myBridge, &ChromeBridge::pageReady, this, [this] {
         refuseFocus();
         watchFocusProxy();

@@ -2,6 +2,8 @@
 
 #include "Theme.h"
 
+#include <algorithm>
+
 HtmlCardSlot::HtmlCardSlot(const QString& name, QSize size, QWidget* viewport)
     : QWidget(viewport), myName(name)
 {
@@ -10,6 +12,14 @@ HtmlCardSlot::HtmlCardSlot(const QString& name, QSize size, QWidget* viewport)
     setAttribute(Qt::WA_NoSystemBackground);
     Theme::makeSurfaceTransparent(this);
     setFixedSize(Theme::wholeDevicePixels(size));
+}
+
+void HtmlCardSlot::setContentHeight(int logicalHeight)
+{
+    const int h = Theme::wholeDevicePixels(std::max(1, logicalHeight));
+    if (h == height()) return;
+    setFixedHeight(h);
+    emit contentHeightChanged();
 }
 
 void HtmlCardSlot::moveEvent(QMoveEvent* event)

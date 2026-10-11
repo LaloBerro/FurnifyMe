@@ -22,10 +22,16 @@ public:
     // Named `htmlCardSlot_<name>`; sized through Theme::wholeDevicePixels().
     HtmlCardSlot(const QString& name, QSize size, QWidget* viewport);
     QString name() const { return myName; }
+    // The page measured its card (Phase 3c: the Versions drawer grows with
+    // its list). Rounded through Theme::wholeDevicePixels(); the width stays.
+    void setContentHeight(int logicalHeight);
 
 signals:
     // Moved, resized, shown or hidden - the page re-reads the rectangle.
     void placed();
+    // The height moved: the overlay relays out, so whatever stacks below
+    // follows.
+    void contentHeightChanged();
 
 protected:
     void moveEvent(QMoveEvent* event) override;

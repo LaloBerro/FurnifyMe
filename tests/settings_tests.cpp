@@ -258,6 +258,28 @@ int main(int argc, char* argv[])
         check(!overlay.replaceWidget(&card, &slot), "a widget that is not an entry is refused");
     }
 
+    // --- a slot whose height the page sets (Phase 3c: the Versions drawer) ------
+    {
+        QWidget host;
+        host.resize(800, 600);
+        HtmlCardSlot slot(QStringLiteral("versions"), QSize(240, 160), &host);
+        // Shown: a hidden widget is sent no resize until it shows, and a slot
+        // only stands anywhere while it is shown (its show says placed()).
+        host.show();
+        slot.show();
+        int grew = 0, placed = 0;
+        QObject::connect(&slot, &HtmlCardSlot::contentHeightChanged, [&] { ++grew; });
+        QObject::connect(&slot, &HtmlCardSlot::placed, [&] { ++placed; });
+        slot.setContentHeight(301);
+        check(slot.height() == Theme::wholeDevicePixels(301) && slot.width() == Theme::wholeDevicePixels(240),
+              QStringLiteral("a page-set height takes whole device pixels and keeps the width (%1)").arg(slot.height()).toUtf8());
+        check(grew == 1 && placed >= 1, "and says so twice: to the overlay and to the page");
+        slot.setContentHeight(301);
+        check(grew == 1, "the same height again says nothing");
+        slot.setContentHeight(0);
+        check(slot.height() >= 1, "a zero height never collapses the slot to nothing");
+    }
+
     // --- the page's settings object ---------------------------------------------
     {
         ActionRegistry registry;
