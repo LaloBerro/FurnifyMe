@@ -1,4 +1,5 @@
 #include "Theme.h"
+#include "Themes.h"
 
 #include <QApplication>
 #include <QFont>
@@ -624,6 +625,10 @@ QColor inkOn(const QColor& ground)
 
 void paintSurfaceOn(QPainter& p, const QRect& rect, int radius, const QColor& ground)
 {
+    if (Themes::shell().card.on) {
+        Themes::paintCard(p, QRectF(rect), Themes::shell().card);
+        return;
+    }
     if (!ground.isValid()) {
         paintSurface(p, rect, radius);
         return;
@@ -649,6 +654,12 @@ void paintSurfaceOn(QPainter& p, const QRect& rect, int radius, const QColor& gr
 
 void paintSurface(QPainter& p, const QRect& rect, int radius)
 {
+    // A theme that draws its own cards (themes part 2) - its mockup's glass,
+    // radius and rim. Graphite has none and paints below, unchanged.
+    if (Themes::shell().card.on) {
+        Themes::paintCard(p, QRectF(rect), Themes::shell().card);
+        return;
+    }
     // The rounded panel, opaque, no shadow - see the header for why
     // translucent pixels have no place in this family. The border is then
     // stroked crisply along the panel's outer edge, so the outermost row and

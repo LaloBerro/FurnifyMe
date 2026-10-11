@@ -31,5 +31,122 @@
     "gizmoAxisZ": "#4A80E0",
     "sizesGroup": "#C89BFF"
   },
-  "page": {}
+  "page": {},
+  "shell": {
+    "backdrop": {
+      "frameW": 1280,
+      "frameH": 800,
+      "blur": 70,
+      "grain": 0.22,
+      "glows": [
+        {
+          "x": -220,
+          "y": -180,
+          "w": 560,
+          "h": 520,
+          "colour": "#5A12E0",
+          "opacity": 0.55
+        },
+        {
+          "x": -260,
+          "y": 380,
+          "w": 460,
+          "h": 520,
+          "colour": "#3B2BD6",
+          "opacity": 0.42
+        },
+        {
+          "x": 1040,
+          "y": -200,
+          "w": 420,
+          "h": 420,
+          "colour": "#9B3DF5",
+          "opacity": 0.34
+        },
+        {
+          "x": 980,
+          "y": 560,
+          "w": 520,
+          "h": 380,
+          "colour": "#5A12E0",
+          "opacity": 0.4
+        }
+      ]
+    },
+    "card": {
+      "radius": 26,
+      "fill": "rgba(26,18,44,.56)",
+      "sheen": "rgba(255,255,255,.10)",
+      "sheenAngle": 160,
+      "sheenStop": 0.42,
+      "edge": "rgba(233,225,255,.16)",
+      "innerTop": "rgba(255,255,255,.16)",
+      "rimAngle": 145,
+      "rimWidth": 1.2,
+      "rim": [
+        [
+          0,
+          "rgba(255,255,255,.72)"
+        ],
+        [
+          0.24,
+          "rgba(233,225,255,.16)"
+        ],
+        [
+          0.48,
+          "rgba(233,225,255,0)"
+        ],
+        [
+          0.72,
+          "rgba(187,156,255,.10)"
+        ],
+        [
+          1,
+          "rgba(212,190,255,.42)"
+        ]
+      ]
+    },
+    "chip": {
+      "size": 42,
+      "radius": 14,
+      "edgeWidth": 2,
+      "idleFill": "rgba(0,0,0,0)",
+      "idleEdge": "rgba(0,0,0,0)",
+      "hoverFill": "rgba(255,255,255,.06)",
+      "hoverEdge": "rgba(6,209,255,.6)",
+      "onTop": "#7A1CFF",
+      "onBottom": "#6A00FF",
+      "onEdge": "rgba(255,255,255,.2)",
+      "onInk": "#FFFFFF",
+      "onInnerTop": "rgba(255,255,255,.35)",
+      "offInk": "rgba(180,171,200,.46)",
+      "offEdge": "rgba(0,0,0,0)",
+      "idleInk": "#B4ABC8",
+      "hoverInk": "#F4F1FB"
+    },
+    "list": {
+      "rowRadius": 14,
+      "selFill": "rgba(106,0,255,.26)",
+      "selEdge": "rgba(187,156,255,.48)",
+      "bar": "#BB9CFF",
+      "barWidth": 3,
+      "barInset": 9,
+      "barX": 3,
+      "nameWeight": 600,
+      "selWeight": 600,
+      "folderWeight": 700,
+      "titleWeight": 700,
+      "titleBright": true,
+      "fieldRadius": 17,
+      "fieldFill": "rgba(8,5,16,.52)",
+      "fieldEdge": "rgba(233,225,255,.16)",
+      "fieldEditEdge": "#BB9CFF",
+      "fieldSearch": true,
+      "badgeRadius": 10,
+      "badgeFill": "rgba(106,0,255,.26)",
+      "badgeEdge": "rgba(187,156,255,.48)",
+      "badgeInk": "#BB9CFF",
+      "badgeWeight": 700
+    }
+  }
 }

@@ -45,4 +45,6 @@ private:
     // stays parked here.
     void releaseFocus();
     bool myInUse = false;
+    // A theme's magnifier at the field's start (themes part 2).
+    class QAction* mySearch = nullptr;
 };

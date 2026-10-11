@@ -31,5 +31,52 @@
     "gizmoAxisZ": "#4A80E0",
     "sizesGroup": "#5EE4F0"
   },
-  "page": {}
+  "page": {},
+  "shell": {
+    "card": {
+      "radius": 0,
+      "fill": "#030305",
+      "edge": "#3B3A47"
+    },
+    "chip": {
+      "size": 40,
+      "radius": 0,
+      "edgeWidth": 1,
+      "idleFill": "rgba(0,0,0,0)",
+      "idleEdge": "rgba(0,0,0,0)",
+      "hoverFill": "rgba(0,0,0,0)",
+      "hoverEdge": "#5A5866",
+      "onTop": "#14131C",
+      "onEdge": "#F5F4FA",
+      "onInk": "#F5F4FA",
+      "offInk": "#5A5866",
+      "offEdge": "rgba(0,0,0,0)",
+      "idleInk": "#CFCDDA",
+      "hoverInk": "#F5F4FA"
+    },
+    "list": {
+      "rowRadius": 0,
+      "selFill": "#14131C",
+      "selEdge": "#4A4858",
+      "bar": "#F5F4FA",
+      "barWidth": 4,
+      "barInset": 0,
+      "barX": 0,
+      "hairline": "#1C1B24",
+      "nameWeight": 400,
+      "selWeight": 600,
+      "folderWeight": 400,
+      "titleWeight": 600,
+      "titleBright": true,
+      "fieldRadius": 0,
+      "fieldFill": "#08080C",
+      "fieldEdge": "#3B3A47",
+      "fieldEditEdge": "#9466FF",
+      "fieldSearch": true,
+      "badgeRadius": 0,
+      "badgeEdge": "#9466FF",
+      "badgeInk": "#B79BFF",
+      "badgeWeight": 500
+    }
+  }
 }

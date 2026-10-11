@@ -1,6 +1,7 @@
 #include "ItemsRow.h"
 
 #include "Theme.h"
+#include "Themes.h"
 
 #include <QAccessible>
 #include <QAccessibleWidget>
@@ -104,10 +105,16 @@ void ItemsRowWidget::installAccessibility()
     QAccessible::installFactory(&itemsRowFactory);
 }
 
-QColor ItemsRowWidget::barColour() { return Theme::accentText(); }
+QColor ItemsRowWidget::barColour()
+{
+    const Themes::List& l = Themes::shell().list;
+    return l.on && l.bar.isValid() ? l.bar : Theme::accentText();
+}
 
 QRect ItemsRowWidget::barRect() const
 {
+    if (const Themes::List& l = Themes::shell().list; l.on)
+        return QRect(l.barX, l.barInset, l.barWidth, std::max(0, height() - 2 * l.barInset));
     return QRect(0, kFillRadius, kBarWidth, std::max(0, height() - 2 * kFillRadius));
 }
 

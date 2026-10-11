@@ -26,6 +26,7 @@
 #include "ModelingOps.h"
 #include "SketchController.h"
 #include "Theme.h"
+#include "ui/Themes.h"
 
 // OCCT before Qt, for the Handle() macro clash.
 #include <AIS_TextLabel.hxx>
@@ -1546,6 +1547,17 @@ void OcctViewWidget::resizeGL(int w, int h)
     const QPoint device = toDevicePixels(QPoint(std::max(1, w), std::max(1, h)));
     myHostWindow->SetSize(std::max(1, device.x()), std::max(1, device.y()));
     myView->MustBeResized();
+    // The theme's backdrop is a picture of the viewport's size: rebuilt once
+    // the resize settles, stretched until then.
+    if (myBackdropShown) {
+        if (!myBackdropTimer) {
+            myBackdropTimer = new QTimer(this);
+            myBackdropTimer->setSingleShot(true);
+            myBackdropTimer->setInterval(150);
+            connect(myBackdropTimer, &QTimer::timeout, this, [this] { applyThemeBackdrop(!myRenderModeActive); });
+        }
+        myBackdropTimer->start();
+    }
     // The logical->device ratio can change under a widget that never resized
     // in logical terms (a window dragged to a display at another scale sends
     // exactly this callback), and Auto's edge tolerance is a promise in
@@ -5868,8 +5880,12 @@ void OcctViewWidget::applyRenderBackgroundColourForTier(RenderTier tier)
     if (myView.IsNull()) return;
     if (!myRenderModeActive) {
         myView->SetBackgroundColor(toOcctColor(Theme::viewport()));
+        applyThemeBackdrop(true);
         return;
     }
+    // Render mode's studio has its own backdrop; the theme's light is not in
+    // a shot.
+    applyThemeBackdrop(false);
     const Quantity_Color backdrop = toOcctColor(renderBackdropColourImpl());
     if (tier != RenderTier::PathTracing) {
         myView->SetBackgroundColor(backdrop);
@@ -5884,6 +5900,42 @@ void OcctViewWidget::applyRenderBackgroundColourForTier(RenderTier tier)
                                               backdrop.Green() * kPathTracingBackdropGain,
                                               backdrop.Blue() * kPathTracingBackdropGain,
                                               Quantity_TOC_RGB));
+}
+
+void OcctViewWidget::applyThemeBackdrop(bool wanted)
+{
+    if (myView.IsNull()) return;
+    const Themes::Shell& shell = Themes::shell();
+    const QPoint device = toDevicePixels(QPoint(std::max(1, width()), std::max(1, height())));
+    const QSize size(std::max(1, device.x()), std::max(1, device.y()));
+    if (!wanted || !shell.backdrop.on) {
+        if (myBackdropShown) {
+            myView->SetBackgroundImage(Handle(Graphic3d_Texture2D)(), Aspect_FM_NONE, false);
+            myBackdropShown = false;
+            myBackdropKey.clear();
+            scheduleRedraw();
+        }
+        return;
+    }
+    // One picture per theme, size and viewport colour - a camera move never
+    // reaches here, and a resize rebuilds once it settles (resizeGL()).
+    const QString key = Themes::currentId() + QLatin1Char('|') + QString::number(size.width()) + QLatin1Char('x') +
+                        QString::number(size.height()) + QLatin1Char('|') + Theme::viewport().name();
+    if (myBackdropShown && key == myBackdropKey) return;
+    const QImage picture =
+        Themes::renderBackdrop(shell.backdrop, size, Theme::viewport()).convertToFormat(QImage::Format_RGB888);
+    if (picture.isNull()) return;
+    Handle(Image_PixMap) pix = new Image_PixMap();
+    if (!pix->InitTrash(Image_Format_RGB, picture.width(), picture.height())) return;
+    const int rowBytes = picture.width() * 3;
+    // Row for row: OCCT's background takes the image top row first, as QImage holds it.
+    for (int y = 0; y < picture.height(); ++y)
+        std::memcpy(pix->ChangeRow(y), picture.constScanLine(y), size_t(rowBytes));
+    Handle(Graphic3d_Texture2D) texture = new Graphic3d_Texture2D(pix);
+    myView->SetBackgroundImage(texture, Aspect_FM_STRETCH, false);
+    myBackdropShown = true;
+    myBackdropKey = key;
+    scheduleRedraw();
 }
 
 void OcctViewWidget::redrawRenderModeLive()

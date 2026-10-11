@@ -235,6 +235,8 @@ if(FURNIFYME_BUILD_APP)
       src/ui/SettingsEdits.cpp
       src/ui/Themes.cpp
       src/ui/Themes.h
+      src/ui/ThemeShell.cpp
+      src/ui/ThemeShell.h
       src/ui/HtmlCardSlot.cpp
       src/web/SettingsBridge.cpp
       src/web/SettingsBridge.h
@@ -360,6 +362,9 @@ if(FURNIFYME_BUILD_APP)
       target_link_libraries(hub_smoke PRIVATE furnify_app)
       add_executable(chrome_smoke tests/chrome_smoke.cpp)
       target_link_libraries(chrome_smoke PRIVATE furnify_app)
+      # The mockups' scene per theme, for the side-by-side (themes part 2).
+      add_executable(theme_shots tests/theme_shots.cpp)
+      target_link_libraries(theme_shots PRIVATE furnify_app)
     endif()
 
     add_executable(furnifyme src/main.cpp)

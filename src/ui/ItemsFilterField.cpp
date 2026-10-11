@@ -1,4 +1,7 @@
 #include "ItemsFilterField.h"
+#include "IconSet.h"
+#include "Themes.h"
+#include <QAction>
 
 #include "ItemsPanel.h"
 #include "Theme.h"
@@ -29,6 +32,29 @@ void ItemsFilterField::applyTheme()
     // wears accentText() rather than the accent fill (Global Constraint 21 and
     // the spec's contrast rule - ruling P7), and only while the field is in
     // use; at rest a quiet chipActive rule says "this is a field".
+    // A theme's own field (themes part 2): its mockup's capsule, with a
+    // magnifier at the start.
+    if (const Themes::List& l = Themes::shell().list; l.on) {
+        const QColor edge = myInUse && l.fieldEditEdge.isValid() ? l.fieldEditEdge : l.fieldEdge;
+        setStyleSheet(QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3; "
+                                     "border-radius: %4px; padding: 6px 10px 6px %6px; font-size: %5pt; }")
+                          .arg(l.fieldFill.name(QColor::HexArgb), Theme::text().name(), edge.name(QColor::HexArgb))
+                          .arg(l.fieldRadius)
+                          .arg(Theme::bodyFont().pointSizeF())
+                          .arg(l.fieldSearch ? 4 : 10));
+        if (l.fieldSearch && !mySearch) {
+            mySearch = addAction(QIcon(), QLineEdit::LeadingPosition);
+        }
+        if (mySearch) {
+            mySearch->setVisible(l.fieldSearch);
+            mySearch->setIcon(IconSet::icon(IconSet::Glyph::Search));
+        }
+        QPalette p = palette();
+        p.setColor(QPalette::PlaceholderText, Theme::textMuted());
+        setPalette(p);
+        return;
+    }
+    if (mySearch) mySearch->setVisible(false);
     const QColor rule = myInUse ? Theme::accentText() : Theme::chipActive();
     setStyleSheet(QStringLiteral("QLineEdit { background: transparent; color: %1; border: none; "
                                  "border-bottom: 2px solid %2; padding: 2px 6px; "

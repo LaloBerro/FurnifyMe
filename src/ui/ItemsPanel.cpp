@@ -1,4 +1,5 @@
 #include "ItemsPanel.h"
+#include "Themes.h"
 
 #include <cstdio>
 
@@ -545,8 +546,14 @@ QColor ItemsPanel::nameColour(const Row& row) const
 void ItemsPanel::styleNameColour(Row& row)
 {
     if (!row.name) return;
-    const QString sheet = QStringLiteral("background: transparent; color: %1;")
-                              .arg(nameColour(row).name(QColor::HexArgb));
+    QString sheet = QStringLiteral("background: transparent; color: %1;")
+                        .arg(nameColour(row).name(QColor::HexArgb));
+    if (const Themes::List& l = Themes::shell().list; l.on) {
+        const int weight = row.isGroup ? l.folderWeight
+                           : (row.widget && row.widget->marked()) ? l.selWeight
+                                                                  : l.nameWeight;
+        sheet += QStringLiteral(" font-weight: %1;").arg(weight);
+    }
     if (row.nameSheet != sheet) {
         row.name->setStyleSheet(sheet);
         row.nameSheet = sheet;
@@ -999,11 +1006,7 @@ void ItemsPanel::applyTheme()
                 .arg(Theme::accentText().name())
                 .arg(Theme::labelFont().pointSizeF()));
     for (Row& row : myRowList) {
-        if (row.count)
-            row.count->setStyleSheet(
-                QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
-                    .arg(Theme::accentText().name())
-                    .arg(Theme::labelFont().pointSizeF()));
+        if (row.count) row.count->setStyleSheet(countSheet());
     }
     if (myFilter) myFilter->applyTheme();
     // Every name re-styled (styleNameColour() and styleNameWords(), from the dropped caches above) and
@@ -1024,6 +1027,25 @@ void ItemsPanel::applyTheme()
     if (myView) applySelection(myView->selectedSolidIds());
 }
 
+QString ItemsPanel::countSheet()
+{
+    // The partly-selected count: words in accentText, or - in a theme that
+    // draws it as a badge (themes part 2) - its mockup's pill.
+    if (const Themes::List& l = Themes::shell().list; l.on) {
+        return QStringLiteral("background: %1; border: 1px solid %2; border-radius: %3px; color: %4; "
+                              "font-size: %5pt; font-weight: %6; padding: 0px 6px;")
+            .arg((l.badgeFill.isValid() ? l.badgeFill : QColor(Qt::transparent)).name(QColor::HexArgb),
+                 (l.badgeEdge.isValid() ? l.badgeEdge : QColor(Qt::transparent)).name(QColor::HexArgb))
+            .arg(l.badgeRadius)
+            .arg((l.badgeInk.isValid() ? l.badgeInk : Theme::accentText()).name())
+            .arg(Theme::labelFont().pointSizeF())
+            .arg(l.badgeWeight);
+    }
+    return QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+        .arg(Theme::accentText().name())
+        .arg(Theme::labelFont().pointSizeF());
+}
+
 void ItemsPanel::styleTitle()
 {
     if (!myTitle) return;
@@ -1034,13 +1056,16 @@ void ItemsPanel::styleTitle()
     // `background: transparent` is not decoration: the app-wide sheet paints
     // every QWidget chrome-black, and a label that stamps its own rectangle
     // over this card would be a black bar across it.
-    const QColor ink = !myTitleLit     ? Theme::textMuted()
+    const Themes::List& l = Themes::shell().list;
+    const QColor rest = l.on && l.titleBright ? Theme::text() : Theme::textMuted();
+    const QColor ink = !myTitleLit     ? rest
                        : myTitleRefused ? Theme::dangerText()
                                         : Theme::accentText();
     myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                          "font-weight: 600; font-size: %2pt;")
+                                          "font-weight: %3; font-size: %2pt;")
                                .arg(ink.name())
-                               .arg(Theme::titleFont().pointSizeF()));
+                               .arg(Theme::titleFont().pointSizeF())
+                               .arg(l.on ? l.titleWeight : 600));
 }
 
 void ItemsPanel::setTitleLit(bool lit, bool refused)
@@ -1623,9 +1648,7 @@ void ItemsPanel::addGroupRow(int groupId, const QString& groupName, int depth, i
     auto* count = new QLabel(row);
     count->setTextFormat(Qt::PlainText);
     count->setAttribute(Qt::WA_TransparentForMouseEvents);
-    count->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
-                             .arg(Theme::accentText().name())
-                             .arg(Theme::labelFont().pointSizeF()));
+    count->setStyleSheet(countSheet());
     count->hide();
     layout->addWidget(count);
     // Transparent for the mouse (a press on it is the row's), so Qt never
@@ -3056,10 +3079,26 @@ void ItemsPanel::restyleRows()
     // entire cost of a selection change - and of every fold, since a fold
     // restyles too. A drag's target is NOT a look: the DropIndicator draws
     // it over the rows, so "where it would land" never touches a fill.
-    const QString markedLook = QStringLiteral("#itemsRow { background-color: %1; "
-                                              "border-radius: 4px; }")
-                                   .arg(Theme::chipActive().name());
-    const QString plainLook = QStringLiteral("#itemsRow { background: transparent; }");
+    QString markedLook = QStringLiteral("#itemsRow { background-color: %1; "
+                                        "border-radius: 4px; }")
+                             .arg(Theme::chipActive().name());
+    QString plainLook = QStringLiteral("#itemsRow { background: transparent; }");
+    // A theme's own row (themes part 2): its mockup's selection capsule, and
+    // Ultraviolet's rule under every row.
+    if (const Themes::List& l = Themes::shell().list; l.on) {
+        const QString rule = l.hairline.isValid()
+                                 ? QStringLiteral(" border-bottom: 1px solid %1;").arg(l.hairline.name(QColor::HexArgb))
+                                 : QString();
+        markedLook = QStringLiteral("#itemsRow { background-color: %1; border: 1px solid %2; border-radius: %3px;%4 }")
+                         .arg(l.selFill.name(QColor::HexArgb),
+                              (l.selEdge.isValid() ? l.selEdge : l.selFill).name(QColor::HexArgb))
+                         .arg(l.rowRadius)
+                         .arg(rule);
+        plainLook = QStringLiteral("#itemsRow { background: transparent; border: 1px solid transparent; "
+                                   "border-radius: %1px;%2 }")
+                        .arg(l.rowRadius)
+                        .arg(rule);
+    }
     // One set lookup per body instead of a linear find per row per body.
     const std::unordered_set<int> selected(mySelectedIds.begin(), mySelectedIds.end());
     for (Row& row : myRowList) {
@@ -3116,6 +3155,7 @@ void ItemsPanel::restyleRows()
         // in a token that clears 3:1 where the fill alone does not.
         row.widget->setMarked(marked);
         row.widget->setCurrent(row.id == myCurrentId);
+        if (Themes::shell().list.on) styleNameColour(row);   // the selected name's weight
         // WHAT A DRAG CARRIES (T-063): its name at 45% (nameColour()), and its
         // buttons out of reach for as long as the hand holds it. Each set only
         // when it changes, by the same rule as the look below - a drag begins

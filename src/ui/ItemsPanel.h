@@ -654,6 +654,8 @@ private:
     bool myTitleRefused = false;
     void setTitleLit(bool lit, bool refused);
     void styleTitle();
+    // The folder count's look - accentText words, or a theme's badge.
+    static QString countSheet();
     void activateRow(int id, RowKind kind, Qt::KeyboardModifiers mods);
     // activateRow()'s work; activateRow() announces when the keys' row moved.
     void selectRow(int id, RowKind kind, Qt::KeyboardModifiers mods);

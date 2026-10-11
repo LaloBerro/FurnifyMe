@@ -115,6 +115,7 @@ enum class Glyph {
     Move,           // four arrows out of one point
     Rotate,         // a circle that turns, with its arrowhead
     Render,         // a lit ball standing on a floor
+    Search,         // a magnifier - the filter field's mark (themes part 2)
 };
 
 // Returns an icon with Normal and Disabled modes already filled in.

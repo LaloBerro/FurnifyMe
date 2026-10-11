@@ -313,6 +313,10 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(3, 20, 21, 20);
             break;
         }
+        case Glyph::Search:                       // a lens and its handle
+            p.drawEllipse(QRectF(4.5, 4.5, 11.0, 11.0));
+            p.drawLine(QPointF(14.0, 14.0), QPointF(19.5, 19.5));
+            break;
     }
 }
 

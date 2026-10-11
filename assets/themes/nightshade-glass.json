@@ -31,5 +31,96 @@
     "gizmoAxisZ": "#4A80E0",
     "sizesGroup": "#E8A6FF"
   },
-  "page": {}
+  "page": {},
+  "shell": {
+    "backdrop": {
+      "frameW": 1280,
+      "frameH": 772,
+      "base": "#0A0812",
+      "baseRadials": [
+        {
+          "x": 704,
+          "y": 401.4,
+          "rx": 900,
+          "ry": 620,
+          "colour": "#120E1C",
+          "outer": "#0A0812",
+          "stop": 0.7
+        }
+      ],
+      "radials": [
+        {
+          "x": 0,
+          "y": 77.2,
+          "rx": 420,
+          "ry": 540,
+          "colour": "rgba(118,58,230,.40)",
+          "stop": 0.7
+        },
+        {
+          "x": 1280,
+          "y": 200.7,
+          "rx": 360,
+          "ry": 500,
+          "colour": "rgba(132,70,240,.32)",
+          "stop": 0.7
+        },
+        {
+          "x": 640,
+          "y": 818.3,
+          "rx": 640,
+          "ry": 200,
+          "colour": "rgba(96,48,200,.36)",
+          "stop": 0.72
+        }
+      ]
+    },
+    "card": {
+      "radius": 14,
+      "fill": "rgba(26,19,44,.50)",
+      "sheen": "rgba(255,255,255,.075)",
+      "sheenAngle": 165,
+      "sheenStop": 0.38,
+      "edge": "rgba(236,228,255,.14)",
+      "innerTop": "rgba(255,255,255,.10)"
+    },
+    "chip": {
+      "size": 36,
+      "radius": 10,
+      "edgeWidth": 1,
+      "idleFill": "rgba(0,0,0,0)",
+      "idleEdge": "rgba(0,0,0,0)",
+      "hoverFill": "rgba(255,255,255,.07)",
+      "hoverEdge": "rgba(236,228,255,.08)",
+      "onTop": "rgba(165,123,255,.18)",
+      "onEdge": "rgba(190,160,255,.36)",
+      "onInk": "#C9B1FF",
+      "offInk": "#5E5773",
+      "offEdge": "rgba(0,0,0,0)",
+      "idleInk": "#DCD6EA",
+      "hoverInk": "#F3F0FA"
+    },
+    "list": {
+      "rowRadius": 9,
+      "selFill": "rgba(165,123,255,.17)",
+      "selEdge": "rgba(190,160,255,.32)",
+      "bar": "#A57BFF",
+      "barWidth": 3,
+      "barInset": 8,
+      "barX": 3,
+      "nameWeight": 500,
+      "selWeight": 600,
+      "folderWeight": 600,
+      "titleWeight": 700,
+      "titleBright": true,
+      "fieldRadius": 10,
+      "fieldFill": "rgba(8,6,14,.55)",
+      "fieldEdge": "rgba(236,228,255,.14)",
+      "fieldEditEdge": "#A57BFF",
+      "fieldSearch": true,
+      "badgeRadius": 0,
+      "badgeInk": "#C9B1FF",
+      "badgeWeight": 600
+    }
+  }
 }

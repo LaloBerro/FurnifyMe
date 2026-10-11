@@ -1,4 +1,5 @@
 #include "ToolChip.h"
+#include "Themes.h"
 
 #include "Theme.h"
 
@@ -187,8 +188,9 @@ QSize ToolChip::sizeHint() const
     const int margin = Theme::surfaceShadowMargin();
     if (myMode == ChipMode::IconOnly) {
         // No text is measured because none is painted: the label and the
-        // shortcut are in the tooltip.
-        return QSize(kIconOnlySide + margin * 2, kIconOnlySide + margin * 2);
+        // shortcut are in the tooltip. A theme's chip has its own side.
+        const int side = Themes::shell().chip.on ? Themes::shell().chip.size : kIconOnlySide;
+        return QSize(side + margin * 2, side + margin * 2);
     }
 
     // Measured with the same fonts paintEvent() actually draws with below -
@@ -257,6 +259,67 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     // which survived. A chip belongs to the floating-surface family by
     // wearing the family's fill, border and radius, not by routing through a
     // call whose every effect it overwrites.
+
+    // A THEME'S CHIP (themes part 2): its mockup's idle, hover, on and off
+    // looks, and the glyph inked to match. Graphite has none and paints below.
+    if (const Themes::Chip& sc = Themes::shell().chip; sc.on) {
+        const double r = std::max(0.0, std::min<double>(sc.radius, std::min(body.width(), body.height()) / 2.0));
+        QPainterPath shape;
+        shape.addRoundedRect(QRectF(body), r, r);
+        const bool on = isChecked() || isDown();
+        const bool off = !isEnabled();
+        QColor edge = sc.idleEdge, ink = sc.idleInk.isValid() ? sc.idleInk : Theme::text();
+        if (off) {
+            edge = sc.offEdge;
+            ink = sc.offInk.isValid() ? sc.offInk : Theme::textDisabled();
+        } else if (on) {
+            QLinearGradient g(QPointF(body.left(), body.top()), QPointF(body.left(), body.bottom()));
+            g.setColorAt(0.0, sc.onTop);
+            g.setColorAt(1.0, sc.onBottom);
+            painter.fillPath(shape, g);
+            if (sc.onInnerTop.isValid()) {
+                QPainterPath lower;
+                lower.addRoundedRect(QRectF(body).translated(0, 1.0), r, r);
+                painter.fillPath(shape.subtracted(lower), sc.onInnerTop);
+            }
+            edge = sc.onEdge;
+            ink = sc.onInk.isValid() ? sc.onInk : Theme::text();
+        } else if (myHovered) {
+            if (sc.hoverFill.isValid()) painter.fillPath(shape, sc.hoverFill);
+            edge = sc.hoverEdge;
+            if (sc.hoverInk.isValid()) ink = sc.hoverInk;
+        } else if (sc.idleFill.isValid()) {
+            painter.fillPath(shape, sc.idleFill);
+        }
+        if (edge.isValid() && edge.alpha() > 0)
+            Theme::drawCrispBorder(painter, QRectF(body), edge, r, sc.edgeWidth);
+        // The glyph, inked: the icon's own shape, filled with the state's ink.
+        const int iconSide = 18;
+        const QRect iconRect(myMode == ChipMode::IconOnly ? body.left() + (body.width() - iconSide) / 2
+                                                          : body.left() + kPadX,
+                             body.top() + (body.height() - iconSide) / 2, iconSide, iconSide);
+        if (myUsesTextGlyph) {
+            painter.setFont(Theme::labelFont());
+            painter.setPen(ink);
+            painter.drawText(body, Qt::AlignCenter, myTextGlyph);
+        } else {
+            QPixmap glyph = icon().pixmap(QSize(iconSide, iconSide), devicePixelRatioF(), QIcon::Normal);
+            {
+                QPainter tint(&glyph);
+                tint.setCompositionMode(QPainter::CompositionMode_SourceIn);
+                tint.fillRect(glyph.rect(), ink);
+            }
+            painter.drawPixmap(iconRect, glyph);
+        }
+        if (myMode == ChipMode::Labelled) {
+            painter.setFont(Theme::labelFont());
+            painter.setPen(off ? Theme::textDisabled() : (on && sc.onInk.isValid() ? sc.onInk : Theme::text()));
+            const int textLeft = body.left() + kPadX + iconSide + kGap;
+            painter.drawText(QRect(textLeft, body.top(), body.right() - kPadX - textLeft + 1, body.height()),
+                             Qt::AlignVCenter | Qt::AlignLeft, text());
+        }
+        return;
+    }
 
     QColor background = Theme::chip();
     if (!isEnabled())        background = Theme::chip().darker(115);

@@ -2765,6 +2765,14 @@ private:
     // has to be able to set it WITHOUT also rebuilding the floor, which is
     // what applyBackgroundForMode() does and what would recurse from there.
     void applyRenderBackgroundColourForTier(RenderTier tier);
+    // THE THEME'S BACKDROP (themes part 2): the light its mockup draws behind
+    // the scene - glows, vignettes, grain - as the view's background image,
+    // rendered from Themes::shell() at the viewport's device size. `wanted`
+    // false (render mode's studio, a theme with none) takes it down.
+    void applyThemeBackdrop(bool wanted);
+    QString myBackdropKey;
+    bool myBackdropShown = false;
+    class QTimer* myBackdropTimer = nullptr;
     // Drives the on-screen path-tracing accumulation buffer through enough
     // passes to settle, bounded by kExportConvergenceCapMs. A no-op on every
     // other tier and outside render mode. See saveSnapshot() for why an

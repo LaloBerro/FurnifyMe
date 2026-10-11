@@ -11,6 +11,7 @@
 // before themes existed mean exactly what they always did.
 
 #include "Theme.h"
+#include "ThemeShell.h"
 
 #include <QObject>
 #include <QString>
@@ -37,6 +38,9 @@ bool exists(const QString& id);
 Theme::Spec baseSpec(const QString& id);
 // The page-only tokens (CSS custom properties without the leading "--").
 QVariantMap pageTokens(const QString& id);
+// A theme's shell - its backdrop, cards and chips as its mockup draws them
+// (ThemeShell.h). Graphite's has every part off.
+const Shell& shellOf(const QString& id);
 
 // --- the theme in use ---------------------------------------------------------
 //
@@ -53,6 +57,8 @@ void setStore(Store store);
 // Graphite until select() runs - so a window that never chooses (gui_smoke)
 // wears exactly defaultSpec().
 QString currentId();
+// The shell of the theme in use - what every Qt surface reads at paint time.
+const Shell& shell();
 // Puts `id` on: closes an open colour picker FIRST (its Cancel restores into
 // the theme being left, never the one arriving), stores the leaving theme's
 // live spec, installs the arriving theme's stored edits or its base, and

@@ -16,6 +16,7 @@ struct Data {
     Info info;
     QJsonObject spec;
     QVariantMap page;
+    Shell shell;
 };
 
 const QStringList& order()
@@ -44,6 +45,7 @@ const QHash<QString, Data>& data()
             d.info.fontFamily = (family.isEmpty() || SettingsEdits::familyDisplayName(bundled) == family) ? bundled : family;
             d.spec = o.value(QStringLiteral("spec")).toObject();
             d.page = o.value(QStringLiteral("page")).toObject().toVariantMap();
+            d.shell = parseShell(o.value(QStringLiteral("shell")).toObject());
             out.insert(id, d);
         }
         return out;
@@ -90,6 +92,13 @@ QVariantMap pageTokens(const QString& id)
     return data().value(exists(id) ? id : defaultId()).page;
 }
 
+const Shell& shellOf(const QString& id)
+{
+    static const Shell none;
+    const auto it = data().find(id);
+    return it == data().end() ? none : it->shell;
+}
+
 namespace {
 Store& store()
 {
@@ -116,6 +125,8 @@ QString currentId()
 {
     return current();
 }
+
+const Shell& shell() { return shellOf(currentId()); }
 
 namespace {
 // "key=value" pieces of a serialized spec, in order.
