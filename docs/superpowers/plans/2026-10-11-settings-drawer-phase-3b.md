@@ -643,5 +643,10 @@ Write each `it` in full in the file, following `web/test/editor.test.ts`'s shape
 
 | When | Checks | Skips | Failures | Run |
 | --- | --- | --- | --- | --- |
-| Phase 3b final, run 1 | | | | |
-| Phase 3b final, run 2 | | | | |
+| d5e3399 (Tasks 1-7), quiet, run 1 | 6370 | 1 | 0 | d5e3399 |
+| d5e3399, quiet, run 2 | 6370 | 1 | 0 | d5e3399 |
+| 861e604 (review fixes), quiet, run 1 | 6370 | 1 | 0 | 861e604 |
+| 861e604, run 2 | 6370 | 1 | 1 (Items drawer selection-restyle wall clock 16.01 ms against 16; 11.1-12.9 in every other run) | 861e604 |
+| 861e604, quiet, run 3 | 6370 | 1 | 0 (that check 11.14 ms) | 861e604 |
+
+Also on 861e604: ctest 19/19, vitest 89, svelte-check clean, hub_smoke 29, chrome_smoke 78.

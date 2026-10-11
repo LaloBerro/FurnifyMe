@@ -310,7 +310,9 @@ web build unless `--qt-chrome` or the page is missing; `gui_smoke` never calls i
 the Qt path stays the one it gates) puts `EditorChrome` - one transparent page the
 viewport's size - over the 3D view. `MainWindow::onReported()` is still the one author:
 it sends Notes and Failures to the page under ToastHost's rules, keeps writing the
-hidden Qt status bar as the STATE, and mirrors it to the page's strip.
+hidden Qt status bar as the STATE, and mirrors it to the page's strip. **Phase 3b put the
+Settings drawer on the same page**: one table (`SettingsEdits`) and one edit path feed the
+Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own anchor.
 
 - **Build:** `cmake --preset windows-web && cmake --build --preset windows-web`. It
   uses the INSTALLER Qt 6.11.1 in `C:/Qt/6.11.1/msvc2022_64` (WebEngine; vcpkg's Qt
@@ -331,7 +333,8 @@ hidden Qt status bar as the STATE, and mirrors it to the page's strip.
   wears `use:chip` (out of the tab order, a press that never moves focus - an armed
   Delete once took a stray Enter); a page that fills its window gives `#app` a height,
   or its 100% layout grows to the content and nothing scrolls; an opaque page needs
-  `WebHost`'s scrollbars (only the overlay hides them); a modal question claims its keys
+  `WebHost`'s scrollbars, and since Phase 3b a transparent page keeps them too (its body is
+  `overflow: hidden`, so only a list inside a card shows one); a modal question claims its keys
   at window level and makes everything behind it `inert`. `WebHost` itself refuses any
   navigation but the page's own URL and every drop (the channel is the page's, not the
   URL's, so a replacing document would inherit the API), swallows Ctrl+wheel (zoom moves
@@ -339,6 +342,28 @@ hidden Qt status bar as the STATE, and mirrors it to the page's strip.
   window whose title strip is the page's stays movable before the page reports
   (`HubWindow::hitTest`'s default 32 px band), and `main.cpp` falls back to the Qt hub
   when the page file is missing.
+- **An HTML card takes a Qt card's PLACE, not its layout** (Phase 3b, ruling R1). The
+  overlay still decides where every card stands: `ViewportOverlay::replaceWidget(qtCard,
+  slot)` swaps in an `HtmlCardSlot` - the card's fixed size, painting nothing, taking no
+  click - in the same anchor and order, so stacking under the gizmo, `occupiedRects()` for
+  the toast and the action-derived visibility hold unchanged, and `EditorChrome::addCard()`
+  tells the page the slot's rectangle every time it moves, shows or hides. The swap happens
+  only while the page is live (`liveChanged`): before it says it is listening, and for good
+  once it dies, the Qt card is back in its anchor - a slot with no page behind it is an
+  invisible card that swallows nothing and shows nothing. Every later card follows this.
+- **A typed field takes the keyboard and gives it back** (ruling R5). The view is
+  `Qt::NoFocus`; a field calls `claimKeyboard()` when pressed and `releaseKeyboard()` on
+  Enter, Escape, blur or unmount, and while held the view accepts every `ShortcutOverride`
+  (WebEngine already claims editing keys for a focused field - what this keeps out is the
+  window's OTHER shortcuts, Ctrl+D and Ctrl+Alt+A, which is exactly what its mutation
+  reddens). Claims are COUNTED: moving from field A to field B arrives as B's claim then A's
+  release. A release gives focus back only while focus is still the page's, and only to a
+  widget outside it; the window's focus widget is read, never `QApplication::focusWidget()`,
+  which is null for a window the OS has not activated (every window the harness shows).
+- **A wheel the page does not consume comes back to the VIEWPORT.** WebEngine re-sends it
+  to the view's parent, so the shield is a viewport filter that swallows any wheel inside
+  the page's hit region (one there can only have come back from the page) - over a card's
+  title, or a list at its end, the camera stays put. A dead page clears its hit region.
 - **What a page over the viewport owes, learned on the chrome (its review's fix pass):**
   - **It may be absent, so it must say it is listening.** The page calls `ready()` once
     every signal is connected; `htmlChromeLive()` is the one term every HTML branch reads,
@@ -390,7 +415,11 @@ Source files under `src/`, plus `tests/`:
 | `web/WebHost.{h,cpp}` | one HTML page in a `QWebEngineView`: profile, channel, qwebchannel.js, `pageUrl()`; `prepareApplication()` puts Qt Quick on OpenGL |
 | `web/ThemeBridge.{h,cpp}` | `Theme::Spec` as CSS custom properties, re-sent on every Theme change |
 | `web/HubWindow.{h,cpp}` | the HTML hub's frameless window: page + `HubModel` + window controls; `WindowChrome` hit-tests from rects the page reports |
-| `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast + status strip today; `ChromeBridge` is its channel object, the page's hit rects its mask |
+| `ui/SettingsEdits.{h,cpp}` | the Settings drawer's model: tabs, rows, number fields, token names and headings, the colour picker, and every `Theme::Spec` edit - read by both drawers; no widgets |
+| `ui/HtmlCardSlot.{h,cpp}` | an HTML card's place in the overlay: the card's size, painting nothing, taking no click |
+| `session/ActionWatch.{h,cpp}` | a few actions' state for a page, one `changed()` per event-loop turn |
+| `web/SettingsBridge.{h,cpp}` | the page's `settings` object: layout, live spec, the rows' actions; edits land in `SettingsEdits`; triggers only its rows' actions |
+| `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast, status strip and the Settings card; `ChromeBridge` is its channel object, the page's hit rects its mask |
 | `web/WebOverlay.{h,cpp}` | the Phase 0 spike's overlay over the viewport (`--web-spike`), on `WebHost` |
 | `web/` (repo root) | the pages: Svelte 5 + Vite, one self-contained file per page (`build.mjs`), vitest page tests in `web/test` |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |
