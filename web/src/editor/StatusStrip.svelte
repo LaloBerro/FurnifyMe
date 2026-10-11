@@ -47,7 +47,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    background: var(--chrome);
+    background: var(--strip-fill, var(--chrome));
     color: var(--text-muted);
     font-size: var(--font-label);
     white-space: nowrap;
@@ -73,7 +73,7 @@
   .dot {
     width: 7px;
     height: 7px;
-    border-radius: 50%;
+    border-radius: var(--r-dot, 50%);
     background: var(--caution);
   }
   /* Capped at half the strip and elided, as Qt's showStateLine() caps the

@@ -654,6 +654,34 @@ int main(int argc, char* argv[])
               "Settings off takes the card away");
         check(!chrome->holdsKeyboard(), "and gives the keyboard back mid-edit");
     }
+    // --- each theme on the editor's chrome (T-072): a capture of each ----------------
+    {
+        if (!settingsSlot->isVisible()) settingsAction->trigger();
+        pump(300);
+        js(page, "document.querySelector('[data-tab=\"0\"]').click()");
+        for (const Themes::Info& theme : Themes::all()) {
+            Themes::select(theme.id);
+            waitFor([&] { return jsString(page, "document.documentElement.dataset.theme") == theme.id; }, 3000);
+            window.view()->setSelectedSolids({window.document().solids().front().id});
+            pump(150);
+            if (del) del->trigger();   // a Note with Undo to look at
+            waitFor([&] { return !toastText(page).isEmpty(); }, 3000);
+            pump(400);
+#ifdef _WIN32
+            capture(&window, outDir + "/chrome-theme-" + theme.id + ".png");
+#endif
+            check(jsString(page, "getComputedStyle(document.querySelector('.settings-card')).fontFamily")
+                      .contains(theme.fontFamily.section(QLatin1Char(' '), 0, 0)),
+                  "the card is set in " + theme.name + "'s typeface - " + theme.fontFamily);
+            js(page, "document.querySelector('.toast .undo').click()");
+            pump(300);
+        }
+        Themes::select(Themes::graphiteId());
+        pump(300);
+        settingsAction->trigger();
+        pump(200);
+    }
+
     // --- the theme, chosen on the card (T-072) ------------------------------------
     {
         if (!settingsSlot->isVisible()) settingsAction->trigger();

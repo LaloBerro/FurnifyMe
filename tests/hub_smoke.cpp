@@ -23,6 +23,7 @@
 #include "SceneModel.h"
 #include "SceneWindow.h"
 #include "Theme.h"
+#include "ui/Themes.h"
 #include "session/HubModel.h"
 #include "web/HubWindow.h"
 #include "web/WebHost.h"
@@ -502,6 +503,28 @@ int main(int argc, char* argv[])
         return QString::compare(a, b, Qt::CaseInsensitive) < 0;
     });
     check(byName == sorted && byName.size() >= 2, "the Name chip sorts by name - got " + byName.join(", "));
+
+    // --- each theme on the hub (T-072): the page wears it, and a capture of each ---
+    for (const Themes::Info& theme : Themes::all()) {
+        Themes::select(theme.id);
+        waitFor([&] { return jsString(page, "document.documentElement.dataset.theme") == theme.id; }, 3000);
+        check(jsString(page, "document.documentElement.dataset.theme") == theme.id,
+              "the hub wears " + theme.name);
+        pump(400);
+        capture(&hub, outDir + "/hub-theme-" + theme.id + ".png");
+    }
+    {
+        Themes::select(QStringLiteral("ultraviolet-grid"));
+        pump(300);
+        const QString radius = jsString(page, "getComputedStyle(document.querySelector('.thumb')).borderTopLeftRadius");
+        check(radius == QStringLiteral("0px"), "under Ultraviolet Grid a card's corner is square (" + radius + ")");
+        Themes::select(QStringLiteral("violet-glass-float"));
+        pump(300);
+        const QString round = jsString(page, "getComputedStyle(document.querySelector('.thumb')).borderTopLeftRadius");
+        check(round == QStringLiteral("26px"), "under Violet Glass Float it is 26px (" + round + ")");
+        Themes::select(Themes::graphiteId());
+        pump(300);
+    }
 
     std::printf("\n%s (%d failures, %d checks)\n", gFailures ? "FAIL" : "PASS", gFailures, gChecks);
     return gFailures == 0 ? 0 : 1;

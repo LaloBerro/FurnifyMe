@@ -150,7 +150,7 @@
 <div class="lane" aria-live={shown?.kind === 'failure' ? 'assertive' : 'polite'}>
   {#if shown}
     <div
-      class="toast"
+      class="toast themed-rim"
       class:failure={shown.kind === 'failure'}
       class:arriving
       class:leaving
@@ -191,9 +191,10 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    background: var(--card-fill, var(--panel));
+    border: 1px solid var(--card-edge, var(--border));
+    border-radius: var(--r-float, 8px);
+    box-shadow: var(--card-shadow, none);
     overflow: hidden;
     color: var(--text);
     font-size: var(--font-body);
@@ -252,7 +253,7 @@
     width: 64px;
     height: 26px;
     border: none;
-    border-radius: 5px;
+    border-radius: var(--r-small, 5px);
     background: var(--chip-hover);
     color: var(--accent-text);
     font: inherit;

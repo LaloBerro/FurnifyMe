@@ -46,7 +46,7 @@
 
 <!-- A press on the scrim or the card keeps focus in the field. -->
 <div class="scrim" role="presentation" onmousedown={(e) => e.target !== field && e.preventDefault()}>
-  <div class="card" role="dialog" aria-modal="true" aria-labelledby="name-title" aria-describedby="name-body">
+  <div class="card themed-rim" role="dialog" aria-modal="true" aria-labelledby="name-title" aria-describedby="name-body">
     <h2 id="name-title">{copy.nameTitle}</h2>
     <input type="text" maxlength="120" bind:this={field} bind:value={name} />
     <p id="name-body">{copy.nameBody}</p>
@@ -78,20 +78,24 @@
     z-index: 10;
   }
   .card {
+    position: relative;
     width: min(380px, calc(100vw - 32px));
     box-sizing: border-box;
     padding: 20px 20px 16px;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 14px;
+    background: var(--card-fill, var(--panel));
+    border: 1px solid var(--card-edge, var(--border));
+    border-radius: var(--r-dialog, 14px);
+    box-shadow: var(--card-shadow, none);
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
   h2 {
     margin: 0;
-    font-size: var(--font-title);
-    font-weight: 600;
+    font-family: var(--title-family, inherit);
+    font-size: var(--title-size, var(--font-title));
+    font-weight: var(--title-weight, 600);
+    letter-spacing: var(--title-tracking, normal);
   }
   p {
     margin: 0;
@@ -103,7 +107,7 @@
     height: 36px;
     padding: 0 10px;
     border: 1px solid var(--accent);
-    border-radius: 8px;
+    border-radius: var(--r-float, 8px);
     background: var(--chip);
     color: var(--text);
     font: inherit;
@@ -121,7 +125,7 @@
     justify-content: center;
     align-items: center;
     gap: 8px;
-    border-radius: 8px;
+    border-radius: var(--r-float, 8px);
     font: inherit;
     cursor: pointer;
   }

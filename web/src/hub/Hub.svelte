@@ -151,6 +151,8 @@
     height: 100%;
     display: flex;
     flex-direction: column;
+    /* A theme's light at the window's edges (themes.css), behind everything. */
+    background: var(--hub-glow, none);
   }
   main {
     flex: 1;
@@ -168,8 +170,10 @@
   h1 {
     flex: 1;
     margin: 0;
-    font-size: var(--font-title);
-    font-weight: 600;
+    font-family: var(--title-family, inherit);
+    font-size: var(--title-size, var(--font-title));
+    font-weight: var(--title-weight, 600);
+    letter-spacing: var(--title-tracking, normal);
   }
   .search input {
     width: 180px;
@@ -177,7 +181,7 @@
     box-sizing: border-box;
     padding: 2px 9px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--r-float, 8px);
     background: var(--chip);
     color: var(--text);
     font: inherit;
@@ -190,11 +194,14 @@
     height: 28px;
     padding: 2px 12px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--r-float, 8px);
     background: var(--chip);
     color: var(--text-muted);
     font: inherit;
     font-size: var(--font-label);
+    font-family: var(--label-family, inherit);
+    text-transform: var(--label-transform, none);
+    letter-spacing: var(--label-tracking, normal);
     cursor: pointer;
   }
   .sort[aria-pressed='true'] {
@@ -212,7 +219,7 @@
   .banner {
     padding: 8px 12px;
     border: 1px solid var(--danger-text);
-    border-radius: 6px;
+    border-radius: var(--r-control, 6px);
     background: var(--chip);
     color: var(--danger-text);
   }
@@ -235,7 +242,7 @@
   }
   .scroll::-webkit-scrollbar-thumb {
     background: var(--chip-active);
-    border-radius: 5px;
+    border-radius: var(--r-small, 5px);
   }
   .grid {
     display: grid;
@@ -252,7 +259,7 @@
     width: 260px;
     height: 197px;
     border: 1px dashed var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--r-card, var(--radius));
     background: transparent;
     color: var(--accent-text);
     font: inherit;
@@ -273,7 +280,7 @@
     background: var(--chip-active);
     border: 1px solid var(--border);
     border-left: 6px solid var(--accent);
-    border-radius: var(--radius);
+    border-radius: var(--r-card, var(--radius));
     color: var(--text);
     white-space: nowrap;
   }

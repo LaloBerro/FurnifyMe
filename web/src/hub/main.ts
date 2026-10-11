@@ -1,5 +1,7 @@
 import { mount } from 'svelte';
 import '../tokens.css';
+import '../themes.css';
+import { applyTokens } from '../theme';
 import Hub from './Hub.svelte';
 import type { HubApi, ThemeApi, WindowApi } from './api';
 import { channelObjects, hosted } from '../channel';
@@ -33,6 +35,9 @@ async function start() {
     win = mockWindow();
     theme = mockTheme();
   }
+  // The theme goes on BEFORE the first mount, so a page opened while a theme
+  // is already chosen never paints a frame of Graphite first.
+  applyTokens(theme.tokens);
   mount(Hub, { target: document.getElementById('app')!, props: { hub, win, theme } });
 }
 

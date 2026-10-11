@@ -145,7 +145,7 @@
     height: 22px;
     padding: 0 22px 0 8px;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--r-small, 5px);
     background: var(--chip);
     color: var(--text);
     font: inherit;
@@ -180,13 +180,13 @@
     overflow-y: auto;
     padding: 3px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--r-control, 6px);
     background: var(--panel);
     outline: none;
   }
   .family {
     padding: 3px 6px;
-    border-radius: 4px;
+    border-radius: var(--r-tiny, 4px);
     font-size: var(--font-label);
     white-space: nowrap;
     overflow: hidden;

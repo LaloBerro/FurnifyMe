@@ -53,7 +53,7 @@
     height: 22px;
     padding: 0 9px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--r-control, 6px);
     background: var(--chip);
     color: var(--text-muted);
     font: inherit;

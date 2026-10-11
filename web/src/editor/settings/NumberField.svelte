@@ -179,7 +179,7 @@
     align-items: stretch;
     height: 22px;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--r-small, 5px);
     background: var(--chip);
     overflow: hidden;
   }

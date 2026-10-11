@@ -163,9 +163,10 @@
     width: 260px;
     height: 163px;
     padding: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--panel);
+    border: 1px solid var(--card-edge, var(--border));
+    border-radius: var(--r-card, var(--radius));
+    background: var(--card-fill, var(--panel));
+    box-shadow: var(--card-shadow, none);
     overflow: hidden;
     cursor: pointer;
     display: block;
@@ -188,7 +189,7 @@
   .disc {
     width: 56px;
     height: 56px;
-    border-radius: 50%;
+    border-radius: var(--r-dot, 50%);
     background: var(--chip);
     color: var(--text-muted);
     font-size: var(--font-title);
@@ -209,7 +210,7 @@
     background: var(--panel);
     color: var(--danger-text);
     border: 1px solid var(--danger);
-    border-radius: 6px;
+    border-radius: var(--r-control, 6px);
     font-size: var(--font-label);
     white-space: nowrap;
     overflow: hidden;
@@ -241,7 +242,7 @@
     height: 22px;
     padding: 2px 8px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--r-tiny, 4px);
     background: var(--chip);
     color: var(--text);
     font: inherit;
@@ -259,7 +260,7 @@
     box-sizing: border-box;
     padding: 0 6px;
     border: 1px solid var(--accent);
-    border-radius: 4px;
+    border-radius: var(--r-tiny, 4px);
     background: var(--chip);
     color: var(--text);
     font: inherit;

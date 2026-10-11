@@ -73,7 +73,7 @@
     height: 18px;
     padding: 0;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--r-tiny, 4px);
     cursor: pointer;
   }
   /* The app's one scrollbar description (Theme::install()): a quiet chipActive
@@ -86,7 +86,7 @@
   }
   .colours::-webkit-scrollbar-thumb {
     background: var(--chip-active);
-    border-radius: 4px;
+    border-radius: var(--r-tiny, 4px);
   }
   .colours::-webkit-scrollbar-button {
     display: none;

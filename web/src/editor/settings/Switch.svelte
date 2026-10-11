@@ -41,7 +41,7 @@
     height: 20px;
     padding: 0;
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: var(--r-pill, 10px);
     background: var(--chip);
     cursor: pointer;
   }
@@ -61,7 +61,7 @@
     left: 2px;
     width: 14px;
     height: 14px;
-    border-radius: 50%;
+    border-radius: var(--r-dot, 50%);
     background: var(--text);
     transition: left var(--motion, 160ms) ease-out;
   }

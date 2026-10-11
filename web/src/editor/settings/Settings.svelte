@@ -128,7 +128,7 @@
 {/snippet}
 
 <section
-  class="settings-card"
+  class="settings-card themed-rim"
   data-hit
   aria-label={words.title}
   style="left: {rect.x}px; top: {rect.y}px; width: {rect.w}px; height: {rect.h}px;"
@@ -231,9 +231,10 @@
     flex-direction: column;
     gap: 8px;
     padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--panel);
+    border: 1px solid var(--card-edge, var(--border));
+    border-radius: var(--r-card, 10px);
+    background: var(--card-fill, var(--panel));
+    box-shadow: var(--card-shadow, none);
     color: var(--text);
     font-size: var(--font-body);
     overflow: hidden;
@@ -244,8 +245,10 @@
   }
   .title {
     flex: 1;
-    font-size: var(--font-title);
-    font-weight: 600;
+    font-family: var(--title-family, inherit);
+    font-size: var(--title-size, var(--font-title));
+    font-weight: var(--title-weight, 600);
+    letter-spacing: var(--title-tracking, normal);
     color: var(--text-muted);
   }
   .close {
@@ -256,7 +259,7 @@
     height: 20px;
     padding: 0;
     border: none;
-    border-radius: 5px;
+    border-radius: var(--r-small, 5px);
     background: transparent;
     visibility: hidden;
     cursor: pointer;
@@ -293,11 +296,14 @@
     height: 24px;
     padding: 0 7px 2px;
     border: none;
-    border-radius: 6px 6px 0 0;
+    border-radius: var(--r-tab, 6px 6px 0 0);
     background: transparent;
     color: var(--text-muted);
     font: inherit;
     font-size: var(--font-label);
+    font-family: var(--label-family, inherit);
+    text-transform: var(--label-transform, none);
+    letter-spacing: var(--label-tracking, normal);
     white-space: nowrap;
     cursor: pointer;
   }
@@ -351,7 +357,7 @@
     flex: 1;
     height: 26px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--r-control, 6px);
     background: var(--chip);
     color: var(--text);
     font: inherit;
