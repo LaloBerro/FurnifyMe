@@ -5,6 +5,15 @@
          list), which is awkward to reference in code. -->
     <file alias="DMSans.ttf">assets/fonts/DMSans-VariableFont_opsz,wght.ttf</file>
   </qresource>
+  <!-- The themes (T-072): each a whole style, as data - DESIGN.md is the
+       contract. Hex lives here and in Theme.cpp, never elsewhere in src/. -->
+  <qresource prefix="/themes">
+    <file alias="violet-glass-float.json">assets/themes/violet-glass-float.json</file>
+    <file alias="aurora-mesh-gradient.json">assets/themes/aurora-mesh-gradient.json</file>
+    <file alias="nightshade-glass.json">assets/themes/nightshade-glass.json</file>
+    <file alias="ultraviolet-grid.json">assets/themes/ultraviolet-grid.json</file>
+    <file alias="graphite.json">assets/themes/graphite.json</file>
+  </qresource>
   <qresource prefix="/icons">
     <file alias="app.png">assets/Icon.png</file>
   </qresource>

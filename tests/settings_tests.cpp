@@ -8,6 +8,7 @@
 
 #include "HtmlCardSlot.h"
 #include "SettingsEdits.h"
+#include "Themes.h"
 #include "session/ActionRegistry.h"
 #include "web/SettingsBridge.h"
 #include "ViewportOverlay.h"
@@ -32,6 +33,35 @@ void check(bool ok, const char* what)
     if (!ok) ++gFailures;
 }
 }  // namespace
+
+// WCAG 2 contrast between two opaque colours.
+double contrast(const QColor& a, const QColor& b)
+{
+    auto lum = [](const QColor& c) {
+        auto ch = [](double v) { return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * ch(c.redF()) + 0.7152 * ch(c.greenF()) + 0.0722 * ch(c.blueF());
+    };
+    const double la = lum(a), lb = lum(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+// Every pair at least `minimum` apart in RGB.
+bool distinct(const std::vector<QColor>& colours, double minimum)
+{
+    for (size_t i = 0; i < colours.size(); ++i)
+        for (size_t j = i + 1; j < colours.size(); ++j) {
+            const double dr = colours[i].red() - colours[j].red(), dg = colours[i].green() - colours[j].green(),
+                         db = colours[i].blue() - colours[j].blue();
+            if (std::sqrt(dr * dr + dg * dg + db * db) < minimum) {
+                std::printf("       (%s and %s are %.0f apart)\n", qPrintable(colours[i].name()),
+                            qPrintable(colours[j].name()), std::sqrt(dr * dr + dg * dg + db * db));
+                return false;
+            }
+        }
+    return true;
+}
+
+void check(bool ok, const QByteArray& what) { check(ok, what.constData()); }
 
 int main(int argc, char* argv[])
 {
@@ -62,6 +92,29 @@ int main(int argc, char* argv[])
               SettingsEdits::groupHeadingFor(QStringLiteral("axisY")).isEmpty(),
           "a heading opens a group, and only there");
     check(SettingsEdits::isRetiredToken(QStringLiteral("focusRing")), "the focus-ring tokens are retired");
+
+    // --- themes as data ----------------------------------------------------------
+    check(Themes::all().size() == 5 && Themes::all().front().id == Themes::defaultId() &&
+              Themes::defaultId() == QStringLiteral("violet-glass-float"),
+          "five themes, the default first");
+    check(Themes::baseSpec(Themes::graphiteId()) == Theme::defaultSpec(), "Graphite is the shipped spec itself");
+    for (const Themes::Info& info : Themes::all()) {
+        const Theme::Spec s = Themes::baseSpec(info.id);
+        const QByteArray id = info.id.toUtf8();
+        check(!info.name.isEmpty() && !info.fontFamily.isEmpty(), "every theme has a name and a typeface: " + id);
+        check(contrast(s.text, s.panel) >= 4.5, "text reads on a panel: " + id);
+        check(contrast(s.accentText, s.chipActive) >= 4.5, "accent words read on a pressed chip: " + id);
+        check(distinct({s.highlightHover, s.highlightSelected, s.sizesOneBody, s.axisX, s.axisY, s.gizmoAxisZ}, 60),
+              "selection, hover, sizes and axes are told apart: " + id);
+        check(s.body.hsvSaturationF() < 0.1, "bodies stay grey: " + id);
+        check(s.fontFamily == info.fontFamily, "the theme's typeface is its spec's: " + id);
+    }
+    check(Themes::baseSpec(QStringLiteral("aurora-mesh-gradient")).highlightSelected !=
+              Themes::baseSpec(Themes::graphiteId()).highlightSelected,
+          "a theme may recolour the viewport's state inks");
+    check(!Themes::exists(QStringLiteral("nope")) &&
+              Themes::baseSpec(QStringLiteral("nope")) == Themes::baseSpec(Themes::defaultId()),
+          "an unknown id answers the default");
 
     // --- the edits ----------------------------------------------------------
     SettingsEdits::setNumber(QStringLiteral("basePt"), 99);
