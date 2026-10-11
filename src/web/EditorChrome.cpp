@@ -156,17 +156,22 @@ void EditorChrome::addCard(HtmlCardSlot* slot)
 void EditorChrome::syncCards()
 {
     QVariantMap map;
-    bool anyHidden = false;
+    bool wentAway = false;
     for (const QPointer<HtmlCardSlot>& slot : myCards) {
         if (!slot) continue;
         QVariantMap card = rectMap(slot->geometry());
-        card.insert(QStringLiteral("shown"), slot->isVisible());
-        anyHidden = anyHidden || !slot->isVisible();
+        const bool shown = slot->isVisible();
+        card.insert(QStringLiteral("shown"), shown);
+        // A card that WAS shown and is not now - never merely one that is
+        // hidden: with two cards, the closed one would otherwise take the
+        // keyboard from a field in the open one on every relayout (Phase 3c).
+        wentAway = wentAway || (myCardShown.value(slot->name()) && !shown);
+        myCardShown.insert(slot->name(), shown);
         map.insert(slot->name(), card);
     }
     // A card going away mid-edit gives the keyboard back from here too,
     // not only from the page (Review Focus 4).
-    if (anyHidden && myHoldsKeyboard) dropKeyboard();
+    if (wentAway && myHoldsKeyboard) dropKeyboard();
     myBridge->setCardMap(map);
 }
 

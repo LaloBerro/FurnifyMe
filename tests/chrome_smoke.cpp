@@ -669,6 +669,221 @@ int main(int argc, char* argv[])
           "the page's versions object is there, with + open");
     if (!versionsSlot || !versionsAction) return 1;
 
+    {
+        const QString furnitureId = window.currentFurnitureId();
+        FurnitureStore& store = window.furnitureStore();
+        const QString cardRect = QStringLiteral(
+            "JSON.stringify((() => { const c = document.querySelector('.versions-card'); if (!c) return {}; "
+            "const r = c.getBoundingClientRect(); return {x: Math.round(r.left), y: Math.round(r.top), "
+            "w: Math.round(r.width), h: Math.round(r.height)}; })())");
+        auto drawn = [&] {
+            const QJsonObject o = QJsonDocument::fromJson(jsString(page, cardRect).toUtf8()).object();
+            return QRect(o.value("x").toInt(), o.value("y").toInt(), o.value("w").toInt(), o.value("h").toInt());
+        };
+        auto reported = [&] { return js(page, "window.__versionsHeight || 0").toInt(); };
+        auto settled = [&] {
+            return reported() > 0 && versionsSlot->height() == Theme::wholeDevicePixels(reported()) &&
+                   drawn() == versionsSlot->geometry();
+        };
+        waitFor([&] { return js(page, "!!document.querySelector('.versions-card')").toBool(); }, 3000);
+        waitFor(settled, 3000);
+        check(settled(), QStringLiteral("the card reports its height, the slot takes it, and the page draws "
+                                        "exactly over the slot (%1x%2, reported %3)")
+                             .arg(drawn().width()).arg(drawn().height()).arg(reported()));
+        check(chrome->hitRegion().contains(versionsSlot->geometry().center()), "a press on the card reaches the page");
+        check(jsString(page, "(document.querySelector('.versions-card .empty') || {}).textContent || ''")
+                  .startsWith(QStringLiteral("No versions yet.")),
+              "a furniture with no versions shows the empty state");
+        const int emptyHeight = versionsSlot->height();
+
+        // + opens a pending version, and typing in it keeps every key.
+        js(page, "document.querySelector('.versions-card .add').click()");
+        waitFor([&] { return chrome->holdsKeyboard(); }, 2000);
+        check(jsString(page, "(document.querySelector('.pending input') || {}).value || ''") == QStringLiteral("Version 1"),
+              "+ opens a pending version named Version 1");
+        check(chrome->holdsKeyboard(), "and the field holds the keyboard");
+        const int bodiesBefore = static_cast<int>(window.document().solids().size());
+        const std::vector<std::pair<int, Qt::KeyboardModifiers>> keys = {
+            {Qt::Key_Delete, Qt::NoModifier}, {Qt::Key_Z, Qt::ControlModifier},
+            {Qt::Key_1, Qt::NoModifier}, {Qt::Key_Space, Qt::NoModifier}};
+        for (const auto& [key, mods] : keys) {
+            QKeyEvent over(QEvent::ShortcutOverride, key, mods);
+            QCoreApplication::sendEvent(chrome->view()->focusProxy(), &over);
+            check(over.isAccepted(), QStringLiteral("key %1 typed into the name is the field's (Review Focus 1)").arg(key));
+        }
+        check(static_cast<int>(window.document().solids().size()) == bodiesBefore, "and no body was deleted");
+
+        // Enter saves.
+        const QString typeAndEnter = QStringLiteral(
+            "(() => { const f = document.querySelector('.pending input'); f.value = '%1'; "
+            "f.dispatchEvent(new Event('input', {bubbles: true})); "
+            "f.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()");
+        js(page, typeAndEnter.arg(QStringLiteral("Shelf added")));
+        waitFor([&] { return !store.versions(furnitureId).isEmpty(); }, 3000);
+        check(store.versions(furnitureId).size() == 1 &&
+                  store.versions(furnitureId).front().name == QStringLiteral("Shelf added"),
+              "Enter saves the version under the typed name");
+        waitFor([&] { return toastText(page).endsWith(QStringLiteral("saved")); }, 2000);
+        check(toastText(page) == QStringLiteral("Version \"Shelf added\" saved"),
+              "and the page says so - \"" + toastText(page) + "\"");
+        waitFor([&] { return !chrome->holdsKeyboard(); }, 2000);
+        check(!chrome->holdsKeyboard(), "and gives the keyboard back");
+        const QString row = QStringLiteral("document.querySelector('.version[data-version=\"Shelf added\"]%1')");
+        waitFor([&] { return js(page, "!!" + row.arg(QString())).toBool(); }, 3000);
+        waitFor([&] { return versionsSlot->height() > emptyHeight && settled(); }, 3000);
+        check(versionsSlot->height() > emptyHeight && settled(),
+              QStringLiteral("the slot grows with the list and the card still covers it exactly (%1 -> %2) (Review Focus 5)")
+                  .arg(emptyHeight).arg(versionsSlot->height()));
+        const QString thumbLoaded = "(() => { const i = " + row.arg(QStringLiteral(" img.thumb")) +
+                                    "; return !!i && i.complete && i.naturalWidth > 0; })()";
+        waitFor([&] { return js(page, thumbLoaded).toBool(); }, 3000);
+        check(js(page, thumbLoaded).toBool(), "the saved version's picture loads");
+
+        // A duplicate refuses, keeping the card (Review Focus 2).
+        js(page, "document.querySelector('.versions-card .add').click()");
+        waitFor([&] { return js(page, "!!document.querySelector('.pending input')").toBool(); }, 2000);
+        pump(150);
+        js(page, typeAndEnter.arg(QStringLiteral("Shelf added")));
+        waitFor([&] { return toastText(page).startsWith(QStringLiteral("Couldn")); }, 3000);
+        check(toastText(page).startsWith(QStringLiteral("Couldn")) && toastText(page).contains(QStringLiteral("already exists")),
+              "a duplicate name is refused, saying why - \"" + toastText(page) + "\"");
+        check(jsString(page, "(document.querySelector('.pending input') || {}).value || ''") == QStringLiteral("Shelf added"),
+              "and the pending card stays, holding what was typed");
+        check(chrome->holdsKeyboard(), "still holding the keyboard");
+        js(page, "document.querySelector('.pending input').dispatchEvent("
+                 "new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+        waitFor([&] { return !js(page, "!!document.querySelector('.pending')").toBool(); }, 2000);
+        check(store.versions(furnitureId).size() == 1 && !chrome->holdsKeyboard() &&
+                  !js(page, "!!document.querySelector('.pending')").toBool(),
+              "Escape discards it, saving nothing and giving the keyboard back");
+
+        // File -> Save version... opens the page's pending card.
+        QAction* saveVersion = actionNamed(&window, QStringLiteral("Save version..."));
+        check(saveVersion != nullptr, "the editor has Save version...");
+        if (saveVersion) saveVersion->trigger();
+        waitFor([&] { return js(page, "!!document.querySelector('.pending input')").toBool(); }, 2000);
+        check(jsString(page, "(document.querySelector('.pending input') || {}).value || ''") == QStringLiteral("Version 1"),
+              "File -> Save version... opens the same pending card on the page");
+        waitFor([&] { return chrome->holdsKeyboard(); }, 2000);
+        versionsAction->trigger();   // hidden mid-edit (Review Focus 4)
+        pump(400);
+        check(!versionsSlot->isVisible() && !js(page, "!!document.querySelector('.versions-card')").toBool(),
+              "Versions off takes the card away");
+        check(!chrome->holdsKeyboard() && store.versions(furnitureId).size() == 1,
+              "and hiding it mid-edit gives the keyboard back and saves nothing");
+        versionsAction->trigger();
+        waitFor([&] { return js(page, "!!" + row.arg(QString())).toBool(); }, 3000);
+        pump(200);
+        check(!js(page, "!!document.querySelector('.pending')").toBool(),
+              "and it comes back without the pending card the menu asked for before");
+
+        // Restore: one checkpoint, a Note with Undo.
+        window.view()->setSelectedSolids({window.document().solids().front().id});
+        pump(150);
+        if (del) del->trigger();
+        pump(300);
+        const int afterDelete = static_cast<int>(window.document().solids().size());
+        js(page, row.arg(QStringLiteral(" .restore")) + ".click()");
+        waitFor([&] { return static_cast<int>(window.document().solids().size()) == afterDelete + 1; }, 3000);
+        check(static_cast<int>(window.document().solids().size()) == afterDelete + 1,
+              "Restore puts the version's bodies back");
+        waitFor([&] { return toastText(page).startsWith(QStringLiteral("Restored")); }, 2000);
+        check(toastText(page).startsWith(QStringLiteral("Restored version")) &&
+                  jsString(page, "(document.querySelector('.toast .undo') || {}).textContent || ''") == QStringLiteral("Undo"),
+              "and its Note offers Undo - \"" + toastText(page) + "\"");
+
+        // Compare opens the second viewport.
+        js(page, row.arg(QStringLiteral(" .compare")) + ".click()");
+        waitFor([&] { return window.isCompareOpen(); }, 3000);
+        check(window.isCompareOpen(), "Compare opens the side-by-side");
+        window.closeCompare();
+        pump(400);
+
+        // Delete: the first click arms, the second deletes.
+        waitFor([&] { return js(page, "!!" + row.arg(QStringLiteral(" .delete"))).toBool(); }, 3000);
+        js(page, row.arg(QStringLiteral(" .delete")) + ".click()");
+        pump(200);
+        check(store.versions(furnitureId).size() == 1 &&
+                  jsString(page, row.arg(QStringLiteral(" .delete")) + ".textContent") ==
+                      QStringLiteral("Delete — click again"),
+              "one click on Delete arms it and deletes nothing");
+        js(page, row.arg(QStringLiteral(" .delete")) + ".click()");
+        waitFor([&] { return store.versions(furnitureId).isEmpty(); }, 3000);
+        check(store.versions(furnitureId).isEmpty(), "the second click deletes the version");
+        waitFor([&] { return versionsSlot->height() == emptyHeight && settled(); }, 3000);
+        check(versionsSlot->height() == emptyHeight && settled(),
+              QStringLiteral("and the slot shrinks back to the empty state's height (%1) (Review Focus 5)")
+                  .arg(versionsSlot->height()));
+
+        // Each theme on the drawer, with one version to look at.
+        // Saved through the window, so it carries its picture.
+        window.saveVersion(QStringLiteral("Shelf added"));
+        waitFor([&] { return js(page, thumbLoaded).toBool() && settled(); }, 3000);
+        for (const Themes::Info& theme : Themes::all()) {
+            Themes::select(theme.id);
+            waitFor([&] { return jsString(page, "document.documentElement.dataset.theme") == theme.id; }, 3000);
+            // Delete armed, so the shot shows the actions row the pointer reveals.
+            if (jsString(page, row.arg(QStringLiteral(" .delete")) + ".textContent") == QStringLiteral("Delete"))
+                js(page, row.arg(QStringLiteral(" .delete")) + ".click()");
+            pump(300);
+#ifdef _WIN32
+            capture(&window, outDir + "/chrome-versions-" + theme.id + ".png");
+#endif
+            check(jsString(page, "getComputedStyle(document.querySelector('.versions-card .name')).fontFamily")
+                      .contains(theme.fontFamily.section(QLatin1Char(' '), 0, 0)),
+                  "the Versions card is set in " + theme.name + "'s typeface");
+        }
+        Themes::select(Themes::graphiteId());
+        pump(300);
+
+        // The armed sentence fits its row - seen in a capture: beside Compare
+        // and Restore it wrapped and leaked below the card's row.
+        if (jsString(page, row.arg(QStringLiteral(" .delete")) + ".textContent") == QStringLiteral("Delete"))
+            js(page, row.arg(QStringLiteral(" .delete")) + ".click()");
+        pump(150);
+        std::printf("[info] armed row: %s\n",
+                    qPrintable(jsString(page, "JSON.stringify((() => { const a = " + row.arg(QStringLiteral(" .actions")) +
+                                                  "; const d = " + row.arg(QStringLiteral(" .delete")) +
+                                                  "; return {aw: a.scrollWidth, ac: a.clientWidth, dh: d.scrollHeight, "
+                                                  "dc: d.clientHeight, n: a.children.length, clipped: [...a.children].filter((b) => b.scrollWidth > b.clientWidth).length, "
+                                                  "right: Math.round(d.getBoundingClientRect().right), "
+                                                  "card: Math.round(document.querySelector('.versions-card').getBoundingClientRect().right)}; })())")));
+        check(js(page, "(() => { const a = " + row.arg(QStringLiteral(" .actions")) + "; const d = " +
+                           row.arg(QStringLiteral(" .delete")) +
+                           "; return a.scrollWidth <= a.clientWidth && d.scrollHeight <= d.clientHeight + 1 && "
+                           "[...a.children].every((b) => { const r = b.getBoundingClientRect(), "
+                           "o = a.getBoundingClientRect(); return b.scrollWidth <= b.clientWidth && "
+                           "r.left >= o.left - 0.5 && r.right <= o.right + 0.5; }) && "
+                           "d.textContent.includes('again'); })()").toBool(),
+              "an armed Delete's sentence fits its row on one line - every button inside the row, none cut off");
+
+        // A long list scrolls inside its 384 px, with the app's scrollbar.
+        window.saveVersion(QStringLiteral("Second"));
+        window.saveVersion(QStringLiteral("Third"));
+        waitFor([&] { return js(page, "document.querySelectorAll('.version').length").toInt() == 3 && settled(); }, 3000);
+        const QJsonObject list = QJsonDocument::fromJson(
+            jsString(page, "JSON.stringify((() => { const l = document.querySelector('.versions-card .list'); "
+                           "return {client: l.clientHeight, scroll: l.scrollHeight, bar: l.offsetWidth - l.clientWidth}; })())")
+                .toUtf8()).object();
+        check(list.value("scroll").toInt() > list.value("client").toInt() && list.value("client").toInt() <= 384,
+              QStringLiteral("a long list scrolls inside 384 px (%1 of %2)")
+                  .arg(list.value("client").toInt()).arg(list.value("scroll").toInt()));
+        check(list.value("bar").toInt() == 8, QStringLiteral("with the app's 8 px scrollbar (%1)").arg(list.value("bar").toInt()));
+        check(settled(), "and the card still covers its slot exactly");
+#ifdef _WIN32
+        capture(&window, outDir + "/chrome-versions-long.png");
+#endif
+        store.deleteVersion(furnitureId, QStringLiteral("Second"));
+        store.deleteVersion(furnitureId, QStringLiteral("Third"));
+        store.deleteVersion(furnitureId, QStringLiteral("Shelf added"));
+        window.versionsModel()->refresh();
+
+        // The close x unchecks the action.
+        js(page, "document.querySelector('.versions-card .close').click()");
+        pump(300);
+        check(!versionsAction->isChecked() && !versionsSlot->isVisible(), "the close x closes the drawer");
+    }
+
     // --- each theme on the editor's chrome (T-072): a capture of each ----------------
     {
         if (!settingsSlot->isVisible()) settingsAction->trigger();

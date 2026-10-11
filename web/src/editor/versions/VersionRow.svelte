@@ -4,7 +4,10 @@
   // a fixed height - its buttons appear on hover, so revealing them never
   // moves the rows below. Delete takes two clicks inside its window; the arm
   // lives in this row, which the list keys by name, so a refresh that keeps
-  // the row keeps the arm (Review Focus 3).
+  // the row keeps the arm (Review Focus 3). While it is armed the row is
+  // Delete's: Compare and Restore step aside and the sentence widens LEFTWARD
+  // from the right edge, so the second click lands where the first did (the
+  // scene window's Remove rule) - beside them it does not fit the card.
   import { onDestroy } from 'svelte';
   import { chip } from '../../actions';
   import type { VersionEntry, VersionsWords } from './api';
@@ -60,8 +63,10 @@
     <span class="date">{entry.savedText}</span>
   </div>
   <div class="actions">
-    <button use:chip class="compare" disabled={!enabled} onclick={oncompare}>{words.compare}</button>
-    <button use:chip class="restore" disabled={!enabled} onclick={onrestore}>{words.restore}</button>
+    {#if !armed}
+      <button use:chip class="compare" disabled={!enabled} onclick={oncompare}>{words.compare}</button>
+      <button use:chip class="restore" disabled={!enabled} onclick={onrestore}>{words.restore}</button>
+    {/if}
     <button use:chip class="delete" disabled={!enabled} onclick={onDelete}
       >{armed ? words.deleteArmed : words.delete}</button
     >
@@ -123,6 +128,7 @@
     color: var(--text);
     font: inherit;
     font-size: var(--font-label);
+    white-space: nowrap;
     cursor: pointer;
   }
   .version:hover .actions button,

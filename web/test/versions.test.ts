@@ -99,6 +99,20 @@ describe('the Versions card', () => {
     expect(calls(api, 'remove')).toEqual([{ method: 'remove', args: ['Version 1'] }]);
   });
 
+  it('while Delete is armed, Compare and Restore step aside so its sentence fits the row', async () => {
+    vi.useFakeTimers();
+    mount();
+    const sel = (s: string) => q(`.version[data-version="Version 1"] ${s}`);
+    await fireEvent.click(sel('.delete')!);
+    expect(sel('.compare')).toBeNull();
+    expect(sel('.restore')).toBeNull();
+    expect(q('.version[data-version="Shelf added"] .compare')).not.toBeNull();
+    vi.advanceTimersByTime(4001);
+    await tick();
+    expect(sel('.compare')).not.toBeNull();
+    expect(sel('.restore')).not.toBeNull();
+  });
+
   it('an armed Delete survives a refresh that keeps its row (Review Focus 3)', async () => {
     const { api } = mount();
     await fireEvent.click(q('.version[data-version="Version 1"] .delete')!);

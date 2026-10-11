@@ -10,6 +10,7 @@
 // sends Notes and Failures here instead of to ToastHost, and keeps writing
 // the (hidden) Qt status bar, which this mirrors to the page.
 
+#include <QHash>
 #include <QObject>
 #include <QPoint>
 #include <QPointer>
@@ -158,4 +159,6 @@ private:
     QPointer<QWidget> myFocusBefore;
     QPointer<QWidget> myWatchedProxy;
     std::vector<QPointer<HtmlCardSlot>> myCards;
+    // Whether each card was shown at the last sync, by name.
+    QHash<QString, bool> myCardShown;
 };

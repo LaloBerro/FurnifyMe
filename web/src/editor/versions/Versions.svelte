@@ -284,6 +284,21 @@
     max-height: 384px;
     overflow-y: auto;
   }
+  /* The app's one scrollbar description (Theme::install()): a quiet chipActive
+     handle on a transparent track, no arrows. */
+  .list::-webkit-scrollbar {
+    width: 8px;
+  }
+  .list::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .list::-webkit-scrollbar-thumb {
+    background: var(--chip-active);
+    border-radius: var(--r-tiny, 4px);
+  }
+  .list::-webkit-scrollbar-button {
+    display: none;
+  }
   .pending {
     box-sizing: border-box;
     display: flex;
