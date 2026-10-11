@@ -321,6 +321,18 @@ template over the hub type, so both hubs share one wiring.
   page's click mask (`QWidget::setMask` from rects the page reports) that changes every
   frame makes Qt repaint the viewport behind it every frame - moving elements leave the
   mask while the camera moves.
+- **What every page owes, learned on the hub (its review's fix pass):** every control
+  wears `use:chip` (out of the tab order, a press that never moves focus - an armed
+  Delete once took a stray Enter); a page that fills its window gives `#app` a height,
+  or its 100% layout grows to the content and nothing scrolls; an opaque page needs
+  `WebHost`'s scrollbars (only the overlay hides them); a modal question claims its keys
+  at window level and makes everything behind it `inert`. `WebHost` itself refuses any
+  navigation but the page's own URL and every drop (the channel is the page's, not the
+  URL's, so a replacing document would inherit the API), swallows Ctrl+wheel (zoom moves
+  the caption away from Windows' hit test) and starts an opaque page on `chrome`. A
+  window whose title strip is the page's stays movable before the page reports
+  (`HubWindow::hitTest`'s default 32 px band), and `main.cpp` falls back to the Qt hub
+  when the page file is missing.
 - **The vocabulary law covers pages:** `web/test/banned.ts` is `usesBannedWord()`
   ported rule for rule, swept over every string in a page's `copy.ts` and over its
   rendered text, user names exempt; `hub_smoke` sweeps the live hub too.
