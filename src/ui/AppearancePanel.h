@@ -104,6 +104,8 @@
 // blocks, and a picker with a live preview has a second reason to obey it:
 // the whole point is that the user watches their model re-dress while they
 // choose, which they cannot do if they cannot orbit it.
+#include "SettingsEdits.h"
+
 #include <QColor>
 #include <QHash>
 #include <QString>
@@ -140,8 +142,9 @@ public:
     // UnitsSaving - "Working" on screen - is the old Units and Files tabs
     // folded into one (the 2026-10 review's F22): each held a single row, and
     // two one-row tabs were what pushed the bar onto a second line.
-    enum class Tab { Colours = 0, TextLines = 1, Viewport = 2, UnitsSaving = 3 };
-    static constexpr int kTabCount = 4;
+    // SettingsEdits owns the table (migration Phase 3b) - one Tab for both drawers.
+    using Tab = SettingsEdits::Tab;
+    static constexpr int kTabCount = SettingsEdits::kTabCount;
 
     explicit AppearancePanel(QWidget* parent = nullptr);
 
@@ -167,6 +170,10 @@ public:
     // work that out. Still a pure mirror: both chips read isChecked().
     void addBinaryChoiceRow(Tab tab, const QString& label, QAction* action,
                             const QString& offLabel, const QString& onLabel);
+    // Every row of SettingsEdits' table, in order, through the three
+    // calls above and the two spec rows below - the one way MainWindow
+    // composes this drawer, so the HTML drawer can read the same table.
+    void addRows(const std::vector<SettingsEdits::Row>& rows);
 
     // --- this drawer's OWN Theme::Spec rows, placed by the caller -----------
     //
@@ -239,7 +246,7 @@ public:
     // timer starts - and changes nothing; a second click while armed resets.
     // The arm drops on the timer, and when the drawer is hidden, so a click
     // made minutes later on a reopened drawer is a first click again.
-    static constexpr int kResetConfirmMs = 4000;
+    static constexpr int kResetConfirmMs = SettingsEdits::kResetConfirmMs;
     static QString resetLabel();
     static QString resetArmedLabel();
     // What the button itself does - the route a click takes, and the suite's.

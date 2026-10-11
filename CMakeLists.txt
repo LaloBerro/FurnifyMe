@@ -161,6 +161,8 @@ if(FURNIFYME_BUILD_APP)
       src/session/Outcome.h
       src/session/ActionRegistry.cpp
       src/session/ActionRegistry.h
+      src/session/ActionWatch.cpp
+      src/session/ActionWatch.h
       # The library on disk - Core + Gui only, so the hub's model can sit
       # beside it (Phase 2).
       src/FurnitureStore.cpp
@@ -214,6 +216,7 @@ if(FURNIFYME_BUILD_APP)
       src/GridRenderer.cpp
       src/ui/AppBar.cpp
       src/ui/AppearancePanel.cpp
+      src/ui/SettingsEdits.cpp
       src/ui/AxisGizmo.cpp
       src/ui/CardSlide.cpp
       src/ui/DimensionRenderer.cpp
@@ -340,6 +343,12 @@ if(FURNIFYME_BUILD_APP)
 
     add_executable(furnifyme src/main.cpp)
     target_link_libraries(furnifyme PRIVATE furnify_app)
+
+    # The Settings drawer's model and bridge (migration Phase 3b), offscreen
+    # beside session_tests - whose platforms/ copy it shares.
+    add_executable(settings_tests tests/settings_tests.cpp)
+    target_link_libraries(settings_tests PRIVATE furnify_app)
+    add_test(NAME settings COMMAND settings_tests)
 
     # The bundled material textures (Milestone 5): every image in
     # assets/materials ships beside the executable, where MainWindow's scan
@@ -490,7 +499,7 @@ if(FURNIFYME_BUILD_APP)
       set(windeployqt "${qt_bin}/windeployqt.exe")
       file(GLOB vcpkg_runtime_dlls "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/*.dll")
       list(FILTER vcpkg_runtime_dlls EXCLUDE REGEX "/Qt6[^/]*\.dll$")
-      foreach(web_target furnifyme web_spike hub_smoke chrome_smoke gui_smoke)
+      foreach(web_target furnifyme web_spike hub_smoke chrome_smoke settings_tests gui_smoke)
         add_dependencies(${web_target} web_pages)
         add_custom_command(TARGET ${web_target} POST_BUILD
           COMMAND "${windeployqt}" --release --no-translations --no-compiler-runtime

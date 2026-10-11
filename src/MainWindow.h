@@ -19,6 +19,7 @@
 // forward-declared - the one reason this header is included rather than the
 // class being named ahead.
 #include "ui/MaterialCard.h"
+#include "ui/SettingsEdits.h"
 #include "FurnitureStore.h"
 #include "Measure.h"
 #include "SketchController.h"
@@ -78,6 +79,8 @@ public:
     // the page by syncHtmlChrome(). main.cpp turns it on; gui_smoke never
     // does, so the Qt chrome stays the tested path until Phase 6.
     void useHtmlChrome();
+    // The Settings drawer's Viewport and Working rows, in order - see the definition.
+    std::vector<SettingsEdits::Row> settingsRows() const;
     EditorChrome* htmlChrome() const { return myHtmlChrome; }
     // Not = default (M1): a drawer drag still live when the window dies is
     // ended HERE, while the document and every member it reads are alive.

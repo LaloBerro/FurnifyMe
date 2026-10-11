@@ -2525,42 +2525,7 @@ void MainWindow::buildOverlay()
     // There is no second copy of any of these settings, so the View menu, the
     // File menu and this drawer cannot disagree, and updateActions() stays
     // the single place that decides what is available.
-    using SettingsTab = AppearancePanel::Tab;
-    myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Show the grid"),
-                                    myGridAction);
-    myAppearancePanel->addGridDetailRow(SettingsTab::Viewport);
-    myAppearancePanel->addToggleRow(SettingsTab::Viewport,
-                                    tr("Show sizes around a selection"), myShowSizesAction);
-    myAppearancePanel->addBinaryChoiceRow(SettingsTab::Viewport, tr("Projection"),
-                                          myOrthographicAction, tr("Perspective"),
-                                          tr("Orthographic"));
-    myAppearancePanel->addGizmoSizeRow(SettingsTab::Viewport);
-    myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Show notifications"),
-                                    myNotificationsAction);
-
-    myAppearancePanel->addChoiceRow(SettingsTab::UnitsSaving, tr("Sizes in"),
-                                    {myUnitsMillimetresAction, myUnitsCentimetresAction},
-                                    {tr("Millimetres"), tr("Centimetres")});
-    // SNAP AND MAGNET ARE NOT UNITS. They are drawing aids - what a dragged
-    // body does when it nears a grid line or another body - and they sat
-    // under Units because the display unit was the only other thing on that
-    // tab. A user looking for them looked at Viewport, which is where the
-    // grid switch already is, and Units was left holding one row.
-    myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Snap to Grid"), mySnapAction);
-    myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Magnet"), myMagnetAction);
-
-    // Autosave's five modes stacked rather than segmented: five chips in a
-    // 272-pixel row would be five unreadable chips.
-    myAppearancePanel->addChoiceRow(
-        SettingsTab::UnitsSaving, tr("Autosave"),
-        {myAutosaveModeActions[static_cast<int>(AutosaveMode::Off)],
-         myAutosaveModeActions[static_cast<int>(AutosaveMode::AfterEveryChange)],
-         myAutosaveModeActions[static_cast<int>(AutosaveMode::EveryMinute)],
-         myAutosaveModeActions[static_cast<int>(AutosaveMode::Every5Minutes)],
-         myAutosaveModeActions[static_cast<int>(AutosaveMode::Every15Minutes)]},
-        {tr("Off"), tr("After every change"), tr("Every minute"), tr("Every 5 minutes"),
-         tr("Every 15 minutes")},
-        /*stacked=*/true);
+    myAppearancePanel->addRows(settingsRows());
 
     // The render settings card (Task 7.2, Option A - "one floating card"),
     // anchored at the SAME TopRight slot the gizmo and the Appearance card
@@ -10263,6 +10228,53 @@ void MainWindow::showSelectionStatus()
 {
     myLastSelectionStatus = selectionStatusText();
     statusBar()->showMessage(myLastSelectionStatus);
+}
+
+std::vector<SettingsEdits::Row> MainWindow::settingsRows() const
+{
+    // The Settings drawer's Viewport and Working rows, in the order the
+    // drawer shows them - composed HERE because two of them are this window's
+    // own Theme::Spec rows interleaved with rows that mirror actions this
+    // window owns (the mockup's order: Grid, Grid detail, Show sizes,
+    // Projection, Gizmo size, Notifications). EVERY action row is a mirror and
+    // nothing else; there is no second copy of any of these settings, so the
+    // View menu, the File menu and either drawer cannot disagree. Both drawers
+    // read this one list (migration Phase 3b).
+    using Row = SettingsEdits::Row;
+    using Kind = Row::Kind;
+    using Tab = SettingsEdits::Tab;
+    std::vector<Row> rows;
+    auto toggle = [&](Tab tab, const QString& label, QAction* action) {
+        rows.push_back(Row{Kind::Toggle, tab, label, {action}, {}, false, {}});
+    };
+    auto number = [&](Tab tab, const QString& id) {
+        rows.push_back(Row{Kind::Number, tab, SettingsEdits::numberField(id)->label, {}, {}, false, id});
+    };
+    toggle(Tab::Viewport, tr("Show the grid"), myGridAction);
+    number(Tab::Viewport, QStringLiteral("gridDensity"));
+    toggle(Tab::Viewport, tr("Show sizes around a selection"), myShowSizesAction);
+    rows.push_back(Row{Kind::Binary, Tab::Viewport, tr("Projection"), {myOrthographicAction},
+                       {tr("Perspective"), tr("Orthographic")}, false, {}});
+    number(Tab::Viewport, QStringLiteral("gizmoScale"));
+    toggle(Tab::Viewport, tr("Show notifications"), myNotificationsAction);
+    rows.push_back(Row{Kind::Choice, Tab::UnitsSaving, tr("Sizes in"),
+                       {myUnitsMillimetresAction, myUnitsCentimetresAction},
+                       {tr("Millimetres"), tr("Centimetres")}, false, {}});
+    // SNAP AND MAGNET ARE NOT UNITS - drawing aids, beside the grid switch.
+    toggle(Tab::Viewport, tr("Snap to Grid"), mySnapAction);
+    toggle(Tab::Viewport, tr("Magnet"), myMagnetAction);
+    // Autosave's five modes stacked: five chips in a 272-pixel row would be
+    // five unreadable chips.
+    rows.push_back(Row{Kind::Choice, Tab::UnitsSaving, tr("Autosave"),
+                       {myAutosaveModeActions[static_cast<int>(AutosaveMode::Off)],
+                        myAutosaveModeActions[static_cast<int>(AutosaveMode::AfterEveryChange)],
+                        myAutosaveModeActions[static_cast<int>(AutosaveMode::EveryMinute)],
+                        myAutosaveModeActions[static_cast<int>(AutosaveMode::Every5Minutes)],
+                        myAutosaveModeActions[static_cast<int>(AutosaveMode::Every15Minutes)]},
+                       {tr("Off"), tr("After every change"), tr("Every minute"), tr("Every 5 minutes"),
+                        tr("Every 15 minutes")},
+                       true, {}});
+    return rows;
 }
 
 void MainWindow::useHtmlChrome()

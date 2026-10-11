@@ -1,5 +1,6 @@
 #include "AppearancePanel.h"
 
+#include "SettingsEdits.h"
 #include "Theme.h"
 
 #include <QAbstractButton>
@@ -71,14 +72,6 @@ constexpr int kSegHeight = 22;
 constexpr int kSwitchWidth = 38;
 constexpr int kSwitchHeight = 20;
 constexpr int kSwitchKnob = 14;
-
-// A colour file is a spec and nothing else - the same string QSettings holds -
-// so there is no size at which reading more of one is useful. A cap rather
-// than a trusting readAll(): Load colours takes a path from a file dialog,
-// which is to say from anywhere, and a serialised spec is a few hundred bytes.
-// Anything past this is not a colour file, and deserializeSpec() will refuse
-// the truncated head just as it would refuse the whole.
-constexpr qint64 kMaxColourFileBytes = 64 * 1024;
 
 // `background: transparent` on a child of this card is not decoration: the
 // app-wide stylesheet paints every QWidget chrome-black, so a label or a
@@ -272,80 +265,17 @@ private:
 
 QString AppearancePanel::familyDisplayName(const QString& family)
 {
-    // A trailing optical size - " 14pt", " 9 pt", " 36pt" - is the name of a
-    // CUT, not of the family, and only ever confuses a row that already sits
-    // under a text size of its own.
-    static const QRegularExpression opticalSize(
-        QStringLiteral("\\s+\\d+(\\.\\d+)?\\s*pt$"),
-        QRegularExpression::CaseInsensitiveOption);
-    QString shown = family;
-    shown.remove(opticalSize);
-    return shown.isEmpty() ? family : shown;
+    return SettingsEdits::familyDisplayName(family);
 }
 
 bool AppearancePanel::isRetiredToken(const QString& id)
 {
-    // See the row loop: these two are kept in Theme::Spec for backward
-    // compatibility with saved colour files and are painted by nothing.
-    return id == QLatin1String("focusRing") || id == QLatin1String("focusRingMuted");
+    return SettingsEdits::isRetiredToken(id);
 }
 
 QString AppearancePanel::nameForToken(const QString& id)
 {
-    // The user's words, never the code's. `gridMinor` is a member name;
-    // "Grid lines" is what somebody choosing a colour is looking for. Swept
-    // for banned words through paintedTexts() like every other painted string
-    // in the shell.
-    static const QHash<QString, QString> names = {
-        {QStringLiteral("viewport"), QObject::tr("Viewport")},
-        // What the bodies are shaded in while modelling - render mode dresses
-        // them in their own wood instead, which is why the row says so.
-        {QStringLiteral("body"), QObject::tr("Bodies while modelling")},
-        {QStringLiteral("gridMinor"), QObject::tr("Grid lines")},
-        {QStringLiteral("gridMajor"), QObject::tr("Grid — every tenth line")},
-        {QStringLiteral("axisX"), QObject::tr("X axis")},
-        {QStringLiteral("axisY"), QObject::tr("Y axis")},
-        {QStringLiteral("gizmoAxisX"), QObject::tr("Orientation gizmo — X")},
-        {QStringLiteral("gizmoAxisY"), QObject::tr("Orientation gizmo — Y")},
-        {QStringLiteral("gizmoAxisZ"), QObject::tr("Orientation gizmo — Z")},
-        {QStringLiteral("highlightHover"), QObject::tr("Hover highlight")},
-        {QStringLiteral("highlightSelected"), QObject::tr("Selection highlight")},
-        {QStringLiteral("dimensionLine"), QObject::tr("Measuring line")},
-        {QStringLiteral("sizesOneBody"), QObject::tr("Sizes — one body")},
-        {QStringLiteral("sizesGroup"), QObject::tr("Sizes — several bodies")},
-        // Named by what happens to the wood, not by the operation - the same
-        // pair serves Subtract, Union and Intersect, and "Subtract colour"
-        // would be wrong on two of the three.
-        {QStringLiteral("booleanOut"), QObject::tr("Material coming out")},
-        {QStringLiteral("booleanStay"), QObject::tr("Material staying")},
-        {QStringLiteral("sketchPointMarker"), QObject::tr("Outline points")},
-        {QStringLiteral("outlineLineColour"), QObject::tr("Outline lines — colour")},
-        {QStringLiteral("chrome"), QObject::tr("Top bar and status bar")},
-        {QStringLiteral("panel"), QObject::tr("Panels")},
-        {QStringLiteral("border"), QObject::tr("Borders")},
-        {QStringLiteral("chip"), QObject::tr("Buttons")},
-        {QStringLiteral("chipHover"), QObject::tr("Buttons — hovered")},
-        {QStringLiteral("chipActive"), QObject::tr("Buttons — pressed")},
-        {QStringLiteral("text"), QObject::tr("Text")},
-        {QStringLiteral("textMuted"), QObject::tr("Quieter text")},
-        {QStringLiteral("textDisabled"), QObject::tr("Unavailable text")},
-        {QStringLiteral("accent"), QObject::tr("Accent")},
-        // The accent's own ink for words: what a link-like "got it", a
-        // value on a chip and the toast's Undo are written in. Its own row
-        // because accent() fills a chip and this has to stay readable ON one.
-        {QStringLiteral("accentText"), QObject::tr("Accent text")},
-        // Failures, not warnings: this token marks a refusal that already
-        // happened - a Failure toast's stripe and an unparseable field's
-        // outline - and the app has nothing it would call a warning.
-        {QStringLiteral("danger"), QObject::tr("Failures")},
-        // The failure hue as words - a broken joint's reason, a refused
-        // size's reason row, "Close without saving".
-        {QStringLiteral("dangerText"), QObject::tr("Failure text")},
-        // A caution is not a failure: a fact worth seeing beside a joint - its
-        // contact is not a plain rectangle - that refuses nothing.
-        {QStringLiteral("caution"), QObject::tr("Caution")},
-    };
-    return names.value(id);
+    return SettingsEdits::tokenName(id);
 }
 
 AppearancePanel::AppearancePanel(QWidget* parent)
@@ -412,13 +342,12 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     tabColumn->addLayout(tabRow1);
     tabColumn->addLayout(tabRow2);
 
-    const QString tabNames[kTabCount] = {tr("Colours"), tr("Text & lines"), tr("Viewport"),
-                                         tr("Working")};
-    const QString tabTips[kTabCount] = {
-        tr("Every colour the app draws with"),
-        tr("Text size, the font, and the app's line weights"),
-        tr("What the 3D area shows around your furniture"),
-        tr("The unit sizes are written in, and how often this furniture is saved to disk")};
+    QString tabNames[kTabCount];
+    QString tabTips[kTabCount];
+    for (int i = 0; i < kTabCount; ++i) {
+        tabNames[i] = SettingsEdits::tabs()[i].name;
+        tabTips[i] = SettingsEdits::tabs()[i].tip;
+    }
     const int tabContentWidth = kWidth - 2 * kPad;
     // MEASURED FIRST, PLACED SECOND. The split has to be decided with every
     // chip's width already in hand, because a greedy fill cannot know that
@@ -539,14 +468,6 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     // Keyed on the token id rather than on a position, so adding a token to
     // Theme::Spec puts it in the run it belongs to instead of silently
     // shifting a heading onto the wrong row.
-    const QVector<QPair<QString, QString>> groupOpeners = {
-        {QStringLiteral("viewport"), tr("Viewport")},
-        {QStringLiteral("axisX"), tr("Axes and gizmo")},
-        {QStringLiteral("highlightHover"), tr("Selection and state")},
-        {QStringLiteral("dimensionLine"), tr("Annotations")},
-        {QStringLiteral("chrome"), tr("Panels and chips")},
-    };
-
     for (const Theme::ColourToken& token : Theme::colourTokens()) {
         // A RETIRED token gets no row: the app draws no keyboard focus rings
         // any more (the user asked for them gone), so a swatch for one would
@@ -555,12 +476,11 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         // rather than being refused for an unknown key.
         if (isRetiredToken(token.id)) continue;
 
-        for (const QPair<QString, QString>& opener : groupOpeners) {
-            if (opener.first != token.id) continue;
-            auto* head = new QLabel(opener.second, content);
+        if (const QString heading = SettingsEdits::groupHeadingFor(token.id); !heading.isEmpty()) {
+            auto* head = new QLabel(heading, content);
             makeTransparent(head, QStringLiteral("appearanceGroup_") + token.id);
             myGroupHeadings.push_back(head);
-            myExtraTexts << opener.second;
+            myExtraTexts << heading;
             list->addWidget(head);
         }
         auto* row = new QWidget(content);
@@ -603,14 +523,16 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     auto* sizeLine = new QHBoxLayout(sizeRow);
     sizeLine->setContentsMargins(0, 0, 0, 0);
     sizeLine->setSpacing(8);
-    mySizeLabel = new QLabel(tr("Text size"), sizeRow);
+    mySizeLabel = new QLabel(SettingsEdits::numberField(QStringLiteral("basePt"))->label, sizeRow);
     makeTransparent(mySizeLabel, QStringLiteral("appearanceSizeLabel"));
     sizeLine->addWidget(mySizeLabel, 1);
     mySize = new QSpinBox(sizeRow);
-    mySize->setRange(static_cast<int>(Theme::kMinBasePt), static_cast<int>(Theme::kMaxBasePt));
-    mySize->setSuffix(tr(" pt"));
-    mySize->setToolTip(tr("How big the app's text is — everything else in the "
-                          "type scale moves with it"));
+    {
+        const SettingsEdits::NumberField& f = *SettingsEdits::numberField(QStringLiteral("basePt"));
+        mySize->setRange(static_cast<int>(f.min), static_cast<int>(f.max));
+        mySize->setSuffix(f.suffix);
+        mySize->setToolTip(f.tip);
+    }
     connect(mySize, &QSpinBox::valueChanged, this, [this](int pt) {
         if (mySyncing) return;
         setBaseSize(pt);
@@ -651,19 +573,8 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         // same face. The first one listed wins, which puts the bundled cut
         // first; applyTheme() finds a stored family by its shown name when its
         // own entry was the one folded away.
-        QStringList families;
-        const QString bundled = Theme::defaultSpec().fontFamily;
-        if (!bundled.isEmpty()) families << bundled;
-        for (const QString& family : QFontDatabase::families()) {
-            if (family != bundled) families << family;
-        }
-        QSet<QString> shownNames;
-        for (const QString& family : families) {
-            const QString shown = familyDisplayName(family);
-            if (shownNames.contains(shown)) continue;
-            shownNames.insert(shown);
+        for (const auto& [shown, family] : SettingsEdits::fontFamilies())
             myFamily->addItem(shown, family);
-        }
     }
     connect(myFamily, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (mySyncing || index < 0) return;
@@ -698,16 +609,18 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     auto* edgeWidthLine = new QHBoxLayout(edgeWidthRow);
     edgeWidthLine->setContentsMargins(0, 0, 0, 0);
     edgeWidthLine->setSpacing(8);
-    myEdgeWidthLabel = new QLabel(tr("Edge lines"), edgeWidthRow);
+    myEdgeWidthLabel = new QLabel(SettingsEdits::numberField(QStringLiteral("edgeWidthPx"))->label, edgeWidthRow);
     makeTransparent(myEdgeWidthLabel, QStringLiteral("appearanceEdgeWidthLabel"));
     edgeWidthLine->addWidget(myEdgeWidthLabel, 1);
     myEdgeWidth = new QDoubleSpinBox(edgeWidthRow);
-    myEdgeWidth->setRange(Theme::kMinEdgeWidthPx, Theme::kMaxEdgeWidthPx);
-    myEdgeWidth->setSingleStep(0.5);
-    myEdgeWidth->setDecimals(1);
-    myEdgeWidth->setSuffix(tr(" px"));
-    myEdgeWidth->setToolTip(tr("How thick the lines along a body's own edges are — "
-                               "0 leaves the shading with none at all"));
+    {
+        const SettingsEdits::NumberField& f = *SettingsEdits::numberField(QStringLiteral("edgeWidthPx"));
+        myEdgeWidth->setRange(f.min, f.max);
+        myEdgeWidth->setSingleStep(f.step);
+        myEdgeWidth->setDecimals(f.decimals);
+        myEdgeWidth->setSuffix(f.suffix);
+        myEdgeWidth->setToolTip(f.tip);
+    }
     connect(myEdgeWidth, &QDoubleSpinBox::valueChanged, this, [this](double px) {
         if (mySyncing) return;
         setEdgeWidth(px);
@@ -720,16 +633,18 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     auto* sketchLineWidthLine = new QHBoxLayout(sketchLineWidthRow);
     sketchLineWidthLine->setContentsMargins(0, 0, 0, 0);
     sketchLineWidthLine->setSpacing(8);
-    mySketchLineWidthLabel = new QLabel(tr("Outline lines"), sketchLineWidthRow);
+    mySketchLineWidthLabel = new QLabel(SettingsEdits::numberField(QStringLiteral("sketchLineWidthPx"))->label, sketchLineWidthRow);
     makeTransparent(mySketchLineWidthLabel, QStringLiteral("appearanceSketchLineWidthLabel"));
     sketchLineWidthLine->addWidget(mySketchLineWidthLabel, 1);
     mySketchLineWidth = new QDoubleSpinBox(sketchLineWidthRow);
-    mySketchLineWidth->setRange(Theme::kMinSketchLineWidthPx, Theme::kMaxSketchLineWidthPx);
-    mySketchLineWidth->setSingleStep(0.5);
-    mySketchLineWidth->setDecimals(1);
-    mySketchLineWidth->setSuffix(tr(" px"));
-    mySketchLineWidth->setToolTip(tr("How thick the line an outline draws is — while it "
-                                     "is being drawn and once it is closed"));
+    {
+        const SettingsEdits::NumberField& f = *SettingsEdits::numberField(QStringLiteral("sketchLineWidthPx"));
+        mySketchLineWidth->setRange(f.min, f.max);
+        mySketchLineWidth->setSingleStep(f.step);
+        mySketchLineWidth->setDecimals(f.decimals);
+        mySketchLineWidth->setSuffix(f.suffix);
+        mySketchLineWidth->setToolTip(f.tip);
+    }
     connect(mySketchLineWidth, &QDoubleSpinBox::valueChanged, this, [this](double px) {
         if (mySyncing) return;
         setSketchLineWidth(px);
@@ -742,18 +657,19 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     auto* strokeLine = new QHBoxLayout(strokeRow);
     strokeLine->setContentsMargins(0, 0, 0, 0);
     strokeLine->setSpacing(8);
-    myStrokeLabel = new QLabel(tr("Button border"), strokeRow);
+    myStrokeLabel = new QLabel(SettingsEdits::numberField(QStringLiteral("chipStrokePx"))->label, strokeRow);
     makeTransparent(myStrokeLabel, QStringLiteral("appearanceStrokeLabel"));
     strokeLine->addWidget(myStrokeLabel, 1);
     myStroke = new QSpinBox(strokeRow);
     // The spec's field is a double, but a border is judged in whole pixels
     // and the crisp-border idiom is built around integer alignment - so the
     // control offers integers over the full legal range, 0 included.
-    myStroke->setRange(static_cast<int>(Theme::kMinChipStrokePx),
-                       static_cast<int>(Theme::kMaxChipStrokePx));
-    myStroke->setSuffix(tr(" px"));
-    myStroke->setToolTip(tr("How thick the line around the tool buttons is — "
-                            "0 leaves only the fill"));
+    {
+        const SettingsEdits::NumberField& f = *SettingsEdits::numberField(QStringLiteral("chipStrokePx"));
+        myStroke->setRange(static_cast<int>(f.min), static_cast<int>(f.max));
+        myStroke->setSuffix(f.suffix);
+        myStroke->setToolTip(f.tip);
+    }
     connect(myStroke, &QSpinBox::valueChanged, this, [this](int px) {
         if (mySyncing) return;
         setChipStroke(px);
@@ -1027,6 +943,30 @@ void AppearancePanel::syncMirrors()
     }
 }
 
+void AppearancePanel::addRows(const std::vector<SettingsEdits::Row>& rows)
+{
+    using Kind = SettingsEdits::Row::Kind;
+    for (const SettingsEdits::Row& row : rows) {
+        switch (row.kind) {
+        case Kind::Toggle:
+            if (!row.actions.isEmpty()) addToggleRow(row.tab, row.label, row.actions.front());
+            break;
+        case Kind::Choice:
+            addChoiceRow(row.tab, row.label, row.actions, row.optionLabels, row.stacked);
+            break;
+        case Kind::Binary:
+            if (!row.actions.isEmpty() && row.optionLabels.size() == 2)
+                addBinaryChoiceRow(row.tab, row.label, row.actions.front(), row.optionLabels[0],
+                                   row.optionLabels[1]);
+            break;
+        case Kind::Number:
+            if (row.numberId == QLatin1String("gridDensity")) addGridDetailRow(row.tab);
+            else if (row.numberId == QLatin1String("gizmoScale")) addGizmoSizeRow(row.tab);
+            break;
+        }
+    }
+}
+
 // --- this drawer's own spec rows, placed by the caller -----------------------
 
 void AppearancePanel::addGridDetailRow(Tab tab)
@@ -1042,17 +982,19 @@ void AppearancePanel::addGridDetailRow(Tab tab)
     // against for lengths, applied to a value that was never a length at all.
     QHBoxLayout* line = makeRow(tab, QStringLiteral("gridDetail"), QString());
     QWidget* row = line->parentWidget();
-    myGridDensityLabel = new QLabel(tr("Grid detail"), row);
+    myGridDensityLabel = new QLabel(SettingsEdits::numberField(QStringLiteral("gridDensity"))->label, row);
     makeTransparent(myGridDensityLabel, QStringLiteral("settingsGridDetailLabel"));
     line->addWidget(myGridDensityLabel, 1);
     myGridDensity = new QDoubleSpinBox(row);
-    myGridDensity->setRange(Theme::kMinGridDensity, Theme::kMaxGridDensity);
-    myGridDensity->setSingleStep(0.1);
-    myGridDensity->setDecimals(1);
-    myGridDensity->setSuffix(QStringLiteral("x"));
+    {
+        const SettingsEdits::NumberField& f = *SettingsEdits::numberField(QStringLiteral("gridDensity"));
+        myGridDensity->setRange(f.min, f.max);
+        myGridDensity->setSingleStep(f.step);
+        myGridDensity->setDecimals(f.decimals);
+        myGridDensity->setSuffix(f.suffix);
+        myGridDensity->setToolTip(f.tip);
+    }
     myGridDensity->setAttribute(Qt::WA_NoMousePropagation);
-    myGridDensity->setToolTip(tr("How many lines the work-plane grid draws — "
-                                 "higher packs more in, lower thins it out"));
     connect(myGridDensity, &QDoubleSpinBox::valueChanged, this, [this](double density) {
         if (mySyncing) return;
         setGridDensity(density);
@@ -1068,17 +1010,19 @@ void AppearancePanel::addGizmoSizeRow(Tab tab)
     // length either, so it never goes near Measure.
     QHBoxLayout* line = makeRow(tab, QStringLiteral("gizmoSize"), QString());
     QWidget* row = line->parentWidget();
-    myGizmoScaleLabel = new QLabel(tr("Gizmo size"), row);
+    myGizmoScaleLabel = new QLabel(SettingsEdits::numberField(QStringLiteral("gizmoScale"))->label, row);
     makeTransparent(myGizmoScaleLabel, QStringLiteral("settingsGizmoSizeLabel"));
     line->addWidget(myGizmoScaleLabel, 1);
     myGizmoScale = new QDoubleSpinBox(row);
-    myGizmoScale->setRange(Theme::kMinGizmoScale, Theme::kMaxGizmoScale);
-    myGizmoScale->setSingleStep(0.1);
-    myGizmoScale->setDecimals(1);
-    myGizmoScale->setSuffix(QStringLiteral("x"));
+    {
+        const SettingsEdits::NumberField& f = *SettingsEdits::numberField(QStringLiteral("gizmoScale"));
+        myGizmoScale->setRange(f.min, f.max);
+        myGizmoScale->setSingleStep(f.step);
+        myGizmoScale->setDecimals(f.decimals);
+        myGizmoScale->setSuffix(f.suffix);
+        myGizmoScale->setToolTip(f.tip);
+    }
     myGizmoScale->setAttribute(Qt::WA_NoMousePropagation);
-    myGizmoScale->setToolTip(tr("How large the Move, Rotate and Scale handles "
-                                "draw over a selected body"));
     connect(myGizmoScale, &QDoubleSpinBox::valueChanged, this, [this](double scale) {
         if (mySyncing) return;
         setGizmoScale(scale);
@@ -1152,76 +1096,26 @@ void AppearancePanel::applyTheme()
 
 void AppearancePanel::setTokenColour(const QString& id, const QColor& colour)
 {
-    if (!colour.isValid()) return;
-    Theme::Spec next = Theme::spec();
-    for (const Theme::ColourToken& token : Theme::colourTokens()) {
-        if (token.id != id) continue;
-        next.*(token.member) = colour;
-        // Straight to Theme, never to the swatch: the swatch is repainted by
-        // applyTheme() off the broadcast this causes, so there is one
-        // direction of data flow and no way for the two to disagree.
-        Theme::setSpec(next);
-        return;
-    }
+    SettingsEdits::setTokenColour(id, colour);
 }
 
-void AppearancePanel::setBaseSize(double pt)
-{
-    Theme::Spec next = Theme::spec();
-    next.basePt = std::clamp(pt, Theme::kMinBasePt, Theme::kMaxBasePt);
-    Theme::setSpec(next);
-}
-
-void AppearancePanel::setChipStroke(double px)
-{
-    Theme::Spec next = Theme::spec();
-    next.chipStrokePx = std::clamp(px, Theme::kMinChipStrokePx, Theme::kMaxChipStrokePx);
-    Theme::setSpec(next);
-}
-
-void AppearancePanel::setGridDensity(double density)
-{
-    Theme::Spec next = Theme::spec();
-    next.gridDensity = std::clamp(density, Theme::kMinGridDensity, Theme::kMaxGridDensity);
-    Theme::setSpec(next);
-}
-
-void AppearancePanel::setEdgeWidth(double px)
-{
-    Theme::Spec next = Theme::spec();
-    next.edgeWidthPx = std::clamp(px, Theme::kMinEdgeWidthPx, Theme::kMaxEdgeWidthPx);
-    Theme::setSpec(next);
-}
-
-void AppearancePanel::setSketchLineWidth(double px)
-{
-    Theme::Spec next = Theme::spec();
-    next.sketchLineWidthPx =
-        std::clamp(px, Theme::kMinSketchLineWidthPx, Theme::kMaxSketchLineWidthPx);
-    Theme::setSpec(next);
-}
-
+void AppearancePanel::setBaseSize(double pt) { SettingsEdits::setNumber(QStringLiteral("basePt"), pt); }
+void AppearancePanel::setChipStroke(double px) { SettingsEdits::setNumber(QStringLiteral("chipStrokePx"), px); }
+void AppearancePanel::setGridDensity(double d) { SettingsEdits::setNumber(QStringLiteral("gridDensity"), d); }
+void AppearancePanel::setEdgeWidth(double px) { SettingsEdits::setNumber(QStringLiteral("edgeWidthPx"), px); }
 void AppearancePanel::setGizmoScale(double scale)
 {
-    Theme::Spec next = Theme::spec();
-    next.gizmoScale = std::clamp(scale, Theme::kMinGizmoScale, Theme::kMaxGizmoScale);
-    Theme::setSpec(next);
+    SettingsEdits::setNumber(QStringLiteral("gizmoScale"), scale);
 }
-
-void AppearancePanel::setFontFamily(const QString& family)
+void AppearancePanel::setSketchLineWidth(double px)
 {
-    Theme::Spec next = Theme::spec();
-    next.fontFamily = family;
-    Theme::setSpec(next);
+    SettingsEdits::setNumber(QStringLiteral("sketchLineWidthPx"), px);
 }
+void AppearancePanel::setFontFamily(const QString& family) { SettingsEdits::setFontFamily(family); }
+void AppearancePanel::reset() { SettingsEdits::reset(); }
 
-void AppearancePanel::reset()
-{
-    Theme::setSpec(Theme::defaultSpec());
-}
-
-QString AppearancePanel::resetLabel() { return tr("Reset colours and sizes"); }
-QString AppearancePanel::resetArmedLabel() { return tr("Reset — click again"); }
+QString AppearancePanel::resetLabel() { return SettingsEdits::resetLabel(); }
+QString AppearancePanel::resetArmedLabel() { return SettingsEdits::resetArmedLabel(); }
 
 void AppearancePanel::onResetClicked()
 {
@@ -1268,45 +1162,17 @@ void AppearancePanel::hideEvent(QHideEvent* event)
     QWidget::hideEvent(event);
 }
 
-QString AppearancePanel::colourFileSuffix() { return QStringLiteral(".furnifytheme"); }
-
-QString AppearancePanel::colourFileFilter()
-{
-    return tr("FurnifyMe colours (*%1)").arg(colourFileSuffix());
-}
+QString AppearancePanel::colourFileSuffix() { return SettingsEdits::colourFileSuffix(); }
+QString AppearancePanel::colourFileFilter() { return SettingsEdits::colourFileFilter(); }
 
 bool AppearancePanel::saveColoursTo(const QString& path) const
 {
-    if (path.isEmpty()) return false;
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) return false;
-    const QByteArray payload = Theme::serializeSpec().toUtf8();
-    // Both halves checked: a write can come up short on a full disk without
-    // the open having failed, and a colour file that is half a spec is a file
-    // that will be refused on the way back in - better to say so now, while
-    // the user still knows which path they chose.
-    if (file.write(payload) != payload.size()) return false;
-    return file.flush();
+    return SettingsEdits::saveColoursTo(path);
 }
 
 bool AppearancePanel::loadColoursFrom(const QString& path)
 {
-    if (path.isEmpty()) return false;
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
-    const QString text = QString::fromUtf8(file.read(kMaxColourFileBytes));
-
-    // THE refusal, and it is deserializeSpec()'s rather than a second parser
-    // written here: its contract is that `loaded` is untouched when it says
-    // no, so there is no state in which half a bad file has been applied.
-    Theme::Spec loaded;
-    if (!Theme::deserializeSpec(text, loaded)) return false;
-
-    // Straight into the same broadcast every swatch click uses, so the panel
-    // re-reads itself, the viewport re-dresses and MainWindow's debounced
-    // write stores it - none of which this function has to know about.
-    Theme::setSpec(loaded);
-    return true;
+    return SettingsEdits::loadColoursFrom(path);
 }
 
 void AppearancePanel::chooseSaveFile()
