@@ -1,5 +1,12 @@
-/* Theme::Spec's defaults as CSS variables. In the migration these are emitted
-   by C++ from the live Spec; the spike hard-codes the shipped values. */
+/* Theme::Spec's shipped defaults as CSS custom properties. In the app,
+   ThemeBridge overwrites every one of them from the live Spec (and again on
+   every Theme change); these only serve the dev server and the tests. */
+@font-face {
+  font-family: 'DM Sans';
+  src: url('./assets/DMSans.ttf') format('truetype');
+  font-weight: 100 1000;
+}
+
 :root {
   --chrome: #1b1b1d;
   --panel: #232326;
@@ -8,41 +15,35 @@
   --chip-active: #3d3d45;
   --accent: #6a00ff;
   --accent-text: #bb9cff;
+  --danger: #e0564a;
   --danger-text: #ff8f82;
+  --caution: #ffca4a;
   --text: #f0f0f0;
   --text-muted: #9a9aa2;
+  --text-disabled: #5c5c64;
   --border: #3a3a40;
+  --viewport: #1c1c1e;
+  /* Theme's four sizes - badge = base-2, label = base-1, body = base,
+     title = base+3 pt - in CSS pixels at 96 dpi, from a 10 pt base. */
+  --font-badge: 10.667px;
+  --font-label: 12px;
+  --font-body: 13.333px;
+  --font-title: 17.333px;
+  --font-family: 'DM Sans';
   --radius: 10px;
   --motion: 160ms;
-  --font: 'DM Sans', 'Segoe UI', system-ui, sans-serif;
 }
 
 html,
 body {
   margin: 0;
-  height: 100%;
-  /* The page is see-through: the OCCT viewport shows wherever nothing is drawn. */
-  background: transparent;
-  overflow: hidden;
-  font-family: var(--font);
-  font-size: 13px;
+  font-family: var(--font-family), 'DM Sans', 'Segoe UI', system-ui, sans-serif;
+  font-size: var(--font-body);
   color: var(--text);
-  /* The root takes no pointer; cards opt back in. */
-  pointer-events: none;
-  user-select: none;
 }
 
-[data-hit] {
-  pointer-events: auto;
-}
-
-[data-hit='off'] {
-  pointer-events: none;
-}
-
-/* The camera is moving: every animation holds where it is (see App.svelte). */
-.camera-moving *,
-.camera-moving *::before,
-.camera-moving *::after {
-  animation-play-state: paused !important;
+/* No control paints a focus ring (CLAUDE.md, the user's own call). */
+:focus,
+:focus-visible {
+  outline: none;
 }

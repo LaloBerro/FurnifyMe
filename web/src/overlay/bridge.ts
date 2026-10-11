@@ -1,3 +1,5 @@
+import { channelObjects, hosted } from '../channel';
+
 // The page's one door to C++. In the app, Qt WebEngine hands the page
 // qt.webChannelTransport and WebOverlay injects qwebchannel.js before any page
 // script runs; in a plain browser (npm run dev) neither exists, and a mock
@@ -26,13 +28,6 @@ export interface Bridge {
   reportReady(): void;
   runCommand(id: string): void;
   reportChipShown(rev: number, x: number, y: number): void;
-}
-
-declare global {
-  interface Window {
-    qt?: { webChannelTransport: unknown };
-    QWebChannel?: new (transport: unknown, ready: (channel: { objects: Record<string, unknown> }) => void) => unknown;
-  }
 }
 
 class MockSignal<A extends unknown[]> implements Signal<A> {
@@ -66,14 +61,7 @@ function mockBridge(): Bridge {
   };
 }
 
-export function connect(): Promise<Bridge> {
-  return new Promise((resolve) => {
-    if (!window.qt || !window.QWebChannel) {
-      resolve(mockBridge());
-      return;
-    }
-    new window.QWebChannel(window.qt.webChannelTransport, (channel) => {
-      resolve(channel.objects.spike as Bridge);
-    });
-  });
+export async function connect(): Promise<Bridge> {
+  if (!hosted()) return mockBridge();
+  return (await channelObjects()).spike as Bridge;
 }

@@ -2,20 +2,10 @@
 
 #include "DocumentModel.h"
 #include "OcctViewWidget.h"
+#include "WebHost.h"
 
-#include <QCoreApplication>
-#include <QDir>
-#include <QFile>
 #include <QMouseEvent>
-#include <QQuickWindow>
-#include <QSGRendererInterface>
 #include <QResizeEvent>
-#include <QWebChannel>
-#include <QWebEnginePage>
-#include <QWebEngineProfile>
-#include <QWebEngineScript>
-#include <QWebEngineScriptCollection>
-#include <QWebEngineSettings>
 #include <QWebEngineView>
 
 #include <BRepBndLib.hxx>
@@ -63,7 +53,7 @@ void SpikeBridge::reportChipShown(int rev, double x, double y)
 
 void WebOverlay::prepareApplication()
 {
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+    WebHost::prepareApplication();
 }
 
 WebOverlay::WebOverlay(OcctViewWidget* viewport, AnchorSource anchor, QObject* parent)
@@ -71,29 +61,15 @@ WebOverlay::WebOverlay(OcctViewWidget* viewport, AnchorSource anchor, QObject* p
 {
     myClock.start();
 
-    // Off the record: no cache or cookies written anywhere for a page that is
-    // part of the application.
-    myProfile = new QWebEngineProfile(this);
     // A child of the viewport, like every Qt overlay today. Measured against a
     // sibling laid over it: the same idle cost to the frame (gate 2), because
     // what costs is compositing one more full-window texture, wherever it sits.
-    myView = new QWebEngineView(viewport);
-    auto* page = new QWebEnginePage(myProfile, myView);
-    myView->setPage(page);
-    // THE line the whole spike stands on: the page clears to transparent, so
-    // anything it does not draw shows the viewport underneath.
-    page->setBackgroundColor(Qt::transparent);
-    page->settings()->setAttribute(QWebEngineSettings::ShowScrollBars, false);
-    page->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls, true);
-    myView->setContextMenuPolicy(Qt::NoContextMenu);
-    myView->setAttribute(Qt::WA_TranslucentBackground);
+    myHost = new WebHost(viewport, WebHost::Ground::Transparent, this);
+    myView = myHost->view();
     myView->setGeometry(viewport->rect());
 
     myBridge = new SpikeBridge(this);
-    myChannel = new QWebChannel(this);
-    myChannel->registerObject(QStringLiteral("spike"), myBridge);
-    page->setWebChannel(myChannel);
-    installWebChannelScript();
+    myHost->registerObject(QStringLiteral("spike"), myBridge);
 
     // Until the page says otherwise, nothing of it takes the pointer.
     applyMask();
@@ -110,11 +86,7 @@ WebOverlay::WebOverlay(OcctViewWidget* viewport, AnchorSource anchor, QObject* p
             s.latencyMs = (myClock.nsecsElapsed() - mySentNs[size_t(rev)]) / 1.0e6;
         myChipSamples.push_back(s);
     });
-    connect(page, &QWebEnginePage::loadFinished, this, [this](bool ok) {
-        myLoaded = true;
-        myLoadOk = ok;
-        applyRenderWidgetAttributes();
-    });
+    connect(myHost, &WebHost::loadFinished, this, [this] { applyRenderWidgetAttributes(); });
 
     // A wheel zoom has no release; the gesture ends when the wheel rests.
     myWheelSettle = new QTimer(this);
@@ -132,17 +104,11 @@ WebOverlay::WebOverlay(OcctViewWidget* viewport, AnchorSource anchor, QObject* p
 WebOverlay::~WebOverlay()
 {
     if (myViewport) myViewport->removeEventFilter(this);
-    // The view belongs to the viewport's child list; delete it before the
-    // profile it was built on, which Qt WebEngine requires.
-    delete myView;
 }
 
 QUrl WebOverlay::defaultUrl()
 {
-    const QString dev = qEnvironmentVariable("FURNIFY_WEB_URL");
-    if (!dev.isEmpty()) return QUrl(dev);
-    return QUrl::fromLocalFile(
-        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("web/index.html")));
+    return WebHost::pageUrl(QStringLiteral("overlay"));
 }
 
 WebOverlay::AnchorSource WebOverlay::topOfFirstBody(const DocumentModel* document)
@@ -160,29 +126,11 @@ WebOverlay::AnchorSource WebOverlay::topOfFirstBody(const DocumentModel* documen
 
 void WebOverlay::load(const QUrl& url)
 {
-    myLoaded = false;
-    myLoadOk = false;
-    myView->load(url);
+    myHost->load(url);
 }
 
-void WebOverlay::installWebChannelScript()
-{
-    // qwebchannel.js ships inside Qt6WebChannel's own resources. Injected
-    // rather than referenced by URL, so the page needs no qrc: access and the
-    // same page runs from file:, from the Vite dev server, or anywhere else.
-    QFile file(QStringLiteral(":/qtwebchannel/qwebchannel.js"));
-    if (!file.open(QIODevice::ReadOnly)) {
-        qWarning("WebOverlay: qwebchannel.js is not in the resources");
-        return;
-    }
-    QWebEngineScript script;
-    script.setName(QStringLiteral("qwebchannel"));
-    script.setSourceCode(QString::fromUtf8(file.readAll()));
-    script.setInjectionPoint(QWebEngineScript::DocumentCreation);
-    script.setWorldId(QWebEngineScript::MainWorld);
-    script.setRunsOnSubFrames(false);
-    myView->page()->scripts().insert(script);
-}
+bool WebOverlay::loaded() const { return myHost->loaded(); }
+bool WebOverlay::loadOk() const { return myHost->loadOk(); }
 
 void WebOverlay::setStackOnTop(bool on)
 {

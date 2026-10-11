@@ -32,9 +32,7 @@
 
 class DocumentModel;
 class OcctViewWidget;
-class QWebChannel;
 class QWebEngineView;
-class QWebEngineProfile;
 
 class SpikeBridge : public QObject
 {
@@ -104,8 +102,8 @@ public:
 
     QWebEngineView* view() const { return myView; }
     SpikeBridge* bridge() const { return myBridge; }
-    bool loaded() const { return myLoaded; }
-    bool loadOk() const { return myLoadOk; }
+    bool loaded() const;
+    bool loadOk() const;
     QRegion hitRegion() const { return myHitRegion; }
 
     // Re-projects the anchor and tells the page. Called on every camera
@@ -135,7 +133,6 @@ protected:
 private:
     void applyMask();
     void applyRenderWidgetAttributes();
-    void installWebChannelScript();
 
     void setCameraMoving(bool moving);
 
@@ -147,13 +144,10 @@ private:
     bool myOrbiting = false;
     QTimer* myWheelSettle = nullptr;
     AnchorSource myAnchor;
-    QWebEngineProfile* myProfile = nullptr;
+    class WebHost* myHost = nullptr;
     QWebEngineView* myView = nullptr;
-    QWebChannel* myChannel = nullptr;
     SpikeBridge* myBridge = nullptr;
     QRegion myHitRegion;
-    bool myLoaded = false;
-    bool myLoadOk = false;
     bool myStackOnTop = false;
 
     int myRev = 0;

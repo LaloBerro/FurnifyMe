@@ -98,7 +98,13 @@ struct Hooks {
 // handoff block, which is where all three legs are pinned. Null is spelled
 // out at the call site that means it rather than defaulted, so a caller
 // cannot omit the scene window by simply not knowing about it.
-void wire(MainWindow& window, SelectorWindow& selector, SceneWindow* scene,
-          Hooks hooks = Hooks());
+//
+// THE HUB IS A TEMPLATE PARAMETER (migration Phase 2): the Qt SelectorWindow
+// and the HTML HubWindow carry the same signals (furnitureChosen,
+// sceneChosen, closing) and refresh(), so both are wired by this one body -
+// explicit instantiations in the .cpp - and neither the suite nor main.cpp
+// has to know which hub it is holding to get the same handoff.
+template <class Hub>
+void wire(MainWindow& window, Hub& selector, SceneWindow* scene, Hooks hooks = Hooks());
 
 }  // namespace EditorSelectorHandoff

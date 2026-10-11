@@ -3,14 +3,17 @@
 #include "MainWindow.h"
 #include "ui/SceneWindow.h"
 #include "SelectorWindow.h"
+#ifdef FURNIFYME_WEB_UI
+#include "web/HubWindow.h"
+#endif
 
 #include <QCoreApplication>
 #include <QObject>
 
 namespace EditorSelectorHandoff {
 
-void wire(MainWindow& window, SelectorWindow& selector, SceneWindow* scene,
-          Hooks hooks)
+template <class Hub>
+void wire(MainWindow& window, Hub& selector, SceneWindow* scene, Hooks hooks)
 {
     if (!hooks.quit) hooks.quit = [] { QCoreApplication::quit(); };
 
@@ -32,7 +35,7 @@ void wire(MainWindow& window, SelectorWindow& selector, SceneWindow* scene,
     // wireSelector()), which must never steal the developer's focus while
     // it runs. raise() alone already brings the window to the front of its
     // own stacking order, which is all a handoff needs.
-    QObject::connect(&selector, &SelectorWindow::furnitureChosen, &window,
+    QObject::connect(&selector, &Hub::furnitureChosen, &window,
                      [&window, &selector, hooks](const QString& id) {
                          window.show();
                          window.raise();
@@ -72,7 +75,7 @@ void wire(MainWindow& window, SelectorWindow& selector, SceneWindow* scene,
     // than anywhere else, because a leg wired somewhere else is a leg free
     // to get that order wrong on its own.
     if (scene) {
-        QObject::connect(&selector, &SelectorWindow::sceneChosen, scene,
+        QObject::connect(&selector, &Hub::sceneChosen, scene,
                          [scene, &selector, hooks](const QString& id) {
                              scene->show();
                              scene->raise();
@@ -100,10 +103,15 @@ void wire(MainWindow& window, SelectorWindow& selector, SceneWindow* scene,
                          [hooks] { hooks.quit(); });
     }
 
-    QObject::connect(&selector, &SelectorWindow::closing, &window,
+    QObject::connect(&selector, &Hub::closing, &window,
                      [hooks] { hooks.quit(); });
     QObject::connect(&window, &MainWindow::quitRequested, &selector,
                      [hooks] { hooks.quit(); });
 }
+
+template void wire<SelectorWindow>(MainWindow&, SelectorWindow&, SceneWindow*, Hooks);
+#ifdef FURNIFYME_WEB_UI
+template void wire<HubWindow>(MainWindow&, HubWindow&, SceneWindow*, Hooks);
+#endif
 
 }  // namespace EditorSelectorHandoff

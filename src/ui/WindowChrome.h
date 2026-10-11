@@ -60,6 +60,12 @@ std::function<Hit(const QPoint&)> captionHitTest(QWidget* topLevel,
 // hover/pressed state into it; pass nullptr for a window without one.
 void attach(QWidget* topLevel, std::function<Hit(const QPoint&)> hitTest,
             WindowButtons* buttons);
+// The same, for a window whose buttons are not a WindowButtons widget - the
+// HTML hub's are drawn by its page. The maximize chip's traffic is NON-client
+// (so Windows' snap layouts appear over it), so its hover and press never
+// reach the window's content; they are delivered here instead.
+void attach(QWidget* topLevel, std::function<Hit(const QPoint&)> hitTest,
+            std::function<void(bool)> onMaxHover, std::function<void(bool)> onMaxPressed);
 
 }  // namespace WindowChrome
 

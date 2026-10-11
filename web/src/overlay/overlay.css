@@ -1,0 +1,25 @@
+/* The overlay page is see-through: the OCCT viewport shows wherever nothing
+   is drawn, and the root takes no pointer - cards opt back in. */
+html,
+body {
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+[data-hit] {
+  pointer-events: auto;
+}
+
+[data-hit='off'] {
+  pointer-events: none;
+}
+
+/* The camera is moving: every animation holds where it is (see Overlay.svelte). */
+.camera-moving *,
+.camera-moving *::before,
+.camera-moving *::after {
+  animation-play-state: paused !important;
+}

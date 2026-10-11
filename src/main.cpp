@@ -5,9 +5,13 @@
 #include "SceneWindow.h"
 #include "SelectorWindow.h"
 #include "Theme.h"
-#ifdef FURNIFYME_WEB_SPIKE
+#ifdef FURNIFYME_WEB_UI
+#include "web/HubWindow.h"
+#include "web/WebHost.h"
 #include "web/WebOverlay.h"
 #endif
+
+#include <memory>
 
 #include <QApplication>
 #include <QEvent>
@@ -45,8 +49,8 @@ int main(int argc, char* argv[])
     // With the attribute set Qt keeps the context across the reparent, and the
     // two viewports share GPU resources besides.
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
-#ifdef FURNIFYME_WEB_SPIKE
-    WebOverlay::prepareApplication();
+#ifdef FURNIFYME_WEB_UI
+    WebHost::prepareApplication();
 #endif
 
     QApplication app(argc, argv);
@@ -85,7 +89,23 @@ int main(int argc, char* argv[])
     // to realize before it is genuinely needed broke startup determinism
     // once already).
     MainWindow window;
-    SelectorWindow selector(window.furnitureStore());
+    // THE HUB: the HTML one (migration Phase 2) wherever the app is built with
+    // the web UI, the Qt one otherwise - and `--qt-hub` asks for the Qt one
+    // in a web build, for comparing the two side by side until Phase 6
+    // deletes it. Both are wired by the one templated handoff below.
+#ifdef FURNIFYME_WEB_UI
+    const bool qtHub = QCoreApplication::arguments().contains(QStringLiteral("--qt-hub"));
+#else
+    const bool qtHub = true;
+#endif
+    std::unique_ptr<SelectorWindow> qtSelector;
+#ifdef FURNIFYME_WEB_UI
+    std::unique_ptr<HubWindow> htmlHub;
+#endif
+    if (qtHub) qtSelector = std::make_unique<SelectorWindow>(window.furnitureStore());
+#ifdef FURNIFYME_WEB_UI
+    else htmlHub = std::make_unique<HubWindow>(window.furnitureStore());
+#endif
     // The third window, constructed here and never shown until a scene card
     // is chosen - the same contract the editor keeps above, and for the same
     // lazy-initializeViewer() reason.
@@ -97,7 +117,10 @@ int main(int argc, char* argv[])
     // exactly what ships rather than a close cousin of it. See that
     // function's own comments for what each leg does and why the ORDER
     // (show the target, then hide the source) is load-bearing.
-    EditorSelectorHandoff::wire(window, selector, &sceneWindow);
+    if (qtSelector) EditorSelectorHandoff::wire(window, *qtSelector, &sceneWindow);
+#ifdef FURNIFYME_WEB_UI
+    if (htmlHub) EditorSelectorHandoff::wire(window, *htmlHub, &sceneWindow);
+#endif
 
     // The shell's entrance, triggered HERE and nowhere else. The editor window
     // is shown by the handoff above, which gui_smoke drives verbatim - so an
@@ -131,7 +154,7 @@ int main(int argc, char* argv[])
     };
     new FirstShowEntrance(&window);
 
-#ifdef FURNIFYME_WEB_SPIKE
+#ifdef FURNIFYME_WEB_UI
     // PHASE 0 SPIKE: `furnifyme --web-spike` lays the Svelte page (web/) over
     // the editor's viewport. Without the flag the app is exactly as shipped.
     if (QCoreApplication::arguments().contains(QStringLiteral("--web-spike"))) {
@@ -148,7 +171,10 @@ int main(int argc, char* argv[])
     }
 #endif
 
-    selector.show();
+    if (qtSelector) qtSelector->show();
+#ifdef FURNIFYME_WEB_UI
+    if (htmlHub) htmlHub->show();
+#endif
 
     return app.exec();
 }

@@ -257,7 +257,10 @@ namespace {
 struct ChromeEntry {
     QPointer<QWidget> widget;
     std::function<WindowChrome::Hit(const QPoint&)> hitTest;
-    QPointer<WindowButtons> buttons;
+    // Where the maximize chip's native hover and press go - WindowButtons'
+    // setters for the Qt hub, the page's window object for the HTML one.
+    std::function<void(bool)> onMaxHover;
+    std::function<void(bool)> onMaxPressed;
 };
 
 std::vector<ChromeEntry>& entries()
@@ -396,7 +399,7 @@ public:
             // widget - Qt never sees these messages.
             case WM_NCLBUTTONDOWN:
                 if (msg->wParam == HTMAXBUTTON) {
-                    if (entry->buttons) entry->buttons->setMaxPressed(true);
+                    if (entry->onMaxPressed) entry->onMaxPressed(true);
                     *result = 0;
                     return true;
                 }
@@ -404,7 +407,7 @@ public:
 
             case WM_NCLBUTTONUP:
                 if (msg->wParam == HTMAXBUTTON) {
-                    if (entry->buttons) entry->buttons->setMaxPressed(false);
+                    if (entry->onMaxPressed) entry->onMaxPressed(false);
                     // POSTED, never performed here: calling showMaximized()
                     // synchronously from inside this filter changes the
                     // window's state in the middle of Qt's own dispatch of
@@ -421,8 +424,7 @@ public:
                 return false;
 
             case WM_NCMOUSEMOVE: {
-                if (entry->buttons)
-                    entry->buttons->setMaxHovered(msg->wParam == HTMAXBUTTON);
+                if (entry->onMaxHover) entry->onMaxHover(msg->wParam == HTMAXBUTTON);
                 if (msg->wParam == HTMAXBUTTON) {
                     TRACKMOUSEEVENT track{sizeof(TRACKMOUSEEVENT),
                                           TME_LEAVE | TME_NONCLIENT, msg->hwnd, 0};
@@ -433,10 +435,8 @@ public:
 
             case WM_NCMOUSELEAVE:
             case WM_MOUSEMOVE:
-                if (entry->buttons) {
-                    entry->buttons->setMaxHovered(false);
-                    entry->buttons->setMaxPressed(false);
-                }
+                if (entry->onMaxHover) entry->onMaxHover(false);
+                if (entry->onMaxPressed) entry->onMaxPressed(false);
                 return false;
 
             case WM_NCRBUTTONUP:
@@ -525,8 +525,19 @@ private:
 void WindowChrome::attach(QWidget* topLevel, std::function<Hit(const QPoint&)> hitTest,
                           WindowButtons* buttons)
 {
+    QPointer<WindowButtons> chips(buttons);
+    attach(topLevel, std::move(hitTest),
+           [chips](bool hovered) { if (chips) chips->setMaxHovered(hovered); },
+           [chips](bool pressed) { if (chips) chips->setMaxPressed(pressed); });
+}
+
+void WindowChrome::attach(QWidget* topLevel, std::function<Hit(const QPoint&)> hitTest,
+                          std::function<void(bool)> onMaxHover,
+                          std::function<void(bool)> onMaxPressed)
+{
     installedFilter();
-    entries().push_back({topLevel, std::move(hitTest), buttons});
+    entries().push_back({topLevel, std::move(hitTest), std::move(onMaxHover),
+                         std::move(onMaxPressed)});
     announceFrameChange(topLevel);   // a no-op until the native window exists
     new FrameChangeWatcher(topLevel);   // parented; covers later re-creation too
 }
@@ -536,6 +547,11 @@ void WindowChrome::attach(QWidget* topLevel, std::function<Hit(const QPoint&)> h
 void WindowChrome::attach(QWidget*, std::function<Hit(const QPoint&)>, WindowButtons*)
 {
     // Not Windows: the native title bar stays, and nothing here is needed.
+}
+
+void WindowChrome::attach(QWidget*, std::function<Hit(const QPoint&)>,
+                          std::function<void(bool)>, std::function<void(bool)>)
+{
 }
 
 #endif

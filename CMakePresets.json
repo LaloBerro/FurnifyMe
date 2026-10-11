@@ -25,10 +25,10 @@
     {
       "name": "windows-web",
       "inherits": "windows",
-      "displayName": "Windows, Phase 0 spike: installer Qt 6.11.1 with WebEngine + vcpkg OCCT",
+      "displayName": "Windows, HTML UI: installer Qt 6.11.1 with WebEngine + vcpkg OCCT",
       "binaryDir": "${sourceDir}/build-web",
       "cacheVariables": {
-        "FURNIFYME_WEB_SPIKE": "ON",
+        "FURNIFYME_WEB_UI": "ON",
         "VCPKG_APPLOCAL_DEPS": "OFF",
         "Qt6_DIR": "C:/Qt/6.11.1/msvc2022_64/lib/cmake/Qt6",
         "CMAKE_PREFIX_PATH": "C:/Qt/6.11.1/msvc2022_64",
@@ -55,8 +55,7 @@
   "buildPresets": [
     { "name": "windows",          "configurePreset": "windows",          "configuration": "RelWithDebInfo" },
     { "name": "windows-headless", "configurePreset": "windows-headless", "configuration": "RelWithDebInfo" },
-    { "name": "windows-web",      "configurePreset": "windows-web",      "configuration": "RelWithDebInfo",
-      "targets": ["furnifyme", "web_spike"] },
+    { "name": "windows-web",      "configurePreset": "windows-web",      "configuration": "RelWithDebInfo" },
     { "name": "linux",            "configurePreset": "linux" },
     { "name": "linux-headless",   "configurePreset": "linux-headless" }
   ],

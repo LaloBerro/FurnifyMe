@@ -8,10 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # run and pass before any Qt code exists. Turn the app off to build tests alone
 # on a machine that has OCCT but no Qt:  -DFURNIFYME_BUILD_APP=OFF
 option(FURNIFYME_BUILD_APP "Build the Qt desktop application" ON)
-# PHASE 0 SPIKE (branch html-ui-spike): the Qt WebEngine overlay. Needs a Qt
-# that ships WebEngine - the installer build in C:/Qt, see the windows-web
-# preset - so it is off everywhere else and the shipped app is unchanged.
-option(FURNIFYME_WEB_SPIKE "Build the Qt WebEngine overlay spike" OFF)
+# The HTML UI (migration Phases 0-2): pages in Qt WebEngine - the hub today,
+# the editor's chrome later. Needs a Qt that ships WebEngine - the installer
+# build in C:/Qt, see the windows-web preset - and Node for the page build.
+# Off, the app is exactly the Qt Widgets app.
+option(FURNIFYME_WEB_UI "Build the HTML UI (Qt WebEngine pages)" OFF)
 
 find_package(OpenCASCADE REQUIRED)
 
@@ -160,6 +161,12 @@ if(FURNIFYME_BUILD_APP)
       src/session/Outcome.h
       src/session/ActionRegistry.cpp
       src/session/ActionRegistry.h
+      # The library on disk - Core + Gui only, so the hub's model can sit
+      # beside it (Phase 2).
+      src/FurnitureStore.cpp
+      src/FurnitureStore.h
+      src/session/HubModel.cpp
+      src/session/HubModel.h
     )
     target_include_directories(furnify_session PUBLIC src)
     target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)
@@ -181,6 +188,10 @@ if(FURNIFYME_BUILD_APP)
       FURNIFY_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src"
       FURNIFY_QTWIDGETS_INCLUDE_DIR="${qt_widgets_include_dir}")
     add_test(NAME session_no_widgets COMMAND session_no_widgets)
+
+    add_executable(hub_model_tests tests/hub_model.cpp)
+    target_link_libraries(hub_model_tests PRIVATE furnify_session)
+    add_test(NAME hub_model COMMAND hub_model_tests)
 
     add_executable(session_tests tests/session.cpp)
     target_link_libraries(session_tests PRIVATE furnify_session)
@@ -251,7 +262,6 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ScenePiecesPanel.cpp
       src/ui/AddPieceCard.cpp
       src/ui/UnsavedCloseCard.cpp
-      src/FurnitureStore.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC
@@ -269,18 +279,44 @@ if(FURNIFYME_BUILD_APP)
       target_link_libraries(furnify_app PUBLIC opengl32)
     endif()
 
-    if(FURNIFYME_WEB_SPIKE)
+    if(FURNIFYME_WEB_UI)
       find_package(Qt6 REQUIRED COMPONENTS WebEngineWidgets WebChannel Quick Test)
-      target_sources(furnify_app PRIVATE src/web/WebOverlay.cpp)
+      target_sources(furnify_app PRIVATE
+        src/web/WebHost.cpp
+        src/web/ThemeBridge.cpp
+        src/web/HubWindow.cpp
+        src/web/WebOverlay.cpp
+      )
       target_link_libraries(furnify_app PUBLIC Qt6::WebEngineWidgets Qt6::WebChannel Qt6::Quick)
-      target_compile_definitions(furnify_app PUBLIC FURNIFYME_WEB_SPIKE)
-      # The gate harness: drives the real MainWindow with the overlay on and
-      # off and prints one measured line per gate. Console subsystem, like
-      # gui_smoke, because it prints.
+      target_compile_definitions(furnify_app PUBLIC FURNIFYME_WEB_UI)
+
+      # The pages: one self-contained file each (web/build.mjs), rebuilt when
+      # any web source changes. Node does the build; nothing here needs it at
+      # run time.
+      find_program(NPM_EXECUTABLE NAMES npm.cmd npm REQUIRED)
+      file(GLOB_RECURSE web_sources CONFIGURE_DEPENDS
+           "${CMAKE_CURRENT_SOURCE_DIR}/web/src/*"
+           "${CMAKE_CURRENT_SOURCE_DIR}/web/*.html")
+      set(web_pages_built
+          "${CMAKE_CURRENT_SOURCE_DIR}/web/dist/hub/index.html"
+          "${CMAKE_CURRENT_SOURCE_DIR}/web/dist/overlay/index.html")
+      add_custom_command(
+        OUTPUT ${web_pages_built}
+        COMMAND "${NPM_EXECUTABLE}" run build
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/web"
+        DEPENDS ${web_sources} "${CMAKE_CURRENT_SOURCE_DIR}/web/build.mjs"
+                "${CMAKE_CURRENT_SOURCE_DIR}/web/package.json"
+        COMMENT "Building the web pages")
+      add_custom_target(web_pages ALL DEPENDS ${web_pages_built})
+
+      # The Phase 0 gate harness and its isolation probe; and the hub's
+      # harness. Console subsystem, like gui_smoke, because they print.
       add_executable(web_spike tests/web_spike.cpp)
       target_link_libraries(web_spike PRIVATE furnify_app Qt6::Test)
       add_executable(web_probe tests/web_probe.cpp)
       target_link_libraries(web_probe PRIVATE furnify_app)
+      add_executable(hub_smoke tests/hub_smoke.cpp)
+      target_link_libraries(hub_smoke PRIVATE furnify_app)
     endif()
 
     add_executable(furnifyme src/main.cpp)
@@ -397,7 +433,7 @@ if(FURNIFYME_BUILD_APP)
       # alone was supposed to fix. Located beside Qt6Core.dll, which is
       # where vcpkg puts every runtime DLL. (Not in the WebEngine spike: the
       # installer Qt's plugin carries its own JPEG decoder.)
-      if(NOT FURNIFYME_WEB_SPIKE)
+      if(NOT FURNIFYME_WEB_UI)
       add_custom_command(TARGET furnifyme POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE_DIR:Qt6::Core>/jpeg62.dll"
@@ -423,32 +459,31 @@ if(FURNIFYME_BUILD_APP)
         COMMENT "Deploying Qt plugin ${plugin} -> ${plugin_type}/")
     endforeach()
 
-    if(FURNIFYME_WEB_SPIKE AND WIN32)
-      # DEPLOYMENT FOR THE SPIKE. vcpkg's applocal step is OFF in this preset:
+    if(FURNIFYME_WEB_UI AND WIN32)
+      # DEPLOYMENT FOR THE HTML UI. vcpkg's applocal step is OFF in this preset:
       # it resolves DLLs by name against vcpkg's own bin/, which also holds
       # vcpkg's Qt, and would copy THAT Qt6Core.dll beside an exe built
       # against the installer Qt. So: windeployqt for Qt and WebEngine, then
-      # every vcpkg runtime DLL that is not Qt (OCCT and what it needs).
+      # every vcpkg runtime DLL that is not Qt (OCCT and what it needs), then
+      # the built pages as web/<page>/index.html.
       get_target_property(qt_qmake Qt6::qmake IMPORTED_LOCATION)
       get_filename_component(qt_bin "${qt_qmake}" DIRECTORY)
       set(windeployqt "${qt_bin}/windeployqt.exe")
       file(GLOB vcpkg_runtime_dlls "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/*.dll")
       list(FILTER vcpkg_runtime_dlls EXCLUDE REGEX "/Qt6[^/]*\.dll$")
-      foreach(spike_target furnifyme web_spike)
-        add_custom_command(TARGET ${spike_target} POST_BUILD
+      foreach(web_target furnifyme web_spike hub_smoke gui_smoke)
+        add_dependencies(${web_target} web_pages)
+        add_custom_command(TARGET ${web_target} POST_BUILD
           COMMAND "${windeployqt}" --release --no-translations --no-compiler-runtime
                   --no-opengl-sw --no-system-d3d-compiler --verbose 0
-                  "$<TARGET_FILE:${spike_target}>"
+                  "$<TARGET_FILE:${web_target}>"
           COMMAND ${CMAKE_COMMAND} -E copy_if_different ${vcpkg_runtime_dlls}
-                  "$<TARGET_FILE_DIR:${spike_target}>/"
-          COMMENT "Deploying Qt WebEngine and OCCT beside ${spike_target}")
+                  "$<TARGET_FILE_DIR:${web_target}>/"
+          COMMAND ${CMAKE_COMMAND} -E copy_directory
+                  "${CMAKE_CURRENT_SOURCE_DIR}/web/dist"
+                  "$<TARGET_FILE_DIR:${web_target}>/web"
+          COMMENT "Deploying Qt WebEngine, OCCT and the pages beside ${web_target}")
       endforeach()
-      # The built page (npm run build in web/) beside the exe as web/index.html.
-      add_custom_command(TARGET web_spike POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:web_spike>/web"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_CURRENT_SOURCE_DIR}/web/dist/index.html"
-                "$<TARGET_FILE_DIR:web_spike>/web/index.html")
     endif()
   else()
     message(STATUS "FurnifyMe: app sources not written yet - building geometry + tests only")

@@ -297,6 +297,37 @@ square wire → face → 10mm prism → second offset box → cut → expected f
 written and non-empty. Once it passes, kernel integration is proven correct and **every
 later bug is a UI bug**. That separation is the point.
 
+## The HTML UI (migration, branch `editor-session`)
+
+The UI is moving from Qt Widgets to HTML/CSS pages in Qt WebEngine; the plan and
+the measured spike are in the report linked from the board (T-066). **Phase 2 has
+shipped the library hub as a page**: `HubWindow` is the hub in a web build, and
+`furnifyme --qt-hub` brings back the Qt `SelectorWindow`, which stays in the tree -
+and under `gui_smoke` - until Phase 6 deletes it. `EditorSelectorHandoff::wire` is a
+template over the hub type, so both hubs share one wiring.
+
+- **Build:** `cmake --preset windows-web && cmake --build --preset windows-web`. It
+  uses the INSTALLER Qt 6.11.1 in `C:/Qt/6.11.1/msvc2022_64` (WebEngine; vcpkg's Qt
+  has none) with vcpkg OCCT, applocal OFF (windeployqt + the non-Qt vcpkg DLLs are
+  copied by POST_BUILD), and Node: `web_pages` runs `npm run build` and the pages land
+  beside the exe as `web/<page>/index.html`. `gui_smoke` reads 6370 + 1 on this
+  build exactly as on the vcpkg one.
+- **Dev loop:** `npm run dev` in `web/`, then run the app with
+  `FURNIFY_WEB_URL=http://localhost:5173` - pages hot-reload against the live app.
+  `npm test` runs the page tests.
+- **Two findings that cost a probe each.** Qt Quick must be on OpenGL
+  (`WebHost::prepareApplication()` before `QApplication`): at its Direct3D default a
+  page in a window holding a `QOpenGLWidget` loads, runs, and lays out at 0x0. And a
+  page's click mask (`QWidget::setMask` from rects the page reports) that changes every
+  frame makes Qt repaint the viewport behind it every frame - moving elements leave the
+  mask while the camera moves.
+- **The vocabulary law covers pages:** `web/test/banned.ts` is `usesBannedWord()`
+  ported rule for rule, swept over every string in a page's `copy.ts` and over its
+  rendered text, user names exempt; `hub_smoke` sweeps the live hub too.
+- **Tests:** `hub_model_tests` (ctest, offscreen), `npm test` (vitest + jsdom, a mock
+  bridge), `hub_smoke.exe [out]` (the real app driven through in-page DOM events -
+  never OS input - and composited captures to look at).
+
 ## Architecture
 
 Source files under `src/`, plus `tests/`:
@@ -315,6 +346,12 @@ Source files under `src/`, plus `tests/`:
 | `session/EditorSession.{h,cpp}` | the document, checkpoints, undo/redo and the ONE outcome channel; Core + Gui only (`furnify_session`), tested by `session_tests`; `session_no_widgets` fails on any Widgets include reached from `src/session` |
 | `session/Outcome.h` | one thing to tell the user, as a value: Note, Failure or Status |
 | `session/ActionRegistry.{h,cpp}` | every `QAction` by a stable id, a JSON snapshot, and a `trigger()` that obeys `isEnabled()` |
+| `session/HubModel.{h,cpp}` | the library hub's logic for the HTML hub - lists, dates, create/rename/delete and their sentences; Core + Gui, tested by `hub_model_tests` |
+| `web/WebHost.{h,cpp}` | one HTML page in a `QWebEngineView`: profile, channel, qwebchannel.js, `pageUrl()`; `prepareApplication()` puts Qt Quick on OpenGL |
+| `web/ThemeBridge.{h,cpp}` | `Theme::Spec` as CSS custom properties, re-sent on every Theme change |
+| `web/HubWindow.{h,cpp}` | the HTML hub's frameless window: page + `HubModel` + window controls; `WindowChrome` hit-tests from rects the page reports |
+| `web/WebOverlay.{h,cpp}` | the Phase 0 spike's overlay over the viewport (`--web-spike`), on `WebHost` |
+| `web/` (repo root) | the pages: Svelte 5 + Vite, one self-contained file per page (`build.mjs`), vitest page tests in `web/test` |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |
 | `ui/Theme.{h,cpp}` | colour tokens, the `Fixed` colours + the app stylesheet; the only place hex lives (`headless_colour_literals` enforces it) |
 | `ui/IconSet.{h,cpp}` | glyphs painted with QPainter (no qtsvg installed) |
