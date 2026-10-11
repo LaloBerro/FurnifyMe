@@ -8,6 +8,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # run and pass before any Qt code exists. Turn the app off to build tests alone
 # on a machine that has OCCT but no Qt:  -DFURNIFYME_BUILD_APP=OFF
 option(FURNIFYME_BUILD_APP "Build the Qt desktop application" ON)
+# PHASE 0 SPIKE (branch html-ui-spike): the Qt WebEngine overlay. Needs a Qt
+# that ships WebEngine - the installer build in C:/Qt, see the windows-web
+# preset - so it is off everywhere else and the shipped app is unchanged.
+option(FURNIFYME_WEB_SPIKE "Build the Qt WebEngine overlay spike" OFF)
 
 find_package(OpenCASCADE REQUIRED)
 
@@ -218,6 +222,20 @@ if(FURNIFYME_BUILD_APP)
       target_link_libraries(furnify_app PUBLIC opengl32)
     endif()
 
+    if(FURNIFYME_WEB_SPIKE)
+      find_package(Qt6 REQUIRED COMPONENTS WebEngineWidgets WebChannel Quick Test)
+      target_sources(furnify_app PRIVATE src/web/WebOverlay.cpp)
+      target_link_libraries(furnify_app PUBLIC Qt6::WebEngineWidgets Qt6::WebChannel Qt6::Quick)
+      target_compile_definitions(furnify_app PUBLIC FURNIFYME_WEB_SPIKE)
+      # The gate harness: drives the real MainWindow with the overlay on and
+      # off and prints one measured line per gate. Console subsystem, like
+      # gui_smoke, because it prints.
+      add_executable(web_spike tests/web_spike.cpp)
+      target_link_libraries(web_spike PRIVATE furnify_app Qt6::Test)
+      add_executable(web_probe tests/web_probe.cpp)
+      target_link_libraries(web_probe PRIVATE furnify_app)
+    endif()
+
     add_executable(furnifyme src/main.cpp)
     target_link_libraries(furnifyme PRIVATE furnify_app)
 
@@ -330,11 +348,14 @@ if(FURNIFYME_BUILD_APP)
       # imports it). Without it qjpeg.dll fails to LOAD, silently, and every
       # .jpg still reads as null - the exact symptom deploying the plugin
       # alone was supposed to fix. Located beside Qt6Core.dll, which is
-      # where vcpkg puts every runtime DLL.
+      # where vcpkg puts every runtime DLL. (Not in the WebEngine spike: the
+      # installer Qt's plugin carries its own JPEG decoder.)
+      if(NOT FURNIFYME_WEB_SPIKE)
       add_custom_command(TARGET furnifyme POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE_DIR:Qt6::Core>/jpeg62.dll"
                 "$<TARGET_FILE_DIR:furnifyme>/")
+      endif()
     endif()
 
     foreach(plugin IN LISTS QT_RUNTIME_PLUGINS)
@@ -354,6 +375,34 @@ if(FURNIFYME_BUILD_APP)
                 "$<TARGET_FILE_DIR:furnifyme>/${plugin_type}/"
         COMMENT "Deploying Qt plugin ${plugin} -> ${plugin_type}/")
     endforeach()
+
+    if(FURNIFYME_WEB_SPIKE AND WIN32)
+      # DEPLOYMENT FOR THE SPIKE. vcpkg's applocal step is OFF in this preset:
+      # it resolves DLLs by name against vcpkg's own bin/, which also holds
+      # vcpkg's Qt, and would copy THAT Qt6Core.dll beside an exe built
+      # against the installer Qt. So: windeployqt for Qt and WebEngine, then
+      # every vcpkg runtime DLL that is not Qt (OCCT and what it needs).
+      get_target_property(qt_qmake Qt6::qmake IMPORTED_LOCATION)
+      get_filename_component(qt_bin "${qt_qmake}" DIRECTORY)
+      set(windeployqt "${qt_bin}/windeployqt.exe")
+      file(GLOB vcpkg_runtime_dlls "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/*.dll")
+      list(FILTER vcpkg_runtime_dlls EXCLUDE REGEX "/Qt6[^/]*\.dll$")
+      foreach(spike_target furnifyme web_spike)
+        add_custom_command(TARGET ${spike_target} POST_BUILD
+          COMMAND "${windeployqt}" --release --no-translations --no-compiler-runtime
+                  --no-opengl-sw --no-system-d3d-compiler --verbose 0
+                  "$<TARGET_FILE:${spike_target}>"
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different ${vcpkg_runtime_dlls}
+                  "$<TARGET_FILE_DIR:${spike_target}>/"
+          COMMENT "Deploying Qt WebEngine and OCCT beside ${spike_target}")
+      endforeach()
+      # The built page (npm run build in web/) beside the exe as web/index.html.
+      add_custom_command(TARGET web_spike POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:web_spike>/web"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/web/dist/index.html"
+                "$<TARGET_FILE_DIR:web_spike>/web/index.html")
+    endif()
   else()
     message(STATUS "FurnifyMe: app sources not written yet - building geometry + tests only")
   endif()

@@ -5,6 +5,9 @@
 #include "SceneWindow.h"
 #include "SelectorWindow.h"
 #include "Theme.h"
+#ifdef FURNIFYME_WEB_SPIKE
+#include "web/WebOverlay.h"
+#endif
 
 #include <QApplication>
 #include <QEvent>
@@ -42,6 +45,9 @@ int main(int argc, char* argv[])
     // With the attribute set Qt keeps the context across the reparent, and the
     // two viewports share GPU resources besides.
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+#ifdef FURNIFYME_WEB_SPIKE
+    WebOverlay::prepareApplication();
+#endif
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("FurnifyMe"));
@@ -124,6 +130,23 @@ int main(int argc, char* argv[])
         MainWindow* myWindow = nullptr;
     };
     new FirstShowEntrance(&window);
+
+#ifdef FURNIFYME_WEB_SPIKE
+    // PHASE 0 SPIKE: `furnifyme --web-spike` lays the Svelte page (web/) over
+    // the editor's viewport. Without the flag the app is exactly as shipped.
+    if (QCoreApplication::arguments().contains(QStringLiteral("--web-spike"))) {
+        auto* overlay = new WebOverlay(window.view(),
+                                       WebOverlay::topOfFirstBody(&window.document()), &window);
+        QObject::connect(&window, &MainWindow::documentChanged, overlay, &WebOverlay::pushAnchor);
+        QObject::connect(overlay->bridge(), &SpikeBridge::commandReceived, overlay,
+                         [overlay](const QString& id) {
+                             emit overlay->bridge()->toastRequested(
+                                 QStringLiteral("C++ received “%1” from the page").arg(id),
+                                 QStringLiteral("note"));
+                         });
+        overlay->load(WebOverlay::defaultUrl());
+    }
+#endif
 
     selector.show();
 
