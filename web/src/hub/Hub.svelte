@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { chip } from '../actions';
   // The library hub as a page - a port of the Qt hub (SelectorWindow.cpp),
   // rule for rule. HubModel (C++) lists and does the work; this page owns the
   // view state the Qt hub owned: the sort, the search, which card is hovered,
@@ -74,9 +75,11 @@
 </script>
 
 <div class="window">
-  <TitleBar {win} />
+  <!-- While the name question stands nothing behind it can be reached: no tab
+       stop, no click, no key - the Qt card claimed every key app-wide. -->
+  <div class="titlebar-slot" inert={naming !== null}><TitleBar {win} /></div>
 
-  <main>
+  <main inert={naming !== null}>
     <div class="header">
       <h1>{copy.title}</h1>
       <div class="search">
@@ -88,8 +91,8 @@
           oninput={(e) => onSearch((e.target as HTMLInputElement).value)}
         />
       </div>
-      <button class="sort" aria-pressed={!byName} onclick={() => (byName = false)}>{copy.sortRecent}</button>
-      <button class="sort" aria-pressed={byName} onclick={() => (byName = true)}>{copy.sortName}</button>
+      <button use:chip class="sort" aria-pressed={!byName} onclick={() => (byName = false)}>{copy.sortRecent}</button>
+      <button use:chip class="sort" aria-pressed={byName} onclick={() => (byName = true)}>{copy.sortName}</button>
     </div>
 
     <!-- Assertive but NOT role=alert: Qt answers an Alert with a system sound. -->
@@ -100,7 +103,7 @@
 
     <div class="scroll">
       <div class="grid furniture">
-        <button class="new" onclick={askName}>{copy.newFurniture}</button>
+        <button use:chip class="new" onclick={askName}>{copy.newFurniture}</button>
         {#each shownFurniture as entry (entry.id)}
           <Card {entry} {hub} />
         {/each}
@@ -108,7 +111,7 @@
 
       <h2 class="section">{copy.scenesHeading}</h2>
       <div class="grid scenes">
-        <button class="new" onclick={() => hub.createScene()}>{copy.newScene}</button>
+        <button use:chip class="new" onclick={() => hub.createScene()}>{copy.newScene}</button>
         {#each shownScenes as entry (entry.id)}
           <Card {entry} {hub} />
         {/each}
@@ -133,8 +136,12 @@
 </div>
 
 <style>
+  /* #app too: without it the layout's 100% heights resolve against content,
+     the scroll area grows to fit everything and NOTHING scrolls - the Scenes
+     section was simply cut off below the window (found by hub_smoke). */
   :global(html),
-  :global(body) {
+  :global(body),
+  :global(#app) {
     height: 100%;
     background: var(--chrome);
     overflow: hidden;

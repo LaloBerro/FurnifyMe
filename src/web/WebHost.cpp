@@ -1,6 +1,9 @@
 #include "WebHost.h"
 
+#include "Theme.h"
+
 #include <QCoreApplication>
+#include <QWheelEvent>
 #include <QDir>
 #include <QFile>
 #include <QQuickWindow>
@@ -30,6 +33,35 @@ QUrl WebHost::pageUrl(const QString& page)
                                    .filePath(QStringLiteral("web/%1/index.html").arg(page)));
 }
 
+bool WebHost::pageAvailable(const QString& page)
+{
+    const QUrl url = pageUrl(page);
+    return !url.isLocalFile() || QFile::exists(url.toLocalFile());
+}
+
+namespace {
+
+// A page that is part of the app goes nowhere else. A dropped file, a link,
+// `location.href = ...` - each would replace the page, and the web channel is
+// the PAGE's, not the URL's, so whatever replaced it would inherit every
+// object registered on it. Only the URL the host loaded is accepted.
+class AppPage : public QWebEnginePage
+{
+public:
+    using QWebEnginePage::QWebEnginePage;
+    QUrl allowed;
+
+protected:
+    bool acceptNavigationRequest(const QUrl& url, NavigationType, bool isMainFrame) override
+    {
+        if (!isMainFrame) return false;
+        return url.adjusted(QUrl::RemoveQuery | QUrl::RemoveFragment) ==
+               allowed.adjusted(QUrl::RemoveQuery | QUrl::RemoveFragment);
+    }
+};
+
+}  // namespace
+
 WebHost::WebHost(QWidget* parent, Ground ground, QObject* owner)
     : QObject(owner ? owner : parent)
 {
@@ -37,13 +69,18 @@ WebHost::WebHost(QWidget* parent, Ground ground, QObject* owner)
     // part of the application.
     myProfile = new QWebEngineProfile(this);
     myView = new QWebEngineView(parent);
-    auto* page = new QWebEnginePage(myProfile, myView);
+    auto* page = new AppPage(myProfile, myView);
     myView->setPage(page);
+    myView->setAcceptDrops(false);
     if (ground == Ground::Transparent) {
         page->setBackgroundColor(Qt::transparent);
         myView->setAttribute(Qt::WA_TranslucentBackground);
+        // An overlay over the viewport scrolls nothing of its own.
+        page->settings()->setAttribute(QWebEngineSettings::ShowScrollBars, false);
+    } else {
+        // The window's own ground until the page paints - not a white flash.
+        page->setBackgroundColor(Theme::chrome());
     }
-    page->settings()->setAttribute(QWebEngineSettings::ShowScrollBars, false);
     // The page is a file beside the exe and reads the library's thumbnails,
     // which are files too.
     page->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls, true);
@@ -56,8 +93,30 @@ WebHost::WebHost(QWidget* parent, Ground ground, QObject* owner)
     connect(page, &QWebEnginePage::loadFinished, this, [this](bool ok) {
         myLoaded = true;
         myLoadOk = ok;
+        watchRenderWidget();
         emit loadFinished(ok);
     });
+    myView->installEventFilter(this);
+    watchRenderWidget();
+}
+
+void WebHost::watchRenderWidget()
+{
+    // The page draws into a child render widget (the view's focus proxy),
+    // which is the one that receives the wheel; it can be replaced, so it is
+    // (re)watched on every load.
+    if (QWidget* render = myView->focusProxy()) {
+        render->removeEventFilter(this);
+        render->installEventFilter(this);
+    }
+}
+
+bool WebHost::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event->type() == QEvent::Wheel &&
+        (static_cast<QWheelEvent*>(event)->modifiers() & Qt::ControlModifier))
+        return true;   // no page zoom - see the header
+    return QObject::eventFilter(watched, event);
 }
 
 WebHost::~WebHost()
@@ -76,6 +135,7 @@ void WebHost::load(const QUrl& url)
 {
     myLoaded = false;
     myLoadOk = false;
+    static_cast<AppPage*>(myView->page())->allowed = url;
     myView->load(url);
 }
 

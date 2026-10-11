@@ -9,6 +9,8 @@
 // the rectangles the page reports (reportChrome), so dragging the strip moves
 // the window and the maximize button raises Windows 11's snap layouts.
 
+#include "WindowChrome.h"
+
 #include <QRect>
 #include <QWidget>
 
@@ -26,6 +28,12 @@ public:
 
     void refresh();
     int furnitureCount() const;
+    // What a point of the window is, for Windows' hit test: caption, the
+    // maximize button, or the page's own. From the rects the page reported;
+    // until it has (or if it never loads) the top 32 px are caption with the
+    // maximize slot where the page would draw it, so the window can always be
+    // moved, maximized and closed from its system menu.
+    WindowChrome::Hit hitTest(const QPoint& p) const;
 
     HubModel* model() const { return myModel; }
     WebHost* host() const { return myHost; }

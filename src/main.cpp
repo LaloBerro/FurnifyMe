@@ -94,7 +94,12 @@ int main(int argc, char* argv[])
     // in a web build, for comparing the two side by side until Phase 6
     // deletes it. Both are wired by the one templated handoff below.
 #ifdef FURNIFYME_WEB_UI
-    const bool qtHub = QCoreApplication::arguments().contains(QStringLiteral("--qt-hub"));
+    // A deploy that lost the hub's page opens on the Qt hub rather than on a
+    // blank first window.
+    const bool pageMissing = !WebHost::pageAvailable(QStringLiteral("hub"));
+    if (pageMissing) qWarning("FurnifyMe: web/hub is missing beside the app - using the Qt hub");
+    const bool qtHub =
+        pageMissing || QCoreApplication::arguments().contains(QStringLiteral("--qt-hub"));
 #else
     const bool qtHub = true;
 #endif

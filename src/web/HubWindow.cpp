@@ -103,17 +103,28 @@ HubWindow::HubWindow(FurnitureStore& store, QWidget* parent)
     // everything else is the page's own.
     HubWindowControls* controls = myControls;
     WindowChrome::attach(
-        this,
-        [controls](const QPoint& p) {
-            if (controls->maxButton().contains(p)) return WindowChrome::Hit::MaxButton;
-            if (controls->titleBar().contains(p) && !controls->buttons().contains(p))
-                return WindowChrome::Hit::Caption;
-            return WindowChrome::Hit::Client;
-        },
+        this, [this](const QPoint& p) { return hitTest(p); },
         [controls](bool hovered) { emit controls->maxHovered(hovered); },
         [controls](bool pressed) { emit controls->maxPressed(pressed); });
 
     myHost->load(WebHost::pageUrl(QStringLiteral("hub")));
+}
+
+WindowChrome::Hit HubWindow::hitTest(const QPoint& p) const
+{
+    QRect bar = myControls->titleBar();
+    QRect max = myControls->maxButton();
+    QRect buttons = myControls->buttons();
+    if (bar.isEmpty()) {
+        // The page has not said yet: the strip the page will draw - 32 px,
+        // three 44 px buttons at the right, maximize in the middle.
+        bar = QRect(0, 0, width(), kTitleH);
+        buttons = QRect(width() - 3 * 44, 0, 3 * 44, kTitleH);
+        max = QRect(width() - 2 * 44, 0, 44, kTitleH);
+    }
+    if (max.contains(p)) return WindowChrome::Hit::MaxButton;
+    if (bar.contains(p) && !buttons.contains(p)) return WindowChrome::Hit::Caption;
+    return WindowChrome::Hit::Client;
 }
 
 void HubWindow::refresh()

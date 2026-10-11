@@ -294,20 +294,35 @@ if(FURNIFYME_BUILD_APP)
       # any web source changes. Node does the build; nothing here needs it at
       # run time.
       find_program(NPM_EXECUTABLE NAMES npm.cmd npm REQUIRED)
-      file(GLOB_RECURSE web_sources CONFIGURE_DEPENDS
-           "${CMAKE_CURRENT_SOURCE_DIR}/web/src/*"
-           "${CMAKE_CURRENT_SOURCE_DIR}/web/*.html")
-      set(web_pages_built
-          "${CMAKE_CURRENT_SOURCE_DIR}/web/dist/hub/index.html"
-          "${CMAKE_CURRENT_SOURCE_DIR}/web/dist/overlay/index.html")
+      set(web_dir "${CMAKE_CURRENT_SOURCE_DIR}/web")
+      # A clean checkout has no node_modules: `npm ci` first, again whenever
+      # the lock file changes (a stamp records the last install).
+      set(web_installed "${CMAKE_CURRENT_BINARY_DIR}/web-npm-ci.stamp")
+      add_custom_command(
+        OUTPUT "${web_installed}"
+        COMMAND "${NPM_EXECUTABLE}" ci --no-audit --no-fund
+        COMMAND ${CMAKE_COMMAND} -E touch "${web_installed}"
+        WORKING_DIRECTORY "${web_dir}"
+        DEPENDS "${web_dir}/package.json" "${web_dir}/package-lock.json"
+        COMMENT "Installing the web build's packages (npm ci)")
+      file(GLOB_RECURSE web_sources CONFIGURE_DEPENDS "${web_dir}/src/*" "${web_dir}/*.html")
+      set(web_pages_built "${web_dir}/dist/hub/index.html" "${web_dir}/dist/overlay/index.html")
       add_custom_command(
         OUTPUT ${web_pages_built}
         COMMAND "${NPM_EXECUTABLE}" run build
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/web"
-        DEPENDS ${web_sources} "${CMAKE_CURRENT_SOURCE_DIR}/web/build.mjs"
-                "${CMAKE_CURRENT_SOURCE_DIR}/web/package.json"
+        WORKING_DIRECTORY "${web_dir}"
+        DEPENDS ${web_sources} "${web_dir}/build.mjs" "${web_installed}"
         COMMENT "Building the web pages")
-      add_custom_target(web_pages ALL DEPENDS ${web_pages_built})
+      # The pages reach the exe directory HERE, every build, after the old
+      # copy is cleared - not in an exe's POST_BUILD, which runs only when that
+      # exe relinks, so a .svelte-only edit would otherwise never arrive (and
+      # a page deleted from dist would linger forever).
+      add_custom_target(web_pages ALL
+        DEPENDS ${web_pages_built}
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/web"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${web_dir}/dist"
+                "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/web"
+        COMMENT "Deploying the web pages beside the executables")
 
       # The Phase 0 gate harness and its isolation probe; and the hub's
       # harness. Console subsystem, like gui_smoke, because they print.
@@ -464,8 +479,8 @@ if(FURNIFYME_BUILD_APP)
       # it resolves DLLs by name against vcpkg's own bin/, which also holds
       # vcpkg's Qt, and would copy THAT Qt6Core.dll beside an exe built
       # against the installer Qt. So: windeployqt for Qt and WebEngine, then
-      # every vcpkg runtime DLL that is not Qt (OCCT and what it needs), then
-      # the built pages as web/<page>/index.html.
+      # every vcpkg runtime DLL that is not Qt (OCCT and what it needs). The
+      # pages are web_pages' own job (above).
       get_target_property(qt_qmake Qt6::qmake IMPORTED_LOCATION)
       get_filename_component(qt_bin "${qt_qmake}" DIRECTORY)
       set(windeployqt "${qt_bin}/windeployqt.exe")
@@ -479,10 +494,7 @@ if(FURNIFYME_BUILD_APP)
                   "$<TARGET_FILE:${web_target}>"
           COMMAND ${CMAKE_COMMAND} -E copy_if_different ${vcpkg_runtime_dlls}
                   "$<TARGET_FILE_DIR:${web_target}>/"
-          COMMAND ${CMAKE_COMMAND} -E copy_directory
-                  "${CMAKE_CURRENT_SOURCE_DIR}/web/dist"
-                  "$<TARGET_FILE_DIR:${web_target}>/web"
-          COMMENT "Deploying Qt WebEngine, OCCT and the pages beside ${web_target}")
+          COMMENT "Deploying Qt WebEngine and OCCT beside ${web_target}")
       endforeach()
     endif()
   else()

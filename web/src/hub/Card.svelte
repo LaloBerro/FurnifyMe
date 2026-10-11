@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { chip } from '../actions';
   // One cell: the 260 x 163 thumbnail above, the under-row below - the name
   // on the left and, at rest, the last-edited date on the right, swapped on
   // hover for Rename and Delete. Hovering the CELL is what swaps it, so an
@@ -22,6 +23,17 @@
   let strip: HTMLElement | undefined = $state();
   let armTimer = 0;
   let settled = false;
+
+  // A window that hides never sends the card a mouseleave, so the card the
+  // user clicked would come back still wearing its hover; a hidden page
+  // forgets it instead.
+  $effect(() => {
+    const forget = () => {
+      if (document.visibilityState === 'hidden') hovered = false;
+    };
+    document.addEventListener('visibilitychange', forget);
+    return () => document.removeEventListener('visibilitychange', forget);
+  });
 
   function open() {
     hub.choose(entry.id, entry.scene);
@@ -103,7 +115,7 @@
   onmouseenter={() => (hovered = true)}
   onmouseleave={() => (hovered = false)}
 >
-  <button class="thumb" class:hovered aria-label={copy.openCard(entry.name)} onclick={open}>
+  <button use:chip class="thumb" class:hovered aria-label={copy.openCard(entry.name)} onclick={open}>
     {#if entry.thumbUrl}
       <img src={entry.thumbUrl} alt="" draggable="false" />
     {:else}
@@ -131,8 +143,8 @@
       <span class="name">{entry.name}</span>
     {/if}
     {#if hovered && !renaming}
-      <button class="action" onclick={beginRename}>{copy.rename}</button>
-      <button class="action" onclick={onDelete}>{armed ? copy.deleteArmed : copy.delete}</button>
+      <button use:chip class="action" onclick={beginRename}>{copy.rename}</button>
+      <button use:chip class="action" onclick={onDelete}>{armed ? copy.deleteArmed : copy.delete}</button>
     {:else if !renaming}
       <span class="date">{entry.editedText}</span>
     {/if}

@@ -26,6 +26,7 @@
 #include "session/HubModel.h"
 #include "web/HubWindow.h"
 #include "web/WebHost.h"
+#include "WindowChrome.h"
 
 #include <QAction>
 #include <QApplication>
@@ -36,9 +37,12 @@
 #include <QJsonDocument>
 #include <QSurfaceFormat>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
+#include <QUrl>
 #include <QWebEnginePage>
 #include <QWebEngineView>
+#include <QWheelEvent>
 
 #include <cstdio>
 #include <functional>
@@ -199,6 +203,20 @@ void keepBehind()
 }
 #endif
 
+#ifdef _WIN32
+// What Windows itself asks the window: WM_NCHITTEST at a point of the hub's
+// client area (logical px), answered by WindowChrome's filter. A message to
+// our own window - not OS input.
+LRESULT nativeHit(QWidget* window, const QPoint& logical)
+{
+    HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    const double dpr = window->devicePixelRatioF();
+    POINT p{LONG(logical.x() * dpr), LONG(logical.y() * dpr)};
+    ClientToScreen(hwnd, &p);
+    return SendMessageW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(p.x, p.y));
+}
+#endif
+
 // gui_smoke's usesBannedWord(), ported: case-insensitive; "round" and
 // "flatten" only with no letter or digit before them; "Joint" passes.
 QStringList bannedIn(const QString& text)
@@ -267,6 +285,16 @@ int main(int argc, char* argv[])
     SceneWindow sceneWindow(&window.furnitureStore());
     sceneWindow.setAttribute(Qt::WA_ShowWithoutActivating);
     EditorSelectorHandoff::wire(window, hub, &sceneWindow);
+
+    // Before the page has said where its title strip is - or if it never
+    // loads - the window must still be movable and closable.
+    check(hub.hitTest(QPoint(10, 10)) == WindowChrome::Hit::Caption &&
+              hub.hitTest(QPoint(hub.width() - 66, 10)) == WindowChrome::Hit::MaxButton &&
+              hub.hitTest(QPoint(10, 100)) == WindowChrome::Hit::Client,
+          "before the page reports, a 32 px strip is caption and its maximize slot answers MaxButton");
+    check(WebHost::pageAvailable(QStringLiteral("hub")) &&
+              !WebHost::pageAvailable(QStringLiteral("no-such-page")),
+          "the app can tell a deployed page from a missing one (main.cpp falls back to the Qt hub)");
     hub.show();
 
     QWebEngineView* page = hub.host()->view();
@@ -282,8 +310,54 @@ int main(int argc, char* argv[])
     check(jsString(page, "getComputedStyle(document.documentElement).getPropertyValue('--panel').trim()") ==
               Theme::panel().name(),
           "the live Theme reaches the page's :root (--panel " + Theme::panel().name() + ")");
-    check(js(page, "!!document.querySelector('[data-card-id] img')").toBool(),
-          "the saved thumbnail is drawn as a picture");
+    waitFor([&] {
+        return js(page, "(() => { const i = document.querySelector('[data-card-id] img'); "
+                        "return !!i && i.complete && i.naturalWidth > 0; })()").toBool();
+    }, 3000);
+    check(js(page, "(() => { const i = document.querySelector('[data-card-id] img'); "
+                   "return !!i && i.complete && i.naturalWidth > 0; })()").toBool(),
+          "the saved thumbnail LOADS (complete, with pixels) - not merely an <img> on the page");
+    check(js(page, "(() => { const s = document.querySelector('.scroll'); "
+                   "return s.scrollHeight > s.clientHeight && s.offsetWidth - s.clientWidth > 0; })()")
+              .toBool(),
+          "a library taller than the window shows a scrollbar - " +
+              jsString(page, "(() => { const s = document.querySelector('.scroll'); return "
+                             "`scroll ${s.scrollHeight} client ${s.clientHeight} offsetW ${s.offsetWidth} "
+                             "clientW ${s.clientWidth}`; })()"));
+    check(!page->acceptDrops(), "the hub's view takes no drops - a dropped file cannot replace the page");
+#ifdef _WIN32
+    {
+        const QRect bar = hub.controls()->titleBar();
+        const QRect max = hub.controls()->maxButton();
+        check(nativeHit(&hub, QPoint(bar.left() + 60, bar.center().y())) == HTCAPTION &&
+                  nativeHit(&hub, max.center()) == HTMAXBUTTON &&
+                  nativeHit(&hub, QPoint(bar.left() + 60, bar.bottom() + 120)) == HTCLIENT,
+              "Windows' own hit test: the strip is caption, the maximize button HTMAXBUTTON, a card client");
+    }
+#endif
+    {
+        QWidget* target = page->focusProxy() ? page->focusProxy() : page;
+        const QPointF at(200, 200);
+        QWheelEvent wheel(at, target->mapToGlobal(at), QPoint(), QPoint(0, 120), Qt::NoButton,
+                          Qt::ControlModifier, Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(target, &wheel);
+        pump(300);
+        check(qFuzzyCompare(page->zoomFactor(), 1.0),
+              QStringLiteral("Ctrl+wheel does not zoom the page (zoom %1) - zoom would move the caption "
+                             "away from where Windows hit-tests it")
+                  .arg(page->zoomFactor()));
+    }
+    {
+        const QString before = page->url().toString();
+        // A file: URL - what a dropped file or a stray link would be. (about:blank
+        // is the renderer's own and never reaches the browser side.)
+        js(page, "location.href = " + QString::fromUtf8(QJsonDocument(QJsonArray{
+                     QUrl::fromLocalFile(QCoreApplication::applicationDirPath()).toString()})
+                     .toJson(QJsonDocument::Compact)).mid(1).chopped(1));
+        pump(600);
+        check(page->url().toString() == before && cardNames(page, "furniture").size() == 3,
+              "the page cannot navigate away from the hub - got " + page->url().toString());
+    }
     check(hub.controls()->titleBar().height() == 32 && hub.controls()->maxButton().width() == 44 &&
               hub.controls()->titleBar().contains(hub.controls()->maxButton()),
           "the page reported its title strip (32 high) and the 44 px maximize button inside it");
@@ -367,6 +441,7 @@ int main(int argc, char* argv[])
     for (const FurnitureStore::FurnitureInfo& i : window.furnitureStore().listFurniture())
         if (i.id == stoolId) stoolDir = i.filePath;
     QDir(stoolDir).removeRecursively();
+    const QStringList beforeRefusal = cardNames(page, "furniture");
     hover(page, "Zebra stool");
     clickButtonIn(page, "Zebra stool", "Rename");
     typeAndKey(page, "(" + cardSelector("Zebra stool") + " || document).querySelector('input.rename')", "Tall stool", "Enter");
@@ -375,6 +450,41 @@ int main(int argc, char* argv[])
               QStringLiteral("Couldn't rename this furniture to Tall stool — Check that its folder still "
                              "exists and isn't read-only"),
           "a refused rename shows the hub's own sentence in the banner");
+    check(cardNames(page, "furniture") == beforeRefusal, "and leaves the grid exactly as it was");
+
+    // --- a picture rewritten while the hub was away is the one it shows ------------
+    {
+        FurnitureStore& store = window.furnitureStore();
+        QString rackId;
+        for (const FurnitureStore::FurnitureInfo& i : store.listFurniture())
+            if (i.name == QStringLiteral("Shoe rack")) rackId = i.id;
+        DocumentModel doc;
+        doc.addSolid(ModelingOps::makeBox(gp_Pnt(0, 0, 0), 10, 10, 10));
+        QImage first(160, 100, QImage::Format_RGB32);
+        first.fill(Qt::red);
+        store.saveFurniture(rackId, doc, first);
+        hub.refresh();
+        pump(400);
+        const QString src1 = jsString(page, "((" + cardSelector("Shoe rack") + ").querySelector('img') || {}).src || ''");
+        QThread::msleep(1100);   // whole-second file times
+        QImage second(160, 100, QImage::Format_RGB32);
+        second.fill(Qt::blue);
+        store.saveFurniture(rackId, doc, second);
+        hub.refresh();
+        waitFor([&] {
+            return js(page, "(() => { const i = (" + cardSelector("Shoe rack") +
+                                ").querySelector('img'); return !!i && i.complete && i.naturalWidth > 0; })()")
+                .toBool();
+        }, 3000);
+        const QString src2 = jsString(page, "((" + cardSelector("Shoe rack") + ").querySelector('img') || {}).src || ''");
+        const QString pixel = jsString(page, "(() => { const i = (" + cardSelector("Shoe rack") +
+                                                 ").querySelector('img'); const c = document.createElement('canvas');"
+                                                 " c.width = 4; c.height = 4; const g = c.getContext('2d');"
+                                                 " g.drawImage(i, 0, 0, 4, 4); const d = g.getImageData(2, 2, 1, 1).data;"
+                                                 " return d[0] + ',' + d[1] + ',' + d[2]; })()");
+        check(!src1.isEmpty() && src1 != src2 && pixel.startsWith(QStringLiteral("0,0,")),
+              "a picture rewritten while the hub was away is the NEW one (src changed, pixel " + pixel + ")");
+    }
 
     // --- search and sort --------------------------------------------------------------
     js(page, "(() => { const s = document.querySelector('input[type=search]'); s.value = 'shoe'; "

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { chip } from '../actions';
   // The hub's own title strip (the native caption is gone - WindowChrome on
   // the C++ side answers Windows' hit tests from the rects this reports):
   // the app mark, the wordmark, and the three Flat window buttons, 44 x 32
@@ -42,10 +43,10 @@
   <img class="mark" src={mark} alt="" width="18" height="18" />
   <span class="wordmark">{copy.wordmark}</span>
   <div class="buttons" bind:this={buttons}>
-    <button class="win" aria-label={copy.minimize} onclick={() => win.minimize()}>
+    <button use:chip class="win" aria-label={copy.minimize} onclick={() => win.minimize()}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12" /></svg>
     </button>
-    <button
+    <button use:chip
       class="win"
       class:hovered={maxHovered}
       class:pressed={maxPressed}
@@ -62,7 +63,7 @@
         {/if}
       </svg>
     </button>
-    <button class="win close" aria-label={copy.close} onclick={() => win.close()}>
+    <button use:chip class="win close" aria-label={copy.close} onclick={() => win.close()}>
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <line x1="5" y1="5" x2="19" y2="19" />
         <line x1="5" y1="19" x2="19" y2="5" />

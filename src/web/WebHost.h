@@ -34,6 +34,11 @@ public:
     // FURNIFY_WEB_URL, when set, names a dev server instead (Vite, for hot
     // reload): <FURNIFY_WEB_URL>/<page>.html.
     static QUrl pageUrl(const QString& page);
+    // Whether `page` is there to load: its built file beside the executable,
+    // or - with FURNIFY_WEB_URL set - assumed served. main.cpp asks this
+    // before choosing the HTML hub, so a deploy that lost the page still
+    // opens the app (on the Qt hub) instead of a blank window.
+    static bool pageAvailable(const QString& page);
 
     // The view is created as a child of `parent`; this object is owned by
     // `owner` (the parent when null).
@@ -50,8 +55,15 @@ public:
 signals:
     void loadFinished(bool ok);
 
+protected:
+    // Ctrl+wheel would zoom the page, and a zoomed page draws its title strip
+    // somewhere other than where Windows hit-tests it; pages here are laid out
+    // in the app's own type scale, which the Settings drawer already sizes.
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
     void injectWebChannelScript();
+    void watchRenderWidget();
 
     QWebEngineProfile* myProfile = nullptr;
     QWebEngineView* myView = nullptr;

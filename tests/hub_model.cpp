@@ -203,6 +203,32 @@ int main(int argc, char* argv[])
               "a refused create says the hub's own sentence and chooses nothing");
     }
 
+    // --- delete refusal: the library path runs through a file -----------------------
+    {
+        QTemporaryDir parent;
+        const QString blocking = parent.path() + QStringLiteral("/blocked");
+        QFile f(blocking);
+        f.open(QIODevice::WriteOnly);
+        f.write("x");
+        f.close();
+        FurnitureStore store(blocking + QStringLiteral("/library"));
+        HubModel hub(store);
+        Strings failures, notes;
+        collect(hub, &HubModel::failure, failures);
+        collect(hub, &HubModel::note, notes);
+        hub.remove(QStringLiteral("nowhere"), false);
+        check(notes.isEmpty() && failures.count() == 1 &&
+                  failures.at(0) == QStringLiteral("Couldn't delete this furniture — Check that its "
+                                                   "folder still exists and isn't read-only"),
+              "a refused delete says the hub's own sentence and reports nothing else - got " +
+                  (failures.count() ? failures.at(0) : QStringLiteral("nothing")));
+        hub.remove(QStringLiteral("nowhere"), true);
+        check(failures.count() == 2 &&
+                  failures.at(1) == QStringLiteral("Couldn't delete this scene — Check that its folder "
+                                                   "still exists and isn't read-only"),
+              "and a refused scene delete its own");
+    }
+
     std::printf("%d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
 }

@@ -44,12 +44,15 @@ describe('the grid', () => {
   });
 
   it('sorts by name with the Name chip, and the two chips are one exclusive pair', async () => {
-    mount();
+    // Recent and Name must DIFFER here, or a broken name sort passes (the
+    // review's finding): Recent is Zinc, alpha, Bench; Name is alpha, Bench, Zinc.
+    mount(mockHub([entry('a', 'alpha', T - 7200e3), entry('b', 'Bench', T - 9000e3), entry('z', 'Zinc', T)]));
+    expect(cardNames()).toEqual(['Zinc', 'alpha', 'Bench']);
     const recent = screen.getByRole('button', { name: copy.sortRecent });
     const name = screen.getByRole('button', { name: copy.sortName });
     expect(recent.getAttribute('aria-pressed')).toBe('true');
     await fireEvent.click(name);
-    expect(cardNames()).toEqual(['Armchair', 'Bench', 'Zebra stool']);
+    expect(cardNames()).toEqual(['alpha', 'Bench', 'Zinc']);
     expect(name.getAttribute('aria-pressed')).toBe('true');
     expect(recent.getAttribute('aria-pressed')).toBe('false');
   });
@@ -265,6 +268,82 @@ describe('the window', () => {
     const { win } = mount();
     await tick();
     expect(win.calls.some((c) => c.method === 'reportChrome')).toBe(true);
+  });
+});
+
+describe('focus (no chip takes it - CLAUDE.md F17)', () => {
+  it('no button is in the tab order, and a press never moves focus', async () => {
+    mount();
+    const card = document.querySelector('[data-card-id="a"]') as HTMLElement;
+    await fireEvent.mouseEnter(card);
+    const buttons = [...document.querySelectorAll('button')];
+    expect(buttons.length).toBeGreaterThan(8);
+    for (const b of buttons) {
+      expect(b.getAttribute('tabindex'), b.textContent ?? b.getAttribute('aria-label') ?? '').toBe('-1');
+      // A press whose default is prevented does not move focus - which is
+      // what keeps the caret in the search field.
+      const press = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+      b.dispatchEvent(press);
+      expect(press.defaultPrevented, b.textContent ?? '').toBe(true);
+    }
+  });
+
+  it('typing fields still take focus', () => {
+    mount();
+    expect(screen.getByPlaceholderText(copy.search).getAttribute('tabindex')).not.toBe('-1');
+  });
+});
+
+describe('the name question claims the keys', () => {
+  async function open() {
+    const ctx = mount();
+    await fireEvent.click(screen.getByText(copy.newFurniture));
+    await vi.runAllTicks();
+    await tick();
+    await tick();
+    return ctx;
+  }
+
+  it('lays out title, field, then the sentence, as the Qt card does', async () => {
+    await open();
+    const dialog = screen.getByRole('dialog');
+    const order = [...dialog.querySelectorAll('h2, input, p')].map((e) => e.tagName);
+    expect(order).toEqual(['H2', 'INPUT', 'P']);
+    expect(within(dialog).getByRole('textbox').getAttribute('maxlength')).toBe('120');
+  });
+
+  it('Escape and Enter still work when focus has left the field', async () => {
+    const { hub } = await open();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await fireEvent.keyDown(window, { key: 'Enter' });
+    expect(hub.calls.filter((c) => c.method === 'createFurniture')).toEqual([
+      { method: 'createFurniture', args: ['Furniture 04'] },
+    ]);
+  });
+
+  it('nothing behind the question can be reached while it stands', async () => {
+    await open();
+    // Svelte sets the inert PROPERTY; a browser reflects it as the attribute,
+    // jsdom (which does not implement inert) keeps just the property.
+    const inert = (el: Element) => (el as HTMLElement & { inert?: boolean }).inert === true || el.hasAttribute('inert');
+    expect(inert(document.querySelector('main')!)).toBe(true);
+    expect(inert(document.querySelector('.titlebar-slot')!)).toBe(true);
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(inert(document.querySelector('main')!)).toBe(false);
+  });
+});
+
+describe('a hidden hub forgets its hover', () => {
+  it('a card hovered when the window hid is at rest when it comes back', async () => {
+    mount();
+    const card = document.querySelector('[data-card-id="a"]') as HTMLElement;
+    await fireEvent.mouseEnter(card);
+    expect(within(card).queryByRole('button', { name: copy.rename })).toBeTruthy();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await tick();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    expect(within(card).queryByRole('button', { name: copy.rename })).toBeNull();
   });
 });
 
