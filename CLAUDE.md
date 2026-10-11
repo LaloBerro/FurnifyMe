@@ -367,11 +367,23 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   pending card. While Delete is armed, Compare and Restore step aside: beside them its
   sentence does not fit the card (the scene window's Remove rule - it widens leftward, the
   second click lands where the first did).
-- **A card going away takes the keyboard back; a card merely HIDDEN does not.**
-  `EditorChrome::syncCards()` dropped the keyboard whenever any card was hidden, which was
-  right with one card and wrong with two: the closed Settings card took the keyboard from
-  the Versions name field on the relayout a refused save causes. It drops it now only when
-  a card that WAS shown goes away.
+- **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
+  whenever any card was hidden, which was right with one card and wrong with two: the
+  closed Settings card took the keyboard from the Versions name field on the relayout a
+  refused save causes. Claims are now counted per card (`claimKeyboardFor(card)`; the page
+  hands each card an adapter, `keyboardFor()` in `Editor.svelte`), and a card that WAS shown
+  going away gives back only its own - the keyboard goes when no card holds it.
+- **A hidden drawer saves nothing, and the C++ gate is what says so.** In an OS-active
+  window the page's name field is BLURRED as the card goes away, and a blur commits (R5);
+  the suite's windows are never active, so no blur ever fires there. `VersionsModel`'s save
+  gate therefore includes whether the drawer is shown, synced the moment the action hides
+  it - before the page's late save can arrive - and chrome_smoke dispatches that blur itself.
+  A page check that only passes because the harness window is inactive is the focus-ring
+  lesson again.
+- **Build BOTH presets before calling a phase done.** The vcpkg `windows` preset (web UI
+  off) did not compile from the Settings card until the Versions review found it:
+  `HtmlCardSlot.h` was included only under `FURNIFYME_WEB_UI` while `settingsSurface()`
+  used the type in every build. Only `build-web` had been built for two phases.
 - **A typed field takes the keyboard and gives it back** (ruling R5). The view is
   `Qt::NoFocus`; a field calls `claimKeyboard()` when pressed and `releaseKeyboard()` on
   Enter, Escape, blur or unmount, and while held the view accepts every `ShortcutOverride`
