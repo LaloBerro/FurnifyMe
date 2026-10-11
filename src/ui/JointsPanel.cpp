@@ -1,5 +1,7 @@
 #include "JointsPanel.h"
 
+#include "session/JointRows.h"
+
 #include "DocumentModel.h"
 #include "IconSet.h"
 #include "Joinery.h"
@@ -60,18 +62,9 @@ constexpr int kDeleteSize = 20;
 
 QString specimen() { return QStringLiteral("Mortise and tenon, 6 × 30 mm"); }
 
-QString lengthText(double mm) { return QString::fromStdString(Measure::formatLength(mm)); }
-
-// Measure's own number with its unit taken off - a tick label, whose unit the
-// shared line names once. Still Measure's rounding, separator and display unit:
-// this removes the suffix Measure appended, it formats nothing itself.
-QString numberOnly(double mm)
-{
-    QString text = lengthText(mm);
-    const QString suffix = QLatin1Char(' ') + QString::fromStdString(Measure::unitSuffix());
-    if (text.endsWith(suffix)) text.chop(suffix.size());
-    return text;
-}
+// Both from JointRows, the one author of what a row says (Phase 3d).
+QString lengthText(double mm) { return JointRows::lengthText(mm); }
+QString numberOnly(double mm) { return JointRows::numberOnly(mm); }
 
 // The PAINTED form of a string: a number never wraps away from its unit
 // ("9 mm"), "inset" never wraps away from its number, and a "W × D" pair stays
@@ -93,16 +86,9 @@ QString bindUnits(const QString& raw)
 
 QString number(double value) { return QString::number(value, 'g', 10); }
 
-QString deleteTooltip()
-{
-    return JointsPanel::tr("Delete this joint\nOne undo brings it back.");
-}
+QString deleteTooltip() { return JointRows::deleteTooltip(); }
 
-QString emptyText()
-{
-    return JointsPanel::tr("No joints yet.\n\nSelect two pieces that meet and press J to "
-                           "plan one.");
-}
+QString emptyText() { return JointRows::emptyText(); }
 
 QString titleCss()
 {
@@ -160,31 +146,8 @@ QString layoutKey(int cardWidth)
 // refusal.
 QString JointsPanel::reasonText(const std::string& error)
 {
-    if (error.rfind("contact:", 0) == 0)
-        return tr("these two pieces can't be measured where they meet — move one so "
-                  "they meet squarely");
-
-    const QString reason = QString::fromStdString(error);
-    QString step;
-    if (error == "one of the pieces is missing")
-        step = tr("undo to bring it back, or delete the joint");
-    else if (error == "these two pieces don't meet")
-        step = tr("move the pieces so they meet");
-    else if (error == "the pieces aren't crossing")
-        step = tr("move one so it crosses the other");
-    else if (error == "the pieces overlap rather than meet")
-        step = tr("move one so they touch without overlapping");
-    else if (error == "the contact is too small for a joint")
-        step = tr("move them so more of the two faces touch");
-    else if (error.rfind("the contact is too narrow", 0) == 0)
-        step = tr("choose another kind, or move them so more of the two faces touch");
-    else if (error.find("curved region") != std::string::npos)
-        step = tr("move them so they meet on flat faces");
-    else
-        // A reason this mapping has not met yet still gets a way forward
-        // rather than a dead end - the step every contact refusal shares.
-        step = tr("move the pieces so they meet squarely");
-    return tr("%1 — %2").arg(reason, step);
+    // JointRows is the one mapping now (Phase 3d) - the page's drawer reads it too.
+    return JointRows::reasonText(error);
 }
 
 // Everything one row paints, decided in refresh() and never changed after:
@@ -208,6 +171,7 @@ struct JointsPanel::RowModel {
         bool band = false;
         double bandStart = 0.0;
         double bandEnd = 0.0;
+        QString writtenLine;   // JointRows' written line for this piece
     };
     struct Strip {
         QRectF bar;
@@ -240,6 +204,8 @@ struct JointsPanel::RowModel {
     QString unit;
     std::vector<Piece> pieces;
     QString readoutText;
+    QString sharedDrawn;     // JointRows' line under the rulers
+    QString sharedWritten;   // and under written numbers
 
     // --- layout ---------------------------------------------------------------
     QFont fonts[FontRoleCount];
@@ -280,93 +246,43 @@ std::shared_ptr<RowModel> contentFor(const DocumentModel& doc, const DocumentMod
                                      const Joinery::Derivation& d, int selectedJoint,
                                      bool expanded)
 {
+    // What the row SAYS comes from JointRows (Phase 3d) - the page's drawer
+    // reads the same, so the two cannot word a joint differently. Everything
+    // below this function is this drawer's own layout and paint.
+    const JointRows::Row c = JointRows::content(doc, joint, d, selectedJoint, expanded);
     auto m = std::make_shared<RowModel>();
-    m->jointId = joint.id;
-    m->kind = static_cast<int>(joint.kind);
-    m->broken = !d.ok;
-    m->selected = joint.id == selectedJoint;
-    m->expanded = expanded;
-    const Joinery::Family family = Joinery::familyOf(joint.kind);
-    m->fastener = family == Joinery::Family::Fasteners;
-    m->nameA = QString::fromStdString(doc.nameOf(joint.bodyA));
-    m->nameB = QString::fromStdString(doc.nameOf(joint.bodyB));
-    m->unit = QString::fromStdString(Measure::unitSuffix());
-    const QString kind = QString::fromStdString(Joinery::kindName(joint.kind));
-
-    if (!d.ok) {
-        // No readout, no numbers, no caveat - a derivation that refused carries
-        // none of them, and nothing here reaches back for the last good one.
-        m->kindLine = JointsPanel::tr("Broken — %1").arg(JointsPanel::reasonText(d.error));
-        return m;
+    m->jointId = c.jointId;
+    m->kind = c.kind;
+    m->broken = c.broken;
+    m->selected = c.selected;
+    m->expanded = c.expanded;
+    m->fastener = c.fastener;
+    m->nameA = c.nameA;
+    m->nameB = c.nameB;
+    m->kindLine = c.kindLine;
+    m->caveat = c.caveat;
+    m->edge = c.edge;
+    m->edgeNamed = c.edgeNamed;
+    m->run = c.run;
+    m->inset = c.inset;
+    m->depthA = c.depthA;
+    m->depthB = c.depthB;
+    m->width = c.width;
+    m->unit = c.unit;
+    m->readoutText = c.readoutText;
+    m->sharedDrawn = c.sharedDrawn;
+    m->sharedWritten = c.sharedWritten;
+    for (const JointRows::Piece& piece : c.pieces) {
+        RowModel::Piece p;
+        p.name = piece.name;
+        p.depthText = piece.depthText;
+        for (const JointRows::Mark& mark : piece.marks) p.marks.push_back(mark.mm);
+        p.band = piece.band;
+        p.bandStart = piece.bandStart.mm;
+        p.bandEnd = piece.bandEnd.mm;
+        p.writtenLine = piece.writtenLine;
+        m->pieces.push_back(p);
     }
-
-    const Joinery::Readout& r = d.readout;
-    m->run = d.contact.runLength();
-    m->inset = r.insetMm;
-    m->depthA = r.depthAMm;
-    m->depthB = r.depthBMm;
-    m->width = r.widthMm;
-    m->edge = QString::fromStdString(r.referenceEdgeA);
-    m->edgeNamed = r.referenceEdgeNamed;
-    // THE caveat channel, kind and contact together - not regionShortfallCaveat()
-    // directly: a housing or a mortise on a contact that names no end-on piece
-    // carries a caveat of its own, and asking the one composed function is what
-    // keeps this row and the placement message showing the same set.
-    m->caveat = QString::fromStdString(Joinery::caveatsFor(joint.kind, d.contact));
-
-    if (m->fastener) {
-        const double size = d.items.empty() ? joint.params.sizeMm : d.items.front().sizeMm;
-        m->kindLine = JointsPanel::tr("%1, %2 × %3")
-                          .arg(kind, QString::number(d.items.size()), lengthText(size));
-        // Both pieces are drilled; a piece with no depth has nothing to mark.
-        if (r.depthAMm > 0.0)
-            m->pieces.push_back({m->nameA, JointsPanel::tr("drill %1").arg(lengthText(r.depthAMm)),
-                                 r.alongMm, false, 0.0, 0.0});
-        if (r.depthBMm > 0.0)
-            m->pieces.push_back({m->nameB, JointsPanel::tr("drill %1").arg(lengthText(r.depthBMm)),
-                                 r.alongMm, false, 0.0, 0.0});
-    } else {
-        m->kindLine = JointsPanel::tr("%1, %2 × %3")
-                          .arg(kind, numberOnly(r.widthMm), lengthText(r.depthAMm));
-        // The band is the item's own span along the run: the channel for a
-        // housing, the tenon between its shoulders, the whole lap.
-        const bool alongU = d.contact.runsAlongU();
-        const double centre = r.alongMm.empty() ? m->run / 2.0 : r.alongMm.front();
-        const double span = d.items.empty()
-                                ? m->run
-                                : (alongU ? d.items.front().spanUMm : d.items.front().spanVMm);
-        const double start = centre - span / 2.0;
-        const double end = centre + span / 2.0;
-        if (r.depthAMm > 0.0)
-            m->pieces.push_back({m->nameA,
-                                 JointsPanel::tr("%1 × %2").arg(numberOnly(r.widthMm),
-                                                                lengthText(r.depthAMm)),
-                                 {}, true, start, end});
-        // A housing's housed piece is not cut (depthB 0) and gets no strip.
-        if (r.depthBMm > 0.0)
-            m->pieces.push_back({m->nameB,
-                                 JointsPanel::tr("%1 × %2").arg(numberOnly(r.widthMm),
-                                                                lengthText(r.depthBMm)),
-                                 {}, true, start, end});
-    }
-
-    // The numbers this row carries, whether or not it is open - the suite's
-    // "a broken joint has none" reads this, so it must not depend on a click.
-    QStringList readout;
-    for (const RowModel::Piece& piece : m->pieces) {
-        readout << piece.depthText;
-        if (piece.band) {
-            readout << JointsPanel::tr("%1 to %2").arg(numberOnly(piece.bandStart),
-                                                      lengthText(piece.bandEnd));
-        } else {
-            QStringList parts;
-            for (double mark : piece.marks) parts << numberOnly(mark);
-            readout << parts.join(QStringLiteral(" · ")) + QLatin1Char(' ') + m->unit;
-        }
-    }
-    readout << m->edge;
-    if (m->fastener) readout << JointsPanel::tr("inset %1 from the face").arg(lengthText(m->inset));
-    m->readoutText = readout.join(QLatin1Char('\n'));
     return m;
 }
 
@@ -631,18 +547,7 @@ void layoutRow(RowModel& m, double width)
                 m.appCopy << piece.depthText;
                 y += std::max(who.rect.height(), depth.rect.height()) + 1.0;
 
-                QString numbers;
-                if (piece.band) {
-                    numbers = JointsPanel::tr("%1 to %2").arg(numberOnly(piece.bandStart),
-                                                             lengthText(piece.bandEnd));
-                } else {
-                    QStringList parts;
-                    for (double mark : piece.marks) parts << numberOnly(mark);
-                    numbers = parts.join(QStringLiteral(" · ")) + QLatin1Char(' ') + m.unit;
-                }
-                const QString line =
-                    m.edgeNamed ? JointsPanel::tr("from the %1 edge: %2").arg(m.edge, numbers)
-                                : numbers;
+                const QString line = piece.writtenLine;
                 RowModel::Painted written =
                     prepared(m, line, RowModel::Label, RowModel::InkText, x0, y, x1 - x0);
                 m.painted.push_back(written);
@@ -652,17 +557,9 @@ void layoutRow(RowModel& m, double width)
         }
 
         // The one line shared by both pieces.
-        const QString inset = JointsPanel::tr("inset %1 from the face").arg(lengthText(m.inset));
-        QString shared;
-        if (!m.fellBack) {
-            shared = m.fastener
-                         ? JointsPanel::tr("%1 from the %2 edge · %3").arg(m.unit, m.edge, inset)
-                         : JointsPanel::tr("%1 from the %2 edge").arg(m.unit, m.edge);
-        } else {
-            // Written: the edge is already named on every numbers line, or its
-            // absence already explained above them - only the inset is left.
-            shared = m.fastener ? inset : QString();
-        }
+        // Written: the edge is already named on every numbers line, or its
+        // absence already explained above them - only the inset is left.
+        const QString shared = m.fellBack ? m.sharedWritten : m.sharedDrawn;
         if (!shared.isEmpty()) {
             y += 5.0;
             RowModel::Painted line =

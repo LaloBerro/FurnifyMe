@@ -172,6 +172,9 @@ if(FURNIFYME_BUILD_APP)
       # The Versions drawer's model (Phase 3c).
       src/session/VersionsModel.cpp
       src/session/VersionsModel.h
+      # The Joints drawer's content and model (Phase 3d).
+      src/session/JointRows.cpp
+      src/session/JointRows.h
     )
     target_include_directories(furnify_session PUBLIC src)
     target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)
@@ -201,6 +204,10 @@ if(FURNIFYME_BUILD_APP)
     add_executable(versions_model_tests tests/versions_model.cpp)
     target_link_libraries(versions_model_tests PRIVATE furnify_session)
     add_test(NAME versions_model COMMAND versions_model_tests)
+
+    add_executable(joints_model_tests tests/joints_model.cpp)
+    target_link_libraries(joints_model_tests PRIVATE furnify_session)
+    add_test(NAME joints_model COMMAND joints_model_tests)
 
     add_executable(session_tests tests/session.cpp)
     target_link_libraries(session_tests PRIVATE furnify_session)
