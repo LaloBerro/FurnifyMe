@@ -56,8 +56,8 @@ public:
     // a copy, in the document's joint order), the selected joint, whether a
     // furniture is open, whether a row may delete (not sketching, not render
     // mode), and whether the drawer is on screen - a hidden one reads nothing.
-    void setState(const DocumentModel* doc, const std::vector<Joinery::Derivation>& derivations,
-                  int selectedJoint, bool live, bool enabled, bool shown);
+    void setState(const DocumentModel* doc, std::vector<Joinery::Derivation> derivations, int selectedJoint,
+                  bool live, bool enabled, bool shown);
 
 public slots:
     // A row's click: opens or closes it, and selects its joint.

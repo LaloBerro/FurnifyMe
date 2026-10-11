@@ -54,7 +54,7 @@ QVariantMap JointsModel::words() const
             {QStringLiteral("close"), QCoreApplication::translate("PanelCloseButton", "Close this panel")}};
 }
 
-void JointsModel::setState(const DocumentModel* doc, const std::vector<Joinery::Derivation>& derivations,
+void JointsModel::setState(const DocumentModel* doc, std::vector<Joinery::Derivation> derivations,
                            int selectedJoint, bool live, bool enabled, bool shown)
 {
     // A hidden drawer reads nothing (review I1 of Phase 3c): this runs on every
@@ -62,7 +62,7 @@ void JointsModel::setState(const DocumentModel* doc, const std::vector<Joinery::
     myShown = shown;
     if (!shown) return;
     myDocument = doc;
-    myDerivations = derivations;
+    myDerivations = std::move(derivations);
     mySelected = selectedJoint;
     const bool flags = live != myLive || enabled != myEnabled;
     myLive = live;
@@ -110,7 +110,10 @@ void JointsModel::activate(int jointId)
 
 void JointsModel::remove(int jointId)
 {
-    if (myEnabled && myHooks.remove) myHooks.remove(jointId);
+    // A hidden drawer deletes nothing, whatever the page last saw: a click in
+    // flight as render mode hides the card must not reach the document
+    // (review M3) - the gate is C++'s, VersionsModel's rule.
+    if (myShown && myEnabled && myHooks.remove) myHooks.remove(jointId);
 }
 
 void JointsModel::close()

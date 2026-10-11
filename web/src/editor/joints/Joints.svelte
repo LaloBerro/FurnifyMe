@@ -39,6 +39,8 @@
   let body: HTMLElement | undefined = $state();
   let probe: HTMLElement | undefined = $state();
   let probeWidth = $state(0);
+  let nameProbe: HTMLElement | undefined = $state();
+  let nameProbeWidth = $state(0);
   let alive = true;
 
   api.changed.connect(() => {
@@ -55,6 +57,15 @@
     void probeWidth;
     if (!probe) return (s: string) => s.length * 6;
     const style = getComputedStyle(probe);
+    return measurerFor(`${style.fontWeight} ${style.fontSize} ${style.fontFamily}`);
+  });
+
+  // The names' font, on the same terms.
+  const measureName = $derived.by(() => {
+    if (fixedMeasure) return fixedMeasure;
+    void nameProbeWidth;
+    if (!nameProbe) return (s: string) => s.length * 7;
+    const style = getComputedStyle(nameProbe);
     return measurerFor(`${style.fontWeight} ${style.fontSize} ${style.fontFamily}`);
   });
 
@@ -84,6 +95,9 @@
   style="left: {rect.x}px; top: {rect.y}px; width: {rect.w}px; height: {rect.h}px;"
 >
   <span class="probe" aria-hidden="true" bind:this={probe} bind:clientWidth={probeWidth}>0123456789 front</span>
+  <span class="probe name-probe" aria-hidden="true" bind:this={nameProbe} bind:clientWidth={nameProbeWidth}
+    >Side left ↔ Shelf</span
+  >
   <div class="body" bind:this={body}>
     <header>
       <span class="title">{words.title}</span>
@@ -97,6 +111,7 @@
           {words}
           {enabled}
           {measure}
+          {measureName}
           {stripWidth}
           onactivate={() => api.activate(row.id)}
           onremove={() => api.remove(row.id)}
@@ -128,12 +143,17 @@
     font-size: var(--font-badge);
     pointer-events: none;
   }
+  .name-probe {
+    font-size: var(--font-body);
+  }
   .body {
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
     min-height: 60px;
-    padding: 10px 1px 8px;
+    /* Flush with the card: the Qt drawer's 1 px inset cleared a border it
+       painted INSIDE its rect; a CSS border is already outside (review M4). */
+    padding: 10px 0 8px;
   }
   header {
     display: flex;

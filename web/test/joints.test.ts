@@ -126,6 +126,10 @@ describe('the Joints card', () => {
     mount(mockJoints([dowelRow(1, { expanded: true, edgeNamed: false, edge: why })]));
     expect(q('.joint .strip')).toBeNull();
     expect(q('.joint .edge-sentence')!.textContent).toBe(why);
+    // FIRST: every number below is read already knowing why no edge is named.
+    const order = all('.joint .markout > *').map((e) => e.className.split(' ')[0]);
+    expect(order[0]).toBe('edge-sentence');
+    expect(order.indexOf('written')).toBeGreaterThan(0);
   });
 
   it('a caveat shows with its caution mark', () => {
@@ -153,6 +157,53 @@ describe('the Joints card', () => {
     for (const b of all('.joints-card button')) expect(b.tabIndex).toBe(-1);
     await fireEvent.click(q('.joints-card .close')!);
     expect(calls(api, 'close').length).toBe(1);
+  });
+
+  it('a different measurer lays the labels out again (Review Focus 1, review I1)', async () => {
+    const api = mockJoints([dowelRow(1, { expanded: true })]);
+    const view = render(Joints, { props: { joints: api, rect, report: () => {}, measure, stripWidth: 212 } });
+    const lefts = () => all('.tick-label').map((l) => l.style.left);
+    const widths = () => all('.tick-label').map((l) => l.dataset.w);
+    const before = lefts();
+    expect(widths()).toEqual(['12', '18', '18', '12', '18', '18']);
+    await view.rerender({ joints: api, rect, report: () => {}, measure: (t: string) => t.length * 9, stripWidth: 212 });
+    await settle();
+    expect(lefts()).not.toEqual(before);
+    expect(widths()).toEqual(['18', '27', '27', '18', '27', '27']);
+  });
+
+  it("a short name keeps its whole width beside a long one - the Qt rule (review M1)", () => {
+    const long = 'Left side panel of the tall cabinet';
+    mount(mockJoints([dowelRow(1, { nameA: 'Shelf', nameB: long })]));
+    const names = all('.joint .name');
+    // 212 wide, " ↔ " 18: 194 to share; "Shelf" (30) fits half and keeps it all.
+    expect(names[0].style.maxWidth).toBe('30px');
+    expect(names[1].style.maxWidth).toBe('164px');
+  });
+
+  it('two long names share the line by half', () => {
+    const long = 'Left side panel of the tall cabinet';
+    mount(mockJoints([dowelRow(1, { nameA: long, nameB: long })]));
+    const names = all('.joint .name');
+    expect(names[0].style.maxWidth).toBe('97px');
+    expect(names[1].style.maxWidth).toBe('97px');
+  });
+
+  it("a click on the disabled delete's glyph never toggles the row (review M2)", async () => {
+    const api = mockJoints([dowelRow(1, { expanded: true })]);
+    api.enabled = false;
+    mount(api);
+    await fireEvent.click(q('.joint .delete svg')!, { detail: 1 });
+    await fireEvent.click(q('.joint .delete path')!, { detail: 1 });
+    expect(calls(api, 'activate')).toEqual([]);
+  });
+
+  it('a broken row that was open shows no number either (Review Focus 2, review M5)', () => {
+    const broken = { ...brokenRow(2), expanded: true, pieces: [dowelPiece('Side left')] };
+    mount(mockJoints([broken]));
+    expect(q('.joint .strip')).toBeNull();
+    expect(q('.joint .written')).toBeNull();
+    expect(/\d/.test(q('.joint')!.querySelector('.kind')!.textContent!)).toBe(false);
   });
 
   it("every word of the app's own on a row is clean", () => {

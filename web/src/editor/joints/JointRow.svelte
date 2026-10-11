@@ -20,6 +20,7 @@
     words,
     enabled,
     measure,
+    measureName,
     stripWidth,
     onactivate,
     onremove,
@@ -27,7 +28,8 @@
     row: JointRowData;
     words: JointsWords;
     enabled: boolean;
-    measure: (text: string) => number;
+    measure: (text: string) => number; // the badge font - tick labels
+    measureName: (text: string) => number; // the body font - the two names
     stripWidth?: number; // a test's fixed width; the measured one otherwise
     onactivate: () => void;
     onremove: () => void;
@@ -54,8 +56,29 @@
   const written = $derived(open && (!row.edgeNamed || (width > 0 && strips === null)));
   const shared = $derived(written ? row.sharedWritten : row.sharedDrawn);
 
+  // THE NAME RULE, the Qt drawer's: a name that fits in half the line keeps
+  // its whole width and the other takes the rest; only when both overflow half
+  // does each get half (review M1 - flex shrank a short name beside a long one).
+  const arrow = ' ↔ ';
+  const kDeleteReserve = 20 + 16; // the open row's delete and chevron
+  const nameWidths: [number, number] | null = $derived.by(() => {
+    if (width <= 0) return null;
+    const available = Math.max(24, width - (row.expanded ? kDeleteReserve : 0) - measureName(arrow));
+    let a = measureName(row.nameA);
+    let b = measureName(row.nameB);
+    if (a + b <= available) return null;
+    const half = available / 2;
+    if (a <= half) b = available - a;
+    else if (b <= half) a = available - b;
+    else a = b = half;
+    return [Math.floor(a), Math.floor(b)];
+  });
+
   function click(event: MouseEvent) {
     if (event.detail >= 2) return;
+    // A click on the delete control - its glyph included, which a DISABLED
+    // button does not stop - never toggles the row (review M2).
+    if ((event.target as Element | null)?.closest?.('.delete')) return;
     onactivate();
   }
 </script>
@@ -69,10 +92,11 @@
   data-joint={row.id}
   onclick={click}
 >
+  <div class="content" bind:clientWidth={measured}>
   <div class="names">
-    <span class="name">{row.nameA}</span>
-    <span class="arrow">↔</span>
-    <span class="name">{row.nameB}</span>
+    <span class="name" style:max-width={nameWidths ? `${nameWidths[0]}px` : null}>{row.nameA}</span>
+    <span class="arrow">{arrow}</span>
+    <span class="name" style:max-width={nameWidths ? `${nameWidths[1]}px` : null}>{row.nameB}</span>
     {#if row.expanded}
       <svg class="chevron" viewBox="0 0 8 5" aria-hidden="true"><polyline points="1,1 4,4 7,1" /></svg>
       <button
@@ -103,7 +127,7 @@
     </div>
   {/if}
   {#if open}
-    <div class="markout" bind:clientWidth={measured}>
+    <div class="markout">
       {#if strips}
         {#each row.pieces as piece, i (i)}
           {@const s = strips[i]}
@@ -112,7 +136,13 @@
             <div class="who"><span class="piece-name">{piece.name}</span><span class="depth">{piece.depthText}</span></div>
             <div class="ruler" class:below>
               {#each s.labels as label, j (j)}
-                <span class="tick-label" class:low={label.line === 1} style="left: {label.left}px">{label.text}</span>
+                <span
+                  class="tick-label"
+                  class:low={label.line === 1}
+                  data-w={label.width}
+                  data-anchor={label.anchor}
+                  style="left: {label.left}px">{label.text}</span
+                >
               {/each}
               {#if s.edgeLine >= 0}
                 <span class="edge-word" class:low={s.edgeLine === 1} style="left: 0px">{row.edge}</span>
@@ -148,6 +178,7 @@
       {/if}
     </div>
   {/if}
+  </div>
 </div>
 
 <style>
@@ -180,7 +211,6 @@
   .names {
     display: flex;
     align-items: center;
-    gap: 4px;
     min-width: 0;
     font-size: var(--font-body);
     color: var(--text);
@@ -193,10 +223,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 0 1 auto;
+    flex: none;
   }
   .arrow {
     flex: none;
+    white-space: pre;
     color: var(--text-muted);
   }
   .chevron {
@@ -224,6 +255,7 @@
     place-items: center;
   }
   .delete svg {
+    pointer-events: none;
     width: 14px;
     height: 14px;
     fill: none;

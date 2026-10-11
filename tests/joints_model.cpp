@@ -221,6 +221,13 @@ int main(int argc, char* argv[])
         model.setState(&doc, derivations(), 0, true, true, true);
         check(changes == hiddenChanges + 1, "an identical state says nothing");
 
+        // Hidden mid-click: the C++ gate refuses, whatever the page last saw (review M3).
+        const int removesBefore = removed.size();
+        model.setState(&doc, derivations(), 0, true, true, /*shown=*/false);
+        model.remove(model.rows().value(0).toMap().value("id").toInt());
+        check(removed.size() == removesBefore, "a hidden drawer's delete deletes nothing - the gate is C++'s");
+        model.setState(&doc, derivations(), 0, true, true, true);
+
         model.setState(&doc, derivations(), 0, /*live=*/false, false, true);
         check(model.rows().isEmpty() && !model.live(), "at the library the drawer lists nothing");
 

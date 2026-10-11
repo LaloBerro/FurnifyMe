@@ -31,6 +31,8 @@ export interface RulerLabel {
   text: string;
   left: number;
   line: 0 | 1; // 0 above the bar, 1 below it
+  width: number; // what the measurer said - the page checks it against the paint
+  anchor: number; // the tick it labels; centred on it unless clamped to the strip
 }
 
 export interface StripLayout {
@@ -77,7 +79,7 @@ export function layoutStrip(
     firstLeft[line] = Math.min(firstLeft[line], left);
     lastRight[line] = left + w;
     if (line === 1) staggered = true;
-    labels.push({ text: c.text, left, line });
+    labels.push({ text: c.text, left, line, width: w, anchor: c.anchor });
   }
 
   const edgeWidth = measure(edge);

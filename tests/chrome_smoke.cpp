@@ -1124,21 +1124,47 @@ int main(int argc, char* argv[])
         }
         waitFor(settled, 3000);
         check(settled(), "the slot grows with the open row and the card still covers it");
-#ifdef _WIN32
+        // Every label was laid out with the width it is PAINTED at, and sits
+        // centred on its tick unless the strip clamped it - so a font that
+        // changed under the ruler shows here (Review Focus 1, review I1).
+        const QString labelsTrue = QStringLiteral(
+            "JSON.stringify((() => { let n = 0, bad = []; "
+            "for (const ruler of document.querySelectorAll('.joint.open .ruler')) { const box = ruler.getBoundingClientRect(); "
+            "for (const l of ruler.querySelectorAll('.tick-label')) { n++; const r = l.getBoundingClientRect(); "
+            "const w = parseFloat(l.dataset.w), a = parseFloat(l.dataset.anchor), left = r.left - box.left; "
+            "const clamped = left < 0.5 || left + w > box.width - 0.5; "
+            "if (Math.abs(w - r.width) > 0.75) bad.push(l.textContent + ' w ' + w.toFixed(2) + ' painted ' + r.width.toFixed(2)); "
+            "else if (!clamped && Math.abs(left + w / 2 - a) > 1) bad.push(l.textContent + ' centre ' + (left + w / 2).toFixed(2) + ' tick ' + a.toFixed(2)); } } "
+            "return {n, bad: bad.join('; ')}; })())");
+        auto labelsHold = [&](const QString& where) {
+            const QJsonObject o = QJsonDocument::fromJson(jsString(page, labelsTrue).toUtf8()).object();
+            check(o.value("n").toInt() >= dowels && o.value("bad").toString().isEmpty(),
+                  QStringLiteral("%1: every tick label is laid out at its painted width, on its tick (%2 labels) %3")
+                      .arg(where).arg(o.value("n").toInt()).arg(o.value("bad").toString()));
+        };
         for (const Themes::Info& theme : Themes::all()) {
             Themes::select(theme.id);
             waitFor([&] { return jsString(page, "document.documentElement.dataset.theme") == theme.id; }, 3000);
             pump(400);
+#ifdef _WIN32
             capture(&window, outDir + "/chrome-joints-" + theme.id + ".png");
-            check(js(page, "!!document.querySelector('.joint.open .strip')").toBool() &&
-                      js(page, "document.querySelectorAll('.joint.open .tick-label').length").toInt() >= dowels,
-                  "the ruler is laid out again in " + theme.name);
+#endif
+            labelsHold(theme.name);
         }
         Themes::select(Themes::graphiteId());
         pump(300);
-#endif
+        {
+            const double textSize = Theme::spec().basePt;
+            SettingsEdits::setNumber(QStringLiteral("basePt"), textSize + 3);
+            pump(500);
+            labelsHold(QStringLiteral("text size %1 pt").arg(textSize + 3));
+            SettingsEdits::setNumber(QStringLiteral("basePt"), textSize);
+            pump(400);
+        }
 
         // The shelf moves away: the joint breaks, keeps its row open, and shows no number.
+        waitFor(settled, 2000);
+        const int openHeight = jointsSlot->height();   // before the break, never after it
         gp_Trsf away;
         // Sideways, clear of the panel - a shelf lifted along it would still meet it.
         away.SetTranslation(gp_Vec(100, 0, 0));
@@ -1149,7 +1175,6 @@ int main(int argc, char* argv[])
         check(!js(page, "!!" + row.arg(QStringLiteral(" .strip"))).toBool() &&
                   !QRegularExpression(QStringLiteral("\\d")).match(jsString(page, row.arg(QStringLiteral(" .kind")) + ".textContent")).hasMatch(),
               "with no ruler and no number - \"" + jsString(page, row.arg(QStringLiteral(" .kind")) + ".textContent") + "\" (Review Focus 2)");
-        const int openHeight = jointsSlot->height();
         waitFor([&] { return jointsSlot->height() < openHeight && settled(); }, 3000);
         check(jointsSlot->height() < openHeight && settled(),
               QStringLiteral("and the card shrinks to the broken row, still covering its slot (%1 -> %2)").arg(openHeight).arg(jointsSlot->height()));
