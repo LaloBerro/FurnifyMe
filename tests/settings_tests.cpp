@@ -6,7 +6,9 @@
 #include <windows.h>
 #endif
 
+#include "HtmlCardSlot.h"
 #include "SettingsEdits.h"
+#include "ViewportOverlay.h"
 #include "Theme.h"
 
 #include <QApplication>
@@ -85,6 +87,37 @@ int main(int argc, char* argv[])
     const Theme::Spec before = Theme::spec();
     check(!SettingsEdits::loadColoursFrom(junk) && Theme::spec() == before,
           "a file that is not a colour file changes nothing");
+
+    // --- a place in the overlay for an HTML card --------------------------------
+    {
+        QWidget viewport;
+        viewport.resize(1000, 700);
+        ViewportOverlay overlay(&viewport);
+        QWidget top(&viewport);
+        top.setFixedSize(100, 50);
+        QWidget card(&viewport);
+        card.setFixedSize(296, 380);
+        overlay.addWidget(&top, ViewportOverlay::Anchor::TopRight);
+        overlay.addWidget(&card, ViewportOverlay::Anchor::TopRight);
+        viewport.show();
+        overlay.relayout();
+        const QRect was = card.geometry();
+        HtmlCardSlot slot(QStringLiteral("settings"), QSize(296, 380), &viewport);
+        int placed = 0;
+        QObject::connect(&slot, &HtmlCardSlot::placed, [&] { ++placed; });
+        check(overlay.replaceWidget(&card, &slot), "a card can be swapped for a slot");
+        slot.show();
+        overlay.relayout();
+        check(slot.geometry() == was, "the slot stands exactly where the card stood");
+        check(!card.isVisible(), "and the card it replaced is hidden");
+        check(placed > 0, "a slot says when it is placed");
+        bool listed = false;
+        for (const QRect& r : overlay.occupiedRects()) listed = listed || r == slot.geometry();
+        check(listed, "the slot is an obstacle the toast steps around");
+        check(slot.testAttribute(Qt::WA_TransparentForMouseEvents), "and takes no click itself");
+        check(slot.objectName() == QStringLiteral("htmlCardSlot_settings"), "a slot is found by its card's name");
+        check(!overlay.replaceWidget(&card, &slot), "a widget that is not an entry is refused");
+    }
 
     std::printf("\n%s (%d failures, %d checks)\n", gFailures ? "FAIL" : "PASS", gFailures, gChecks);
     return gFailures ? 1 : 0;

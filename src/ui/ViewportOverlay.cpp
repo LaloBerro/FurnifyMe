@@ -64,6 +64,20 @@ void ViewportOverlay::addWidget(QWidget* widget, Anchor anchor)
     relayout();
 }
 
+bool ViewportOverlay::replaceWidget(QWidget* old, QWidget* replacement)
+{
+    if (!old || !replacement) return false;
+    for (Entry& entry : myEntries) {
+        if (entry.widget != old) continue;
+        replacement->setParent(myViewport);
+        entry.widget = replacement;
+        old->hide();
+        relayout();
+        return true;
+    }
+    return false;
+}
+
 void ViewportOverlay::addFloatingObstacle(QWidget* widget)
 {
     if (!widget) return;

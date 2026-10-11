@@ -90,6 +90,12 @@ public:
     explicit ViewportOverlay(QWidget* viewport);
 
     void addWidget(QWidget* widget, Anchor anchor);
+    // Puts `replacement` where `old` is anchored - same anchor, same place in
+    // the order, so it stacks exactly where `old` stacked - and hides `old`,
+    // which is anchored no more. Visibility of the replacement stays its
+    // caller's to decide. False, and nothing changed, when `old` is not an
+    // entry. How an HTML card takes over a Qt card's place (Phase 3b).
+    bool replaceWidget(QWidget* old, QWidget* replacement);
     void relayout();
 
     // The rectangles currently occupied by the anchored widgets - the chip

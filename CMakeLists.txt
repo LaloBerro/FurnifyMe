@@ -217,6 +217,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/AppBar.cpp
       src/ui/AppearancePanel.cpp
       src/ui/SettingsEdits.cpp
+      src/ui/HtmlCardSlot.cpp
       src/ui/AxisGizmo.cpp
       src/ui/CardSlide.cpp
       src/ui/DimensionRenderer.cpp
