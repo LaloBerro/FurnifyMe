@@ -156,7 +156,9 @@ signals:
 
 | When | gui_smoke checks | skips | failures | build |
 | --- | --- | --- | --- | --- |
-| Installer Qt, run 1 | | | | |
-| Installer Qt, run 2 | | | | |
-| End of Phase 2, run 1 | | | | |
-| End of Phase 2, run 2 | | | | |
+| Installer Qt, run 1 | 6370 | 1 | 0 | 705f388 |
+| Installer Qt, run 2 | 6370 | 1 | 0 | 705f388 |
+| Phase 2 before review, run 1 | 6370 | 1 | 0 | 2cc483f |
+| Phase 2 before review, run 2 | 6370 | 1 | 0 | 2cc483f |
+| End of Phase 2, run 1 | 6370 | 1 | 0 | bc9bec6 |
+| End of Phase 2, run 2 | 6370 | 1 | 0 | bc9bec6 |
