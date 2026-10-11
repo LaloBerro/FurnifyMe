@@ -79,13 +79,15 @@ int main(int argc, char* argv[])
 
     {
         EditorSession session;
-        std::vector<int> revisionsAtSignal;
+        // What the listener sees is the undo stack, because a checkpoint does
+        // not move revision() - a revision-based check here passed with the
+        // signal and the checkpoint swapped (the slice A review's finding).
+        std::vector<bool> undoableAtSignal;
         QObject::connect(&session, &EditorSession::aboutToChangeDocument, [&] {
-            revisionsAtSignal.push_back(session.document().revision());
+            undoableAtSignal.push_back(session.document().canUndo());
         });
-        const int before = session.document().revision();
         session.checkpoint();
-        check(revisionsAtSignal.size() == 1 && revisionsAtSignal.front() == before,
+        check(undoableAtSignal.size() == 1 && !undoableAtSignal.front() && session.document().canUndo(),
               "aboutToChangeDocument fires BEFORE the checkpoint is taken");
         session.document().addSolid(ModelingOps::makeBox(gp_Pnt(0, 0, 0), 5, 5, 5));
         check(session.undo() && session.document().count() == 0, "undo goes back through the session");

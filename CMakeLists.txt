@@ -151,8 +151,8 @@ if(FURNIFYME_BUILD_APP)
 
     # The editor session (migration Phase 1): the document, its checkpoints,
     # the outcome channel and the action registry - everything the HTML layer
-    # will talk to. Core and Gui ONLY: a QtWidgets include in here fails to
-    # compile, which is the structural guard furnify_geometry gives the kernel.
+    # will talk to. Core and Gui ONLY - and session_no_widgets below is what
+    # actually enforces that, since linking alone does not.
     find_package(Qt6 REQUIRED COMPONENTS Core Gui)
     add_library(furnify_session STATIC
       src/session/EditorSession.cpp
@@ -163,6 +163,24 @@ if(FURNIFYME_BUILD_APP)
     )
     target_include_directories(furnify_session PUBLIC src)
     target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)
+
+    # The no-Widgets rule above, enforced: a text scan of src/session (and the
+    # project headers it reaches) against the QtWidgets include directory.
+    # Linking Core + Gui alone does not enforce it - they export include/Qt6,
+    # so <QtWidgets/QWidget> would still resolve.
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+    get_target_property(qt_widgets_includes Qt6::Widgets INTERFACE_INCLUDE_DIRECTORIES)
+    set(qt_widgets_include_dir "")
+    foreach(dir IN LISTS qt_widgets_includes)
+      if(dir MATCHES "/QtWidgets$")
+        set(qt_widgets_include_dir "${dir}")
+      endif()
+    endforeach()
+    add_executable(session_no_widgets tests/session_no_widgets.cpp)
+    target_compile_definitions(session_no_widgets PRIVATE
+      FURNIFY_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src"
+      FURNIFY_QTWIDGETS_INCLUDE_DIR="${qt_widgets_include_dir}")
+    add_test(NAME session_no_widgets COMMAND session_no_widgets)
 
     add_executable(session_tests tests/session.cpp)
     target_link_libraries(session_tests PRIVATE furnify_session)

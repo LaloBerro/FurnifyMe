@@ -1,9 +1,10 @@
 #pragma once
 
 // The editor session (migration Phase 1, slice A): the document and
-// everything about it that is not a widget. QtCore and QtGui only - the
-// furnify_session target links nothing from Widgets, so a widget include here
-// fails to compile. MainWindow owns one and renders what it reports; the HTML
+// everything about it that is not a widget. QtCore and QtGui only: the
+// furnify_session target links nothing from Widgets, and the
+// session_no_widgets test fails on any Widgets include reached from here
+// (linking alone would not catch <QtWidgets/...>). MainWindow owns one and renders what it reports; the HTML
 // layer will subscribe to the same signals.
 
 #include "DocumentModel.h"

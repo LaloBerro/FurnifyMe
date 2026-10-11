@@ -312,7 +312,7 @@ Source files under `src/`, plus `tests/`:
 | `MainWindow.{h,cpp}` | menus, toolbar, mode switching |
 | `OcctViewWidget.{h,cpp}` | the Qt↔OCCT bridge — the only genuinely tricky file |
 | `DocumentModel.{h,cpp}` | owns the list of solids |
-| `session/EditorSession.{h,cpp}` | the document, checkpoints, undo/redo and the ONE outcome channel; Core + Gui only (`furnify_session`), tested by `session_tests` |
+| `session/EditorSession.{h,cpp}` | the document, checkpoints, undo/redo and the ONE outcome channel; Core + Gui only (`furnify_session`), tested by `session_tests`; `session_no_widgets` fails on any Widgets include reached from `src/session` |
 | `session/Outcome.h` | one thing to tell the user, as a value: Note, Failure or Status |
 | `session/ActionRegistry.{h,cpp}` | every `QAction` by a stable id, a JSON snapshot, and a `trigger()` that obeys `isEnabled()` |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |
