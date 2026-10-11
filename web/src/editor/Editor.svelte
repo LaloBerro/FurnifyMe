@@ -38,6 +38,12 @@
   // R4). Kept here, where something is always listening, until the card takes
   // it - the request can arrive before the card has mounted.
   let versionsRequest = $state(0);
+  // Each card claims the keyboard in its own name, so one closing never takes
+  // it from a field in another (Phase 3c review I2).
+  const keyboardFor = (card: string) => ({
+    claimKeyboard: () => chrome.claimKeyboardFor(card),
+    releaseKeyboard: () => chrome.releaseKeyboardFor(card),
+  });
   let seq = 0;
 
   const host = $derived({ w: viewW, h: viewH - (status.shown ? kStripHeight : 0) });
@@ -93,7 +99,7 @@
 {#if versions && cards.versions?.shown}
   <Versions
     {versions}
-    keyboard={chrome}
+    keyboard={keyboardFor('versions')}
     rect={cards.versions}
     report={(name, height) => chrome.reportCardHeight(name, height)}
     newRequest={versionsRequest}
@@ -101,7 +107,7 @@
   />
 {/if}
 {#if settings && cards.settings?.shown}
-  <Settings {settings} keyboard={chrome} rect={cards.settings} />
+  <Settings {settings} keyboard={keyboardFor('settings')} rect={cards.settings} />
 {/if}
 {#if status.shown}
   <StatusStrip {status} />

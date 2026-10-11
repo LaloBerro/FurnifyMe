@@ -1269,6 +1269,9 @@ QVector<FurnitureStore::VersionInfo> FurnitureStore::versions(const QString& id)
         VersionInfo info;
         info.name = entry.value(QStringLiteral("name")).toString();
         info.saved = QDateTime::fromString(entry.value(QStringLiteral("saved")).toString(), Qt::ISODateWithMs);
+        // versionThumbPath()'s rule, from the same read.
+        const QString thumb = entry.value(QStringLiteral("thumb")).toString();
+        if (!thumb.isEmpty()) info.thumbPath = versionsDir(id) + QStringLiteral("/") + thumb;
         result.push_back(info);
     }
     return result;

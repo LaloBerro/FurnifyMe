@@ -37,6 +37,20 @@ int main(int argc, char* argv[])
     doc.addSolid(ModelingOps::makeBox(gp_Pnt(0, 0, 0), 600, 300, 18));
     store.saveFurniture(id, doc, QImage());
 
+    // --- the store reads the list once (review I1) ---------------------------
+    {
+        QImage pic(8, 5, QImage::Format_RGB32);
+        pic.fill(Qt::gray);
+        const QString file = dir.filePath(QStringLiteral("pic.png"));
+        pic.save(file);
+        store.saveVersion(id, QStringLiteral("Pictured"), doc, file);
+        const QVector<FurnitureStore::VersionInfo> infos = store.versions(id);
+        check(infos.size() == 1 && infos[0].thumbPath == store.versionThumbPath(id, QStringLiteral("Pictured")) &&
+                  !infos[0].thumbPath.isEmpty(),
+              "a version's picture comes with the list, not from a second read of the manifest");
+        store.deleteVersion(id, QStringLiteral("Pictured"));
+    }
+
     QStringList saved, restored, compared, removed;
     int closes = 0;
     bool saveAnswer = true;
@@ -129,6 +143,28 @@ int main(int argc, char* argv[])
     saveAnswer = true;
     check(!model.save(QStringLiteral("Late")) && saved.size() == 2,
           "with + shut a save asks nothing (the gate is the model's too, not only the page's)");
+
+    // --- the drawer hidden (review C2, I1) ------------------------------------
+    model.setState(id, true, true, /*shown=*/false);
+    saveAnswer = true;
+    const int savesBefore = saved.size();
+    check(!model.save(QStringLiteral("Late blur")) && saved.size() == savesBefore,
+          "with the drawer hidden a save asks nothing - a blur arriving after the card went away writes no version");
+    model.setState(id, true, true, true);
+    const int beforeHiddenEdit = model.versions().size();
+    model.setState(id, true, true, false);
+    store.saveVersion(id, QStringLiteral("Made elsewhere"), doc);
+    const int changesHidden = changed.count();
+    model.setState(id, true, true, false);
+    model.setState(id, false, true, false);
+    model.setState(id, true, true, false);
+    check(model.versions().size() == beforeHiddenEdit,
+          "while the drawer is hidden a state change reads nothing from the store");
+    model.setState(id, true, true, true);
+    check(model.versions().size() == beforeHiddenEdit + 1 && changed.count() > changesHidden,
+          "and showing it reads the list again");
+    store.deleteVersion(id, QStringLiteral("Made elsewhere"));
+    model.setState(id, true, true, true);
 
     model.requestNew();
     check(asked.count() == 1, "File -> Save version... asks the card for a pending version");

@@ -49,6 +49,10 @@ export interface ChromeApi {
   // it back after (ruling R5 - the view is otherwise Qt::NoFocus).
   claimKeyboard(): void;
   releaseKeyboard(): void;
+  // The same, owned by one card (Phase 3c review I2): a card going away gives
+  // back only its own claims.
+  claimKeyboardFor(card: string): void;
+  releaseKeyboardFor(card: string): void;
   // A card that sizes itself (the Versions drawer, Phase 3c) says how tall it
   // is; its slot takes the height and the overlay re-stacks around it.
   reportCardHeight(name: string, height: number): void;

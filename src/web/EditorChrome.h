@@ -65,8 +65,9 @@ signals:
     void undoRequested(int stamp);
     void hitRectsChanged();
     void pageReady();
-    void keyboardClaimed();
-    void keyboardReleased();
+    // card: the HTML card whose field claims ('' for an anonymous claim).
+    void keyboardClaimed(const QString& card);
+    void keyboardReleased(const QString& card);
     void cardHeightReported(const QString& name, int height);
 
 public slots:
@@ -76,6 +77,10 @@ public slots:
     void ready();
     void claimKeyboard();
     void releaseKeyboard();
+    // The same, owned by one card (Phase 3c review I2): a card going away
+    // takes back only its own claims, never another card's.
+    void claimKeyboardFor(const QString& card);
+    void releaseKeyboardFor(const QString& card);
     // A card that sizes itself (the Versions drawer, Phase 3c) says how tall
     // it is; its slot takes the height.
     void reportCardHeight(const QString& name, int height);
@@ -103,8 +108,8 @@ public:
     // A typed field on the page holds the keyboard (ruling R5). While it
     // does, the view claims every ShortcutOverride, so Delete, Ctrl+Z or a
     // digit in a field never reaches a window shortcut.
-    void claimKeyboard();
-    void releaseKeyboard();
+    void claimKeyboard(const QString& card = QString());
+    void releaseKeyboard(const QString& card = QString());
     bool holdsKeyboard() const { return myHoldsKeyboard; }
     ~EditorChrome() override;
 
@@ -154,7 +159,10 @@ private:
     // to field B arrives as B's claim THEN A's release (the browser's
     // order), so a flag would give the keyboard up in the middle (review
     // I1); a count only lets go when the last holder does.
-    int myKeyboardDepth = 0;
+    // Counted PER CARD (Phase 3c review I2): a card going away gives back its
+    // own claims, and the keyboard goes only when no card holds it.
+    QHash<QString, int> myKeyboardClaims;
+    int keyboardClaimCount() const;
     void dropKeyboard();
     QPointer<QWidget> myFocusBefore;
     QPointer<QWidget> myWatchedProxy;

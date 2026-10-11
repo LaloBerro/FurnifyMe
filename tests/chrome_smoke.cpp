@@ -702,6 +702,13 @@ int main(int argc, char* argv[])
         check(jsString(page, "(document.querySelector('.pending input') || {}).value || ''") == QStringLiteral("Version 1"),
               "+ opens a pending version named Version 1");
         check(chrome->holdsKeyboard(), "and the field holds the keyboard");
+        // Another card closing leaves this one the keyboard (review I2): the
+        // claims are per card, and Settings held none.
+        settingsAction->trigger();
+        pump(300);
+        settingsAction->trigger();
+        pump(300);
+        check(chrome->holdsKeyboard(), "Settings opening and closing leaves the Versions field the keyboard (review I2)");
         const int bodiesBefore = static_cast<int>(window.document().solids().size());
         const std::vector<std::pair<int, Qt::KeyboardModifiers>> keys = {
             {Qt::Key_Delete, Qt::NoModifier}, {Qt::Key_Z, Qt::ControlModifier},
@@ -734,6 +741,12 @@ int main(int argc, char* argv[])
         check(versionsSlot->height() > emptyHeight && settled(),
               QStringLiteral("the slot grows with the list and the card still covers it exactly (%1 -> %2) (Review Focus 5)")
                   .arg(emptyHeight).arg(versionsSlot->height()));
+        const QRect grown = versionsSlot->geometry();
+        const QString bodyInside = QStringLiteral(
+            "(() => { const c = document.querySelector('.versions-card'), b = c.querySelector('.body'); "
+            "return b.getBoundingClientRect().bottom <= c.getBoundingClientRect().bottom - "
+            "parseFloat(getComputedStyle(c).borderBottomWidth) + 0.5; })()");
+        check(js(page, bodyInside).toBool(), "the card's whole body stands inside its border - none clipped (review M3)");
         const QString thumbLoaded = "(() => { const i = " + row.arg(QStringLiteral(" img.thumb")) +
                                     "; return !!i && i.complete && i.naturalWidth > 0; })()";
         waitFor([&] { return js(page, thumbLoaded).toBool(); }, 3000);
@@ -766,7 +779,13 @@ int main(int argc, char* argv[])
               "File -> Save version... opens the same pending card on the page");
         waitFor([&] { return chrome->holdsKeyboard(); }, 2000);
         versionsAction->trigger();   // hidden mid-edit (Review Focus 4)
+        // In an OS-active window the field is BLURRED as the card goes away,
+        // and a blur commits (review C2); the suite's windows never are, so
+        // the blur is dispatched here, after the hide, as it arrives there.
+        const bool blurred = js(page, "(() => { const f = document.querySelector('.pending input'); if (!f) return false; "
+                                      "f.dispatchEvent(new FocusEvent('blur')); return true; })()").toBool();
         pump(400);
+        check(blurred, "the name field was still there to blur as the drawer hid");
         check(!versionsSlot->isVisible() && !js(page, "!!document.querySelector('.versions-card')").toBool(),
               "Versions off takes the card away");
         check(!chrome->holdsKeyboard() && store.versions(furnitureId).size() == 1,
@@ -814,6 +833,9 @@ int main(int argc, char* argv[])
         check(versionsSlot->height() == emptyHeight && settled(),
               QStringLiteral("and the slot shrinks back to the empty state's height (%1) (Review Focus 5)")
                   .arg(versionsSlot->height()));
+        waitFor([&] { return !chrome->hitRegion().contains(QPoint(grown.center().x(), grown.bottom() - 4)); }, 2000);
+        check(!chrome->hitRegion().contains(QPoint(grown.center().x(), grown.bottom() - 4)),
+              "and where the taller card stood, a press reaches the viewport again (review M5)");
 
         // Each theme on the drawer, with one version to look at.
         // Saved through the window, so it carries its picture.

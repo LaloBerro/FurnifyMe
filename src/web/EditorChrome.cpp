@@ -45,12 +45,22 @@ void ChromeBridge::setCardMap(const QVariantMap& map)
 
 void ChromeBridge::claimKeyboard()
 {
-    emit keyboardClaimed();
+    emit keyboardClaimed(QString());
 }
 
 void ChromeBridge::releaseKeyboard()
 {
-    emit keyboardReleased();
+    emit keyboardReleased(QString());
+}
+
+void ChromeBridge::claimKeyboardFor(const QString& card)
+{
+    emit keyboardClaimed(card);
+}
+
+void ChromeBridge::releaseKeyboardFor(const QString& card)
+{
+    emit keyboardReleased(card);
 }
 
 void ChromeBridge::reportCardHeight(const QString& name, int height)
@@ -156,7 +166,7 @@ void EditorChrome::addCard(HtmlCardSlot* slot)
 void EditorChrome::syncCards()
 {
     QVariantMap map;
-    bool wentAway = false;
+    QStringList gone;
     for (const QPointer<HtmlCardSlot>& slot : myCards) {
         if (!slot) continue;
         QVariantMap card = rectMap(slot->geometry());
@@ -165,20 +175,30 @@ void EditorChrome::syncCards()
         // A card that WAS shown and is not now - never merely one that is
         // hidden: with two cards, the closed one would otherwise take the
         // keyboard from a field in the open one on every relayout (Phase 3c).
-        wentAway = wentAway || (myCardShown.value(slot->name()) && !shown);
+        if (myCardShown.value(slot->name()) && !shown) gone << slot->name();
         myCardShown.insert(slot->name(), shown);
         map.insert(slot->name(), card);
     }
-    // A card going away mid-edit gives the keyboard back from here too,
-    // not only from the page (Review Focus 4).
-    if (wentAway && myHoldsKeyboard) dropKeyboard();
+    // A card going away mid-edit gives ITS claims back from here too, not
+    // only from the page (Review Focus 4) - and only its own: a field in a
+    // card still open keeps the keyboard (Phase 3c review I2).
+    for (const QString& name : gone) myKeyboardClaims.remove(name);
+    if (!gone.isEmpty() && myHoldsKeyboard && keyboardClaimCount() == 0) dropKeyboard();
     myBridge->setCardMap(map);
 }
 
-void EditorChrome::claimKeyboard()
+int EditorChrome::keyboardClaimCount() const
+{
+    int total = 0;
+    for (int n : myKeyboardClaims) total += n;
+    return total;
+}
+
+void EditorChrome::claimKeyboard(const QString& card)
 {
     if (!myLive) return;
-    if (++myKeyboardDepth > 1 || myHoldsKeyboard) return;
+    ++myKeyboardClaims[card];
+    if (myHoldsKeyboard) return;
     QWebEngineView* view = myHost->view();
     QWidget* proxy = view->focusProxy() ? view->focusProxy() : view;
     // The WINDOW's focus widget, not QApplication's: that one is null for a
@@ -194,16 +214,18 @@ void EditorChrome::claimKeyboard()
     proxy->setFocus(Qt::OtherFocusReason);
 }
 
-void EditorChrome::releaseKeyboard()
+void EditorChrome::releaseKeyboard(const QString& card)
 {
-    if (myKeyboardDepth == 0) return;
-    if (--myKeyboardDepth > 0) return;
+    auto it = myKeyboardClaims.find(card);
+    if (it == myKeyboardClaims.end()) return;
+    if (--it.value() <= 0) myKeyboardClaims.erase(it);
+    if (keyboardClaimCount() > 0) return;
     dropKeyboard();
 }
 
 void EditorChrome::dropKeyboard()
 {
-    myKeyboardDepth = 0;
+    myKeyboardClaims.clear();
     if (!myHoldsKeyboard) return;
     myHoldsKeyboard = false;
     QWebEngineView* view = myHost->view();

@@ -46,6 +46,9 @@ public:
     struct VersionInfo {
         QString name;
         QDateTime saved;
+        // versionThumbPath() for this version, read with the list - empty when
+        // it has no picture (the Versions card asks per state change, review I1).
+        QString thumbPath;
     };
 
     // A SCENE in the library: several furniture arranged in one picture.

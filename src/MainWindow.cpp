@@ -1,9 +1,13 @@
 #include "MainWindow.h"
+// Outside the web guard: both are built into every preset, and
+// settingsSurface()/versionsSurface()/syncVersionsModel()/onSaveVersion()
+// use them in every build (Phase 3c review C1 - the vcpkg build had not
+// compiled since the Settings card, because only build-web was built).
+#include "session/VersionsModel.h"
+#include "ui/HtmlCardSlot.h"
 #ifdef FURNIFYME_WEB_UI
 #include "web/EditorChrome.h"
-#include "ui/HtmlCardSlot.h"
 #include "web/SettingsBridge.h"
-#include "session/VersionsModel.h"
 #endif
 
 #include <cstdio>
@@ -1349,6 +1353,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // toggle above.
     connect(myVersionsPanelAction, &QAction::toggled, this, [this](bool shown) {
         if (QWidget* versions = versionsSurface()) versions->setVisible(shown);
+        // At once, before the page's late blur-commit can arrive (review C2).
+        syncVersionsModel();
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -4814,7 +4820,12 @@ void MainWindow::onSaveVersion()
     if (myVersionsPanelAction) myVersionsPanelAction->setChecked(true);
     // In HTML-chrome mode the page opens its own pending card (ruling R4 of
     // Phase 3c); the request is kept until the card mounts.
-    if (htmlChromeLive() && myVersionsModel) myVersionsModel->requestNew();
+    // canOpenSaveVersion() as beginNewVersion() checks it: trigger() ignores
+    // isEnabled(), and a request left waiting would open a pending card the
+    // next time the drawer mounts (review M1).
+    if (htmlChromeLive() && myVersionsModel) {
+        if (canOpenSaveVersion()) myVersionsModel->requestNew();
+    }
     else if (myVersionsPanel) myVersionsPanel->beginNewVersion();
 }
 
@@ -10486,8 +10497,12 @@ void MainWindow::syncVersionsModel()
     if (!myVersionsModel) return;
     // VersionsPanel::refresh()'s two gates: + is canOpenSaveVersion(), the
     // rows are open unless at the library or sketching.
+    // The third term, whether the drawer is on screen: a hidden drawer reads
+    // nothing and saves nothing, so the blur a live window delivers as the
+    // card goes away cannot write a version (review C2, I1).
+    QWidget* surface = versionsSurface();
     myVersionsModel->setState(myShowingInitScreen ? QString() : myFurnitureId, canOpenSaveVersion(),
-                              !myShowingInitScreen && !mySketching);
+                              !myShowingInitScreen && !mySketching, surface && surface->isVisible());
 }
 
 bool MainWindow::htmlChromeLive() const

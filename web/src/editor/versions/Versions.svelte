@@ -138,7 +138,12 @@
   onMount(() => {
     const measure = () => {
       if (!body) return;
-      const h = Math.ceil(body.getBoundingClientRect().height);
+      // The body plus the card's own border, which the slot also holds
+      // (review M3).
+      const card = body.parentElement;
+      const style = card ? getComputedStyle(card) : null;
+      const border = style ? parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth) : 0;
+      const h = Math.ceil(body.getBoundingClientRect().height + (border || 0));
       if (h <= 0) return;
       // The harness reads the last height the card reported.
       (window as unknown as { __versionsHeight?: number }).__versionsHeight = h;

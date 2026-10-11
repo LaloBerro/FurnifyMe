@@ -37,9 +37,8 @@ QVariantList VersionsModel::readList() const
     if (myFurnitureId.isEmpty()) return list;
     for (const FurnitureStore::VersionInfo& v : myStore.versions(myFurnitureId)) {
         QString url;
-        const QString thumb = myStore.versionThumbPath(myFurnitureId, v.name);
-        const QFileInfo info(thumb);
-        if (!thumb.isEmpty() && info.exists()) {
+        const QFileInfo info(v.thumbPath);
+        if (!v.thumbPath.isEmpty() && info.exists()) {
             QUrl u = QUrl::fromLocalFile(info.absoluteFilePath());
             u.setQuery(QStringLiteral("v=%1").arg(info.lastModified().toMSecsSinceEpoch()));
             url = u.toString();
@@ -61,12 +60,20 @@ void VersionsModel::refresh()
     emit changed();
 }
 
-void VersionsModel::setState(const QString& furnitureId, bool canSave, bool rowsEnabled)
+void VersionsModel::setState(const QString& furnitureId, bool canSave, bool rowsEnabled, bool shown)
 {
     const bool gates = canSave != myCanSave || rowsEnabled != myRowsEnabled || furnitureId != myFurnitureId;
     myFurnitureId = furnitureId;
     myCanSave = canSave;
     myRowsEnabled = rowsEnabled;
+    myShown = shown;
+    // A hidden drawer reads nothing: this runs on every appStateChanged -
+    // every selection click, every step of a colour drag (review I1). Showing
+    // it reads the list again.
+    if (!shown) {
+        if (gates) emit changed();
+        return;
+    }
     const QVariantList next = readList();
     const bool list = next != myVersions;
     myVersions = next;
@@ -93,7 +100,10 @@ QString VersionsModel::defaultName() const
 bool VersionsModel::save(const QString& name)
 {
     const QString trimmed = name.trimmed();
-    if (trimmed.isEmpty() || !myCanSave || !myHooks.save) return false;
+    // !myShown: the drawer went away, and the page's late blur-commit must
+    // write nothing (review C2) - the hide reaches this model before the
+    // page's save call does.
+    if (trimmed.isEmpty() || !myCanSave || !myShown || !myHooks.save) return false;
     return myHooks.save(trimmed);
 }
 

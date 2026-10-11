@@ -53,9 +53,10 @@ public:
     QVariantMap words() const;
 
     // The open furniture ('' at the library) and the two gates MainWindow
-    // derives (canOpenSaveVersion(), and not at the library nor sketching).
-    // Re-reads the store; says changed() only when something moved.
-    void setState(const QString& furnitureId, bool canSave, bool rowsEnabled);
+    // derives (canOpenSaveVersion(), and not at the library nor sketching),
+    // and whether the drawer is shown. Re-reads the store while it is; says
+    // changed() only when something moved.
+    void setState(const QString& furnitureId, bool canSave, bool rowsEnabled, bool shown = true);
     // File -> Save version...: the card opens its pending version.
     void requestNew();
 
@@ -80,5 +81,8 @@ private:
     QString myFurnitureId;
     bool myCanSave = false;
     bool myRowsEnabled = false;
+    // Whether the drawer is on screen: a hidden one reads nothing and saves
+    // nothing (review I1, C2).
+    bool myShown = true;
     QVariantList myVersions;
 };
