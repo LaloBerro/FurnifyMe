@@ -1324,18 +1324,19 @@ bool DocumentModel::materialLook(const std::string& material, MaterialLook& out)
     return false;
 }
 
+// These two record the furniture's wood AT A SAVE (MainWindow's save path is
+// their one caller) - and a save is never an edit (CLAUDE.md: "Save and
+// autosave are never a checkpoint"). So neither moves revision(): it did, and
+// autosave's save 400 ms after every edit moved it with nothing to undo,
+// killing the HTML toast's Undo and a refusal's "wrote nothing" check alike.
 void DocumentModel::setActiveMaterial(const std::string& material)
 {
-    if (myActiveMaterial == material) return;
     myActiveMaterial = material;
-    ++myRevision;
 }
 
 void DocumentModel::setWoodTextureFile(const std::string& path)
 {
-    if (myWoodTextureFile == path) return;
     myWoodTextureFile = path;
-    ++myRevision;
 }
 
 void DocumentModel::setMaterialLook(const MaterialLook& look)

@@ -23,12 +23,13 @@
     "highlightHover": "#5EE4F0",
     "highlightSelected": "#FFA500",
     "sizesOneBody": "#9AB4FF",
-    "dimensionLine": "#A57BFF",
-    "axisX": "#E0564A",
+    "dimensionLine": "#8A4DFF",
+    "axisX": "#6A2B2B",
     "gizmoAxisX": "#E0564A",
-    "axisY": "#7FC84E",
+    "axisY": "#3F5E2D",
     "gizmoAxisY": "#7FC84E",
-    "gizmoAxisZ": "#4A80E0"
+    "gizmoAxisZ": "#4A80E0",
+    "sizesGroup": "#E8A6FF"
   },
   "page": {}
 }

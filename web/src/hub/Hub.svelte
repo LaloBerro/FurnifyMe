@@ -171,7 +171,9 @@
     flex: 1;
     margin: 0;
     font-family: var(--title-family, inherit);
-    font-size: var(--title-size, var(--font-title));
+    /* The page heading keeps the type scale: only a CARD title takes a
+       theme's extra size (DESIGN.md theme decisions). */
+    font-size: var(--font-title);
     font-weight: var(--title-weight, 600);
     letter-spacing: var(--title-tracking, normal);
   }

@@ -117,9 +117,41 @@ QString currentId()
     return current();
 }
 
+namespace {
+// "key=value" pieces of a serialized spec, in order.
+QStringList pieces(const Theme::Spec& spec)
+{
+    return Theme::serializeSpec(spec).split(QLatin1Char(';'), Qt::SkipEmptyParts);
+}
+}  // namespace
+
+void storeEdits(const QString& id, const Theme::Spec& spec)
+{
+    if (!store().save || !exists(id)) return;
+    const QStringList base = pieces(baseSpec(id));
+    QStringList changed;
+    for (const QString& piece : pieces(spec))
+        if (!base.contains(piece)) changed << piece;
+    store().save(id, changed.join(QLatin1Char(';')));
+}
+
 void storeCurrent()
 {
-    if (store().save) store().save(current(), Theme::serializeSpec());
+    storeEdits(current(), Theme::spec());
+}
+
+Theme::Spec editedSpec(const QString& id)
+{
+    const Theme::Spec base = baseSpec(id);
+    if (!store().load) return base;
+    const QString edits = store().load(id);
+    if (edits.isEmpty()) return base;
+    // The base written out first and the edits after it: deserializeSpec()
+    // applies pieces in order, so each edit lands over the base it belongs
+    // to. A full snapshot (an older store) is simply all edits.
+    Theme::Spec out;
+    if (!Theme::deserializeSpec(Theme::serializeSpec(base) + QLatin1Char(';') + edits, out)) return base;
+    return out;
 }
 
 bool select(const QString& id)
@@ -138,12 +170,7 @@ namespace {
 // Installs `id`'s stored edits, or its base, and announces it.
 void install(const QString& id)
 {
-    Theme::Spec next = baseSpec(id);
-    if (store().load) {
-        Theme::Spec stored;
-        const QString text = store().load(id);
-        if (!text.isEmpty() && Theme::deserializeSpec(text, stored)) next = stored;
-    }
+    const Theme::Spec next = editedSpec(id);
     current() = id;
     Theme::setSpec(next);
     emit notifier()->currentChanged(id);

@@ -39,6 +39,7 @@
 #include <QColorDialog>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QSettings>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QStatusBar>
@@ -745,6 +746,49 @@ int main(int argc, char* argv[])
         }
         text.replace(QStringLiteral("Bench"), QStringLiteral(" "));
         check(bannedIn(text).isEmpty(), "no word the page shows is banned - found: " + bannedIn(text).join(", "));
+    }
+
+    // --- a returning user keeps the theme they were given (themes review C1) --------
+    // Inside a settings scope of its own (an ini under the temp dir), so no
+    // window here can write the real registry.
+    {
+        const QString org = QCoreApplication::organizationName(), app = QCoreApplication::applicationName();
+        const QSettings::Format format = QSettings::defaultFormat();
+        QTemporaryDir settingsDir;
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QCoreApplication::setOrganizationName(QStringLiteral("FurnifyMe-chrome_smoke"));
+        QCoreApplication::setApplicationName(QStringLiteral("returning-theme-probe"));
+        Theme::Spec legacy = Theme::defaultSpec();
+        legacy.accent = QColor(12, 200, 34);
+        QSettings().setValue(QStringLiteral("appearance"), Theme::serializeSpec(legacy));   // a build before themes
+        const Theme::Spec violet = Themes::baseSpec(Themes::defaultId());
+        {
+            MainWindow first(nullptr, /*persistProgress=*/true, library.path());
+            check(Themes::currentId() == Themes::defaultId() && Theme::spec() == violet,
+                  "launch 1 of a build with themes starts Violet Glass Float at its base");
+        }
+        {
+            MainWindow second(nullptr, /*persistProgress=*/true, library.path());
+            check(Themes::currentId() == Themes::defaultId() && Theme::spec() == violet,
+                  "and launch 2 is still Violet Glass Float at its base - not the old colours (C1)");
+            Themes::select(Themes::graphiteId());
+            check(Theme::spec().accent == QColor(12, 200, 34), "the old colours are Graphite's");
+            Themes::select(Themes::defaultId());
+            check(Theme::spec() == violet, "and Violet stays Violet");
+        }
+        {
+            QSettings().setValue(QStringLiteral("theme"), QStringLiteral("from-a-newer-build"));
+            MainWindow third(nullptr, /*persistProgress=*/true, library.path());
+            check(Themes::currentId() == Themes::defaultId() && Theme::spec() == violet,
+                  "a stored theme this build does not know starts the default at its base");
+        }
+        QSettings().clear();
+        QSettings::setDefaultFormat(format);
+        QCoreApplication::setOrganizationName(org);
+        QCoreApplication::setApplicationName(app);
+        check(Themes::currentId() == Themes::graphiteId() && Theme::spec() == Theme::defaultSpec(),
+              "each window gave the theme back when it closed");
     }
 
     // --- a page that is not there reports through Qt (review I3) ---------------------

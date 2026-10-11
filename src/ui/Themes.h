@@ -64,7 +64,16 @@ bool select(const QString& id);
 // default spec, and storing it would overwrite the user's own Graphite edits.
 void start(const QString& id);
 // Stores the live spec as the current theme's edits (the debounced save).
+// Only what differs from the theme's base is kept (themes review I1): a base
+// fixed in a later build still reaches a theme the user has visited, and a
+// token added later starts at the theme's value, not Graphite's. A theme
+// nobody changed stores nothing.
 void storeCurrent();
+// The same for any theme and spec - how a build before themes files its
+// colours as Graphite's edits.
+void storeEdits(const QString& id, const Theme::Spec& spec);
+// `id`'s stored edits laid over its CURRENT base.
+Theme::Spec editedSpec(const QString& id);
 
 class Notifier : public QObject
 {

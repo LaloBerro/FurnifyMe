@@ -21,14 +21,15 @@
     "gridMajor": "#1E1E3A",
     "body": "#B3B3B8",
     "highlightHover": "#F472B6",
-    "highlightSelected": "#B9A4FB",
+    "highlightSelected": "#9F7AFA",
     "sizesOneBody": "#67E8F9",
-    "dimensionLine": "#A78BFA",
-    "axisX": "#F87171",
+    "dimensionLine": "#7C3AED",
+    "axisX": "#73373B",
     "gizmoAxisX": "#F87171",
-    "axisY": "#86EFAC",
+    "axisY": "#406F56",
     "gizmoAxisY": "#86EFAC",
-    "gizmoAxisZ": "#60A5FA"
+    "gizmoAxisZ": "#60A5FA",
+    "sizesGroup": "#FBBF24"
   },
   "page": {}
 }

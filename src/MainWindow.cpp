@@ -771,19 +771,19 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
                           [](const QString& id, const QString& spec) {
                               QSettings().setValue(QStringLiteral("appearance/") + id, spec);
                           }});
+        //
+        // ONLY a theme's own key holds its colours (themes review C1): the
+        // live "appearance" is read as LEGACY input alone - a window with a
+        // "theme" key never reads it back, or a migrating user's old colours
+        // came back on the second launch wearing the new theme's name.
         const QString storedTheme = settings.value(QStringLiteral("theme")).toString();
-        if (!storedTheme.isEmpty()) {
-            Themes::start(storedTheme);
-            Theme::Spec stored;
-            if (Theme::deserializeSpec(settings.value(QStringLiteral("appearance")).toString(), stored))
-                Theme::setSpec(stored);
-        } else {
+        if (storedTheme.isEmpty()) {
+            Theme::Spec legacy;
             if (!settings.contains(QStringLiteral("appearance/graphite")) &&
-                settings.contains(QStringLiteral("appearance")))
-                QSettings().setValue(QStringLiteral("appearance/graphite"),
-                                     settings.value(QStringLiteral("appearance")));
-            Themes::start(Themes::defaultId());
+                Theme::deserializeSpec(settings.value(QStringLiteral("appearance")).toString(), legacy))
+                Themes::storeEdits(Themes::graphiteId(), legacy);
         }
+        Themes::start(storedTheme.isEmpty() ? Themes::defaultId() : storedTheme);
         QSettings().setValue(QStringLiteral("theme"), Themes::currentId());
         connect(Themes::notifier(), &Themes::Notifier::currentChanged, this,
                 [](const QString& id) { QSettings().setValue(QStringLiteral("theme"), id); });
@@ -1455,6 +1455,7 @@ MainWindow::~MainWindow()
     // writer is cut first, so the restore writes nothing.
     if (myPersistProgress && !myThemeBeforeWindow.isEmpty()) {
         QObject::disconnect(Themes::notifier(), nullptr, this, nullptr);
+        QObject::disconnect(Theme::notifier(), nullptr, this, nullptr);
         Themes::setStore({});
         Themes::start(myThemeBeforeWindow);
         Theme::setSpec(mySpecBeforeWindow);
@@ -2033,7 +2034,7 @@ void MainWindow::buildActions()
     for (const Themes::Info& theme : Themes::all()) {
         auto* action = new QAction(theme.name, this);
         action->setCheckable(true);
-        action->setToolTip(tr("Dress the app in %1 - each theme keeps your own colour edits").arg(theme.name));
+        action->setToolTip(tr("Dress the app in %1 — each theme keeps your own colour edits").arg(theme.name));
         action->setChecked(theme.id == Themes::currentId());
         themeGroup->addAction(action);
         const QString id = theme.id;

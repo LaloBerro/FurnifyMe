@@ -106,8 +106,18 @@ int main(int argc, char* argv[])
         check(!info.name.isEmpty() && !info.fontFamily.isEmpty(), "every theme has a name and a typeface: " + id);
         check(contrast(s.text, s.panel) >= 4.5, "text reads on a panel: " + id);
         check(contrast(s.accentText, s.chipActive) >= 4.5, "accent words read on a pressed chip: " + id);
-        check(distinct({s.highlightHover, s.highlightSelected, s.sizesOneBody, s.axisX, s.axisY, s.gizmoAxisZ}, 60),
-              "selection, hover, sizes and axes are told apart: " + id);
+        // Every viewport ink against every other, and against the bodies they
+        // sit on (review I2): DESIGN.md - distinct within the theme, checked
+        // against its own body.
+        check(distinct({s.highlightHover, s.highlightSelected, s.sizesOneBody, s.sizesGroup, s.dimensionLine}, 60),
+              "hover, selection, both size inks and the outline line are told apart: " + id);
+        check(distinct({s.gizmoAxisX, s.gizmoAxisY, s.gizmoAxisZ}, 60), "the gizmo arms are told apart: " + id);
+        for (const QColor& ink : {s.highlightHover, s.highlightSelected, s.sizesOneBody, s.sizesGroup, s.dimensionLine})
+            check(distinct({ink, s.body}, 80), "and each stands off the bodies: " + id + " " + ink.name().toUtf8());
+        // The grid's own axis lines stay muted below the gizmo arms (review
+        // I3), or an arm lying along an axis disappears into it.
+        check(s.axisX.lightness() < s.gizmoAxisX.lightness() && s.axisY.lightness() < s.gizmoAxisY.lightness(),
+              "the grid's axis lines are quieter than the gizmo arms: " + id);
         check(s.body.hsvSaturationF() < 0.1, "bodies stay grey: " + id);
         check(s.fontFamily == info.fontFamily, "the theme's typeface is its spec's: " + id);
         check(QFontDatabase::families().contains(info.fontFamily), "the theme's typeface is installed: " + id);
@@ -136,6 +146,12 @@ int main(int argc, char* argv[])
         Themes::select(Themes::graphiteId());
         check(Theme::spec().accent != QColor(1, 2, 3), "another theme does not wear that edit");
         check(saved.contains(QStringLiteral("nightshade-glass")), "the theme left behind is stored");
+        // Only what the user changed (review I1): a base fix in a later build
+        // must still reach a theme the user has visited.
+        check(saved.value(QStringLiteral("nightshade-glass")).contains(QStringLiteral("accent=")) &&
+                  !saved.value(QStringLiteral("nightshade-glass")).contains(QStringLiteral("panel=")),
+              "a theme keeps only the user's own changes, not a copy of its base");
+        check(saved.value(Themes::graphiteId()).isEmpty(), "and a theme nobody changed keeps nothing at all");
         Themes::select(QStringLiteral("nightshade-glass"));
         check(Theme::spec().accent == QColor(1, 2, 3), "coming back brings the edit back (Review Focus 2)");
         SettingsEdits::reset();
