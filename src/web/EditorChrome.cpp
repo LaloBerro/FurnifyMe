@@ -155,16 +155,22 @@ void EditorChrome::syncCards()
     }
     // A card going away mid-edit gives the keyboard back from here too,
     // not only from the page (Review Focus 4).
-    if (anyHidden && myHoldsKeyboard) releaseKeyboard();
+    if (anyHidden && myHoldsKeyboard) dropKeyboard();
     myBridge->setCardMap(map);
 }
 
 void EditorChrome::claimKeyboard()
 {
-    if (myHoldsKeyboard || !myLive) return;
+    if (!myLive) return;
+    if (++myKeyboardDepth > 1 || myHoldsKeyboard) return;
     QWebEngineView* view = myHost->view();
     QWidget* proxy = view->focusProxy() ? view->focusProxy() : view;
-    myFocusBefore = QApplication::focusWidget();
+    // The WINDOW's focus widget, not QApplication's: that one is null for a
+    // window the OS has not activated, which is every window the harness shows.
+    myFocusBefore = view->window()->focusWidget();
+    // Only a widget OUTSIDE the page is somewhere to go back to: handing focus
+    // back to the page's own render widget would keep it claiming keys.
+    if (myFocusBefore && (myFocusBefore == view || view->isAncestorOf(myFocusBefore))) myFocusBefore = nullptr;
     myHoldsKeyboard = true;
     watchFocusProxy();
     view->setFocusPolicy(Qt::StrongFocus);
@@ -174,11 +180,28 @@ void EditorChrome::claimKeyboard()
 
 void EditorChrome::releaseKeyboard()
 {
+    if (myKeyboardDepth == 0) return;
+    if (--myKeyboardDepth > 0) return;
+    dropKeyboard();
+}
+
+void EditorChrome::dropKeyboard()
+{
+    myKeyboardDepth = 0;
     if (!myHoldsKeyboard) return;
     myHoldsKeyboard = false;
+    QWebEngineView* view = myHost->view();
+    QWidget* now = view->window()->focusWidget();
+    // Focus goes back only if it is still the page's. A release that follows
+    // the user clicking a Qt field (the Items filter, the Re-measure field)
+    // must leave it there, or the next letters reach window shortcuts instead
+    // of the field they were typed into (review I2).
+    const bool stillOurs = !now || now == view || view->isAncestorOf(now);
     refuseFocus();
-    if (myFocusBefore) myFocusBefore->setFocus(Qt::OtherFocusReason);
-    else myHost->view()->clearFocus();
+    if (stillOurs) {
+        if (myFocusBefore) myFocusBefore->setFocus(Qt::OtherFocusReason);
+        else view->clearFocus();
+    }
     myFocusBefore = nullptr;
 }
 
@@ -241,8 +264,11 @@ void EditorChrome::setLive(bool live)
     // A dead page leaves the viewport outright: its mask would otherwise
     // keep swallowing presses on the strip's band over nothing at all.
     if (!live) {
-        releaseKeyboard();
+        dropKeyboard();
         myHost->view()->hide();
+        // Nothing of the page takes the pointer any more - the wheel shield
+        // and the mask read this region (review I3).
+        myBridge->reportHitRects({});
     }
     emit liveChanged(live);
 }
@@ -279,7 +305,7 @@ bool EditorChrome::eventFilter(QObject* watched, QEvent* event)
         event->accept();
         return true;
     }
-    if (watched == myViewport && event->type() == QEvent::Wheel) {
+    if (watched == myViewport && event->type() == QEvent::Wheel && myLive) {
         // THE WHEEL SHIELD (Review Focus 2). A wheel the page did not consume
         // - over a card's title, or a list already at its end - is handed by
         // WebEngine to the view's PARENT, the viewport, which would zoom the

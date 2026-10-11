@@ -26,6 +26,8 @@
   let text = $state('');
   let input: HTMLInputElement | undefined = $state();
   let before = 0;
+  // Something was sent during this edit - what Escape has to take back.
+  let dirty = false;
   let claimed = false;
 
   $effect(() => {
@@ -57,25 +59,52 @@
     keyboard.releaseKeyboard();
   }
 
+  function send(v: number) {
+    if (editing) dirty = true;
+    onchange(v);
+  }
+
   function step(direction: number) {
-    onchange(settle(value + direction * field.step));
+    const next = settle(value + direction * field.step);
+    // The field shows the step at once, as a spin box does, even mid-edit
+    // (review I5) - the spec's echo is not waited for.
+    if (editing) text = format(next);
+    send(next);
   }
 
   function focus() {
     claim();
-    if (!editing) before = value;
+    if (!editing) {
+      before = value;
+      dirty = false;
+    }
     editing = true;
   }
 
+  // Enter and blur: what was typed is applied, clamped to the range, as a
+  // spin box fixes up its text when it is left.
   function finish() {
+    if (!editing) return;
+    const v = parse(text);
+    if (!Number.isNaN(v)) {
+      const settled = settle(v);
+      if (settled !== value) onchange(settled);
+      text = format(settled);
+    } else {
+      text = format(value);
+    }
     editing = false;
-    text = format(value);
     release();
   }
 
+  // While typing, only a value the field could hold is applied (review I4):
+  // a "1" on the way to "12" is not a font size of 8 pt for one keystroke -
+  // QSpinBox treats it as intermediate and says nothing either.
   function typed() {
     const v = parse(text);
-    if (!Number.isNaN(v)) onchange(settle(v));
+    if (Number.isNaN(v) || v < field.min || v > field.max) return;
+    if (field.decimals === 0 && !Number.isInteger(v)) return;
+    send(Number(v.toFixed(field.decimals)));
   }
 
   function key(event: KeyboardEvent) {
@@ -83,9 +112,12 @@
       event.preventDefault();
       finish();
       input?.blur();
+      return;
     } else if (event.key === 'Escape') {
       event.preventDefault();
-      onchange(before);
+      // Put back what the edit started from - only if anything was sent.
+      if (dirty) onchange(before);
+      dirty = false;
       editing = false;
       text = format(before);
       release();

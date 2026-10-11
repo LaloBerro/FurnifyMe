@@ -68,7 +68,7 @@ signals:
     void colourLoadRefused(const QString& path);
 
 private:
-    ActionRegistry* myRegistry = nullptr;
+    QPointer<ActionRegistry> myRegistry;
     ActionWatch* myWatch = nullptr;
     QVariantMap myLayout;
     QSet<QString> myAllowed;

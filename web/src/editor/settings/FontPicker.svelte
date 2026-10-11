@@ -45,6 +45,7 @@
     open = true;
     keyboard.claimKeyboard();
     window.addEventListener('mousedown', outside, true);
+    window.addEventListener('blur', left);
     await tick();
     list?.focus();
     list?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest' });
@@ -54,6 +55,7 @@
     if (!open) return;
     open = false;
     window.removeEventListener('mousedown', outside, true);
+    window.removeEventListener('blur', left);
     if (!keep && before) onpreview(before);
     before = '';
     keyboard.releaseKeyboard();
@@ -90,6 +92,18 @@
     if (root && !root.contains(event.target as Node)) close(true);
   }
 
+  // Focus leaving the page - a click on the viewport or any Qt widget - closes
+  // the list keeping what it shows, as the Qt combo's popup closes on any
+  // outside click (review I6); so does focus moving elsewhere on the page.
+  function left() {
+    close(true);
+  }
+
+  function focusOut(event: FocusEvent) {
+    const next = event.relatedTarget as Node | null;
+    if (!root || !next || !root.contains(next)) close(true);
+  }
+
   onDestroy(() => close(false));
 </script>
 
@@ -98,7 +112,7 @@
     >{shown}</button
   >
   {#if open}
-    <div class="list" role="listbox" tabindex="-1" bind:this={list} onkeydown={key}>
+    <div class="list" role="listbox" tabindex="-1" bind:this={list} onkeydown={key} onfocusout={focusOut}>
       {#each families as family, i (family.family)}
         <div
           class="family"

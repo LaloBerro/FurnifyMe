@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
-import Settings from '../src/editor/settings/Settings.svelte';
+import Settings, { forgetTab } from '../src/editor/settings/Settings.svelte';
 import { mockSettings } from '../src/editor/settings/mock';
 import { bannedWordsIn } from './banned';
 
@@ -41,7 +41,10 @@ async function openTab(index: number) {
   await settle();
 }
 
-beforeEach(() => vi.useFakeTimers());
+beforeEach(() => {
+  vi.useFakeTimers();
+  forgetTab();
+});
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -254,15 +257,50 @@ describe('a number field', () => {
     field.value = '12';
     await fireEvent.input(field);
     expect(calls(settings, 'setNumber').at(-1)!.args).toEqual(['basePt', 12]);
-    field.value = '99 pt';
-    await fireEvent.input(field);
-    expect(calls(settings, 'setNumber').at(-1)!.args).toEqual(['basePt', 14]);
     field.value = 'abc';
     await fireEvent.input(field);
-    expect(calls(settings, 'setNumber')).toHaveLength(2);
+    expect(calls(settings, 'setNumber')).toHaveLength(1);
     await fireEvent.keyDown(field, { key: 'Escape' });
     expect(calls(settings, 'setNumber').at(-1)!.args).toEqual(['basePt', 10]);
     expect(keys.calls).toEqual(['claim', 'release']);
+  });
+
+  it('a partial entry outside the range is not applied while typing (review I4)', async () => {
+    const { settings } = mount();
+    await openTab(1);
+    const field = q('[data-number="basePt"] input') as HTMLInputElement;
+    await fireEvent.focus(field);
+    field.value = '1';
+    await fireEvent.input(field);
+    expect(calls(settings, 'setNumber')).toHaveLength(0);
+    field.value = '12.5';
+    await fireEvent.input(field);
+    expect(calls(settings, 'setNumber')).toHaveLength(0);
+    field.value = '99 pt';
+    await fireEvent.input(field);
+    expect(calls(settings, 'setNumber')).toHaveLength(0);
+    await fireEvent.keyDown(field, { key: 'Enter' });
+    expect(calls(settings, 'setNumber').at(-1)!.args).toEqual(['basePt', 14]);
+  });
+
+  it('a step while editing shows the new value at once (review I5)', async () => {
+    const { settings } = mount();
+    await openTab(1);
+    const field = q('[data-number="basePt"] input') as HTMLInputElement;
+    await fireEvent.focus(field);
+    await fireEvent.keyDown(field, { key: 'ArrowUp' });
+    await settle();
+    expect(calls(settings, 'setNumber').at(-1)!.args).toEqual(['basePt', 11]);
+    expect(field.value).toBe('11 pt');
+  });
+
+  it('Escape with nothing changed writes nothing', async () => {
+    const { settings } = mount();
+    await openTab(1);
+    const field = q('[data-number="basePt"] input') as HTMLInputElement;
+    await fireEvent.focus(field);
+    await fireEvent.keyDown(field, { key: 'Escape' });
+    expect(calls(settings, 'setNumber')).toHaveLength(0);
   });
 
   it('Enter commits and gives the keyboard back', async () => {
@@ -314,10 +352,47 @@ describe('the font list', () => {
     expect(calls(settings, 'setFontFamily').map((c) => c.args[0])).toEqual(['Arial', 'Georgia', 'DM Sans 14pt']);
   });
 
+  it('closes, keeping the preview, when focus leaves the page (review I6)', async () => {
+    const { settings, keys } = mount();
+    await openTab(1);
+    await fireEvent.click(q('.font-picker .current')!);
+    await settle();
+    await fireEvent.keyDown(q('.font-picker [role="listbox"]')!, { key: 'ArrowDown' });
+    window.dispatchEvent(new Event('blur'));
+    await settle();
+    expect(q('.font-picker [role="listbox"]')).toBeNull();
+    expect(keys.calls).toEqual(['claim', 'release']);
+    expect(calls(settings, 'setFontFamily').map((c) => c.args[0])).toEqual(['Arial']);
+  });
+
+  it('and when focus moves out of the list inside the page', async () => {
+    const { keys } = mount();
+    await openTab(1);
+    await fireEvent.click(q('.font-picker .current')!);
+    await settle();
+    const list = q('.font-picker [role="listbox"]')!;
+    list.dispatchEvent(new FocusEvent('focusout', { relatedTarget: document.body, bubbles: true }));
+    await settle();
+    expect(q('.font-picker [role="listbox"]')).toBeNull();
+    expect(keys.calls).toEqual(['claim', 'release']);
+  });
+
   it('shows the family by its shown name', async () => {
     mount();
     await openTab(1);
     expect(q('.font-picker .current')!.textContent).toBe('DM Sans');
+  });
+});
+
+describe('reopening', () => {
+  it('opens on the tab it was left on, for the session (as the Qt drawer does)', async () => {
+    const first = mount();
+    await openTab(2);
+    first.view.unmount();
+    mount();
+    await settle();
+    expect(q('[data-tab="2"]')!.getAttribute('aria-selected')).toBe('true');
+    await openTab(0);
   });
 });
 

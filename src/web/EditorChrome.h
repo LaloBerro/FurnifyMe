@@ -145,6 +145,12 @@ private:
     QPoint myPointer{-1, -1};
     bool myLive = false;
     bool myHoldsKeyboard = false;
+    // How many of the page's fields hold the keyboard. Moving from field A
+    // to field B arrives as B's claim THEN A's release (the browser's
+    // order), so a flag would give the keyboard up in the middle (review
+    // I1); a count only lets go when the last holder does.
+    int myKeyboardDepth = 0;
+    void dropKeyboard();
     QPointer<QWidget> myFocusBefore;
     QPointer<QWidget> myWatchedProxy;
     std::vector<QPointer<HtmlCardSlot>> myCards;

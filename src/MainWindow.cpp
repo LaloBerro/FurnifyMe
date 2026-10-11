@@ -10295,7 +10295,13 @@ void MainWindow::useHtmlChrome()
     if (myOverlay) connect(myOverlay, &ViewportOverlay::laidOut, this, &MainWindow::syncHtmlChrome);
     // Until the page says it is listening, and for good once it dies, the
     // Qt toast and status bar carry every report (review I3).
-    connect(myHtmlChrome, &EditorChrome::liveChanged, this, [this] {
+    connect(myHtmlChrome, &EditorChrome::liveChanged, this, [this](bool live) {
+        // The card's place follows the page: the slot while it can draw,
+        // the Qt drawer back in its anchor when it cannot.
+        if (myOverlay && mySettingsSlot && myAppearancePanel) {
+            if (live) myOverlay->replaceWidget(myAppearancePanel, mySettingsSlot);
+            else myOverlay->replaceWidget(mySettingsSlot, myAppearancePanel);
+        }
         updateActions();
         syncHtmlChrome();
     });
@@ -10304,8 +10310,10 @@ void MainWindow::useHtmlChrome()
     // the overlay, and the page draws the card there. The Qt drawer stays
     // built - gui_smoke drives it - and simply never shows in this mode.
     if (myOverlay && myAppearancePanel) {
+        // Built now, anchored when the page says it is listening (liveChanged
+        // above) - until then Settings is still the Qt drawer.
         mySettingsSlot = new HtmlCardSlot(QStringLiteral("settings"), myAppearancePanel->size(), myView);
-        myOverlay->replaceWidget(myAppearancePanel, mySettingsSlot);
+        mySettingsSlot->hide();
         myHtmlChrome->addCard(mySettingsSlot);
     }
     auto* settings = new SettingsBridge(&mySession.actions(), settingsRows(), myHtmlChrome);
@@ -10337,7 +10345,10 @@ void MainWindow::reportColourLoadRefused(const QString& path)
 
 QWidget* MainWindow::settingsSurface() const
 {
-    if (mySettingsSlot) return mySettingsSlot;
+    // The page's card only while the page is there to draw it (review I3):
+    // before it says it is listening, and for good once it dies, Settings is
+    // the Qt drawer again, in its own place.
+    if (mySettingsSlot && htmlChromeLive()) return mySettingsSlot;
     return myAppearancePanel;
 }
 

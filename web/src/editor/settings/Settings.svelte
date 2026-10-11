@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  // Which tab is open is SESSION state: the Qt drawer keeps it while it is
+  // hidden, and so does this one, though the card unmounts when it hides.
+  // Never persisted - the drawer opens on Colours in a fresh session.
+  let sessionTab = 0;
+  export function forgetTab() {
+    sessionTab = 0;
+  }
+</script>
+
 <script lang="ts">
   // THE SETTINGS DRAWER as a card on the editor's chrome page (migration
   // Phase 3b) - AppearancePanel, ported. Where it stands is not this page's
@@ -38,7 +48,10 @@
   const indexActions = (list: ActionState[]) => Object.fromEntries(list.map((a) => [a.id, a]));
   let spec: SettingsSpec = $state(api.spec);
   let actions: Record<string, ActionState> = $state(indexActions(api.actions));
-  let tab = $state(0);
+  let tab = $state(sessionTab);
+  $effect(() => {
+    sessionTab = tab;
+  });
   let hovered = $state(false);
 
   let alive = true;

@@ -36,6 +36,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QStatusBar>
@@ -503,10 +504,42 @@ int main(int argc, char* argv[])
         check(!chrome->holdsKeyboard() && page->focusPolicy() == Qt::NoFocus &&
                   (!page->focusProxy() || page->focusProxy()->focusPolicy() == Qt::NoFocus),
               "Escape gives the keyboard back");
-        QKeyEvent after(QEvent::ShortcutOverride, Qt::Key_Delete, Qt::NoModifier);
-        after.ignore();
-        QCoreApplication::sendEvent(proxy, &after);
-        check(!after.isAccepted(), "and afterwards the page claims nothing");
+        // Keys go where focus is; afterwards it is no longer the page's. (A
+        // ShortcutOverride sent straight AT the render widget is answered by
+        // WebEngine itself, focused or not - not what a real key meets.)
+        check(window.focusWidget() != proxy && window.focusWidget() != page,
+              QStringLiteral("and afterwards keys go back to where they went before (%1)")
+                  .arg(window.focusWidget() ? window.focusWidget()->metaObject()->className() : "none"));
+    }
+
+    // --- the keyboard passes from field to field, and never steals focus (review I1, I2) --
+    {
+        // The browser's order moving from field A to field B: B's claim
+        // first, A's release after. The keyboard must stay with the page.
+        chrome->bridge()->claimKeyboard();
+        chrome->bridge()->claimKeyboard();
+        chrome->bridge()->releaseKeyboard();
+        check(chrome->holdsKeyboard(), "moving from one field to the next keeps the keyboard");
+        chrome->bridge()->releaseKeyboard();
+        check(!chrome->holdsKeyboard(), "and the last field out gives it back");
+
+        // The user clicks a Qt field while typing in the page: the release
+        // that follows must leave focus where the user put it.
+        auto* elsewhere = new QLineEdit(&window);
+        elsewhere->setGeometry(10, 10, 80, 20);
+        elsewhere->show();
+        window.view()->setFocus();
+        chrome->bridge()->claimKeyboard();
+        QWidget* proxy = page->focusProxy() ? page->focusProxy() : page;
+        check(window.focusWidget() == proxy, "a claim puts focus in the page");
+        elsewhere->setFocus();
+        chrome->bridge()->releaseKeyboard();
+        check(window.focusWidget() == elsewhere, "a release leaves focus where the user moved it");
+        window.view()->setFocus();
+        chrome->bridge()->claimKeyboard();
+        chrome->bridge()->releaseKeyboard();
+        check(window.focusWidget() == window.view(), "but hands it back when it was still the page's");
+        delete elsewhere;
     }
 
     // --- a wheel over the card never zooms (Review Focus 2) -----------------------------
@@ -641,6 +674,14 @@ int main(int argc, char* argv[])
         pump(300);
         check(broken.htmlChrome() && !broken.htmlChrome()->isLive(), "a page that never loaded is not live");
         check(broken.statusBar()->isVisible(), "so the Qt status bar stays up");
+        if (QAction* brokenSettings = actionNamed(&broken, QStringLiteral("Settings..."))) {
+            brokenSettings->trigger();
+            pump(200);
+            check(broken.findChild<AppearancePanel*>()->isVisible(),
+                  "and Settings opens the Qt drawer, not an empty slot (review I3)");
+            brokenSettings->trigger();
+            pump(100);
+        }
         TopoDS_Face f;
         for (TopExp_Explorer e(broken.document().solids().front().shape, TopAbs_FACE); e.More(); e.Next()) {
             f = TopoDS::Face(e.Current());
@@ -673,6 +714,28 @@ int main(int argc, char* argv[])
         window.pullFaceBy(live, -100000.0);
         ToastHost* toasts = window.findChild<ToastHost*>();
         check(toasts && toasts->isShowing(), "and the next Failure is shown by the Qt toast");
+        if (settingsAction) {
+            settingsAction->trigger();
+            pump(200);
+            check(window.findChild<AppearancePanel*>()->isVisible(),
+                  "Settings opens the Qt drawer once the page is gone (review I3)");
+            settingsAction->trigger();
+            pump(100);
+        }
+        {
+            // Where the page's strip was - always in its hit region while it
+            // lived - a wheel zooms again.
+            const double distance = window.view()->camera().state().distance;
+            const QPoint at(window.view()->width() / 2, window.view()->height() - 8);
+            QWheelEvent wheel(QPointF(at), QPointF(window.view()->mapToGlobal(at)), QPoint(), QPoint(0, 120),
+                              Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(window.view(), &wheel);
+            pump(150);
+            check(std::abs(window.view()->camera().state().distance - distance) > 1e-6,
+                  "and a wheel where the strip was zooms again (review I3)");
+            check(chrome->hitRegion().isEmpty(),
+                  "a dead page keeps no part of the viewport for itself (review I3)");
+        }
     }
 #endif
 

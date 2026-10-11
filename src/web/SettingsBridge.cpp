@@ -64,6 +64,10 @@ SettingsBridge::SettingsBridge(ActionRegistry* registry, const std::vector<Setti
         for (const QAction* action : row.actions) {
             if (!action) continue;
             const QString id = ActionRegistry::idFor(action->text());
+            // Only an action the registry holds under that id: one that lost
+            // a slug clash was never registered, and its row must not mirror
+            // the action that won it.
+            if (id.isEmpty() || !registry || registry->action(id) != action) continue;
             ids << id;
             watched << id;
             myAllowed.insert(id);
