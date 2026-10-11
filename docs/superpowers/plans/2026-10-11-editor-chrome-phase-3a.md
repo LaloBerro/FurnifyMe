@@ -28,3 +28,17 @@
 4. **`MainWindow` HTML-chrome mode**: `useHtmlChrome()`, routing in `onReported()`, the relays (stamp, undo-enabled, notes, obstacles on `laidOut` + balloon, status on `messageChanged` + `appStateChanged`), the bar hidden; `main.cpp` turns it on in a web build unless `--qt-chrome`.
 5. **`chrome_smoke` harness** — the real editor in HTML-chrome mode: a delete's Note with Undo that undoes; a Failure's reason on the strip after its toast; notifications off; the stamp dismissal; hover pause; the toast clear of the rail, the drawer and the balloon; the strip's three parts; captures to look at.
 6. **Gate**: `gui_smoke` twice, ctest, vitest, `hub_smoke`, `chrome_smoke`; review; fixes; docs.
+
+## Gate record
+
+| When | Checks | Skips | Failures | Run |
+| --- | --- | --- | --- | --- |
+| 523b039 run 1 | 6370 | 1 | 9 (re-measure cascade; a compile was running beside it - T-070) | 523b039 |
+| 523b039 run 2 | 6370 | 1 | 0 | 523b039 |
+| d2772e0 (review fixes) run 1 | 6370 | 1 | 0 | d2772e0 |
+| d2772e0 run 2 | 6370 | 1 | 9 (same cascade, a compile beside it) | d2772e0 |
+| 3ed2b8f (T-070 fixed), quiet, run 1 | 6370 | 1 | 0 | 3ed2b8f |
+| 3ed2b8f, quiet, run 2 | 6370 | 1 | 0 | 3ed2b8f |
+
+The cascade was reproduced filtered under a compile (1 in 3) and is gone after T-070's
+fix (9 of 9 under load). Lesson kept: a gate run shares the machine with nothing heavy.
