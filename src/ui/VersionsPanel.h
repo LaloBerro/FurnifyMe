@@ -87,6 +87,9 @@ public:
     // public so gui_smoke asserts against the real number rather than a
     // second copy of it.
     static constexpr int kDeleteConfirmMs = 4000;
+    // The drawer's width at the live type scale - public so the HTML card's
+    // slot (Phase 3c) is exactly as wide as this drawer.
+    static int cardWidth();
 
     void refresh();
     int rowCount() const { return static_cast<int>(myRows.size()); }
@@ -197,7 +200,6 @@ protected:
 
 private:
     void applyTheme();
-    static int cardWidth();
     // The width a card's own content (its thumbnail, its bar) actually has
     // to work with - cardWidth() minus this panel's own outer padding.
     static int cardInnerWidth();

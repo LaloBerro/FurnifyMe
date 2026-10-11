@@ -82,6 +82,9 @@ public:
     // The Settings drawer's Viewport and Working rows, in order - see the definition.
     std::vector<SettingsEdits::Row> settingsRows() const;
     EditorChrome* htmlChrome() const { return myHtmlChrome; }
+    // The Versions drawer's model on the chrome page (Phase 3c); null until
+    // useHtmlChrome().
+    class VersionsModel* versionsModel() const { return myVersionsModel; }
     // Not = default (M1): a drawer drag still live when the window dies is
     // ended HERE, while the document and every member it reads are alive.
     // Left to member order, ~QWidget's own hide would reach
@@ -2366,6 +2369,12 @@ private:
     // the one shown and hidden off the Settings action.
     class HtmlCardSlot* mySettingsSlot = nullptr;
     QWidget* settingsSurface() const;
+    // The Versions card's place and model (Phase 3c), on settingsSurface()'s
+    // terms; the model is re-derived on every appStateChanged.
+    class HtmlCardSlot* myVersionsSlot = nullptr;
+    class VersionsModel* myVersionsModel = nullptr;
+    QWidget* versionsSurface() const;
+    void syncVersionsModel();
     void reportColourSaveFailed(const QString& path);
     void reportColourLoadRefused(const QString& path);
     void syncHtmlChrome();

@@ -3,6 +3,7 @@
 #include "web/EditorChrome.h"
 #include "ui/HtmlCardSlot.h"
 #include "web/SettingsBridge.h"
+#include "session/VersionsModel.h"
 #endif
 
 #include <cstdio>
@@ -1111,8 +1112,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // show will happily undo one.
         if (QWidget* settings = settingsSurface())
             settings->setVisible(myAppearanceAction->isChecked() && !hiddenForRenderMode);
-        if (myVersionsPanel)
-            myVersionsPanel->setVisible(myVersionsPanelAction->isChecked() && !hiddenForRenderMode);
+        if (QWidget* versions = versionsSurface())
+            versions->setVisible(myVersionsPanelAction->isChecked() && !hiddenForRenderMode);
         if (myJointsPanel)
             myJointsPanel->setVisible(myJointsPanelAction->isChecked() && !hiddenForRenderMode);
         // The status bar's own shown state, on the same derived-not-stored
@@ -1347,7 +1348,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // The versions drawer, on the same terms - see the items drawer's
     // toggle above.
     connect(myVersionsPanelAction, &QAction::toggled, this, [this](bool shown) {
-        if (myVersionsPanel) myVersionsPanel->setVisible(shown);
+        if (QWidget* versions = versionsSurface()) versions->setVisible(shown);
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -4811,7 +4812,10 @@ void MainWindow::onSaveVersion()
     // menu behave the same as clicking the button: the pending card has
     // somewhere visible to appear.
     if (myVersionsPanelAction) myVersionsPanelAction->setChecked(true);
-    if (myVersionsPanel) myVersionsPanel->beginNewVersion();
+    // In HTML-chrome mode the page opens its own pending card (ruling R4 of
+    // Phase 3c); the request is kept until the card mounts.
+    if (htmlChromeLive() && myVersionsModel) myVersionsModel->requestNew();
+    else if (myVersionsPanel) myVersionsPanel->beginNewVersion();
 }
 
 bool MainWindow::saveVersion(const QString& name)
@@ -10388,6 +10392,10 @@ void MainWindow::useHtmlChrome()
             if (live) myOverlay->replaceWidget(myAppearancePanel, mySettingsSlot);
             else myOverlay->replaceWidget(mySettingsSlot, myAppearancePanel);
         }
+        if (myOverlay && myVersionsSlot && myVersionsPanel) {
+            if (live) myOverlay->replaceWidget(myVersionsPanel, myVersionsSlot);
+            else myOverlay->replaceWidget(myVersionsSlot, myVersionsPanel);
+        }
         updateActions();
         syncHtmlChrome();
     });
@@ -10409,6 +10417,34 @@ void MainWindow::useHtmlChrome()
     connect(settings, &SettingsBridge::colourSaveFailed, this, &MainWindow::reportColourSaveFailed);
     connect(settings, &SettingsBridge::colourLoadRefused, this, &MainWindow::reportColourLoadRefused);
     myHtmlChrome->registerObject(QStringLiteral("settings"), settings);
+
+    // THE VERSIONS CARD (Phase 3c): the Settings card's shape, with one
+    // difference - its height is the page's, because the list grows.
+    if (myOverlay && myVersionsPanel) {
+        myVersionsSlot = new HtmlCardSlot(QStringLiteral("versions"),
+                                          QSize(VersionsPanel::cardWidth(), 160), myView);
+        myVersionsSlot->hide();
+        myHtmlChrome->addCard(myVersionsSlot);
+        connect(myVersionsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+            if (myOverlay) myOverlay->relayout();
+        });
+        // The width follows the type scale, as the Qt drawer's does.
+        connect(Theme::notifier(), &Theme::Notifier::changed, myVersionsSlot, [this] {
+            myVersionsSlot->setFixedWidth(Theme::wholeDevicePixels(VersionsPanel::cardWidth()));
+        });
+    }
+    VersionsModel::Hooks hooks;
+    hooks.save = [this](const QString& name) { return saveVersion(name); };
+    hooks.restore = [this](const QString& name) { return restoreVersion(name); };
+    hooks.compare = [this](const QString& name) { return openCompare(name); };
+    hooks.remove = [this](const QString& name) { return deleteVersionByName(name); };
+    hooks.close = [this] {
+        if (myVersionsPanelAction) myVersionsPanelAction->setChecked(false);
+    };
+    myVersionsModel = new VersionsModel(myStore, hooks, myHtmlChrome);
+    myHtmlChrome->registerObject(QStringLiteral("versions"), myVersionsModel);
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncVersionsModel);
+    syncVersionsModel();
     myHtmlChrome->start();
     connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);
@@ -10436,6 +10472,22 @@ QWidget* MainWindow::settingsSurface() const
     // the Qt drawer again, in its own place.
     if (mySettingsSlot && htmlChromeLive()) return mySettingsSlot;
     return myAppearancePanel;
+}
+
+QWidget* MainWindow::versionsSurface() const
+{
+    // settingsSurface()'s rule: the page's card only while the page can draw it.
+    if (myVersionsSlot && htmlChromeLive()) return myVersionsSlot;
+    return myVersionsPanel;
+}
+
+void MainWindow::syncVersionsModel()
+{
+    if (!myVersionsModel) return;
+    // VersionsPanel::refresh()'s two gates: + is canOpenSaveVersion(), the
+    // rows are open unless at the library or sketching.
+    myVersionsModel->setState(myShowingInitScreen ? QString() : myFurnitureId, canOpenSaveVersion(),
+                              !myShowingInitScreen && !mySketching);
 }
 
 bool MainWindow::htmlChromeLive() const

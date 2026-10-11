@@ -21,6 +21,8 @@
 #include "Theme.h"
 #include "ViewportOverlay.h"
 #include "ui/AppearancePanel.h"
+#include "ui/VersionsPanel.h"
+#include "session/VersionsModel.h"
 #include "ui/GestureChip.h"
 #include "ui/SettingsEdits.h"
 #include "ui/Themes.h"
@@ -655,6 +657,18 @@ int main(int argc, char* argv[])
               "Settings off takes the card away");
         check(!chrome->holdsKeyboard(), "and gives the keyboard back mid-edit");
     }
+    // --- the Versions card's place (Phase 3c) ------------------------------------
+    QAction* versionsAction = actionNamed(&window, QStringLiteral("Versions"));
+    check(versionsAction != nullptr, "the editor has Versions");
+    if (versionsAction && !versionsAction->isChecked()) versionsAction->trigger();
+    pump(400);
+    QWidget* versionsSlot = window.findChild<QWidget*>(QStringLiteral("htmlCardSlot_versions"));
+    check(versionsSlot && versionsSlot->isVisible(), "Versions shows the card's slot");
+    check(!window.findChild<VersionsPanel*>()->isVisible(), "and the Qt drawer stays hidden");
+    check(window.versionsModel() && window.versionsModel()->canSave(),
+          "the page's versions object is there, with + open");
+    if (!versionsSlot || !versionsAction) return 1;
+
     // --- each theme on the editor's chrome (T-072): a capture of each ----------------
     {
         if (!settingsSlot->isVisible()) settingsAction->trigger();
