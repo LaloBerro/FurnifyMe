@@ -5911,6 +5911,11 @@ void OcctViewWidget::applyThemeBackdrop(bool wanted)
     const QSize size(std::max(1, device.x()), std::max(1, device.y()));
     if (!wanted || !shell.backdrop.on) {
         if (myBackdropShown) {
+            // The OLD texture is released inside this call, on the GL
+            // context - so it has to be ours and current, or the driver is
+            // handed a free with no context and faults (it did, in the app,
+            // on the first theme change: nvoglv64.dll, access violation).
+            GlScope gl(this);
             myView->SetBackgroundImage(Handle(Graphic3d_Texture2D)(), Aspect_FM_NONE, false);
             myBackdropShown = false;
             myBackdropKey.clear();
@@ -5933,6 +5938,8 @@ void OcctViewWidget::applyThemeBackdrop(bool wanted)
     for (int y = 0; y < picture.height(); ++y)
         std::memcpy(pix->ChangeRow(y), picture.constScanLine(y), size_t(rowBytes));
     Handle(Graphic3d_Texture2D) texture = new Graphic3d_Texture2D(pix);
+    // Current, for the release of the texture this one replaces - see above.
+    GlScope gl(this);
     myView->SetBackgroundImage(texture, Aspect_FM_STRETCH, false);
     myBackdropShown = true;
     myBackdropKey = key;

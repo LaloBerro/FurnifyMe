@@ -26,6 +26,8 @@
 #include "ui/WalkthroughPanel.h"
 #include "CameraController.h"
 #include <QMouseEvent>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
 #include "web/EditorChrome.h"
 #include "web/WebHost.h"
 
@@ -208,8 +210,18 @@ int main(int argc, char* argv[])
     for (auto* hint : window.findChildren<HintBalloon*>()) hint->hide();
     pump(400);
 
+    QOffscreenSurface foreignSurface;
+    foreignSurface.create();
+    QOpenGLContext foreignContext;
+    foreignContext.create();
     for (const Themes::Info& theme : Themes::all()) {
         if (!only.isEmpty() && !only.contains(theme.id)) continue;
+        // A FOREIGN GL context current at the switch, as it is in the app
+        // whenever the HTML layer last drew on this thread: a theme change
+        // must not lean on whichever context happens to be current (the
+        // backdrop swap released its old texture with none of its own and
+        // the driver faulted - the user's crash switching to Aurora).
+        foreignContext.makeCurrent(&foreignSurface);
         Themes::select(theme.id);
         pump(700);
         for (auto* hint : window.findChildren<HintBalloon*>()) hint->hide();

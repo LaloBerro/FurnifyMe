@@ -371,6 +371,10 @@ if(FURNIFYME_BUILD_APP)
 
     add_executable(furnifyme src/main.cpp)
     target_link_libraries(furnifyme PRIVATE furnify_app)
+    # main()'s crash reporter symbolizes its frames through DbgHelp.
+    if(WIN32)
+      target_link_libraries(furnifyme PRIVATE dbghelp)
+    endif()
 
     # The Settings drawer's model and bridge (migration Phase 3b), offscreen
     # beside session_tests - whose platforms/ copy it shares.

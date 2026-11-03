@@ -13,6 +13,72 @@
 
 #include <memory>
 
+#ifdef _WIN32
+#include <cstdio>
+#include <cstring>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dbghelp.h>
+
+// A CRASH THAT SAYS WHERE. The app is a GUI-subsystem binary with no console
+// and this machine has no debugger, so an access violation (one in the GL
+// driver on a theme change, the first time) left nothing but a module name
+// in the event log. The unhandled-exception filter runs before the stack
+// unwinds, so the faulting frames are still there: symbolized through DbgHelp
+// (RelWithDebInfo carries our PDBs) and written to %TEMP%\furnifyme-crash.txt.
+// A file, not stderr, because this process has no stderr anyone can read.
+static LONG WINAPI reportCrash(EXCEPTION_POINTERS* info)
+{
+    static bool reported = false;
+    if (reported) return EXCEPTION_CONTINUE_SEARCH;
+    reported = true;
+    char path[MAX_PATH] = {};
+    const DWORD n = GetTempPathA(MAX_PATH, path);
+    if (n == 0 || n > MAX_PATH - 32) return EXCEPTION_CONTINUE_SEARCH;
+    std::strcat(path, "furnifyme-crash.txt");
+    FILE* out = std::fopen(path, "w");
+    if (!out) return EXCEPTION_CONTINUE_SEARCH;
+    std::fprintf(out, "exception 0x%08lx at %p\n", info->ExceptionRecord->ExceptionCode,
+                 info->ExceptionRecord->ExceptionAddress);
+    void* frames[62] = {};
+    const USHORT count = CaptureStackBackTrace(0, 62, frames, nullptr);
+    const HANDLE process = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitialize(process, nullptr, TRUE);
+    char buffer[sizeof(SYMBOL_INFO) + 512] = {};
+    auto* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 500;
+    for (USHORT i = 0; i < count; ++i) {
+        const DWORD64 address = reinterpret_cast<DWORD64>(frames[i]);
+        DWORD64 displacement = 0;
+        char module[MAX_PATH] = "?";
+        HMODULE handle = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(frames[i]), &handle))
+            GetModuleFileNameA(handle, module, MAX_PATH);
+        const char* base = std::strrchr(module, '\\');
+        IMAGEHLP_LINE64 line{};
+        line.SizeOfStruct = sizeof(line);
+        DWORD lineDisplacement = 0;
+        if (SymFromAddr(process, address, &displacement, symbol)) {
+            if (SymGetLineFromAddr64(process, address, &lineDisplacement, &line))
+                std::fprintf(out, "%02u %s!%s  %s:%lu\n", unsigned(i), base ? base + 1 : module, symbol->Name,
+                             line.FileName, line.LineNumber);
+            else
+                std::fprintf(out, "%02u %s!%s\n", unsigned(i), base ? base + 1 : module, symbol->Name);
+        } else {
+            std::fprintf(out, "%02u %s+%p\n", unsigned(i), base ? base + 1 : module,
+                         reinterpret_cast<void*>(address - reinterpret_cast<DWORD64>(handle)));
+        }
+    }
+    std::fclose(out);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 #include <QApplication>
 #include <QEvent>
 #include <QObject>
@@ -21,6 +87,9 @@
 
 int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(reportCrash);
+#endif
 #ifndef _WIN32
     // Wayland does not hand out a native window handle OCCT can attach a V3d_View
     // to. Force XCB unless the user has deliberately chosen a platform plugin.
