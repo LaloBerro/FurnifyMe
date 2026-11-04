@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const pages = ['overlay', 'hub', 'editor'];
+const pages = ['overlay', 'hub', 'editor', 'render'];
 
 // dist holds exactly these pages - nothing a retired page left behind, since
 // the whole folder is what gets deployed.
