@@ -249,9 +249,13 @@ describe('the Items card', () => {
     expect(calls(api, 'dragOver').at(-1)).toEqual(['outside', 0, 0]);
     await settle();
     expect(q('.ghost')!.textContent).toContain('Release to cancel');
+    // The layer that keeps the ghost inside the page's painted mask.
+    expect(q('.drag-layer')!.hasAttribute('data-hit')).toBe(true);
     release(400, 300);
     expect(calls(api, 'endDrag')).toEqual([[true]]);
     expect(calls(api, 'activate')).toEqual([]);
+    await settle();
+    expect(q('.drag-layer')).toBeNull();
   });
 
   it('a press on a row of a multiple selection with a modifier carries the row alone', () => {

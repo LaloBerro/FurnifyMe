@@ -348,6 +348,11 @@ void EditorChrome::giveFocusBack()
         // own field, hidden while the page draws the question, would take every
         // plain-letter shortcut afterwards (Phase 3g review M5).
         if (myFocusBefore && myFocusBefore->isVisible()) myFocusBefore->setFocus(Qt::OtherFocusReason);
+        // With nowhere recorded, the keys go to the 3D view - the editor's
+        // own home for them, and where a click would put them. clearFocus()
+        // does nothing in a window that is not active, which left the page
+        // holding focus after the list let go (Phase 3h).
+        else if (myViewport && myViewport->isVisible()) myViewport->setFocus(Qt::OtherFocusReason);
         else view->clearFocus();
     }
     myFocusBefore = nullptr;

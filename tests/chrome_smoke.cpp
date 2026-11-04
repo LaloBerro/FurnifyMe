@@ -26,6 +26,7 @@
 #include "ui/VersionsPanel.h"
 #include "session/VersionsModel.h"
 #include "session/JointsModel.h"
+#include "session/ItemsModel.h"
 #include "ui/JointsPanel.h"
 #include "ui/GestureChip.h"
 #include "ui/SettingsEdits.h"
@@ -302,6 +303,28 @@ int main(int argc, char* argv[])
         store.saveFurniture(shelfUnitId, doc, QImage());
     }
 
+    // A cabinet for the Items card (Phase 3h): Carcass { Side left, Side
+    // right, Top }, then a loose Shelf and Back.
+    QString cabinetId;
+    {
+        FurnitureStore store(library.path());
+        cabinetId = store.createFurniture(QStringLiteral("Cabinet"));
+        DocumentModel doc;
+        auto board = [&](const char* name, double x) {
+            const int id = doc.addSolid(ModelingOps::makeBox(gp_Pnt(x, 0, 0), 18, 300, 600));
+            doc.setItemName(id, name);
+            return id;
+        };
+        const int sideL = board("Side left", 0);
+        const int sideR = board("Side right", 200);
+        const int top = board("Top", 400);
+        board("Shelf", 600);
+        board("Back", 800);
+        const int carcass = doc.createGroup("Carcass");
+        for (int id : {sideL, sideR, top}) doc.setItemGroup(id, carcass);
+        store.saveFurniture(cabinetId, doc, QImage());
+    }
+
     MainWindow window(nullptr, /*persistProgress=*/false, library.path());
     window.setAttribute(Qt::WA_ShowWithoutActivating);
     window.resize(1280, 820);
@@ -474,30 +497,41 @@ int main(int argc, char* argv[])
     if (QAction* items = actionNamed(&window, QStringLiteral("Items")); items && !items->isChecked())
         items->trigger();
     pump(300);
-    if (ItemsPanel* drawer = window.itemsPanel(); drawer && drawer->rowCount() >= 2) {
-        QWidget* row = drawer->rowWidgetAt(0);
-        QWidget* target = drawer->rowWidgetAt(1);
-        auto send = [&](QEvent::Type type, const QPoint& inDrawer) {
-            const QPoint local = row->mapFrom(drawer, inDrawer);
-            QMouseEvent e(type, QPointF(local), QPointF(row->mapToGlobal(local)),
-                          type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton, Qt::LeftButton,
-                          Qt::NoModifier);
-            QCoreApplication::sendEvent(row, &e);
-        };
-        const QPoint from = row->mapTo(drawer, QPoint(row->width() / 3, row->height() / 2));
-        const QPoint to = target->mapTo(drawer, QPoint(target->width() / 3, target->height() - 3));
-        send(QEvent::MouseButtonPress, from);
-        for (int i = 1; i <= 4; ++i) send(QEvent::MouseMove, from + (to - from) * i / 4);
+    // The drawer is the page's card in this mode (Phase 3h): its drag is
+    // driven there, through the page's own events.
+    waitFor([&] { return js(page, "document.querySelectorAll('.items-card [data-row]').length").toInt() >= 2; }, 3000);
+    if (js(page, "document.querySelectorAll('.items-card [data-row]').length").toInt() >= 2 && window.itemsModel()) {
+        js(page, "(() => { const rows = document.querySelectorAll('.items-card [data-row]'); "
+                 "const a = rows[0].getBoundingClientRect(), b = rows[1].getBoundingClientRect(); "
+                 "const x = a.left + a.width / 3, y0 = a.top + a.height / 2, y1 = b.bottom - 3; "
+                 "rows[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0, buttons: 1, clientX: x, clientY: y0})); "
+                 "for (let i = 1; i <= 4; i++) window.dispatchEvent(new MouseEvent('mousemove', "
+                 "{bubbles: true, buttons: 1, clientX: x, clientY: y0 + (y1 - y0) * i / 4})); })()");
         pump(200);
-        const QString line = drawer->dragStatusText();
+        const QString line = window.itemsModel()->dragStatusText();
         const QString rightTitle = QStringLiteral("(document.querySelector('.strip .right') || {}).title || ''");
         waitFor([&] { return jsString(page, rightTitle) == line; }, 1500);
         check(!line.isEmpty() && jsString(page, rightTitle) == line,
               "a drawer drag's line reaches the strip's right channel - \"" + line + "\"");
-        drawer->cancelDrag();
+        js(page, "window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
         pump(200);
+        check(!window.itemsModel()->dragActive(), "and Escape ends the drag");
+        // The press held the list's keys, as a click in the Qt list gives it
+        // focus; a click on the viewport's empty space gives them back.
+        check(chrome->holdsListKeys(), "the press on a row held the list's keys");
+        const QPoint blank(window.view()->width() - 60, window.view()->height() / 2);
+        QMouseEvent down(QEvent::MouseButtonPress, QPointF(blank), QPointF(window.view()->mapToGlobal(blank)),
+                         Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window.view(), &down);
+        QMouseEvent up(QEvent::MouseButtonRelease, QPointF(blank), QPointF(window.view()->mapToGlobal(blank)),
+                       Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window.view(), &up);
+        pump(150);
+        check(!chrome->holdsListKeys(),
+              QStringLiteral("and a click on the viewport gave them back (focus: %1)")
+                  .arg(window.focusWidget() ? window.focusWidget()->metaObject()->className() : "none"));
     } else {
-        check(false, "the Items drawer lists the two seeded bodies");
+        check(false, "the Items card lists the two seeded bodies");
     }
     {
         // A long state line is capped at half the strip, as Qt caps the label.
@@ -623,8 +657,10 @@ int main(int argc, char* argv[])
         // ShortcutOverride sent straight AT the render widget is answered by
         // WebEngine itself, focused or not - not what a real key meets.)
         check(window.focusWidget() != proxy && window.focusWidget() != page,
-              QStringLiteral("and afterwards keys go back to where they went before (%1)")
-                  .arg(window.focusWidget() ? window.focusWidget()->metaObject()->className() : "none"));
+              QStringLiteral("and afterwards keys go back to where they went before (%1; field %2, list %3)")
+                  .arg(window.focusWidget() ? window.focusWidget()->metaObject()->className() : "none")
+                  .arg(chrome->holdsKeyboard())
+                  .arg(chrome->holdsListKeys()));
     }
 
     // --- the keyboard passes from field to field, and never steals focus (review I1, I2) --
@@ -1332,6 +1368,298 @@ int main(int argc, char* argv[])
               "Joints off takes the card away");
         waitFor([&] { return !chrome->hitRegion().contains(last.center()); }, 2000);
         check(!chrome->hitRegion().contains(last.center()), "and where it stood, a press reaches the viewport (Review Focus 5)");
+        window.openFurniture(furnitureId);
+        pump(300);
+    }
+
+    // --- the Items card, end to end (Phase 3h) ------------------------------------
+    {
+        check(window.openFurniture(cabinetId), "the cabinet opens");
+        pump(300);
+        const DocumentModel& doc = window.document();
+        auto idOf = [&](const char* name) {
+            for (const DocumentModel::Solid& s : doc.solids())
+                if (s.name == name) return s.id;
+            return 0;
+        };
+        const int sideL = idOf("Side left"), sideR = idOf("Side right"), top = idOf("Top");
+        const int shelf = idOf("Shelf"), back = idOf("Back");
+        const int carcass = doc.groupOf(sideL);
+        check(sideL && sideR && top && shelf && back && carcass > 0, "with its five boards and the Carcass folder");
+        QAction* itemsAction = actionNamed(&window, QStringLiteral("Items"));
+        if (itemsAction && !itemsAction->isChecked()) itemsAction->trigger();
+        QWidget* itemsSlot = window.findChild<QWidget*>(QStringLiteral("htmlCardSlot_items"));
+        ItemsModel* model = window.itemsModel();
+        check(itemsSlot && itemsSlot->isVisible() && !window.itemsPanel()->isVisible() && model,
+              "Items shows the card's slot, and the Qt drawer stays hidden");
+        if (!itemsSlot || !model || !itemsAction) return 1;
+        // Helpers: a press, a move and a release where the page's own row is.
+        js(page, "window.__ic = (id) => { const r = document.querySelector(`.items-card [data-row=\"${id}\"]`); "
+                 "if (!r) return null; const b = r.getBoundingClientRect(); return [b.left + b.width / 3, b.top + b.height / 2]; }; "
+                 "window.__ip = (id, o = {}) => { const r = document.querySelector(`.items-card [data-row=\"${id}\"]`); "
+                 "const [x, y] = window.__ic(id); r.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0, "
+                 "buttons: 1, clientX: x, clientY: y, ctrlKey: !!o.ctrl, shiftKey: !!o.shift, altKey: !!o.alt})); return [x, y]; }; "
+                 "window.__im = (x, y) => window.dispatchEvent(new MouseEvent('mousemove', {bubbles: true, buttons: 1, clientX: x, clientY: y})); "
+                 "window.__iu = (x, y) => window.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, button: 0, clientX: x, clientY: y})); "
+                 "window.__iclick = (id, o) => { const [x, y] = window.__ip(id, o); window.__iu(x, y); }; "
+                 "window.__ikey = (key, o = {}) => document.querySelector('.items-card .list').dispatchEvent("
+                 "new KeyboardEvent('keydown', {key, bubbles: true, shiftKey: !!o.shift, altKey: !!o.alt, ctrlKey: !!o.ctrl})); "
+                 "window.__inames = () => [...document.querySelectorAll('.items-card [data-row]')].map((r) => "
+                 "r.querySelector('.name, input.rename') ? (r.querySelector('.name') || {}).textContent : '').join('|'); true");
+        const auto pageNames = [&] { return jsString(page, "window.__inames()"); };
+        const auto modelNames = [&] {
+            QStringList names;
+            for (const QVariant& v : model->rows()) names << v.toMap().value(QStringLiteral("name")).toString();
+            return names.join(QLatin1Char('|'));
+        };
+        const auto selection = [&] {
+            std::vector<int> ids = window.view()->selectedSolidIds();
+            std::sort(ids.begin(), ids.end());
+            return ids;
+        };
+        const auto sorted = [](std::vector<int> v) {
+            std::sort(v.begin(), v.end());
+            return v;
+        };
+        waitFor([&] { return !modelNames().isEmpty() && pageNames() == modelNames(); }, 3000);
+        check(pageNames() == modelNames() && !pageNames().contains(QStringLiteral("Side left")),
+              "the card draws ItemsModel's rows, Carcass folded - " + pageNames());
+        auto settled = [&] {
+            const int h = js(page, "window.__itemsHeight || 0").toInt();
+            const QRect drawn = [&] {
+                const QJsonObject o = QJsonDocument::fromJson(jsString(page,
+                    "JSON.stringify((() => { const r = document.querySelector('.items-card').getBoundingClientRect(); "
+                    "return {x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height)}; })())")
+                    .toUtf8()).object();
+                return QRect(o.value("x").toInt(), o.value("y").toInt(), o.value("w").toInt(), o.value("h").toInt());
+            }();
+            return h > 0 && itemsSlot->height() == Theme::wholeDevicePixels(h) && drawn == itemsSlot->geometry();
+        };
+        waitFor(settled, 3000);
+        check(settled(), "the card reports its height and covers its slot exactly");
+
+        // The twisty opens the folder.
+        js(page, QStringLiteral("document.querySelector('.items-card [data-row=\"%1\"] .twisty').click()").arg(carcass));
+        waitFor([&] { return pageNames().contains(QStringLiteral("Side left")); }, 3000);
+        check(pageNames().contains(QStringLiteral("Side left")) && model->isFolderOpen(carcass), "the twisty opens Carcass");
+
+        // Clicks select on release: plain, Ctrl, Shift, a folder.
+        js(page, QStringLiteral("window.__iclick(%1)").arg(shelf));
+        waitFor([&] { return selection() == std::vector<int>{shelf}; }, 2000);
+        check(selection() == std::vector<int>{shelf}, "a click on Shelf selects it in the viewport");
+        js(page, QStringLiteral("window.__iclick(%1, {ctrl: true})").arg(back));
+        waitFor([&] { return selection().size() == 2; }, 2000);
+        check(selection() == sorted({shelf, back}), "Ctrl adds Back");
+        js(page, QStringLiteral("window.__iclick(%1)").arg(sideL));
+        pump(150);
+        js(page, QStringLiteral("window.__iclick(%1, {shift: true})").arg(top));
+        waitFor([&] { return selection().size() == 3; }, 2000);
+        check(selection() == sorted({sideL, sideR, top}), "Shift takes the run of rows between");
+        js(page, QStringLiteral("window.__iclick(%1)").arg(shelf));
+        pump(150);
+        js(page, QStringLiteral("window.__iclick(%1)").arg(carcass));
+        waitFor([&] { return selection().size() == 3; }, 2000);
+        check(selection() == sorted(doc.bodiesUnderGroup(carcass)), "a folder click selects every body in it");
+        waitFor([&] { return js(page, QStringLiteral("!!document.querySelector('.items-card [data-row=\"%1\"].marked')").arg(carcass)).toBool(); }, 2000);
+        check(js(page, QStringLiteral("!!document.querySelector('.items-card [data-row=\"%1\"].marked')").arg(carcass)).toBool(),
+              "and the folder row wears the mark");
+
+        // The eye hides a body in the viewport; a second click shows it again.
+        js(page, QStringLiteral("document.querySelector('.items-card [data-row=\"%1\"] .eye').click()").arg(shelf));
+        waitFor([&] { return !doc.isVisible(shelf); }, 2000);
+        check(!doc.isVisible(shelf) && !window.view()->isSolidVisible(shelf), "the eye hides Shelf, document and viewport");
+        js(page, QStringLiteral("document.querySelector('.items-card [data-row=\"%1\"] .eye').click()").arg(shelf));
+        waitFor([&] { return doc.isVisible(shelf); }, 2000);
+        check(doc.isVisible(shelf) && window.view()->isSolidVisible(shelf), "and shows it again");
+
+        // Rename by double-click: one checkpoint, the name written.
+        js(page, QStringLiteral("document.querySelector('.items-card [data-row=\"%1\"]').dispatchEvent("
+                                "new MouseEvent('dblclick', {bubbles: true}))").arg(shelf));
+        waitFor([&] { return js(page, "!!document.querySelector('.items-card input.rename')").toBool(); }, 2000);
+        check(jsString(page, "(document.querySelector('.items-card input.rename') || {}).value") == QStringLiteral("Shelf") &&
+                  chrome->holdsKeyboard(),
+              "a double-click opens the field over the row, holding the keyboard");
+        js(page, "(() => { const f = document.querySelector('.items-card input.rename'); f.value = 'Top shelf'; "
+                 "f.dispatchEvent(new Event('input', {bubbles: true})); "
+                 "f.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()");
+        waitFor([&] { return doc.nameOf(shelf) == "Top shelf"; }, 2000);
+        check(doc.nameOf(shelf) == "Top shelf" && !chrome->holdsKeyboard(), "Enter renames it and gives the keyboard back");
+        // F2: the Rename action opens the field over the selected body's row.
+        window.view()->setSelectedSolids({back});
+        pump(150);
+        if (QAction* rename = actionNamed(&window, QStringLiteral("Rename"))) rename->trigger();
+        waitFor([&] { return js(page, "!!document.querySelector('.items-card input.rename')").toBool(); }, 2000);
+        check(jsString(page, "(document.querySelector('.items-card input.rename') || {}).value") == QStringLiteral("Back"),
+              "Rename (F2) opens the field over the selected body's row");
+        js(page, "document.querySelector('.items-card input.rename').dispatchEvent("
+                 "new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+        waitFor([&] { return !js(page, "!!document.querySelector('.items-card input.rename')").toBool(); }, 2000);
+        check(doc.nameOf(back) == "Back", "and Escape leaves the name alone");
+
+        // The row menu's Move into: one checkpoint, a Note.
+        js(page, QStringLiteral("(() => { const [x, y] = window.__ic(%1); document.querySelector('.items-card [data-row=\"%1\"]')"
+                                ".dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: x, clientY: y})); })()").arg(back));
+        waitFor([&] { return js(page, "!!document.querySelector('.menu [data-entry=\"into\"]')").toBool(); }, 2000);
+        check(js(page, "!!document.querySelector('.menu [data-entry=\"into\"]')").toBool(), "a right press opens the row menu");
+        pump(300);
+#ifdef _WIN32
+        capture(&window, outDir + "/items-menu.png");
+#endif
+        js(page, "document.querySelector('.menu [data-entry=\"into\"]').click()");
+        pump(150);
+        js(page, QStringLiteral("document.querySelector('.menu [data-entry=\"into:%1\"]').click()").arg(carcass));
+        waitFor([&] { return doc.groupOf(back) == carcass; }, 2000);
+        check(doc.groupOf(back) == carcass, "Move into -> Carcass files Back there");
+        waitFor([&] { return toastText(page).contains(QStringLiteral("Moved")); }, 2000);
+        check(toastText(page).contains(QStringLiteral("Moved")), "with a Note - \"" + toastText(page) + "\"");
+        actionNamed(&window, QStringLiteral("Undo"))->trigger();
+        waitFor([&] { return doc.groupOf(back) == 0; }, 2000);
+        check(doc.groupOf(back) == 0, "one Undo takes it back");
+
+        // The filter: rows narrow to matches, the match highlighted, Escape clears.
+        js(page, "(() => { const f = document.querySelector('.items-card input.filter'); "
+                 "f.dispatchEvent(new MouseEvent('mousedown', {bubbles: true})); f.focus(); f.value = 'side'; "
+                 "f.dispatchEvent(new Event('input', {bubbles: true})); })()");
+        waitFor([&] { return pageNames() == QStringLiteral("Carcass|Side left|Side right"); }, 2000);
+        check(pageNames() == QStringLiteral("Carcass|Side left|Side right"), "the filter narrows the rows - " + pageNames());
+        check(jsString(page, QStringLiteral("document.querySelector('.items-card [data-row=\"%1\"] .hit').textContent").arg(sideL)) ==
+                  QStringLiteral("Side"),
+              "and highlights the match");
+        js(page, "document.querySelector('.items-card input.filter').dispatchEvent("
+               "new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+        waitFor([&] { return pageNames().contains(QStringLiteral("Back")); }, 2000);
+        check(model->filterText().isEmpty() && pageNames().contains(QStringLiteral("Back")), "Escape clears it");
+        js(page, "document.querySelector('.items-card input.filter').blur()");
+        pump(100);
+
+        // Reveal: a pick in the viewport opens the folder its row is in.
+        waitFor(settled, 2000);
+        const int openHeight = itemsSlot->height();
+        js(page, QStringLiteral("document.querySelector('.items-card [data-row=\"%1\"] .twisty').click()").arg(carcass));
+        waitFor([&] { return !pageNames().split(QLatin1Char('|')).contains(QStringLiteral("Top")); }, 2000);
+        waitFor([&] { return itemsSlot->height() < openHeight && settled(); }, 2000);
+        check(itemsSlot->height() < openHeight && settled(),
+              QStringLiteral("folding a folder shrinks the card, which still covers its slot (%1 -> %2)")
+                  .arg(openHeight).arg(itemsSlot->height()));
+        window.view()->setSelectedSolids({});
+        pump(100);
+        window.view()->setSelectedSolids({top});
+        waitFor([&] { return pageNames().split(QLatin1Char('|')).contains(QStringLiteral("Top")); }, 2000);
+        check(model->isFolderOpen(carcass) && pageNames().split(QLatin1Char('|')).contains(QStringLiteral("Top")),
+              QStringLiteral("a viewport pick opens the folder its row is in (open %1, rows %2)")
+                  .arg(model->isFolderOpen(carcass)).arg(pageNames()));
+
+        // The list's keys (Review Focus 1): held from a press, Up claimed and
+        // Ctrl+Z not, Down walking the rows, Alt+Up moving one with a checkpoint.
+        js(page, QStringLiteral("window.__iclick(%1)").arg(shelf));
+        waitFor([&] { return chrome->holdsListKeys() && selection() == std::vector<int>{shelf}; }, 2000);
+        QWidget* proxy = page->focusProxy() ? page->focusProxy() : page;
+        const auto claimed = [&](int key, Qt::KeyboardModifiers mods) {
+            QKeyEvent over(QEvent::ShortcutOverride, key, mods);
+            over.ignore();
+            QCoreApplication::sendEvent(proxy, &over);
+            return over.isAccepted();
+        };
+        check(chrome->holdsListKeys() && claimed(Qt::Key_Up, Qt::NoModifier) && claimed(Qt::Key_F2, Qt::NoModifier) &&
+                  !claimed(Qt::Key_Z, Qt::ControlModifier) && !claimed(Qt::Key_E, Qt::NoModifier),
+              "a click on a row holds the list's keys - Up and F2 claimed, Ctrl+Z and E not");
+        js(page, "window.__ikey('ArrowDown')");
+        waitFor([&] { return selection() == std::vector<int>{back}; }, 2000);
+        check(selection() == std::vector<int>{back}, "Down selects the next row");
+        js(page, "window.__ikey('ArrowUp')");
+        waitFor([&] { return selection() == std::vector<int>{shelf}; }, 2000);
+        const std::vector<int> rootBefore = doc.orderedChildren(0);
+        const bool couldUndo = doc.canUndo();
+        js(page, "window.__ikey('ArrowUp', {alt: true})");
+        waitFor([&] { return doc.orderedChildren(0) != rootBefore; }, 2000);
+        check(doc.orderedChildren(0) != rootBefore && doc.canUndo(), "Alt+Up moves Shelf up one place");
+        (void)couldUndo;
+        actionNamed(&window, QStringLiteral("Undo"))->trigger();
+        waitFor([&] { return doc.orderedChildren(0) == rootBefore; }, 2000);
+        check(doc.orderedChildren(0) == rootBefore, "and one Undo puts it back");
+
+        // A drag into a folder: one checkpoint, the Note's words.
+        // The page has the order back before the hand aims at it: the Undo
+        // reaches the document first and the page a channel message later.
+        waitFor([&] { return pageNames() == modelNames(); }, 2000);
+        js(page, QStringLiteral("(() => { const [x, y] = window.__ip(%1); const [tx, ty] = window.__ic(%2); "
+                                "for (let i = 1; i <= 5; i++) window.__im(x + (tx - x) * i / 5, y + (ty - y) * i / 5); "
+                                "window.__dropAt = [tx, ty]; })()").arg(back).arg(carcass));
+        waitFor([&] { return model->dragActive() && !model->dragStatusText().isEmpty(); }, 2000);
+        check(model->dragActive() && model->dragStatusText().contains(QStringLiteral("Carcass")),
+              "dragging Back over Carcass says where it will land - \"" + model->dragStatusText() + "\"");
+        waitFor([&] { return js(page, "!!document.querySelector('.items-card .indicator.ring') && !!document.querySelector('.ghost')").toBool(); }, 2000);
+        check(js(page, "!!document.querySelector('.items-card .indicator.ring') && !!document.querySelector('.ghost')").toBool(),
+              QStringLiteral("with the ring around the folder row and the ghost under the hand (ring %1, line %2, ghost %3)")
+                  .arg(js(page, "!!document.querySelector('.items-card .indicator.ring')").toBool())
+                  .arg(js(page, "!!document.querySelector('.items-card .indicator')").toBool())
+                  .arg(js(page, "!!document.querySelector('.ghost')").toBool())
+              );
+        {
+            // The ghost is PAINTED: the view's mask clips drawing as well as
+            // presses, so it must lie inside the page's region.
+            const QJsonObject g = QJsonDocument::fromJson(jsString(page,
+                "JSON.stringify((() => { const r = document.querySelector('.ghost').getBoundingClientRect(); "
+                "return {x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2)}; })())").toUtf8()).object();
+            const QPoint ghost(g.value("x").toInt(), g.value("y").toInt());
+            waitFor([&] { return chrome->hitRegion().contains(ghost); }, 2000);
+            check(chrome->hitRegion().contains(ghost), "and the ghost lies inside what the page paints");
+        }
+        pump(300);
+#ifdef _WIN32
+        capture(&window, outDir + "/items-drag.png");
+#endif
+        js(page, "window.__iu(...window.__dropAt)");
+        waitFor([&] { return doc.groupOf(back) == carcass; }, 2000);
+        check(doc.groupOf(back) == carcass && !model->dragActive(), "the release files Back in Carcass");
+        waitFor([&] { return toastText(page).contains(QStringLiteral("Moved")); }, 2000);
+        check(toastText(page).contains(QStringLiteral("Carcass")), "and the Note says so - \"" + toastText(page) + "\"");
+        actionNamed(&window, QStringLiteral("Undo"))->trigger();
+        waitFor([&] { return doc.groupOf(back) == 0; }, 2000);
+        // Escape mid-drag moves nothing (Review Focus 3).
+        waitFor([&] { return pageNames() == modelNames(); }, 2000);
+        const int revision = doc.revision();
+        js(page, QStringLiteral("(() => { const [x, y] = window.__ip(%1); const [tx, ty] = window.__ic(%2); "
+                                "for (let i = 1; i <= 5; i++) window.__im(x + (tx - x) * i / 5, y + (ty - y) * i / 5); "
+                                "window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})); "
+                                "window.__iu(tx, ty); })()").arg(back).arg(carcass));
+        pump(300);
+        check(doc.groupOf(back) == 0 && doc.revision() == revision && !model->dragActive() &&
+                  !js(page, "!!document.querySelector('.ghost')").toBool() && model->dragStatusText().isEmpty(),
+              "Escape mid-drag moves nothing and leaves no ghost and no drag line");
+
+        // Every theme, with a row selected.
+        window.view()->setSelectedSolids({sideR});
+        for (const Themes::Info& theme : Themes::all()) {
+            Themes::select(theme.id);
+            waitFor([&] { return jsString(page, "document.documentElement.dataset.theme") == theme.id; }, 3000);
+            pump(400);
+#ifdef _WIN32
+            capture(&window, outDir + "/chrome-items-" + theme.id + ".png");
+#endif
+        }
+        Themes::select(Themes::graphiteId());
+        pump(300);
+
+        // The page's words, swept.
+        {
+            QString text = jsString(page, "document.querySelector('.items-card').innerText");
+            for (const char* name : {"Carcass", "Side left", "Side right", "Top shelf", "Top", "Shelf", "Back"})
+                text.replace(QString::fromUtf8(name), QStringLiteral(" "));
+            check(bannedIn(text).isEmpty(), "no word the card shows is banned - found: " + bannedIn(text).join(", "));
+        }
+
+        // Items off: the slot goes, and nothing of it takes the pointer.
+        const QRect last = itemsSlot->geometry();
+        itemsAction->trigger();
+        pump(400);
+        check(!itemsSlot->isVisible() && !js(page, "!!document.querySelector('.items-card')").toBool(),
+              "Items off takes the card away");
+        waitFor([&] { return !chrome->hitRegion().contains(last.center()); }, 2000);
+        check(!chrome->hitRegion().contains(last.center()) && !chrome->holdsListKeys(),
+              "and where it stood a press reaches the viewport, and the list gave its keys back");
+        itemsAction->trigger();
+        pump(300);
         window.openFurniture(furnitureId);
         pump(300);
     }

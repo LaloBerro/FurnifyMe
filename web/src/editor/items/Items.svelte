@@ -58,6 +58,7 @@
 
   let body: HTMLElement | undefined = $state();
   let list: HTMLElement | undefined = $state();
+  let rowsBox: HTMLElement | undefined = $state();
   let header: HTMLElement | undefined = $state();
   let card: HTMLElement | undefined = $state();
   let filterField: HTMLInputElement | undefined = $state();
@@ -438,7 +439,11 @@
       const border = card ? parseFloat(getComputedStyle(card).borderTopWidth) * 2 || 0 : 0;
       // The card's natural height: everything but the list, plus the whole
       // list - never asked of the rectangle the card is drawn at.
-      const natural = body.offsetHeight - list.clientHeight + list.scrollHeight + border;
+      // The rows' own box, not the list's scrollHeight: that never drops
+      // below the list's current height, so a card that grew could never
+      // shrink again when a folder folded.
+      const content = rowsBox ? rowsBox.offsetHeight : list.scrollHeight;
+      const natural = body.offsetHeight - list.clientHeight + content + border;
       const cap = Math.max(kMinHeight, bottom - rect.y - kBottomClearance);
       const h = Math.ceil(Math.min(Math.max(natural, kMinHeight), cap));
       if (h <= 0) return;
@@ -447,20 +452,10 @@
     };
     const observer = new ResizeObserver(measure);
     if (body) observer.observe(body);
-    if (list) {
-      observer.observe(list);
-      for (const child of list.children) observer.observe(child);
-    }
-    const mo = new MutationObserver(() => {
-      if (list) for (const child of list.children) observer.observe(child);
-      measure();
-    });
-    if (list) mo.observe(list, { childList: true });
+    if (list) observer.observe(list);
+    if (rowsBox) observer.observe(rowsBox);
     measure();
-    return () => {
-      observer.disconnect();
-      mo.disconnect();
-    };
+    return () => observer.disconnect();
   });
 
   onDestroy(() => {
@@ -523,6 +518,7 @@
       oncontextmenu={onContextMenu}
       onkeydown={onListKey}
     >
+      <div class="rows" bind:this={rowsBox}>
       {#each rows as row (row.kind + row.id)}
         <ItemRow
           {row}
@@ -548,6 +544,7 @@
       {#if st.empty}
         <p class="empty">{words.empty}</p>
       {/if}
+      </div>
       {#if indicator}
         <div
           class="indicator"
@@ -582,6 +579,13 @@
   />
 {/if}
 
+{#if dragging}
+  <!-- While the hand holds a row, the page takes the whole viewport into its
+       mask: the view's mask clips painting as well as presses, so a ghost
+       outside the card would otherwise never be drawn. Presses are the drag's
+       already (Qt's grab), and the layer goes with the drag. -->
+  <div class="drag-layer" data-hit></div>
+{/if}
 {#if dragging && drag.active}
   <div
     class="ghost"
@@ -693,6 +697,17 @@
   }
   .list::-webkit-scrollbar {
     display: none;
+  }
+  .rows {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .drag-layer {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
   }
   .empty,
   .no-match {
