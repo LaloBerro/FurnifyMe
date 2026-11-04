@@ -35,6 +35,7 @@
 #include "web/EditorChrome.h"
 #include "web/RenderPage.h"
 #include "ui/RenderStudio.h"
+#include "ui/SceneWindow.h"
 #include "ui/RenderSettingsPanel.h"
 #include "web/WebHost.h"
 
@@ -1428,6 +1429,39 @@ int main(int argc, char* argv[])
             pump(400);
             check(studio->dockedPanel() == nullptr && !renderMode->isChecked(), "leaving render mode undocks it");
         }
+    }
+
+    // --- the scene window's render page (Review Focus 5) --------------------------
+    {
+        SceneWindow scene(&window.furnitureStore());
+        scene.setAttribute(Qt::WA_ShowWithoutActivating);
+        scene.resize(1200, 800);
+        RenderPage* scenePage = RenderPage::attach(scene.studio(), &scene);
+        scene.show();
+        scene.view()->setAnimationsEnabled(false);
+        check(scenePage && waitFor([&] { return scenePage->isLive(); }, 20000), "the scene window's render page loads");
+        QAction* sceneRender = actionNamed(&scene, QStringLiteral("Render mode"));
+        if (scenePage && sceneRender) {
+            sceneRender->trigger();
+            pump(600);
+            check(scene.studio()->dockedPanel() == scenePage->view() && scenePage->view()->isVisible() &&
+                      !scene.studio()->panel()->isVisible(),
+                  "the scene's render mode docks the page too");
+            auto* sv = static_cast<QWebEngineView*>(scenePage->view());
+            waitFor([&] { return js(sv, "!!document.querySelector('.panel .title')").toBool(); }, 5000);
+            const QString headings =
+                jsString(sv, "[...document.querySelectorAll('.scroll .heading')].map(h => h.textContent).join('|')");
+            check(scene.studio()->panel()->materialTileNames().isEmpty() && !headings.contains(QStringLiteral("Material")) &&
+                      headings.contains(QStringLiteral("Studio")),
+                  "and a scene, whose pieces wear their own woods, shows no Material section - " + headings);
+#ifdef _WIN32
+            capture(&scene, outDir + "/render-panel-scene.png");
+#endif
+            sceneRender->trigger();
+            pump(300);
+        }
+        scene.hide();
+        pump(200);
     }
 
 #ifdef _WIN32
