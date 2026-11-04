@@ -54,6 +54,11 @@ export interface ChromeApi {
   // back only its own claims.
   claimKeyboardFor(card: string): void;
   releaseKeyboardFor(card: string): void;
+  // A LIST holds its keys (Phase 3h, ruling R3): the view takes focus but
+  // only the list's own keys are claimed, so every other shortcut still
+  // fires. Ended by C++ when focus leaves the page.
+  holdListKeys?(card: string): void;
+  releaseListKeys?(card: string): void;
   // A card that sizes itself (the Versions drawer, Phase 3c) says how tall it
   // is; its slot takes the height and the overlay re-stacks around it.
   reportCardHeight(name: string, height: number): void;

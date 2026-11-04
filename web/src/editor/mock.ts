@@ -38,6 +38,8 @@ export function mockChrome() {
     releaseKeyboard: () => calls.push({ method: 'releaseKeyboard', args: [] }),
     claimKeyboardFor: (card) => calls.push({ method: 'claimKeyboardFor', args: [card] }),
     releaseKeyboardFor: (card) => calls.push({ method: 'releaseKeyboardFor', args: [card] }),
+    holdListKeys: (card) => calls.push({ method: 'holdListKeys', args: [card] }),
+    releaseListKeys: (card) => calls.push({ method: 'releaseListKeys', args: [card] }),
     reportCardHeight: (name, height) => calls.push({ method: 'reportCardHeight', args: [name, height] }),
   };
   return chrome;

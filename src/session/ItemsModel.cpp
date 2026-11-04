@@ -75,6 +75,9 @@ QVariantMap ItemsModel::words() const
         {QStringLiteral("headName"), tr("Name")},
         {QStringLiteral("headTools"), tr("Grain · Eye")},
         {QStringLiteral("ledgerKeys"), tr("Alt+↑↓ moves")},
+        // The drag ghost's words (DragGhost): "Shelf +2", and its cancel line.
+        {QStringLiteral("ghostMore"), QCoreApplication::translate("DragGhost", "%1 +%2")},
+        {QStringLiteral("releaseToCancel"), ItemMoveText::releaseToCancel()},
         {QStringLiteral("dragThreshold"), 6},
         {QStringLiteral("springMs"), 700},
     };

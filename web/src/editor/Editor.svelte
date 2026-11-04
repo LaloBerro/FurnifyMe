@@ -17,6 +17,8 @@
   import type { VersionsApi } from './versions/api';
   import Joints from './joints/Joints.svelte';
   import type { JointsApi } from './joints/api';
+  import Items from './items/Items.svelte';
+  import type { ItemsApi } from './items/api';
   import { applyTokens } from '../theme';
   import { reportHitsOnChange } from '../overlay/hits';
 
@@ -26,12 +28,14 @@
     settings,
     versions,
     joints,
+    items,
   }: {
     chrome: ChromeApi;
     theme: ThemeApi;
     settings?: SettingsApi;
     versions?: VersionsApi;
     joints?: JointsApi;
+    items?: ItemsApi;
   } = $props();
 
   const kStripHeight = 24;
@@ -121,6 +125,16 @@
     report={(name, height) => chrome.reportCardHeight(name, height)}
     newRequest={versionsRequest}
     onrequesthandled={() => (versionsRequest = 0)}
+  />
+{/if}
+{#if items && cards.items?.shown}
+  <Items
+    {items}
+    keyboard={keyboardFor('items')}
+    listKeys={{ hold: () => chrome.holdListKeys?.('items'), release: () => chrome.releaseListKeys?.('items') }}
+    rect={cards.items}
+    bottom={host.h}
+    report={(name, height) => chrome.reportCardHeight(name, height)}
   />
 {/if}
 {#if joints && cards.joints?.shown}

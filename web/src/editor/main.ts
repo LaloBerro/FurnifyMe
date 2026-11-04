@@ -15,6 +15,8 @@ import type { VersionsApi } from './versions/api';
 import { mockVersions, sampleVersions } from './versions/mock';
 import type { JointsApi } from './joints/api';
 import { brokenRow, dowelRow, mockJoints } from './joints/mock';
+import type { ItemsApi } from './items/api';
+import { mockItems } from './items/mock';
 
 async function start() {
   let chrome: ChromeApi;
@@ -22,6 +24,7 @@ async function start() {
   let settings: SettingsApi | undefined;
   let versions: VersionsApi | undefined;
   let joints: JointsApi | undefined;
+  let items: ItemsApi | undefined;
   if (hosted()) {
     const objects = await channelObjects();
     chrome = objects.chrome as ChromeApi;
@@ -29,6 +32,7 @@ async function start() {
     settings = objects.settings as SettingsApi | undefined;
     versions = objects.versions as VersionsApi | undefined;
     joints = objects.joints as JointsApi | undefined;
+    items = objects.items as ItemsApi | undefined;
   } else {
     // The dev server: a status strip and a toast to look at.
     const mock = mockChrome();
@@ -38,16 +42,18 @@ async function start() {
     settings = mockSettings();
     versions = mockVersions([...sampleVersions]);
     joints = mockJoints([brokenRow(2), dowelRow(1, { expanded: true, selected: true })]);
+    items = mockItems();
     mock.cards = {
       settings: { x: window.innerWidth - 320, y: 120, w: 296, h: 380, shown: true },
       versions: { x: 60, y: 120, w: 240, h: 400, shown: true },
       joints: { x: 320, y: 120, w: 240, h: 400, shown: true },
+      items: { x: 580, y: 120, w: 200, h: 360, shown: true },
     };
     setTimeout(() => mock.toast.emit('Deleted Body 02', 'note', true, 1), 300);
   }
   // The theme goes on before the first mount - see hub/main.ts.
   applyTokens(theme.tokens);
-  mount(Editor, { target: document.getElementById('app')!, props: { chrome, theme, settings, versions, joints } });
+  mount(Editor, { target: document.getElementById('app')!, props: { chrome, theme, settings, versions, joints, items } });
 }
 
 start();

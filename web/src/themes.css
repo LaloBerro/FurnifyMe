@@ -240,3 +240,120 @@
   background-size: 8px 8px;
   border-top: 1px solid #2a2933;
 }
+
+/* THE ITEMS CARD per theme (Phase 3h, ruling R8): each theme's shell.list
+   numbers from assets/themes/<id>.json, as the Qt drawer reads them - the
+   selection capsule and its bar, the name weights, the field, the count
+   badge, the title, the "+" header and the grain mark before the eye.
+   Graphite sets none of these: it is the fallbacks. */
+:root[data-theme='violet-glass-float'] .items-card,
+:root[data-theme='violet-glass-float'] .ghost {
+  --list-row-radius: 14px;
+  --list-sel-fill: rgba(106, 0, 255, 0.26);
+  --list-sel-edge: rgba(187, 156, 255, 0.48);
+  --list-bar: #bb9cff;
+  --list-bar-width: 3px;
+  --list-bar-inset: 9px;
+  --list-bar-x: 3px;
+  --list-name-weight: 600;
+  --list-sel-weight: 600;
+  --list-folder-weight: 700;
+  --list-title-weight: 700;
+  --list-title-ink: var(--text);
+  --list-title-size: 17px;
+  --list-field-radius: 17px;
+  --list-field-fill: rgba(8, 5, 16, 0.52);
+  --list-field-edge: rgba(233, 225, 255, 0.16);
+  --list-field-edit-edge: #bb9cff;
+  --list-badge-radius: 10px;
+  --list-badge-fill: rgba(106, 0, 255, 0.26);
+  --list-badge-border: 1px solid rgba(187, 156, 255, 0.48);
+  --list-badge-ink: #bb9cff;
+  --list-badge-weight: 700;
+  --list-badge-pad: 0 6px;
+  --list-plus-display: block;
+  --list-folder-display: none;
+  --list-grain-order: -1;
+}
+:root[data-theme='aurora-mesh-gradient'] .items-card {
+  --list-row-radius: 10px;
+  --list-sel-fill: rgba(167, 139, 250, 0.16);
+  --list-bar: #a78bfa;
+  --list-bar-width: 3px;
+  --list-bar-inset: 8px;
+  --list-bar-x: 2px;
+  --list-folder-weight: 500;
+  --list-title-weight: 300;
+  --list-title-ink: var(--text);
+  --list-title-size: 26px;
+  --list-title-family: 'Sora', sans-serif;
+  --list-field-radius: 12px;
+  --list-field-fill: rgba(7, 7, 15, 0.55);
+  --list-field-edge: rgba(255, 255, 255, 0.1);
+  --list-field-edit-edge: #a78bfa;
+  --list-badge-radius: 9px;
+  --list-badge-fill: rgba(167, 139, 250, 0.12);
+  --list-badge-ink: #c4b5fd;
+  --list-badge-weight: 600;
+  --list-badge-pad: 0 6px;
+  --list-plus-display: block;
+  --list-folder-display: none;
+  --list-grain-order: -1;
+}
+:root[data-theme='nightshade-glass'] .items-card {
+  --list-row-radius: 9px;
+  --list-sel-fill: rgba(165, 123, 255, 0.17);
+  --list-sel-edge: rgba(190, 160, 255, 0.32);
+  --list-bar: #a57bff;
+  --list-bar-width: 3px;
+  --list-bar-inset: 8px;
+  --list-bar-x: 3px;
+  --list-name-weight: 500;
+  --list-sel-weight: 600;
+  --list-folder-weight: 600;
+  --list-title-weight: 700;
+  --list-title-ink: var(--text);
+  --list-title-size: 16px;
+  --list-field-radius: 10px;
+  --list-field-fill: rgba(8, 6, 14, 0.55);
+  --list-field-edge: rgba(236, 228, 255, 0.14);
+  --list-field-edit-edge: #a57bff;
+  --list-badge-radius: 0;
+  --list-badge-ink: #c9b1ff;
+  --list-badge-weight: 600;
+  --list-plus-display: block;
+  --list-folder-display: none;
+  --list-grain-order: -1;
+}
+:root[data-theme='ultraviolet-grid'] .items-card {
+  --list-row-radius: 0;
+  --list-sel-fill: #14131c;
+  --list-sel-edge: #4a4858;
+  --list-bar: #f5f4fa;
+  --list-bar-width: 4px;
+  --list-bar-inset: 0px;
+  --list-bar-x: 0px;
+  --list-hairline-rule: 1px solid #1c1b24;
+  --list-sel-weight: 600;
+  --list-title-weight: 600;
+  --list-title-ink: var(--text);
+  --list-title-size: 16px;
+  --list-field-radius: 0;
+  --list-field-fill: #08080c;
+  --list-field-edge: #3b3a47;
+  --list-field-edit-edge: #9466ff;
+  --list-badge-radius: 0;
+  --list-badge-border: 1px solid #9466ff;
+  --list-badge-ink: #b79bff;
+  --list-badge-weight: 500;
+  --list-badge-pad: 0 6px;
+  --list-plus-display: block;
+  --list-folder-display: none;
+  --list-grain-order: -1;
+  --list-ledger-inline: inline;
+  --list-ledger-block: block;
+  --list-ledger-flex: flex;
+  --list-rule: #2a2933;
+  --list-rule-hi: #5a5866;
+  --list-mono: 'IBM Plex Mono', monospace;
+}
