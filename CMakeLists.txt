@@ -182,6 +182,8 @@ if(FURNIFYME_BUILD_APP)
       src/session/ItemMoveText.h
       src/session/ItemsKeys.cpp
       src/session/ItemsKeys.h
+      src/session/ItemsModel.cpp
+      src/session/ItemsModel.h
     )
     target_include_directories(furnify_session PUBLIC src)
     target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)
@@ -215,6 +217,10 @@ if(FURNIFYME_BUILD_APP)
     add_executable(joints_model_tests tests/joints_model.cpp)
     target_link_libraries(joints_model_tests PRIVATE furnify_session)
     add_test(NAME joints_model COMMAND joints_model_tests)
+
+    add_executable(items_model_tests tests/items_model.cpp)
+    target_link_libraries(items_model_tests PRIVATE furnify_session)
+    add_test(NAME items_model COMMAND items_model_tests)
 
     add_executable(session_tests tests/session.cpp)
     target_link_libraries(session_tests PRIVATE furnify_session)
