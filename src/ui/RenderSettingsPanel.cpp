@@ -1,6 +1,7 @@
 #include "RenderSettingsPanel.h"
 
 #include "IconSet.h"
+#include "RenderSettingsCopy.h"
 #include "Measure.h"
 #include "Theme.h"
 
@@ -226,6 +227,7 @@ public:
 
     QString name() const { return myName; }
     QString filePath() const { return myFilePath; }
+    QPixmap thumbnail() const { return myThumb; }
     double glossiness() const { return myGloss; }
     double metallic() const { return myMetal; }
     bool isWood() const { return myWood; }
@@ -449,7 +451,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     shell->setContentsMargins(kPad, kPad, kPad, kPad);
     shell->setSpacing(kRowSpacing);
 
-    myTitle = new QLabel(tr("Render settings"), this);
+    myTitle = new QLabel(RenderSettingsCopy::title(), this);
     shell->addWidget(myTitle);
 
     // The SECTIONS scroll; the footer below stays pinned. ViewportOverlay's
@@ -563,6 +565,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         myValueLabels.push_back({slider, readout});
         connect(slider, &QSlider::valueChanged, this,
                 &RenderSettingsPanel::syncValueLabels);
+        connect(slider, &QSlider::valueChanged, this, &RenderSettingsPanel::stateChanged);
 
         outer->addWidget(row);
         return slider;
@@ -576,7 +579,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     // help me to put right the camera" - and they are one section for the
     // same reason, both being about where the edges of the shot are rather
     // than about what is in it.
-    addSection(tr("Frame"));
+    addSection(RenderSettingsCopy::frame());
     {
         auto* row = new QWidget(this);
         makeTransparent(row, QStringLiteral("renderSettingsAspectRow"));
@@ -587,21 +590,12 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         line->setContentsMargins(0, 0, 0, 0);
         line->setHorizontalSpacing(5);
         line->setVerticalSpacing(5);
-        const struct { const char* label; const char* tip; } shapes[] = {
-            {"Free", "The window's own shape - nothing is masked off"},
-            {"1:1", "A square picture"},
-            {"4:5", "Taller than wide - a single piece, standing"},
-            {"3:2", "A photograph's own shape"},
-            {"16:9", "Wide - a room, or a run of furniture"}};
+        const auto shapes = RenderSettingsCopy::aspects();
         for (std::size_t i = 0; i < myAspectChips.size(); ++i) {
-            auto* chip = new SegChip(tr(shapes[i].label), row);
-            chip->setToolTip(tr(shapes[i].tip));
-            connect(chip, &QAbstractButton::clicked, this, [this, i] {
-                const Aspect picked = static_cast<Aspect>(i);
-                if (myAspect == picked) return;
-                setAspect(picked);
-                emit aspectChanged(picked);
-            });
+            auto* chip = new SegChip(shapes[i].label, row);
+            chip->setToolTip(shapes[i].tip);
+            connect(chip, &QAbstractButton::clicked, this,
+                    [this, i] { chooseAspect(static_cast<Aspect>(i)); });
             myAspectChips[i] = chip;
             line->addWidget(chip, static_cast<int>(i / 3), static_cast<int>(i % 3));
         }
@@ -614,19 +608,12 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         auto* line = new QHBoxLayout(row);
         line->setContentsMargins(0, 0, 0, 0);
         line->setSpacing(5);
-        const struct { const char* label; const char* tip; } kinds[] = {
-            {"Off", "No lines inside the picture"},
-            {"Thirds", "Two lines each way - put what matters where they cross"},
-            {"Centre", "One line each way, through the middle"}};
+        const auto kinds = RenderSettingsCopy::guides();
         for (std::size_t i = 0; i < myGuideChips.size(); ++i) {
-            auto* chip = new SegChip(tr(kinds[i].label), row);
-            chip->setToolTip(tr(kinds[i].tip));
-            connect(chip, &QAbstractButton::clicked, this, [this, i] {
-                const Guides picked = static_cast<Guides>(i);
-                if (myGuides == picked) return;
-                setGuides(picked);
-                emit guidesChanged(picked);
-            });
+            auto* chip = new SegChip(kinds[i].label, row);
+            chip->setToolTip(kinds[i].tip);
+            connect(chip, &QAbstractButton::clicked, this,
+                    [this, i] { chooseGuides(static_cast<Guides>(i)); });
             myGuideChips[i] = chip;
             line->addWidget(chip);
         }
@@ -643,18 +630,16 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     // multiple images using those settings and always be the same." Directly
     // under Frame, because a shot restores the frame too - the two rows above
     // are part of what one of these rows puts back.
-    addSection(tr("Shots"));
+    addSection(RenderSettingsCopy::shots());
     {
         auto* row = new QWidget(this);
         makeTransparent(row, QStringLiteral("renderSettingsShotSaveRow"));
         auto* line = new QHBoxLayout(row);
         line->setContentsMargins(0, 0, 0, 0);
         line->setSpacing(5);
-        auto* save = new SegChip(tr("Save this view"), row);
-        save->setToolTip(tr("Remember where the camera is, the picture's shape, the lens "
-                            "and the light — so the next image can be taken the same way"));
-        connect(save, &QAbstractButton::clicked, this,
-                [this] { emit shotSaveRequested(); });
+        auto* save = new SegChip(RenderSettingsCopy::saveShot().label, row);
+        save->setToolTip(RenderSettingsCopy::saveShot().tip);
+        connect(save, &QAbstractButton::clicked, this, &RenderSettingsPanel::saveShot);
         mySaveShot = save;
         line->addWidget(save);
         line->addStretch(1);
@@ -669,7 +654,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
 
         // The empty state says what the button above is for, rather than
         // leaving a heading over nothing.
-        myShotEmpty = new QLabel(tr("No shots saved yet"), this);
+        myShotEmpty = new QLabel(RenderSettingsCopy::noShots(), this);
         myShotEmpty->setObjectName(QStringLiteral("renderSettingsShotEmpty"));
         myShotEmpty->setWordWrap(true);
         outer->addWidget(myShotEmpty);
@@ -677,13 +662,13 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
 
     addRule();
 
-    addSection(tr("Light"));
-    myLightAngleSlider = addRow(QStringLiteral("lightAngle"), tr("Angle"), 0, 359, 0);
+    addSection(RenderSettingsCopy::light());
+    myLightAngleSlider = addRow(QStringLiteral("lightAngle"), RenderSettingsCopy::angle(), 0, 359, 0);
     connect(myLightAngleSlider, &QSlider::valueChanged, this, [this](int v) {
         if (mySyncing) return;
         emit lightAngleChanged(static_cast<double>(v));
     });
-    myLightStrengthSlider = addRow(QStringLiteral("lightStrength"), tr("Strength"),
+    myLightStrengthSlider = addRow(QStringLiteral("lightStrength"), RenderSettingsCopy::strength(),
                                    kLightStrengthMin, kLightStrengthMax, 200);
     connect(myLightStrengthSlider, &QSlider::valueChanged, this, [this](int v) {
         if (mySyncing) return;
@@ -693,7 +678,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     addRule();
 
     // --- Material (mockup B's selector: preset tiles over the sliders) ---
-    addSection(tr("Material"));
+    addSection(RenderSettingsCopy::material());
     myMaterialHead = mySectionLabels.back();
     {
         auto* grid = new QWidget(this);
@@ -735,8 +720,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     // there are no rows here for it to be about. The tier caveat itself is
     // unchanged and is stated on each dial's tooltip on the card instead,
     // which is where the user now is when it matters.
-    myMaterialNote = new QLabel(
-        tr("Double-click a wood to set its colour, surface and grain"), this);
+    myMaterialNote = new QLabel(RenderSettingsCopy::materialNote(), this);
     myMaterialNote->setObjectName(QStringLiteral("renderSettingsMaterialNote"));
     myMaterialNote->setWordWrap(true);
     outer->addWidget(myMaterialNote);
@@ -747,22 +731,22 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     // "Studio", not "Scene": scene is the vocabulary table's Never-word
     // for the 3D area, and this section dresses the studio - backdrop,
     // floor, shadows - which is exactly what the render-mode docs call it.
-    addSection(tr("Studio"));
+    addSection(RenderSettingsCopy::studio());
     {
         auto* row = new QWidget(this);
         makeTransparent(row, QStringLiteral("renderSettingsBackgroundRow"));
         auto* line = new QHBoxLayout(row);
         line->setContentsMargins(0, 0, 0, 0);
         line->setSpacing(8);
-        auto* name = new QLabel(tr("Background"), row);
+        auto* name = new QLabel(RenderSettingsCopy::background(), row);
         makeTransparent(name, QStringLiteral("renderSettingsBackgroundLabel"));
         line->addWidget(name, 1);
         myRowLabels.push_back(name);
 
         myBackgroundSwatch = new Swatch(row);
-        myBackgroundSwatch->setToolTip(tr("Pick the render-mode backdrop colour"));
+        myBackgroundSwatch->setToolTip(RenderSettingsCopy::backgroundTip());
         connect(myBackgroundSwatch, &QAbstractButton::clicked, this,
-                &RenderSettingsPanel::openBackgroundDialog);
+                &RenderSettingsPanel::pickBackground);
         line->addWidget(myBackgroundSwatch);
 
         // AND A WAY BACK. The picked colour drives the backdrop AND the
@@ -770,12 +754,10 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         // so a saturated choice turns the studio into a chroma-key field with
         // the floor following it, and there was no control that undid it. The
         // viewport could always clear the override; nothing could ask it to.
-        auto* reset = new SegChip(tr("Studio"), row);
+        auto* reset = new SegChip(RenderSettingsCopy::studioReset().label, row);
         myStudioReset = reset;
-        reset->setToolTip(tr("Put the backdrop back to the studio tone this render mode is "
-                             "calibrated for"));
-        connect(reset, &QAbstractButton::clicked, this,
-                [this] { emit backgroundResetRequested(); });
+        reset->setToolTip(RenderSettingsCopy::studioReset().tip);
+        connect(reset, &QAbstractButton::clicked, this, &RenderSettingsPanel::resetBackground);
         line->addWidget(reset);
         outer->addWidget(row);
     }
@@ -783,8 +765,8 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     addRule();
 
     // --- Camera ----------------------------------------------------------
-    addSection(tr("Camera"));
-    myFovSlider = addRow(QStringLiteral("fov"), tr("FOV"), 20, 120, 45);
+    addSection(RenderSettingsCopy::camera());
+    myFovSlider = addRow(QStringLiteral("fov"), RenderSettingsCopy::fov(), 20, 120, 45);
     connect(myFovSlider, &QSlider::valueChanged, this, [this](int v) {
         if (mySyncing) return;
         emit fovChanged(static_cast<double>(v));
@@ -793,7 +775,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     addRule();
 
     // --- Quality ---------------------------------------------------------
-    addSection(tr("Quality"));
+    addSection(RenderSettingsCopy::quality());
     {
         auto* row = new QWidget(this);
         makeTransparent(row, QStringLiteral("renderSettingsQualityRow"));
@@ -802,23 +784,14 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         line->setSpacing(7);
         // Ascending, left to right, so the row reads as a dial rather than as
         // three unrelated buttons.
-        mySimpleChip = new SegChip(tr("Simple"), row);
-        mySimpleChip->setToolTip(tr("Instant frames with real shadows — for framing a "
-                                    "shot or a quicker machine"));
-        myBalancedChip = new SegChip(tr("Balanced"), row);
-        myBalancedChip->setToolTip(tr("Sharp the moment it appears, with no grain to wait "
-                                      "out — the middle of the three"));
-        myDeepChip = new SegChip(tr("Deep"), row);
-        myDeepChip->setToolTip(tr("The richest picture this machine reaches — slower, "
-                                  "and it keeps polishing while you watch"));
-        const auto pick = [this](Quality quality) {
-            if (myQuality == quality) return;
-            setQuality(quality);
-            emit qualityChanged(quality);
-            // The two-state signal still fires for whatever only knows Quick -
-            // and only when the answer to THAT question actually changed.
-            emit quickChanged(quality == Quality::Simple);
-        };
+        const auto words = RenderSettingsCopy::qualities();
+        mySimpleChip = new SegChip(words[0].label, row);
+        mySimpleChip->setToolTip(words[0].tip);
+        myBalancedChip = new SegChip(words[1].label, row);
+        myBalancedChip->setToolTip(words[1].tip);
+        myDeepChip = new SegChip(words[2].label, row);
+        myDeepChip->setToolTip(words[2].tip);
+        const auto pick = [this](Quality quality) { chooseQuality(quality); };
         connect(mySimpleChip, &QAbstractButton::clicked, this,
                 [pick] { pick(Quality::Simple); });
         connect(myBalancedChip, &QAbstractButton::clicked, this,
@@ -841,13 +814,9 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         auto* line = new QHBoxLayout(row);
         line->setContentsMargins(0, 0, 0, 0);
         line->setSpacing(7);
-        myCutoutChip = new SegChip(tr("Cut out"), row);
-        myCutoutChip->setToolTip(tr("Save Screenshot writes a PNG with no floor and no "
-                                    "background — just the furniture, on transparency"));
-        connect(myCutoutChip, &QAbstractButton::clicked, this, [this] {
-            setCutout(!myCutout);
-            emit cutoutChanged(myCutout);
-        });
+        myCutoutChip = new SegChip(RenderSettingsCopy::cutout().label, row);
+        myCutoutChip->setToolTip(RenderSettingsCopy::cutout().tip);
+        connect(myCutoutChip, &QAbstractButton::clicked, this, &RenderSettingsPanel::toggleCutout);
         line->addWidget(myCutoutChip);
         line->addStretch(1);
         outer->addWidget(row);
@@ -869,23 +838,12 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         line->setContentsMargins(0, 0, 0, 0);
         line->setHorizontalSpacing(5);
         line->setVerticalSpacing(5);
-        const struct { ExportSize size; const char* label; const char* tip; } kSizes[] = {
-            {ExportSize::Viewport, QT_TR_NOOP("Window"),
-             QT_TR_NOOP("Twice the viewport's own pixels — what this app has always saved")},
-            {ExportSize::Height720, QT_TR_NOOP("720"), QT_TR_NOOP("1280 x 720, near enough")},
-            {ExportSize::Height1080, QT_TR_NOOP("1080"), QT_TR_NOOP("Full HD")},
-            {ExportSize::Height1440, QT_TR_NOOP("1440"), QT_TR_NOOP("Quad HD")},
-            {ExportSize::Height2160, QT_TR_NOOP("4K"), QT_TR_NOOP("Ultra HD")},
-        };
+        const auto sizes = RenderSettingsCopy::exportSizes();
         for (std::size_t i = 0; i < myExportChips.size(); ++i) {
-            auto* chip = new SegChip(tr(kSizes[i].label), row);
-            chip->setToolTip(tr(kSizes[i].tip));
-            const ExportSize size = kSizes[i].size;
-            connect(chip, &QAbstractButton::clicked, this, [this, size] {
-                if (myExportSize == size) return;
-                setExportSize(size);
-                emit exportSizeChanged(size);
-            });
+            auto* chip = new SegChip(sizes[i].label, row);
+            chip->setToolTip(sizes[i].tip);
+            const ExportSize size = static_cast<ExportSize>(i);
+            connect(chip, &QAbstractButton::clicked, this, [this, size] { chooseExportSize(size); });
             myExportChips[i] = chip;
             line->addWidget(chip, static_cast<int>(i) / 3, static_cast<int>(i) % 3);
         }
@@ -905,7 +863,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         // stayed behind in the scroll: pinned and headless, the sizes read as
         // if they belonged to Camera, which is the row immediately above them.
         {
-            auto* head = new QLabel(tr("Export"), this);
+            auto* head = new QLabel(RenderSettingsCopy::exportHeading(), this);
             makeTransparent(head, QStringLiteral("renderSettingsSection_export"));
             mySectionLabels.push_back(head);
             shell->addWidget(head);
@@ -977,6 +935,7 @@ void RenderSettingsPanel::setBackground(const QColor& colour)
     myBackground = colour;
     if (myBackgroundSwatch) myBackgroundSwatch->setColour(colour);
     emit backgroundChanged(colour);
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setBackgroundSilently(const QColor& colour)
@@ -984,6 +943,7 @@ void RenderSettingsPanel::setBackgroundSilently(const QColor& colour)
     if (!colour.isValid()) return;
     myBackground = colour;
     if (myBackgroundSwatch) myBackgroundSwatch->setColour(colour);
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setFov(double fovyDeg)
@@ -1007,6 +967,7 @@ void RenderSettingsPanel::setValuesSilently(double glossiness01, double metallic
     }
     setFov(fovyDeg);
     mySyncing = false;
+    emit stateChanged();
 }
 
 double RenderSettingsPanel::surfaceGlossiness() const
@@ -1045,7 +1006,7 @@ void RenderSettingsPanel::openBackgroundDialog()
 
     auto* dialog = new QColorDialog(myBackground, this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(tr("Render background colour"));
+    dialog->setWindowTitle(RenderSettingsCopy::colourDialogTitle());
     dialog->setModal(false);
 
     const QColor before = myBackground;
@@ -1135,9 +1096,8 @@ void RenderSettingsPanel::setShots(const QStringList& names)
         line->setSpacing(4);
 
         auto* apply = new SegChip(myShotNames.at(i), row);
-        apply->setToolTip(tr("Put the camera, the picture's shape, the lens and the light "
-                             "back the way they were"));
-        connect(apply, &QAbstractButton::clicked, this, [this, i] { emit shotApplied(i); });
+        apply->setToolTip(RenderSettingsCopy::applyShotTip());
+        connect(apply, &QAbstractButton::clicked, this, [this, i] { applyShot(i); });
         line->addWidget(apply, 1);
         myShotApply.push_back(apply);
 
@@ -1147,9 +1107,9 @@ void RenderSettingsPanel::setShots(const QStringList& names)
         // shot holds no work and taking it again is one press of the button
         // above).
         auto* drop = new SegChip(QStringLiteral("\u00d7"), row);
-        drop->setToolTip(tr("Forget this shot"));
+        drop->setToolTip(RenderSettingsCopy::removeShotTip());
         drop->setFixedWidth(kShotDropWidth);
-        connect(drop, &QAbstractButton::clicked, this, [this, i] { emit shotRemoved(i); });
+        connect(drop, &QAbstractButton::clicked, this, [this, i] { removeShot(i); });
         line->addWidget(drop);
         myShotDrop.push_back(drop);
 
@@ -1160,6 +1120,7 @@ void RenderSettingsPanel::setShots(const QStringList& names)
     // The card sizes itself from its content (see sizeHint()), and the
     // content just changed height by a whole row.
     updateGeometry();
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setAspect(Aspect aspect)
@@ -1168,6 +1129,7 @@ void RenderSettingsPanel::setAspect(Aspect aspect)
     for (std::size_t i = 0; i < myAspectChips.size(); ++i) {
         if (myAspectChips[i]) myAspectChips[i]->setCurrent(static_cast<Aspect>(i) == aspect);
     }
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setGuides(Guides guides)
@@ -1176,6 +1138,7 @@ void RenderSettingsPanel::setGuides(Guides guides)
     for (std::size_t i = 0; i < myGuideChips.size(); ++i) {
         if (myGuideChips[i]) myGuideChips[i]->setCurrent(static_cast<Guides>(i) == guides);
     }
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setExportSize(ExportSize size)
@@ -1184,17 +1147,21 @@ void RenderSettingsPanel::setExportSize(ExportSize size)
     for (std::size_t i = 0; i < myExportChips.size(); ++i) {
         if (myExportChips[i]) myExportChips[i]->setCurrent(static_cast<ExportSize>(i) == size);
     }
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setExportNote(const QString& note)
 {
-    if (myExportNote) myExportNote->setText(note);
+    if (!myExportNote || myExportNote->text() == note) return;
+    myExportNote->setText(note);
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setCutout(bool cutout)
 {
     myCutout = cutout;
     if (myCutoutChip) myCutoutChip->setCurrent(cutout);
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setQuality(Quality quality)
@@ -1203,13 +1170,132 @@ void RenderSettingsPanel::setQuality(Quality quality)
     if (mySimpleChip) mySimpleChip->setCurrent(quality == Quality::Simple);
     if (myBalancedChip) myBalancedChip->setCurrent(quality == Quality::Balanced);
     if (myDeepChip) myDeepChip->setCurrent(quality == Quality::Deep);
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setWood(bool wood)
 {
     myWood = wood;
     syncPresetTiles();
+    emit stateChanged();
 }
+
+// --- the user's edits (Phase 3e): what each chip's click does, once -----------
+
+void RenderSettingsPanel::chooseAspect(Aspect aspect)
+{
+    if (myAspect == aspect) return;
+    setAspect(aspect);
+    emit aspectChanged(aspect);
+}
+
+void RenderSettingsPanel::chooseGuides(Guides guides)
+{
+    if (myGuides == guides) return;
+    setGuides(guides);
+    emit guidesChanged(guides);
+}
+
+void RenderSettingsPanel::chooseExportSize(ExportSize size)
+{
+    if (myExportSize == size) return;
+    setExportSize(size);
+    emit exportSizeChanged(size);
+}
+
+void RenderSettingsPanel::chooseQuality(Quality quality)
+{
+    if (myQuality == quality) return;
+    setQuality(quality);
+    emit qualityChanged(quality);
+    // The two-state signal still fires for whatever only knows Quick -
+    // and only when the answer to THAT question actually changed.
+    emit quickChanged(quality == Quality::Simple);
+}
+
+void RenderSettingsPanel::toggleCutout()
+{
+    setCutout(!myCutout);
+    emit cutoutChanged(myCutout);
+}
+
+void RenderSettingsPanel::chooseWood(const QString& name)
+{
+    MaterialTile* tile = tileNamed(name);
+    if (!tile) return;
+    if (myWood && myWoodName == tile->name()) return;
+    myWoodName = tile->name();
+    setWood(true);
+    emit woodTextureChosen(tile->name(), tile->filePath());
+}
+
+void RenderSettingsPanel::editMaterial(const QString& name)
+{
+    if (MaterialTile* tile = tileNamed(name)) emit materialEditRequested(tile->name());
+}
+
+void RenderSettingsPanel::saveShot() { emit shotSaveRequested(); }
+
+void RenderSettingsPanel::applyShot(int index)
+{
+    if (index < 0 || index >= myShotNames.size()) return;
+    emit shotApplied(index);
+}
+
+void RenderSettingsPanel::removeShot(int index)
+{
+    if (index < 0 || index >= myShotNames.size()) return;
+    emit shotRemoved(index);
+}
+
+void RenderSettingsPanel::pickBackground() { openBackgroundDialog(); }
+
+void RenderSettingsPanel::resetBackground() { emit backgroundResetRequested(); }
+
+MaterialTile* RenderSettingsPanel::tileNamed(const QString& name) const
+{
+    for (MaterialTile* tile : myPresetTiles)
+        if (tile && tile->name() == name) return tile;
+    return nullptr;
+}
+
+QImage RenderSettingsPanel::materialThumbnail(const QString& name) const
+{
+    MaterialTile* tile = tileNamed(name);
+    return tile ? tile->thumbnail().toImage() : QImage();
+}
+
+QSlider* RenderSettingsPanel::sliderFor(Dial dial) const
+{
+    switch (dial) {
+        case Dial::LightAngle: return myLightAngleSlider;
+        case Dial::LightStrength: return myLightStrengthSlider;
+        case Dial::Fov: return myFovSlider;
+    }
+    return nullptr;
+}
+
+int RenderSettingsPanel::dialValue(Dial dial) const
+{
+    const QSlider* slider = sliderFor(dial);
+    return slider ? slider->value() : 0;
+}
+
+QPoint RenderSettingsPanel::dialRange(Dial dial) const
+{
+    const QSlider* slider = sliderFor(dial);
+    return slider ? QPoint(slider->minimum(), slider->maximum()) : QPoint();
+}
+
+QString RenderSettingsPanel::readout(Dial dial) const
+{
+    const QSlider* slider = sliderFor(dial);
+    return slider ? formatReadout(slider) : QString();
+}
+
+QString RenderSettingsPanel::exportNote() const { return myExportNote ? myExportNote->text() : QString(); }
+
+QString RenderSettingsPanel::tierName() const { return myTierLabel ? myTierLabel->text() : QString(); }
 
 void RenderSettingsPanel::setWoodTileMm(double mm)
 {
@@ -1255,6 +1341,7 @@ void RenderSettingsPanel::setWoodSelection(const QString& name)
     // was the default, not because anybody picked a procedural grain.
     myWoodName = name.isEmpty() || name == QLatin1String("Wood") ? defaultWoodName() : name;
     syncPresetTiles();
+    emit stateChanged();
 }
 
 QString RenderSettingsPanel::materialFilePath(const QString& name) const
@@ -1347,16 +1434,14 @@ void RenderSettingsPanel::addTextureMaterials(
 {
     for (const auto& entry : namesAndPaths) {
         auto* tile = new MaterialTile(entry.first, entry.second, this);
-        connect(tile, &QAbstractButton::clicked, this, [this, tile] {
-            if (myWood && myWoodName == tile->name()) return;
-            myWoodName = tile->name();
-            setWood(true);
-            emit woodTextureChosen(tile->name(), tile->filePath());
-        });
+        const QString name = entry.first;
+        connect(tile, &QAbstractButton::clicked, this, [this, name] { chooseWood(name); });
         addTile(tile);
     }
     syncPresetTiles();
     syncMaterialSection();
+    emit materialsChanged();
+    emit stateChanged();
 }
 
 void RenderSettingsPanel::setTierStatus(const QString& tierName, double progress01)
@@ -1366,12 +1451,24 @@ void RenderSettingsPanel::setTierStatus(const QString& tierName, double progress
     // one dirty raster child recomposites EVERY visible overlay - so an
     // unchanged status was repainting the whole tree at 2 Hz for the length
     // of a render session (the branch review's measurement-backed finding).
-    if (myTierLabel && myTierLabel->text() != tierName) myTierLabel->setText(tierName);
+    bool moved = false;
+    if (myTierLabel && myTierLabel->text() != tierName) {
+        myTierLabel->setText(tierName);
+        moved = true;
+    }
     if (myProgress) {
         const bool show = progress01 >= 0.0;
         if (myProgress->isVisible() != show) myProgress->setVisible(show);
         if (show) myProgress->setFraction(progress01);
     }
+    // The page's bar follows the same half-percent grain the Qt line keeps, so
+    // a 500 ms ticker reporting the same depth announces nothing.
+    const double next = progress01 >= 0.0 ? std::clamp(progress01, 0.0, 1.0) : -1.0;
+    if ((next < 0.0) != (myTierProgress < 0.0) || std::fabs(next - myTierProgress) >= 0.005) {
+        myTierProgress = next;
+        moved = true;
+    }
+    if (moved) emit stateChanged();
 }
 
 void RenderSettingsPanel::setShutterAction(QAction* action)
@@ -1386,30 +1483,27 @@ void RenderSettingsPanel::setShutterAction(QAction* action)
     }
     if (myShutter) return;
     myShutter = new RenderShutterButton(action, this, /*wide=*/true);
+    // The shutter's enabled state and words are part of what this panel shows.
+    connect(action, &QAction::changed, this, &RenderSettingsPanel::stateChanged);
     // Straight into the outer layout's tail, after the footer status pair.
     if (auto* outer = qobject_cast<QVBoxLayout*>(layout())) outer->addWidget(myShutter);
 }
 
 void RenderSettingsPanel::syncValueLabels()
 {
-    for (const auto& pair : myValueLabels) {
-        QSlider* slider = pair.first;
-        QLabel* readout = pair.second;
-        QString text;
-        if (slider == myLightAngleSlider || slider == myFovSlider ||
-            slider == myWoodAngleSlider)
-            text = QStringLiteral("%1\u00b0").arg(slider->value());
-        else if (slider == myLightStrengthSlider)
-            text = QStringLiteral("%1%").arg(slider->value());
-        else if (slider == myWoodTileSlider)
-            // A LENGTH, so it reads through Measure like every other length
-            // in this app - which is also what makes it follow the unit.
-            text = QString::fromStdString(
-                Measure::formatLength(static_cast<double>(slider->value())));
-        else
-            text = QString::number(slider->value());
-        readout->setText(text);
-    }
+    for (const auto& pair : myValueLabels) pair.second->setText(formatReadout(pair.first));
+}
+
+QString RenderSettingsPanel::formatReadout(const QSlider* slider) const
+{
+    if (slider == myLightAngleSlider || slider == myFovSlider || slider == myWoodAngleSlider)
+        return QStringLiteral("%1\u00b0").arg(slider->value());
+    if (slider == myLightStrengthSlider) return QStringLiteral("%1%").arg(slider->value());
+    if (slider == myWoodTileSlider)
+        // A LENGTH, so it reads through Measure like every other length
+        // in this app - which is also what makes it follow the unit.
+        return QString::fromStdString(Measure::formatLength(static_cast<double>(slider->value())));
+    return QString::number(slider->value());
 }
 
 void RenderSettingsPanel::syncPresetTiles()

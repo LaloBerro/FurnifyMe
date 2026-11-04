@@ -41,6 +41,8 @@
 // that actually lands on the bare viewport does. Pinned by gui_smoke.
 #include <QAbstractButton>
 #include <QColor>
+#include <QImage>
+#include <QPoint>
 #include <QStringList>
 #include <QWidget>
 
@@ -255,6 +257,42 @@ public:
     // really went rather than that some tile or other is present.
     QStringList materialTileNames() const;
 
+    // THE USER'S EDITS, ONE PATH EACH (migration Phase 3e). Each does exactly
+    // what a click on its own chip does - the chips call these - so the HTML
+    // panel, which drives this one, cannot mean anything a click here does
+    // not: a choice that is already current says nothing, Cut out toggles,
+    // the wood already worn says nothing, and an index or a name with no row
+    // or tile behind it is refused.
+    void chooseAspect(Aspect aspect);
+    void chooseGuides(Guides guides);
+    void chooseExportSize(ExportSize size);
+    void chooseQuality(Quality quality);
+    void toggleCutout();
+    void chooseWood(const QString& name);
+    void editMaterial(const QString& name);
+    void saveShot();
+    void applyShot(int index);
+    void removeShot(int index);
+    // The one modeless picker, as the swatch's click opens it.
+    void pickBackground();
+    void resetBackground();
+
+    // The three dials the panel still carries, for a reader that is not
+    // the slider: the value, its legal range and its readout, formatted by
+    // the one formatter the panel's own readouts use.
+    enum class Dial { LightAngle, LightStrength, Fov };
+    int dialValue(Dial dial) const;
+    QPoint dialRange(Dial dial) const;
+    QString readout(Dial dial) const;
+
+    // A tile's thumbnail as it was decoded once, at construction; null for a
+    // name no tile answers to.
+    QImage materialThumbnail(const QString& name) const;
+    QString exportNote() const;
+    QString tierName() const;
+    // Negative while the tier has no polish to show.
+    double tierProgress() const { return myTierProgress; }
+
     // The six controls, for childAt() hit tests and direct suite drives -
     // AppearancePanel's own sizeControl()/swatchFor() shape.
     QSlider* surfaceControl() const { return mySurfaceSlider; }
@@ -275,6 +313,12 @@ public:
     QColorDialog* activeColourDialog() const { return myDialog; }
 
 signals:
+    // ANYTHING this panel shows changed - a user edit, a silent return path,
+    // the tier line, the shutter's action. The HTML panel re-reads its state
+    // on this; nothing else needs it.
+    void stateChanged();
+    // The tiles changed (addTextureMaterials()).
+    void materialsChanged();
     void quickChanged(bool quick);
     void qualityChanged(Quality quality);
     void cutoutChanged(bool cutout);
@@ -361,6 +405,11 @@ private:
     // The footer's live status pair - see setTierStatus().
     QLabel* myTierLabel = nullptr;
     class ProgressLine* myProgress = nullptr;
+    double myTierProgress = -1.0;
+    QSlider* sliderFor(Dial dial) const;
+    // The readout's text for a slider - the one formatter.
+    QString formatReadout(const QSlider* slider) const;
+    class MaterialTile* tileNamed(const QString& name) const;
     // The Quality chips and their state - see setQuality().
     class SegChip* myDeepChip = nullptr;
     class SegChip* mySimpleChip = nullptr;

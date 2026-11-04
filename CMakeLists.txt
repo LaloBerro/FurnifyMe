@@ -284,6 +284,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/JointChip.cpp
       src/ui/JointsPanel.cpp
       src/ui/RenderSettingsPanel.cpp
+      src/ui/RenderSettingsCopy.cpp
       src/ui/RenderFrameGuides.cpp
       src/ui/RenderStudio.cpp
       src/ui/SceneWindow.cpp
@@ -381,6 +382,12 @@ if(FURNIFYME_BUILD_APP)
     add_executable(settings_tests tests/settings_tests.cpp)
     target_link_libraries(settings_tests PRIVATE furnify_app)
     add_test(NAME settings COMMAND settings_tests)
+
+    # The render settings panel's edit path and its page bridge (migration
+    # Phase 3e), offscreen beside settings_tests.
+    add_executable(render_bridge_tests tests/render_bridge.cpp)
+    target_link_libraries(render_bridge_tests PRIVATE furnify_app)
+    add_test(NAME render_bridge COMMAND render_bridge_tests)
 
     # The bundled material textures (Milestone 5): every image in
     # assets/materials ships beside the executable, where MainWindow's scan
@@ -531,7 +538,7 @@ if(FURNIFYME_BUILD_APP)
       set(windeployqt "${qt_bin}/windeployqt.exe")
       file(GLOB vcpkg_runtime_dlls "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/*.dll")
       list(FILTER vcpkg_runtime_dlls EXCLUDE REGEX "/Qt6[^/]*\.dll$")
-      foreach(web_target furnifyme web_spike hub_smoke chrome_smoke settings_tests gui_smoke)
+      foreach(web_target furnifyme web_spike hub_smoke chrome_smoke settings_tests render_bridge_tests gui_smoke)
         add_dependencies(${web_target} web_pages)
         add_custom_command(TARGET ${web_target} POST_BUILD
           COMMAND "${windeployqt}" --release --no-translations --no-compiler-runtime
