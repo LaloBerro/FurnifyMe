@@ -207,4 +207,44 @@ TypeScript + Vite, vitest + jsdom.
 
 ## Gate record
 
-(filled in at the end)
+**Commits** (branch `items-card` from `main` at `3687008`): `1e07473` key table and move words into
+the session library; `07e70a2` ItemsModel; `0df460b` the list hold; `6cb6b3c` MainWindow wiring;
+`d6b8d4a` the page; `4294281` end to end, with three fixes; `3f4f26a` review fixes.
+
+| Gate | Result |
+|---|---|
+| ctest (both presets) | 23/23 in windows-web and in windows (vcpkg) |
+| items_model_tests | 95/95 |
+| vitest / svelte-check | 215/215; 0 errors, 0 warnings |
+| chrome_smoke | 313/313 (42 new for the card, 6 for the list hold) |
+| hub_smoke | 36/36 |
+| gui_smoke run 1 | PASS 6448 + 1 skip, floor 6449 |
+| gui_smoke run 2 | PASS 6448 + 1 skip, floor 6449 |
+
+**Mutations, each to a named red line:** the Shift range over hidden rows (after a vacuous fixture
+was found and fixed - the folded folder sat before the anchor); the filter writing folds; the hold
+claiming every key; the drag threshold dropped; a name rendered as HTML; a refusal shown for any
+target. The page was written before its tests (a ledgered departure, as in 3g); the mutations are
+what prove the tests have teeth.
+
+**Found by looking at captures and by the end-to-end checks, fixed in `4294281`:** the card could
+grow but never shrink (it measured the list's `scrollHeight`); the drag ghost was never drawn (the
+view's mask clips painting - a full-viewport layer stands in it for the drag); focus stayed in the
+page after a hold with nowhere recorded to return to (`clearFocus()` does nothing in an inactive
+window - the keys now go to the 3D view).
+
+**Review (Opus, read-only):** 1 Critical, 3 Important, 4 Minor. Fixed, each watched red first: C1
+the row menu could stay open for good after a document swap or a drag start, its layer and claim
+taking every press and key; I1 a rename committed by a click away took focus back from where the
+user clicked; I2 a double-click on a twisty, eye or grain mark opened a rename; I3 a rename C++
+closed kept its keyboard claim, and one the card was hidden under blocked the next; M1 F2 claimed
+only while the keys' row is on screen; M2 a double-click's second press selected again.
+
+**Rulings:** R1-R8 as planned. I1's second suggestion (a hold that only records while focus is
+outside the page) was declined: a row press does not move Qt focus into the NoFocus view, so the
+hold has to take it, or the list's keys would never reach the page.
+
+**Deferred minors:** M3 - a click on a Qt chip above the page runs while the row menu is open (QMenu
+would have eaten it); the menu closes on the next document change. M4 - an Undo resets the keys' row
+(`resyncView()` -> `resetPick()`), as the Qt drawer does: parity, though Review Focus 5 promised
+more.
