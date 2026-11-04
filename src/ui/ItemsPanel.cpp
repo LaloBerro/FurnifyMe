@@ -8,7 +8,7 @@
 #include "DropIndicator.h"
 #include "IconSet.h"
 #include "InlineRename.h"
-#include "ItemMoveText.h"
+#include "session/ItemMoveText.h"
 #include "ItemsFilterField.h"
 #include "ItemsRow.h"
 #include "KeyClaim.h"
@@ -2086,72 +2086,18 @@ bool ItemsPanel::claimsKey(const QKeyEvent* key) const
     return true;
 }
 
-const std::vector<ItemsPanel::ListKey>& ItemsPanel::listKeys()
-{
-    // One row of the ShortcutSheet's "Items list" group per entry, in this
-    // order. The labels say what the KEY does, in the sheet's own register.
-    static const std::vector<ListKey> table = {
-        {ListCommand::Step, {QKeyCombination(Qt::Key_Up), QKeyCombination(Qt::Key_Down)},
-         QT_TR_NOOP("Select the row above or below"), false},
-        {ListCommand::ExtendStep,
-         {QKeyCombination(Qt::ShiftModifier, Qt::Key_Up),
-          QKeyCombination(Qt::ShiftModifier, Qt::Key_Down)},
-         QT_TR_NOOP("Add the row above or below to the selection"), false},
-        {ListCommand::FirstOrLast, {QKeyCombination(Qt::Key_Home), QKeyCombination(Qt::Key_End)},
-         QT_TR_NOOP("Select the first or the last row"), false},
-        {ListCommand::FoldOrParent, {QKeyCombination(Qt::Key_Left)},
-         QT_TR_NOOP("Close the folder, or go to the folder the row is in"), false},
-        {ListCommand::UnfoldOrChild, {QKeyCombination(Qt::Key_Right)},
-         QT_TR_NOOP("Open the folder, or go to its first row"), false},
-        {ListCommand::Rename, {QKeyCombination(Qt::Key_F2)}, QT_TR_NOOP("Rename the row"), false},
-        {ListCommand::MoveUp, {QKeyCombination(Qt::AltModifier, Qt::Key_Up)},
-         QT_TR_NOOP("Move up"), false},
-        {ListCommand::MoveDown, {QKeyCombination(Qt::AltModifier, Qt::Key_Down)},
-         QT_TR_NOOP("Move down"), false},
-        {ListCommand::MoveOutOfFolder, {QKeyCombination(Qt::AltModifier, Qt::Key_Left)},
-         QT_TR_NOOP("Move out of its folder"), false},
-        {ListCommand::MoveIntoFolderAbove, {QKeyCombination(Qt::AltModifier, Qt::Key_Right)},
-         QT_TR_NOOP("Move into the folder above"), false},
-        {ListCommand::EnterList, {QKeyCombination(Qt::Key_Down), QKeyCombination(Qt::Key_Return)},
-         QT_TR_NOOP("From the filter field, go to the list"), true},
-    };
-    return table;
-}
+const std::vector<ItemsPanel::ListKey>& ItemsPanel::listKeys() { return ItemsKeys::table(); }
 
 const ItemsPanel::ListKey* ItemsPanel::listKeyFor(QKeyCombination combination, bool fromFilterField)
 {
-    // Keypad Enter is the same key as Return to the hand that presses it.
-    if (combination.key() == Qt::Key_Enter)
-        combination = QKeyCombination(combination.keyboardModifiers(), Qt::Key_Return);
-    for (const ListKey& entry : listKeys()) {
-        if (entry.fromFilterField != fromFilterField) continue;
-        for (const QKeyCombination& key : entry.keys)
-            if (key == combination) return &entry;
-    }
-    return nullptr;
+    return ItemsKeys::forKey(combination, fromFilterField);
 }
 
-QString ItemsPanel::listKeyLabel(const ListKey& entry) { return tr(entry.label); }
+QString ItemsPanel::listKeyLabel(const ListKey& entry) { return ItemsKeys::label(entry); }
 
-QString ItemsPanel::listKeyText(const ListKey& entry)
-{
-    QStringList keys;
-    for (QKeyCombination key : entry.keys) {
-        // "Enter", the app's word for the key (KeyClaim's "Enter applies"),
-        // never NativeText's "Return" - one key, one name on every surface.
-        if (key.key() == Qt::Key_Return)
-            key = QKeyCombination(key.keyboardModifiers(), Qt::Key_Enter);
-        keys << QKeySequence(key).toString(QKeySequence::NativeText);
-    }
-    return keys.join(QStringLiteral(", "));
-}
+QString ItemsPanel::listKeyText(const ListKey& entry) { return ItemsKeys::text(entry); }
 
-QKeySequence ItemsPanel::listKeySequence(ListCommand command)
-{
-    for (const ListKey& entry : listKeys())
-        if (entry.command == command && !entry.keys.empty()) return QKeySequence(entry.keys.front());
-    return QKeySequence();
-}
+QKeySequence ItemsPanel::listKeySequence(ListCommand command) { return ItemsKeys::sequence(command); }
 
 bool ItemsPanel::event(QEvent* event)
 {

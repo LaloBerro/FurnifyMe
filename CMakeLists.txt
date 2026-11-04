@@ -177,6 +177,11 @@ if(FURNIFYME_BUILD_APP)
       src/session/JointRows.h
       src/session/JointsModel.cpp
       src/session/JointsModel.h
+      # The Items drawer's words, key table and model (Phase 3h).
+      src/session/ItemMoveText.cpp
+      src/session/ItemMoveText.h
+      src/session/ItemsKeys.cpp
+      src/session/ItemsKeys.h
     )
     target_include_directories(furnify_session PUBLIC src)
     target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)
@@ -259,7 +264,6 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ViewportOverlay.cpp
       src/ui/ItemsPanel.cpp
       src/ui/ItemsRow.cpp
-      src/ui/ItemMoveText.cpp
       src/ui/ItemsFilterField.cpp
       src/ui/DropIndicator.cpp
       src/ui/DragGhost.cpp

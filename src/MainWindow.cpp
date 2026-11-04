@@ -34,7 +34,7 @@
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
-#include "ItemMoveText.h"
+#include "session/ItemMoveText.h"
 #include "PanelCloseButton.h"
 #include "PullArrow.h"
 #include "ShapeFlyout.h"

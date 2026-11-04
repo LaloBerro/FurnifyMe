@@ -47,7 +47,7 @@
 #include "ItemsFilterField.h"
 #include "ItemsPanel.h"
 #include "ItemsRow.h"
-#include "ItemMoveText.h"
+#include "session/ItemMoveText.h"
 #include "Joinery.h"
 #include "JointChip.h"
 #include "JointsPanel.h"

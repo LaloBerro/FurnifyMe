@@ -1,6 +1,6 @@
 #include "DragGhost.h"
 
-#include "ItemMoveText.h"
+#include "session/ItemMoveText.h"
 #include "Theme.h"
 
 #include <QFontMetrics>

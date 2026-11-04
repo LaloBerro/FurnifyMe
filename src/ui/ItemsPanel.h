@@ -38,6 +38,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include "session/ItemsKeys.h"
+
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -145,25 +147,11 @@ public:
     // keys off it, and MainWindow hands it to the ShortcutSheet as its "Items
     // list" group - so a key the list answers is a key the sheet lists, and
     // neither can be written twice. Each entry is one row of the sheet.
-    enum class ListCommand {
-        Step,                 // Up / Down
-        ExtendStep,           // Shift+Up / Shift+Down
-        FirstOrLast,          // Home / End
-        FoldOrParent,         // Left
-        UnfoldOrChild,        // Right
-        Rename,               // F2, over a live row only
-        MoveUp,               // Alt+Up
-        MoveDown,             // Alt+Down
-        MoveOutOfFolder,      // Alt+Left
-        MoveIntoFolderAbove,  // Alt+Right (ruling D1)
-        EnterList,            // Down / Enter in the filter field (ruling D2)
-    };
-    struct ListKey {
-        ListCommand command;
-        std::vector<QKeyCombination> keys;
-        const char* label;          // untranslated; listKeyLabel() translates
-        bool fromFilterField;       // answered by the filter field, not the list
-    };
+    // The table itself lives in session/ItemsKeys since Phase 3h, so the
+    // HTML drawer and the chrome's list hold read the same one; these are
+    // its names here.
+    using ListCommand = ItemsKeys::Command;
+    using ListKey = ItemsKeys::Key;
     static const std::vector<ListKey>& listKeys();
     // The entry a key belongs to, in the list's scope or the filter field's -
     // null when it is not one of the drawer's keys. `mods` without Keypad.
