@@ -36,6 +36,20 @@ void ChromeBridge::setStatusMap(const QVariantMap& map)
     emit statusChanged();
 }
 
+void ChromeBridge::setQuestionMap(const QVariantMap& map)
+{
+    if (myQuestion == map) return;
+    myQuestion = map;
+    emit questionChanged(map);
+}
+
+void ChromeBridge::answerQuestion(const QString& which)
+{
+    if (!myQuestion.value(QStringLiteral("asking")).toBool()) return;
+    if (which != QLatin1String("save") && which != QLatin1String("discard") && which != QLatin1String("keep")) return;
+    emit questionAnswered(which);
+}
+
 void ChromeBridge::setCardMap(const QVariantMap& map)
 {
     if (myCards == map) return;
@@ -117,6 +131,7 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     applyMask();
     connect(myBridge, &ChromeBridge::hitRectsChanged, this, &EditorChrome::applyMask);
     connect(myBridge, &ChromeBridge::undoRequested, this, &EditorChrome::undoRequested);
+    connect(myBridge, &ChromeBridge::questionAnswered, this, &EditorChrome::questionAnswered);
     connect(myBridge, &ChromeBridge::keyboardClaimed, this, &EditorChrome::claimKeyboard);
     connect(myBridge, &ChromeBridge::keyboardReleased, this, &EditorChrome::releaseKeyboard);
     // A card that sizes itself tells us its height; its slot takes it, and
@@ -293,6 +308,14 @@ void EditorChrome::setStatus(const QString& left, const QString& right, const QS
                             {QStringLiteral("name"), name},
                             {QStringLiteral("unsaved"), unsaved},
                             {QStringLiteral("shown"), shown}});
+}
+
+void EditorChrome::setQuestion(bool asking, const QVariantMap& words)
+{
+    QVariantMap map = asking ? words : QVariantMap();
+    map.insert(QStringLiteral("asking"), asking);
+    myBridge->setQuestionMap(map);
+    if (asking) myHost->view()->raise();
 }
 
 void EditorChrome::setLive(bool live)

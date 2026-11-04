@@ -3086,7 +3086,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
         if (!myCloseCard || !myCloseCard->isAsking()) return;
         myCloseCard->replace();
-        if (myWindowButtons) myWindowButtons->raise();
+        raiseCloseQuestion();
     });
     connect(myCloseCard, &UnsavedCloseCard::saveChosen, this, &MainWindow::onCloseSaveChosen);
     connect(myCloseCard, &UnsavedCloseCard::discardChosen, this,
@@ -4114,7 +4114,35 @@ void MainWindow::askBeforeClosing(CloseRoute route)
     // on the way - over the scrim, where a live control would be clickable
     // through the question. The window controls go back on top last: the
     // scrim blocks the viewport, not the window.
+    raiseCloseQuestion();
+}
+
+QVariantMap MainWindow::closeQuestionWords() const
+{
+    QVariantMap words = myCloseCard ? myCloseCard->words() : QVariantMap();
+    // WHERE THE WASH STOPS: the window buttons. Raised over it they still take
+    // their presses, but Qt composites the web page over plain widgets
+    // whatever their stacking, so the page's wash dimmed them (measured: the
+    // close glyph at 52 against the Qt card's 152). The page cuts this
+    // rectangle out of its wash instead - the Qt card's look, a crisp card in
+    // a dimmed window.
+    if (myWindowButtons && myView && myWindowButtons->isVisible()) {
+        const QRect r(myWindowButtons->mapTo(myView, QPoint(0, 0)), myWindowButtons->size());
+        words.insert(QStringLiteral("keepClear"), QVariantMap{{QStringLiteral("x"), r.x()},
+                                                              {QStringLiteral("y"), r.y()},
+                                                              {QStringLiteral("w"), r.width()},
+                                                              {QStringLiteral("h"), r.height()}});
+    }
+    return words;
+}
+
+void MainWindow::raiseCloseQuestion()
+{
+    if (!myCloseCard || !myCloseCard->isAsking()) return;
     myCloseCard->raise();
+#ifdef FURNIFYME_WEB_UI
+    if (myCloseCard->drawnElsewhere() && myHtmlChrome) myHtmlChrome->view()->raise();
+#endif
     if (myWindowButtons) myWindowButtons->raise();
 }
 
@@ -10401,6 +10429,23 @@ void MainWindow::useHtmlChrome()
 #ifdef FURNIFYME_WEB_UI
     if (myHtmlChrome) return;
     myHtmlChrome = new EditorChrome(myView, this);
+    // The close question's three answers come back from the page through the
+    // Qt card's own answer(): it hides first, then reports (Phase 3f).
+    connect(myHtmlChrome, &EditorChrome::questionAnswered, this, [this](const QString& which) {
+        if (!myCloseCard || !myCloseCard->isAsking()) return;
+        if (which == QLatin1String("save")) myCloseCard->answer(UnsavedCloseCard::Answer::Save);
+        else if (which == QLatin1String("discard")) myCloseCard->answer(UnsavedCloseCard::Answer::Discard);
+        else if (which == QLatin1String("keep")) myCloseCard->answer(UnsavedCloseCard::Answer::Keep);
+    });
+    if (myCloseCard) {
+        connect(myCloseCard, &UnsavedCloseCard::questionChanged, this, [this](bool asking) {
+            if (!myHtmlChrome || !myHtmlChrome->isLive()) return;
+            myHtmlChrome->setQuestion(asking, closeQuestionWords());
+            if (asking) raiseCloseQuestion();
+            // The Qt cards go back over the page once nothing stands over them.
+            else if (myOverlay) myOverlay->relayout();
+        });
+    }
     // The render settings panel as its own page, docked in the Qt panel's
     // place while it is live (migration Phase 3e) - under the chrome's own
     // rule, so `--qt-chrome` keeps the Qt panel too.
@@ -10442,6 +10487,13 @@ void MainWindow::useHtmlChrome()
         if (myOverlay && myJointsSlot && myJointsPanel) {
             if (live) myOverlay->replaceWidget(myJointsPanel, myJointsSlot);
             else myOverlay->replaceWidget(myJointsSlot, myJointsPanel);
+        }
+        // The close question (Phase 3f): the page draws it while it can, and
+        // the Qt card paints again the moment it cannot - mid-question too.
+        if (myCloseCard) {
+            myCloseCard->setDrawnElsewhere(live);
+            myHtmlChrome->setQuestion(live && myCloseCard->isAsking(), closeQuestionWords());
+            raiseCloseQuestion();
         }
         updateActions();
         syncHtmlChrome();

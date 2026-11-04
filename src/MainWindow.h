@@ -1988,6 +1988,14 @@ private:
     // autosave debounce, raises the card. Asked again while it stands, the
     // latest route wins (an X over Close furniture's question means quit).
     void askBeforeClosing(CloseRoute route);
+    // The close question on top: the card (its key claim), then - while the
+    // chrome page draws it (Phase 3f) - the page's view over every Qt card,
+    // then the window buttons back over both. After every relayout too,
+    // which raises each anchored card as it places it.
+    void raiseCloseQuestion();
+    // The close question's words for the page, with the window buttons'
+    // rectangle the wash must leave clear (Phase 3f).
+    QVariantMap closeQuestionWords() const;
     // Performs the close itself once nothing more needs asking: the library
     // route through showInitScreen(), the quit route through quitRequested().
     void finishClose(CloseRoute route, const QString& statusMessage);

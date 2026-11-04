@@ -1,3 +1,4 @@
+import type { QuestionState } from './Question.svelte';
 import type { ChromeApi, StatusState, ToastKind } from './api';
 import type { Rect } from './solver';
 import { MockSignal } from '../hub/mock';
@@ -12,6 +13,7 @@ export function mockChrome() {
     obstaclesChanged: MockSignal;
     statusChanged: MockSignal;
     cardsChanged: MockSignal;
+    questionChanged: MockSignal<[QuestionState]>;
   } = {
     calls,
     toast: new MockSignal<[string, ToastKind, boolean, number, number?, number?, boolean?]>(),
@@ -24,6 +26,9 @@ export function mockChrome() {
     statusChanged: new MockSignal(),
     cards: {},
     cardsChanged: new MockSignal(),
+    question: { asking: false } as QuestionState,
+    questionChanged: new MockSignal<[QuestionState]>(),
+    answerQuestion: (which) => calls.push({ method: 'answerQuestion', args: [which] }),
     reportHitRects: (rects) => calls.push({ method: 'reportHitRects', args: [rects] }),
     undo: (stamp) => calls.push({ method: 'undo', args: [stamp] }),
     ready: () => calls.push({ method: 'ready', args: [] }),

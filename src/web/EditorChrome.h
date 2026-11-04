@@ -36,12 +36,18 @@ class ChromeBridge : public QObject
     Q_PROPERTY(QVariantList obstacles READ obstacles NOTIFY obstaclesChanged)
     Q_PROPERTY(QVariantMap status READ status NOTIFY statusChanged)
     Q_PROPERTY(QVariantMap cards READ cards NOTIFY cardsChanged)
+    Q_PROPERTY(QVariantMap question READ question NOTIFY questionChanged)
 public:
     using QObject::QObject;
     bool undoEnabled() const { return myUndoEnabled; }
     QVariantList obstacles() const { return myObstacles; }
     QVariantMap status() const { return myStatus; }
     QVariantMap cards() const { return myCards; }
+    // The close question (Phase 3f): {asking, title, body, save, saveKey,
+    // discard, keep, keepKey}. Also sent WITH questionChanged, which a page
+    // must not wait a batch for.
+    QVariantMap question() const { return myQuestion; }
+    void setQuestionMap(const QVariantMap& map);
     const QVector<QRect>& hitRects() const { return myHitRects; }
 
     void setUndoEnabledState(bool on);
@@ -61,7 +67,9 @@ signals:
     void obstaclesChanged();
     void statusChanged();
     void cardsChanged();
+    void questionChanged(const QVariantMap& question);
     // Observed on the C++ side
+    void questionAnswered(const QString& which);
     void undoRequested(int stamp);
     void hitRectsChanged();
     void pageReady();
@@ -84,8 +92,12 @@ public slots:
     // A card that sizes itself (the Versions drawer, Phase 3c) says how tall
     // it is; its slot takes the height.
     void reportCardHeight(const QString& name, int height);
+    // The close question's answer: "save", "discard" or "keep". Anything else,
+    // or an answer while no question stands, is refused.
+    void answerQuestion(const QString& which);
 
 private:
+    QVariantMap myQuestion;
     bool myUndoEnabled = true;
     QVariantList myObstacles;
     QVariantMap myStatus;
@@ -120,6 +132,10 @@ public:
     void setObstacles(const std::vector<QRect>& rects);
     void setStatus(const QString& left, const QString& right, const QString& name, bool unsaved,
                    bool shown);
+    // The close question stands (words from UnsavedCloseCard::words()) or
+    // does not (an empty map). While it stands the page's view is raised over
+    // every Qt card, so its wash takes every press (Phase 3f, ruling R2).
+    void setQuestion(bool asking, const QVariantMap& words);
 
     ChromeBridge* bridge() const { return myBridge; }
     WebHost* host() const { return myHost; }
@@ -136,6 +152,7 @@ public:
 signals:
     void undoRequested(int stamp);
     void liveChanged(bool live);
+    void questionAnswered(const QString& which);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

@@ -29,6 +29,7 @@
 #include <QAbstractButton>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 #include <QWidget>
 
 class QStatusBar;
@@ -80,10 +81,31 @@ public:
     // same split ItemsPanel and SelectorWindow make.
     QStringList paintedUserTexts() const { return {myName}; }
 
+    // DRAWN ELSEWHERE (migration Phase 3f): the editor's chrome page draws the
+    // wash and the card instead. This one then paints nothing, hides its
+    // buttons and lets the pointer through to the page standing over it -
+    // and stays SHOWN while the question stands, so isAsking(), the key claim
+    // (every ShortcutOverride in the window, Enter = save, Esc = keep) and
+    // every gate that reads isAsking() hold exactly as they did.
+    void setDrawnElsewhere(bool drawnElsewhere);
+    bool drawnElsewhere() const { return myDrawnElsewhere; }
+
+    // The question's words as the page draws them: title, body, the three
+    // labels and the two key names - the same functions this card paints with.
+    QVariantMap words() const;
+
+    enum class Answer { Save, Discard, Keep };
+    // Hides FIRST, then reports - see the file comment for why the order is
+    // the contract. Public for the page's buttons, which answer through here.
+    void answer(Answer which);
+
 signals:
     void saveChosen();
     void discardChosen();
     void keepChosen();
+    // The question began or ended standing - the card's real visibility,
+    // both ways.
+    void questionChanged(bool asking);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -98,10 +120,6 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private:
-    enum class Answer { Save, Discard, Keep };
-    // Hides FIRST, then reports - see the file comment for why the order is
-    // the contract.
-    void answer(Answer which);
     void layoutCard();
     int titleHeight(int textWidth) const;
     int bodyHeight(int textWidth) const;
@@ -112,6 +130,7 @@ private:
     CloseCardButton* myDiscard = nullptr;
     CloseCardButton* myKeep = nullptr;
     bool myClaimInstalled = false;
+    bool myDrawnElsewhere = false;
 };
 
 // One of the card's three answers. Painted, not a QPushButton, because the

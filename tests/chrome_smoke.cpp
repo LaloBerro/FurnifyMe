@@ -36,6 +36,9 @@
 #include "web/RenderPage.h"
 #include "ui/RenderStudio.h"
 #include "ui/SceneWindow.h"
+#include "ui/UnsavedCloseCard.h"
+#include "ui/WindowChrome.h"
+#include "ui/ToolCluster.h"
 #include "ui/RenderSettingsPanel.h"
 #include "web/WebHost.h"
 
@@ -1312,6 +1315,131 @@ int main(int argc, char* argv[])
         broken.close();
         pump(200);
     }
+    // --- the close question as HTML (Phase 3f) -------------------------------------
+    UnsavedCloseCard* closeCard = window.findChild<UnsavedCloseCard*>();
+    QAction* closeFurniture = actionNamed(&window, QStringLiteral("Close furniture"));
+    const auto washShown = [&] { return js(page, "!!document.querySelector('.wash')").toBool(); };
+    {
+        check(closeCard && closeFurniture, "the editor has its close question and Close furniture");
+        // Something to lose: a body nudged, so the furniture is dirty.
+        {
+            gp_Trsf nudge;
+            nudge.SetTranslation(gp_Vec(0, 0, 5));
+            window.transformBody(window.document().solids().front().id, nudge);
+            pump(200);
+        }
+        check(window.isFurnitureDirty(), "the furniture has unsaved changes to ask about");
+        // The window buttons' brightest pixel, before and while the question
+        // stands - the page's wash must leave them as crisp as the Qt card's
+        // raise did (measured red first: 52 against 152).
+        WindowButtons* windowButtons = window.findChild<WindowButtons*>();
+        const auto buttonsBrightness = [&](const QString& file) {
+            const QImage shot(file);
+            if (shot.isNull() || !windowButtons) return -1;
+            const double dpr = window.devicePixelRatioF();
+            const QRect r(windowButtons->mapTo(&window, QPoint(0, 0)) * dpr, windowButtons->size() * dpr);
+            int best = 0;
+            for (int y = r.top(); y <= r.bottom(); ++y)
+                for (int x = r.left(); x <= r.right(); ++x)
+                    if (shot.rect().contains(x, y)) best = std::max(best, qGray(shot.pixel(x, y)));
+            return best;
+        };
+#ifdef _WIN32
+        capture(&window, outDir + "/close-question-before.png");
+#endif
+        if (closeCard && closeFurniture) {
+            closeFurniture->trigger();
+            pump(300);
+            check(window.isAskingBeforeClose() && closeCard->drawnElsewhere() && !closeCard->saveButton()->isVisible(),
+                  "Close furniture asks - the Qt card stands, drawn elsewhere, its own buttons hidden");
+            check(waitFor(washShown, 3000) &&
+                      jsString(page, "document.querySelector('.wash .title').textContent") ==
+                          QStringLiteral("Save changes to Bench before closing?"),
+                  "the page draws the question with the Qt card's words");
+            check(jsString(page, "[...document.querySelectorAll('.answer .label')].map(n => n.textContent).join('|')") ==
+                      QStringLiteral("Save and close|Close without saving|Keep editing"),
+                  "its three answers, in order");
+            // A press anywhere behind it reaches the page's wash - never the
+            // viewport, the rail or a drawer (Review Focus 1).
+            const QPoint centre = window.view()->rect().center();
+            QWidget* atCentre = window.view()->childAt(centre);
+            check(atCentre && (atCentre == page || page->isAncestorOf(atCentre)),
+                  "a press on the viewport behind the question lands on the page");
+            if (ToolCluster* rail = window.findChild<ToolCluster*>()) {
+                const QPoint onRail = rail->geometry().center();
+                QWidget* at = window.view()->childAt(onRail);
+                check(at && (at == page || page->isAncestorOf(at)), "and so does a press on the rail");
+            }
+            if (WindowButtons* buttons = window.findChild<WindowButtons*>()) {
+                const QPoint onButtons = window.view()->mapFrom(&window, buttons->mapTo(&window, buttons->rect().center()));
+                QWidget* at = window.view()->childAt(onButtons);
+                check(at == buttons || (at && buttons->isAncestorOf(at)),
+                      "the window buttons stay usable over the wash (Review Focus 4)");
+            }
+            check(js(page, "document.querySelector('.behind').inert").toBool(), "everything else on the page is inert");
+#ifdef _WIN32
+            capture(&window, outDir + "/close-question.png");
+            {
+                const int before = buttonsBrightness(outDir + "/close-question-before.png");
+                const int during = buttonsBrightness(outDir + "/close-question.png");
+                check(before > 0 && during >= before * 0.9,
+                      QStringLiteral("the wash leaves the window buttons crisp (brightest %1 against %2 with no question)")
+                          .arg(during).arg(before));
+            }
+#endif
+            // Esc still answers - the Qt card's key claim (Review Focus 2).
+            {
+                QWidget* target = window.focusWidget() ? window.focusWidget() : window.view();
+                QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                QCoreApplication::sendEvent(target, &esc);
+                pump(300);
+            }
+            check(!window.isAskingBeforeClose() && !washShown() && window.isFurnitureDirty() &&
+                      !js(page, "document.querySelector('.behind').inert").toBool(),
+                  "Esc keeps editing: the question and its wash go, nothing is saved");
+            // Ctrl+Z reaches nothing while it stands.
+            closeFurniture->trigger();
+            pump(300);
+            const int revision = window.document().revision();
+            {
+                QWidget* target = window.focusWidget() ? window.focusWidget() : window.view();
+                QKeyEvent over(QEvent::ShortcutOverride, Qt::Key_Z, Qt::ControlModifier);
+                QCoreApplication::sendEvent(target, &over);
+                QKeyEvent press(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+                QCoreApplication::sendEvent(target, &press);
+                pump(200);
+            }
+            check(window.isAskingBeforeClose() && window.document().revision() == revision,
+                  "Ctrl+Z reaches nothing while the question stands");
+            // A click on the page's Keep editing answers through the Qt card.
+            waitFor(washShown, 3000);
+            js(page, "document.querySelector('.answer.keep').click()");
+            check(waitFor([&] { return !window.isAskingBeforeClose(); }, 3000) && window.isFurnitureDirty(),
+                  "the page's Keep editing answers - the furniture stays open and unsaved");
+            check(waitFor([&] { return !washShown(); }, 3000), "and the wash goes with it");
+            // The Qt cards stand over the page again once it has gone.
+            if (ToolCluster* rail = window.findChild<ToolCluster*>()) {
+                QWidget* at = window.view()->childAt(rail->geometry().center());
+                check(at == rail || (at && rail->isAncestorOf(at)), "the rail takes its own presses again");
+            }
+            // A long name wraps the title rather than widening the card (Review Focus 5).
+            closeFurniture->trigger();
+            pump(200);
+            closeCard->ask(QStringLiteral("A very long furniture name for the hallway cabinet beside the stairs"));
+            pump(300);
+            const int cardWidth = js(page, "Math.round(document.querySelector('.wash .card').getBoundingClientRect().width)").toInt();
+            // Wrapped: the title stands taller than two of its own font sizes
+            // ("normal" line height is about 1.2 of it, one line).
+            const double titleRatio = js(page, "(() => { const t = document.querySelector('.wash .title'); "
+                                               "return t.getBoundingClientRect().height / parseFloat(getComputedStyle(t).fontSize); })()").toDouble();
+            check(cardWidth == 380 && titleRatio > 2.0,
+                  QStringLiteral("a long name wraps the title in the 380 px card (%1 px, %2 font sizes tall)")
+                      .arg(cardWidth).arg(titleRatio, 0, 'f', 2));
+            js(page, "document.querySelector('.answer.keep').click()");
+            waitFor([&] { return !window.isAskingBeforeClose(); }, 3000);
+        }
+    }
+
     // --- the render settings panel as a page (Phase 3e) -----------------------------
     {
         RenderStudio* studio = window.findChild<RenderStudio*>();
@@ -1466,7 +1594,12 @@ int main(int argc, char* argv[])
 
 #ifdef _WIN32
     {
-        // A render process that dies: the same fallback, from then on.
+        // A render process that dies: the same fallback, from then on - and
+        // with the close question standing when it does (Phase 3f, Review
+        // Focus 3), the Qt card paints it again at once.
+        if (closeFurniture) closeFurniture->trigger();
+        pump(300);
+        const bool askedBeforeDeath = window.isAskingBeforeClose();
         const qint64 pid = page->page()->renderProcessPid();
         if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
             TerminateProcess(h, 1);
@@ -1475,6 +1608,18 @@ int main(int argc, char* argv[])
         waitFor([&] { return !chrome->isLive(); }, 5000);
         check(!chrome->isLive(), "a page whose render process died is no longer live");
         pump(200);
+        if (closeCard && askedBeforeDeath) {
+            check(window.isAskingBeforeClose() && !closeCard->drawnElsewhere() && closeCard->saveButton()->isVisible(),
+                  "the question still stands, and the Qt card draws it again");
+            QWidget* at = window.view()->childAt(closeCard->saveButton()->geometry().center());
+            check(at == closeCard->saveButton(), "its own Save and close takes the press");
+#ifdef _WIN32
+            capture(&window, outDir + "/close-question-fallback.png");
+#endif
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(window.focusWidget() ? window.focusWidget() : window.view(), &esc);
+            pump(200);
+        }
         check(window.statusBar()->isVisible() && !page->isVisible(),
               "the Qt status bar comes back and the dead page leaves the viewport");
         TopoDS_Face live;

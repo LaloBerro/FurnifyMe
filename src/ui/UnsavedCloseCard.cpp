@@ -125,11 +125,34 @@ QStringList UnsavedCloseCard::paintedTexts() const
 
 void UnsavedCloseCard::ask(const QString& furnitureName)
 {
+    const bool renamed = furnitureName != myName;
     myName = furnitureName;
     replace();
     show();
     raise();
     update();
+    // Asking again while asking only changes the name - the page is told.
+    if (renamed && isAsking()) emit questionChanged(true);
+}
+
+void UnsavedCloseCard::setDrawnElsewhere(bool drawnElsewhere)
+{
+    if (myDrawnElsewhere == drawnElsewhere) return;
+    myDrawnElsewhere = drawnElsewhere;
+    setAttribute(Qt::WA_TransparentForMouseEvents, drawnElsewhere);
+    for (CloseCardButton* button : {mySave, myDiscard, myKeep}) button->setVisible(!drawnElsewhere);
+    update();
+}
+
+QVariantMap UnsavedCloseCard::words() const
+{
+    return {{QStringLiteral("title"), titleText()},
+            {QStringLiteral("body"), bodyText()},
+            {QStringLiteral("save"), mySave->label()},
+            {QStringLiteral("saveKey"), mySave->keyHint()},
+            {QStringLiteral("discard"), myDiscard->label()},
+            {QStringLiteral("keep"), myKeep->label()},
+            {QStringLiteral("keepKey"), myKeep->keyHint()}};
 }
 
 void UnsavedCloseCard::replace()
@@ -247,6 +270,8 @@ bool UnsavedCloseCard::eventFilter(QObject* watched, QEvent* event)
 
 void UnsavedCloseCard::paintEvent(QPaintEvent* /*event*/)
 {
+    // The page draws the question (Phase 3f) - nothing of it is painted here.
+    if (myDrawnElsewhere) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
@@ -294,6 +319,7 @@ void UnsavedCloseCard::showEvent(QShowEvent* event)
     if (!myClaimInstalled) {
         QCoreApplication::instance()->installEventFilter(this);
         myClaimInstalled = true;
+        emit questionChanged(true);
     }
 }
 
@@ -303,6 +329,7 @@ void UnsavedCloseCard::hideEvent(QHideEvent* event)
     if (myClaimInstalled) {
         QCoreApplication::instance()->removeEventFilter(this);
         myClaimInstalled = false;
+        emit questionChanged(false);
     }
 }
 

@@ -1,3 +1,4 @@
+import type { QuestionState } from './Question.svelte';
 // What the editor's chrome page talks to: EditorChrome's `chrome` object on
 // the web channel (ThemeBridge as `theme` beside it). A mock with the same
 // shape serves the tests and the dev server (mock.ts).
@@ -56,4 +57,10 @@ export interface ChromeApi {
   // A card that sizes itself (the Versions drawer, Phase 3c) says how tall it
   // is; its slot takes the height and the overlay re-stacks around it.
   reportCardHeight(name: string, height: number): void;
+  // The close question (Phase 3f): read once at load, then carried WITH each
+  // change - a property's NOTIFY would arrive a batch late.
+  question?: QuestionState;
+  questionChanged?: Signal<[QuestionState]>;
+  // "save", "discard" or "keep" - answered through the Qt card's own answer().
+  answerQuestion?(which: 'save' | 'discard' | 'keep'): void;
 }
