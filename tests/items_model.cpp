@@ -507,6 +507,36 @@ int main(int argc, char* argv[])
     model.setState(in);
     check(changes == settled, "an identical state changes nothing");
 
+    // --- review fixes ----------------------------------------------------------
+    {
+        // C1: a document swap (resetPick) closes an open menu, and says so.
+        model.openMenu(shelf);
+        const int at = changes;
+        model.resetPick();
+        check(!model.menu().value(QStringLiteral("open")).toBool() && changes > at,
+              "a document swap closes an open row menu, and announces it (review C1)");
+        model.openMenu(shelf);
+        model.beginDrag(back, true);
+        check(!model.menu().value(QStringLiteral("open")).toBool(), "so does a drag starting (review C1)");
+        model.endDrag(false);
+        // I3: a rename the drawer is hidden under does not wedge the next one.
+        model.beginRenameFor(shelf);
+        in.shown = false;
+        model.setState(in);
+        in.shown = true;
+        model.setState(in);
+        model.beginRenameFor(back);
+        check(model.state().value(QStringLiteral("rename")).toMap().value(QStringLiteral("id")).toInt() == back,
+              "a rename the drawer was hidden under does not block the next one (review I3)");
+        model.cancelRename();
+        // M1: F2 is the list's only while its row is on screen.
+        model.activate(sideL, false, false);
+        check(model.currentRowShown(), "the keys' row is on screen");
+        model.setFolderOpen(carcass, false);
+        check(!model.currentRowShown(), "folded away, it is not - F2 then goes to Rename (review M1)");
+        model.setFolderOpen(carcass, true);
+    }
+
     // --- words -----------------------------------------------------------------
     {
         const QVariantMap w = model.words();

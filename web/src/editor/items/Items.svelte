@@ -195,6 +195,9 @@
     hold();
     if (!row || event.button !== 0 || renaming) return;
     event.preventDefault();
+    // A double-click's second press (Qt delivers a DblClick in its place):
+    // the first already selected, and the dblclick asks for the rename.
+    if (event.detail >= 2) return;
     // A drag whose release never arrived must not turn this click into a move.
     if (dragging) cancelDrag();
     press = { id: row.id, x: event.clientX, y: event.clientY, ctrl: event.ctrlKey, shift: event.shiftKey };
@@ -527,15 +530,18 @@
           oneye={() => api.toggleEye(row.id)}
           ongrain={() => api.toggleGrain(row.id)}
           ontwisty={() => api.toggleFold(row.id)}
-          oncommit={(text) => {
+          oncommit={(text, byKey) => {
             renaming = 0;
             api.commitRename(row.id, text);
-            hold();
+            // Only a key in the field hands the keys back to the list: a click
+            // away put focus where the user clicked, and taking it back would
+            // send their next keys to the page (review I1).
+            if (byKey) hold();
           }}
-          oncancel={() => {
+          oncancel={(byKey) => {
             renaming = 0;
             api.cancelRename();
-            hold();
+            if (byKey) hold();
           }}
           onfieldclaim={() => claim('rename')}
           onfieldrelease={() => unclaim('rename')}

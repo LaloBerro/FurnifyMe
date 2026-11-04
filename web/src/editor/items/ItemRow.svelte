@@ -26,8 +26,10 @@
     oneye: () => void;
     ongrain: () => void;
     ontwisty: () => void;
-    oncommit: (text: string) => void;
-    oncancel: () => void;
+    // `byKey`: Enter or Escape in the field, not a click away - only then do
+    // the list's keys come back to the page (review I1).
+    oncommit: (text: string, byKey: boolean) => void;
+    oncancel: (byKey: boolean) => void;
     onfieldclaim: () => void;
     onfieldrelease: () => void;
   } = $props();
@@ -49,18 +51,26 @@
     draft = renameSeed;
     done = false;
     tick().then(() => {
+      if (done) return;
       onfieldclaim();
       field?.focus();
       field?.select();
     });
+    // C++ closing the rename (a document swap, the row folding away) removes
+    // the field with no blur to count on: its claim goes back here (review I3).
+    return () => {
+      if (done) return;
+      done = true;
+      onfieldrelease();
+    };
   });
 
-  function finish(commit: boolean) {
+  function finish(commit: boolean, byKey: boolean) {
     if (done) return;
     done = true;
     onfieldrelease();
-    if (commit) oncommit(draft);
-    else oncancel();
+    if (commit) oncommit(draft, byKey);
+    else oncancel(byKey);
   }
 
   function onKey(event: KeyboardEvent) {
@@ -68,10 +78,10 @@
     event.stopPropagation();
     if (event.key === 'Enter') {
       event.preventDefault();
-      finish(true);
+      finish(true, true);
     } else if (event.key === 'Escape') {
       event.preventDefault();
-      finish(false);
+      finish(false, true);
     }
   }
 
@@ -106,6 +116,7 @@
       title={row.twistyTip}
       aria-label={row.twistyName}
       onmousedown={stop}
+      ondblclick={stop}
       onclick={(e) => {
         e.stopPropagation();
         if (!row.held) ontwisty();
@@ -126,7 +137,7 @@
       onclick={stop}
       ondblclick={stop}
       onkeydown={onKey}
-      onblur={() => finish(true)}
+      onblur={() => finish(true, false)}
     />
   {:else}
     <span class="name"
@@ -144,6 +155,7 @@
       aria-label={row.grainName}
       disabled={row.carried}
       onmousedown={stop}
+      ondblclick={stop}
       onclick={(e) => {
         e.stopPropagation();
         ongrain();
@@ -161,6 +173,7 @@
     aria-pressed={row.eyeOn}
     disabled={row.carried}
     onmousedown={stop}
+    ondblclick={stop}
     onclick={(e) => {
       e.stopPropagation();
       oneye();

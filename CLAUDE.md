@@ -428,6 +428,42 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   edit never retypes the field. The claim goes back when the question ends, whoever ends it,
   and no version is saved behind it. The library hub asks the same question in its own page
   (`web/src/hub/NameCard.svelte`).
+- **The Items card (Phase 3h, branch `items-card`): the logic is C++, once; the page draws and
+  gestures.** `session/ItemsModel` is `ItemsPanel`'s rules ported - the visible rows in
+  `orderedChildren()` order with folds by folder id, the marks, click/Ctrl/Shift and folder clicks,
+  the filter (the match crosses as a RANGE and the page builds text nodes, so a name is never
+  markup), reveal and the hidden-pick foot, rename, the row menu as a description chosen by id, the
+  key commands, and a drag's carried rows, dry run and words. It writes nothing: every change goes
+  through a hook to exactly what the Qt drawer's signals reach, so the checkpoints and Notes are
+  the Qt drawer's. The page (`web/src/editor/items`) owns only pixels and gestures: a row selects on
+  RELEASE, a 6 px press is a drag, `drop.ts` ports the zones and their hysteresis, the card springs
+  folded folders, auto-scrolls, draws one cue and a ghost, and cancels on Escape, a window blur or a
+  release outside the card. Each row carries its own drop targets (`above`, `below`) worked out in
+  C++, so the zones never ask which sibling follows. The Qt drawer keeps its own copy of the rules
+  until Phase 6 (the HubModel precedent); `MainWindow` tells both every state change and sends a
+  gesture (F2, a new folder's rename and fold, the drag line) to whichever is on screen.
+  - **A list HOLDS its keys; a field CLAIMS the keyboard** (ruling R3). `holdListKeys(card)` gives
+    the page Qt focus, and the chrome then decides EVERY `ShortcutOverride` itself: the table's
+    list-scope keys are claimed, everything else refused - never left to WebEngine, which answers
+    some editing shortcuts on its own - so Ctrl+Z, E and Delete still fire while the list is
+    focused, as with the Qt drawer. F2 only while the model has a row. A field claiming inside the
+    same card takes every key and hands them back to the list. The hold ends on a press on the
+    viewport (which also covers a window that is not active), a FocusOut other than the window
+    losing activation, its card going, and the page dying. With nowhere recorded to give focus
+    back to, the keys go to the 3D view: `clearFocus()` does nothing in an inactive window, and the
+    page kept focus after the list let go.
+  - **The view's mask clips PAINTING as well as presses.** The drag ghost lies outside the card,
+    so for the drag's length a transparent `data-hit` layer stands over the whole viewport; without
+    it the ghost was never drawn anywhere. Anything a page paints outside its reported rectangles
+    is invisible - a menu brings its own full-viewport layer for the same reason, which is also
+    what swallows the press that closes it.
+  - **A card that sizes itself measures its CONTENT, never a scroll container's `scrollHeight`**,
+    which never drops below the container's own height: the first build could grow and never
+    shrink when a folder folded.
+  - **A test driving the page waits for the page, not the document**: an Undo reaches
+    `DocumentModel` at once and the page a channel message later, and a drag aimed at row positions
+    read in between landed one row off. chrome_smoke's waits compare the page's rows with the
+    model's.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a
@@ -564,6 +600,8 @@ Source files under `src/`, plus `tests/`:
 | `session/ActionRegistry.{h,cpp}` | every `QAction` by a stable id, a JSON snapshot, and a `trigger()` that obeys `isEnabled()` |
 | `session/JointRows.{h,cpp}` | what a joint's row says and measures - shared by the Qt joints drawer and the page's; `reasonText()` lives here |
 | `session/JointsModel.{h,cpp}` | the Joints drawer's model for the HTML card - rows broken first, open rows by joint id, hooks; Core + OCCT, tested by `joints_model_tests` |
+| `session/ItemsKeys.{h,cpp}` | the Items list's ONE key table (ruling D19): read by `ItemsPanel`, the shortcut sheet, `ItemsModel` and the chrome's list hold |
+| `session/ItemsModel.{h,cpp}` | the Items drawer's model for the HTML card - visible rows, folds, filter, marks, reveal, the row menu, key commands, a drag's dry run; writes nothing, every change through hooks; tested by `items_model_tests` |
 | `session/VersionsModel.{h,cpp}` | the Versions drawer's model for the HTML card - list, thumbnail URLs, default name, words, gates; the four requests through hooks; Core + Gui, tested by `versions_model_tests` |
 | `session/HubModel.{h,cpp}` | the library hub's logic for the HTML hub - lists, dates, create/rename/delete and their sentences; Core + Gui, tested by `hub_model_tests` |
 | `web/WebHost.{h,cpp}` | one HTML page in a `QWebEngineView`: profile, channel, qwebchannel.js, `pageUrl()`; `prepareApplication()` puts Qt Quick on OpenGL |
@@ -589,7 +627,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/ToolCluster.{h,cpp}` | a vertical stack of chips |
 | `ui/ViewportOverlay.{h,cpp}` | anchors clusters to viewport edges; not a widget |
 | `ui/ItemsPanel.{h,cpp}` | the item list: rows reused by id and folded by visibility, the stored order, the drag, the filter, reveal, the keys |
-| `ui/ItemMoveText.{h,cpp}` | the ONE author of the drawer's move copy: present tense for the drag's status line, past for the Note, the Failure's reason |
+| `session/ItemMoveText.{h,cpp}` | the ONE author of the drawer's move copy: present tense for the drag's status line, past for the Note, the Failure's reason (in `furnify_session` since Phase 3h, so both drawers read it) |
 | `ui/ItemsFilterField.{h,cpp}` | the drawer's permanent "Filter by name" field; claims Escape and letters back from the shortcut map |
 | `ui/DropIndicator.{h,cpp}` | the drag's one mark inside the drawer: an insertion line with a ring, or a ring around a folder row; `accentText`, `dangerText` when refused |
 | `ui/DragGhost.{h,cpp}` | what a drag carries, over the viewport; three variants rasterised once per drag |

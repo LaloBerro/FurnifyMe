@@ -134,6 +134,9 @@ public:
     void cancelDrag() { endDrag(false); }
     QString filterText() const { return myFilter; }
     int currentRowId() const { return myCurrentId; }
+    // Whether the keys' row is on screen in the list - F2 is the list's only
+    // then (ItemsPanel::claimsKey()), and goes on to the Rename action otherwise.
+    bool currentRowShown() const { return visibleIndexOf(myCurrentId) >= 0; }
     // The fixed copy, for the vocabulary sweep.
     QStringList paintedTexts() const;
 

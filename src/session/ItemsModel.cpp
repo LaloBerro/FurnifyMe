@@ -137,6 +137,10 @@ void ItemsModel::setState(Inputs inputs)
             // A drawer going away takes a live drag and an open menu with it.
             if (myDrag.active) endDrag(false);
             closeMenu();
+            // A rename the drawer goes away under is over - its field went
+            // with the card, and "one rename at a time" would refuse every
+            // later one (review I3).
+            myRenameId = 0;
         }
         return;
     }
@@ -172,7 +176,9 @@ void ItemsModel::resetPick()
     myCurrentKind = Kind::Body;
     myHiddenPickId = 0;
     myRenameId = 0;
-    myMenuOpen = false;
+    // Through closeMenu(), which tells the page (review C1): a menu closed
+    // only here stayed drawn, its layer taking every press.
+    closeMenu();
     if (myIn.shown) rebuild();
 }
 
@@ -1014,7 +1020,7 @@ void ItemsModel::beginDrag(int id, bool plain)
     if (!myIn.live || !myIn.document || myDrag.active ||
         !(myIn.document->contains(id) || myIn.document->containsOutline(id) || myIn.document->groupExists(id)))
         return;
-    myMenuOpen = false;
+    closeMenu();
     myDrag = Drag{};
     myDrag.active = true;
     const Kind kind = kindOf(id);

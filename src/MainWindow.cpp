@@ -10709,7 +10709,7 @@ void MainWindow::useHtmlChrome()
         const ItemsKeys::Key* entry = ItemsKeys::forKey(combo, false);
         if (!entry) return false;
         if (entry->command == ItemsKeys::Command::Rename)
-            return myItemsModel && myItemsModel->currentRowId() != 0;
+            return myItemsModel && myItemsModel->currentRowShown();
         return true;
     });
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncItemsModel);

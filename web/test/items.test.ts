@@ -369,6 +369,44 @@ describe('the Items card', () => {
     expect(scrolled).toBe(1);
   });
 
+  it("a double-click on the twisty, eye or grain mark opens no rename (review I2)", async () => {
+    const { api } = mount();
+    for (const sel of ['[data-row="7"] .twisty', '[data-row="4"] .eye', '[data-row="4"] .grain'])
+      await fireEvent.dblClick(q(sel)!);
+    expect(calls(api, 'beginRename')).toEqual([]);
+  });
+
+  it('a rename C++ closes gives its keyboard claim back (review I3)', async () => {
+    const { api, kb } = mount();
+    await update(api, () => (api.state.rename = { id: 4, name: 'Shelf', seq: 1 }));
+    expect(kb).toContain('claim');
+    await update(api, () => (api.state.rename = { id: 0, name: '', seq: 1 }));
+    expect(row(4).querySelector('input.rename')).toBeNull();
+    expect(kb.filter((k) => k === 'claim').length).toBe(kb.filter((k) => k === 'release').length);
+  });
+
+  it('a rename committed by a click away does not take the keys back for the list (review I1)', async () => {
+    const { api, kb } = mount();
+    await update(api, () => (api.state.rename = { id: 4, name: 'Shelf', seq: 1 }));
+    kb.length = 0;
+    await fireEvent.blur(row(4).querySelector('input.rename')!);
+    expect(calls(api, 'commitRename')).toEqual([[4, 'Shelf']]);
+    expect(kb).not.toContain('hold');
+    await update(api, () => (api.state.rename = { id: 2, name: 'Side right', seq: 2 }));
+    kb.length = 0;
+    await fireEvent.keyDown(row(2).querySelector('input.rename')!, { key: 'Enter' });
+    expect(kb).toContain('hold');
+  });
+
+  it("a double-click's second press selects nothing again (review M2)", () => {
+    const { api } = mount();
+    press(row(4), 100, 300, { ctrlKey: true });
+    release(100, 300);
+    press(row(4), 100, 300, { ctrlKey: true, detail: 2 });
+    release(100, 300);
+    expect(calls(api, 'activate')).toEqual([[4, true, false]]);
+  });
+
   it('no banned word in its words or its rendered text', () => {
     const { api } = mount();
     const words = Object.values(api.words).filter((w): w is string => typeof w === 'string');
