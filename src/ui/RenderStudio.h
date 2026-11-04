@@ -25,9 +25,12 @@
 // before this class existed (5028). A changed count would have meant
 // something stopped running.
 #include <QObject>
+#include <QPointer>
 
 #include "DocumentModel.h"
 #include <QStringList>
+
+#include <functional>
 
 class AppBar;
 class CardSlide;
@@ -92,6 +95,17 @@ public:
     void syncPanelFromView();
 
     RenderSettingsPanel* panel() const { return myPanel; }
+
+    // THE HTML PANEL (migration Phase 3e): a page's view that stands in the
+    // Qt panel's place in the dock while `live` says the page can draw. The
+    // Qt panel stays the state either way - the page drives it - and docks
+    // back the moment `live` turns false. Call htmlPanelLiveChanged() when
+    // that answer changes; a dock already open swaps on the spot. Never called
+    // by gui_smoke, so the suite docks the Qt panel exactly as before.
+    void setHtmlPanel(QWidget* view, std::function<bool()> live);
+    void htmlPanelLiveChanged();
+    // Which of the two the dock holds - null while render mode is off.
+    QWidget* dockedPanel() const { return myDocked; }
     RenderFrameGuides* frame() const { return myFrame; }
     ToolChip* exitChip() const { return myExitChip; }
 
@@ -140,4 +154,9 @@ private:
     QTimer* myTierTicker = nullptr;
     QWidget* myDock = nullptr;
     bool myEnabled = false;
+    QPointer<QWidget> myHtmlView;
+    std::function<bool()> myHtmlLive;
+    QPointer<QWidget> myDocked;
+    // The page while it can draw, else the Qt panel.
+    QWidget* panelToDock() const;
 };

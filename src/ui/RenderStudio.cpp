@@ -266,7 +266,10 @@ void RenderStudio::refresh()
     // show will happily undo one.
     if (myBarSlide) myBarSlide->setShown(!myEnabled);
     if (myExitChip) myExitChip->setVisible(myEnabled);
-    if (myPanel) myPanel->setVisible(myEnabled);
+    // Only the one the dock holds is shown: the other is a child of the window
+    // standing in no layout, and showing it would float it at the corner.
+    if (myPanel) myPanel->setVisible(myEnabled && myDocked == myPanel);
+    if (myHtmlView) myHtmlView->setVisible(myEnabled && myDocked == myHtmlView);
     if (myFrame) {
         myFrame->setVisible(myEnabled);
         if (myEnabled) {
@@ -306,7 +309,9 @@ void RenderStudio::setDockOpen(bool open)
         // takes its own fixed width at full height - which is the whole of
         // what "a panel, not a card" means here.
         row->addWidget(myView, 1);
-        row->addWidget(myPanel, 0);
+        QWidget* panel = panelToDock();
+        row->addWidget(panel, 0);
+        myDocked = panel;
         myHost->setCentralWidget(myDock);
         myDock->resize(centralSize);
     } else {
@@ -317,6 +322,11 @@ void RenderStudio::setDockOpen(bool open)
         // panel" rather than as a crash, which is worse.
         myPanel->setParent(myHost);
         myPanel->hide();
+        if (myHtmlView) {
+            myHtmlView->setParent(myHost);
+            myHtmlView->hide();
+        }
+        myDocked = nullptr;
         myHost->setCentralWidget(myView);
         // The compare pane's own lesson, applied at the second site that
         // needs it: setCentralWidget() leaves myView at the width it had as
@@ -329,4 +339,40 @@ void RenderStudio::setDockOpen(bool open)
         myDock->deleteLater();
         myDock = nullptr;
     }
+}
+
+// --- the HTML panel (migration Phase 3e) ----------------------------------------
+
+void RenderStudio::setHtmlPanel(QWidget* view, std::function<bool()> live)
+{
+    myHtmlView = view;
+    myHtmlLive = std::move(live);
+    if (myHtmlView) {
+        // A child of the window, standing in no layout until it is docked.
+        myHtmlView->setParent(myHost);
+        myHtmlView->hide();
+    }
+    htmlPanelLiveChanged();
+}
+
+QWidget* RenderStudio::panelToDock() const
+{
+    if (myHtmlView && myHtmlLive && myHtmlLive()) return myHtmlView;
+    return myPanel;
+}
+
+void RenderStudio::htmlPanelLiveChanged()
+{
+    if (!myDock || !myDocked) return;
+    QWidget* wanted = panelToDock();
+    if (!wanted || wanted == myDocked) return;
+    QLayout* row = myDock->layout();
+    if (!row) return;
+    QWidget* leaving = myDocked;
+    delete row->replaceWidget(leaving, wanted);
+    leaving->hide();
+    leaving->setParent(myHost);
+    leaving->hide();
+    myDocked = wanted;
+    refresh();
 }
