@@ -11,6 +11,7 @@
 #include "RenderSettingsCopy.h"
 #include "RenderSettingsPanel.h"
 #include "Theme.h"
+#include "web/RenderBridge.h"
 
 #include <QAction>
 #include <QApplication>
@@ -18,6 +19,7 @@
 #include <QImage>
 #include <QTemporaryDir>
 
+#include <cmath>
 #include <cstdio>
 
 namespace {
@@ -227,6 +229,119 @@ int main(int argc, char* argv[])
     panel.setTierStatus(QStringLiteral("Shadows"), -1.0);
     check(panel.tierName() == QStringLiteral("Shadows") && panel.tierProgress() < 0.0, "the tier line and no polish bar");
     check(panel.exportNote() == QStringLiteral("3840 x 2160"), "the export note");
+
+    // --- the bridge: what the page reads, and what it may do ----------------------
+    {
+        RenderBridge bridge(&panel);
+        const QVariantMap layout = bridge.layout();
+        check(layout.value(QStringLiteral("title")).toString() == RenderSettingsCopy::title(), "layout: the title");
+        const QVariantMap sections = layout.value(QStringLiteral("sections")).toMap();
+        check(sections.value(QStringLiteral("studio")).toString() == QStringLiteral("Studio") &&
+                  sections.value(QStringLiteral("export")).toString() == QStringLiteral("Export"),
+              "layout: the section headings");
+        const QVariantList aspects = layout.value(QStringLiteral("aspects")).toList();
+        check(aspects.size() == 5 && aspects[4].toMap().value(QStringLiteral("label")).toString() == QStringLiteral("16:9") &&
+                  !aspects[4].toMap().value(QStringLiteral("tip")).toString().isEmpty(),
+              "layout: the five shapes with their tips");
+        check(layout.value(QStringLiteral("qualities")).toList().size() == 3 &&
+                  layout.value(QStringLiteral("exportSizes")).toList().size() == 5 &&
+                  layout.value(QStringLiteral("guides")).toList().size() == 3,
+              "layout: the quality, export and guide chips");
+        const QVariantMap dials = layout.value(QStringLiteral("dials")).toMap();
+        check(dials.value(QStringLiteral("lightStrength")).toMap().value(QStringLiteral("max")).toInt() == 400 &&
+                  dials.value(QStringLiteral("fov")).toMap().value(QStringLiteral("min")).toInt() == 20,
+              "layout: each dial's range is the slider's");
+        const QVariantList tiles = layout.value(QStringLiteral("tiles")).toList();
+        check(tiles.size() == 2 && tiles[1].toMap().value(QStringLiteral("name")).toString() == QStringLiteral("Walnut") &&
+                  tiles[1].toMap().value(QStringLiteral("thumb")).toString().startsWith(QStringLiteral("data:image/png;base64,")),
+              "layout: each tile carries its thumbnail as a data URL");
+
+        int layoutEvents = 0, stateEvents = 0;
+        QObject::connect(&bridge, &RenderBridge::layoutChanged, [&] { ++layoutEvents; });
+        QObject::connect(&bridge, &RenderBridge::stateChanged, [&] { ++stateEvents; });
+
+        panel.setAspect(Panel::Aspect::FourFive);
+        panel.setShots({QStringLiteral("Front"), QStringLiteral("<b>Back</b>")});
+        panel.setBackgroundSilently(QColor(0x12, 0x34, 0x56));
+        panel.setLightStrength(1.5);
+        panel.setTierStatus(QStringLiteral("Path tracing"), 0.5);
+        QVariantMap state = bridge.state();
+        check(stateEvents > 0, "state: the panel's changes reach the page");
+        check(state.value(QStringLiteral("aspect")).toInt() == 2, "state: the shape");
+        check(state.value(QStringLiteral("shots")).toStringList() ==
+                  QStringList({QStringLiteral("Front"), QStringLiteral("<b>Back</b>")}),
+              "state: the shot names, as the user wrote them");
+        check(state.value(QStringLiteral("background")).toString() == QStringLiteral("#123456"), "state: the background");
+        const QVariantMap strength =
+            state.value(QStringLiteral("dials")).toMap().value(QStringLiteral("lightStrength")).toMap();
+        check(strength.value(QStringLiteral("value")).toInt() == 150 &&
+                  strength.value(QStringLiteral("readout")).toString() == QStringLiteral("150%"),
+              "state: a dial's value and its readout");
+        check(state.value(QStringLiteral("tierName")).toString() == QStringLiteral("Path tracing") &&
+                  std::abs(state.value(QStringLiteral("tierProgress")).toDouble() - 0.5) < 1e-9,
+              "state: the tier line and the polish");
+        const QVariantMap shutter = state.value(QStringLiteral("shutter")).toMap();
+        check(shutter.value(QStringLiteral("label")).toString() == QStringLiteral("Save Screenshot") &&
+                  shutter.value(QStringLiteral("enabled")).toBool(),
+              "state: the shutter reads the action's words, without & and ...");
+
+        // Each slot reaches the panel, by the panel's own rules.
+        bridge.aspect(4);
+        check(panel.aspect() == Panel::Aspect::SixteenNine, "aspect(4) chooses 16:9");
+        bridge.aspect(9);
+        bridge.aspect(-1);
+        check(panel.aspect() == Panel::Aspect::SixteenNine, "an aspect with no chip is refused");
+        bridge.guides(1);
+        bridge.exportSize(3);
+        bridge.quality(0);
+        check(panel.guides() == Panel::Guides::Thirds && panel.exportSize() == Panel::ExportSize::Height1440 &&
+                  panel.quality() == Panel::Quality::Simple,
+              "guides, export size and quality by index");
+        const bool wasCut = panel.cutout();
+        bridge.cutout();
+        check(panel.cutout() != wasCut, "cutout() toggles");
+        bridge.setDial(QStringLiteral("lightAngle"), 270);
+        bridge.setDial(QStringLiteral("lightStrength"), 320);
+        bridge.setDial(QStringLiteral("fov"), 70);
+        check(panel.dialValue(Panel::Dial::LightAngle) == 270 && std::abs(panel.lightStrength() - 3.2) < 1e-9 &&
+                  panel.dialValue(Panel::Dial::Fov) == 70,
+              "setDial moves each dial in slider units");
+        bridge.setDial(QStringLiteral("nothing"), 5);
+        check(panel.dialValue(Panel::Dial::Fov) == 70, "an unknown dial is refused");
+        int woods = 0;
+        QObject::connect(&panel, &Panel::woodTextureChosen, [&](const QString&, const QString&) { ++woods; });
+        bridge.wood(QStringLiteral("Walnut"));
+        check(woods == 1 && panel.woodSelection() == QStringLiteral("Walnut"), "wood() chooses a tile");
+        int applied = -1;
+        QObject::connect(&panel, &Panel::shotApplied, [&](int i) { applied = i; });
+        bridge.applyShot(1);
+        check(applied == 1, "applyShot names its row");
+
+        int shots = 0;
+        QObject::connect(&shoot, &QAction::triggered, [&] { ++shots; });
+        shoot.setEnabled(false);
+        check(!bridge.state().value(QStringLiteral("shutter")).toMap().value(QStringLiteral("enabled")).toBool(),
+              "state: a disabled Save Screenshot disables the shutter");
+        bridge.shoot();
+        check(shots == 0, "shoot() refuses while Save Screenshot is disabled");
+        shoot.setEnabled(true);
+        bridge.shoot();
+        check(shots == 1, "and triggers it while enabled");
+
+        // A tile added after the page read its layout reaches it.
+        const QString cherryPath = dir.filePath(QStringLiteral("cherry.png"));
+        QImage(64, 64, QImage::Format_RGB32).save(cherryPath);
+        panel.addTextureMaterials({{QStringLiteral("Cherry"), cherryPath}});
+        check(layoutEvents == 1 && bridge.layout().value(QStringLiteral("tiles")).toList().size() == 3,
+              "layout: a tile added later is announced and listed");
+
+        int readies = 0;
+        QObject::connect(&bridge, &RenderBridge::readyChanged, [&](bool r) { if (r) ++readies; });
+        check(!bridge.isReady(), "the page is not ready until it says so");
+        bridge.ready();
+        bridge.ready();
+        check(bridge.isReady() && readies == 1, "ready() says so once");
+    }
 
     std::printf("\n%s (%d failures, %d checks)\n", gFailures ? "FAIL" : "PASS", gFailures, gChecks);
     return gFailures ? 1 : 0;

@@ -242,6 +242,8 @@ if(FURNIFYME_BUILD_APP)
       src/ui/HtmlCardSlot.cpp
       src/web/SettingsBridge.cpp
       src/web/SettingsBridge.h
+      src/web/RenderBridge.cpp
+      src/web/RenderBridge.h
       src/ui/AxisGizmo.cpp
       src/ui/CardSlide.cpp
       src/ui/DimensionRenderer.cpp
