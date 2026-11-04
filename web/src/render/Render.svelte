@@ -95,11 +95,21 @@
       <div class="shots">
         {#each now.shots as name, i (i + ':' + name)}
           <div class="shot">
-            <button use:chip class="chip apply" title={layout.applyShotTip} onclick={() => render.applyShot(i)}
-              >{name}</button
+            <!-- The NAME travels with the index, and the second click of a
+                 double-click does nothing: the list the page holds lags C++
+                 by a channel round trip, so a stale index alone could forget
+                 or apply the shot that slid into its place (review I1). -->
+            <button
+              use:chip
+              class="chip apply"
+              title={layout.applyShotTip}
+              onclick={(event) => event.detail < 2 && render.applyShot(i, name)}>{name}</button
             >
-            <button use:chip class="chip drop" title={layout.removeShotTip} onclick={() => render.removeShot(i)}
-              >×</button
+            <button
+              use:chip
+              class="chip drop"
+              title={layout.removeShotTip}
+              onclick={(event) => event.detail < 2 && render.removeShot(i, name)}>×</button
             >
           </div>
         {/each}

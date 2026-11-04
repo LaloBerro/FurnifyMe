@@ -14,6 +14,7 @@
 // gui_smoke calls neither, so the suite's render mode docks the Qt panel.
 
 #include <QObject>
+#include <QPointer>
 
 class QWidget;
 class RenderBridge;
@@ -42,7 +43,9 @@ private:
     void setLive(bool live);
     void refuseFocus();
 
-    RenderStudio* myStudio = nullptr;
+    // Guarded: the studio is a sibling child of the window, and the page's
+    // view can report a failed load or a dead render process after it.
+    QPointer<RenderStudio> myStudio;
     WebHost* myHost = nullptr;
     RenderBridge* myBridge = nullptr;
     ThemeBridge* myTheme = nullptr;

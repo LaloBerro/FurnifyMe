@@ -42,6 +42,8 @@
     }}
     onpointerup={() => (held = false)}
     onpointercancel={() => (held = false)}
+    onlostpointercapture={() => (held = false)}
+    onchange={() => (held = false)}
   />
   <span class="readout">{dial.readout}</span>
 </div>

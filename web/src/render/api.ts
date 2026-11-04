@@ -87,8 +87,10 @@ export interface RenderApi {
   wood(name: string): void;
   editMaterial(name: string): void;
   saveShot(): void;
-  applyShot(index: number): void;
-  removeShot(index: number): void;
+  // The row's index AND the name the page shows there - C++ refuses a pair
+  // that no longer matches.
+  applyShot(index: number, name: string): void;
+  removeShot(index: number, name: string): void;
   pickBackground(): void;
   resetBackground(): void;
   shoot(): void;

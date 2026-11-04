@@ -312,10 +312,18 @@ int main(int argc, char* argv[])
         QObject::connect(&panel, &Panel::woodTextureChosen, [&](const QString&, const QString&) { ++woods; });
         bridge.wood(QStringLiteral("Walnut"));
         check(woods == 1 && panel.woodSelection() == QStringLiteral("Walnut"), "wood() chooses a tile");
-        int applied = -1;
+        int applied = -1, removed = -1;
         QObject::connect(&panel, &Panel::shotApplied, [&](int i) { applied = i; });
-        bridge.applyShot(1);
+        QObject::connect(&panel, &Panel::shotRemoved, [&](int i) { removed = i; });
+        bridge.applyShot(1, QStringLiteral("<b>Back</b>"));
         check(applied == 1, "applyShot names its row");
+        applied = -1;
+        bridge.applyShot(1, QStringLiteral("Front"));
+        bridge.removeShot(0, QStringLiteral("Corner"));
+        check(applied == -1 && removed == -1,
+              "a row whose name is not the one the page saw is refused - a stale index never hits a neighbour (review I1)");
+        bridge.removeShot(0, QStringLiteral("Front"));
+        check(removed == 0, "and the row the page saw is forgotten");
 
         int shots = 0;
         QObject::connect(&shoot, &QAction::triggered, [&] { ++shots; });

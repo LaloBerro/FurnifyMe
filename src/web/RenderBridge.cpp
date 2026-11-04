@@ -188,14 +188,14 @@ void RenderBridge::saveShot()
     if (myPanel) myPanel->saveShot();
 }
 
-void RenderBridge::applyShot(int index)
+void RenderBridge::applyShot(int index, const QString& name)
 {
-    if (myPanel) myPanel->applyShot(index);
+    if (myPanel && myPanel->shots().value(index) == name && !name.isNull()) myPanel->applyShot(index);
 }
 
-void RenderBridge::removeShot(int index)
+void RenderBridge::removeShot(int index, const QString& name)
 {
-    if (myPanel) myPanel->removeShot(index);
+    if (myPanel && myPanel->shots().value(index) == name && !name.isNull()) myPanel->removeShot(index);
 }
 
 void RenderBridge::pickBackground()

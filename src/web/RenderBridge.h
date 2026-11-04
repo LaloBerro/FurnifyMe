@@ -51,8 +51,11 @@ public slots:
     void wood(const QString& name);
     void editMaterial(const QString& name);
     void saveShot();
-    void applyShot(int index);
-    void removeShot(int index);
+    // The row's index and the name the page showed there: a pair that no
+    // longer matches - the list moved under a click in flight - is refused,
+    // so a stale index never forgets or applies the neighbouring shot.
+    void applyShot(int index, const QString& name);
+    void removeShot(int index, const QString& name);
     void pickBackground();
     void resetBackground();
     // Save Screenshot, only while it is enabled - the shutter's own rule.

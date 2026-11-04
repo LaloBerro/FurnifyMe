@@ -380,6 +380,23 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   own row open. The rulers re-lay out when a hidden probe set in the badge font changes
   width (a theme, a font, a type scale). A double-click toggles once (`detail >= 2` is
   ignored), and the row's delete stops its click from reaching the row.
+- **The render settings panel (Phase 3e, branch `render-card`) is a PAGE OF ITS OWN,
+  docked, and the Qt panel stays the state.** The panel is not an overlay card - in render
+  mode `RenderStudio` docks it in a row beside the viewport, in the editor AND the scene
+  window, and the scene window has no chrome page - so it is `web/render.html` in its own
+  opaque `WebHost` (`web/RenderPage`), and `RenderStudio::setHtmlPanel()` docks that view in
+  the Qt panel's place while the page is live; it docks the Qt panel back the moment the page
+  fails or its render process dies, render mode staying on. The page never talks to the studio
+  or a window: `web/RenderBridge` (both presets) reads every row off `RenderSettingsPanel` and
+  sends every edit to the panel's own edit slots (`chooseAspect()`, `chooseWood()`,
+  `saveShot()`... - the Qt chips call the same ones), so `RenderStudio`'s wiring and both
+  windows' listeners did not move a line. Words come from `ui/RenderSettingsCopy` (tr context
+  `"RenderSettingsPanel"`), tiles cross as PNG data URLs made from the pixmaps the panel
+  decoded once, readouts are the panel's own formatter, and `stateChanged()` fires on every
+  change, silent return paths included. `MainWindow` must not set the Qt panel's visibility:
+  `RenderStudio::refresh()` shows only the one the dock holds (a Qt panel shown by the old
+  line stood loose in the window's corner). Attached by `useHtmlChrome()` for the editor and
+  by `main.cpp` for the scene window, under the chrome's rule; `gui_smoke` attaches neither.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a
@@ -527,6 +544,9 @@ Source files under `src/`, plus `tests/`:
 | `ui/ThemeDecor.{h,cpp}` | what a mockup draws over the viewport outside any card: Ultraviolet's crosshairs and grid readout; hidden in every other theme |
 | `ui/HtmlCardSlot.{h,cpp}` | an HTML card's place in the overlay: the card's size (its height the page's, for a card that sizes itself), painting nothing, taking no click |
 | `session/ActionWatch.{h,cpp}` | a few actions' state for a page, one `changed()` per event-loop turn |
+| `ui/RenderSettingsCopy.{h,cpp}` | every word the render settings panel paints, once - read by the Qt panel and the page's bridge |
+| `web/RenderBridge.{h,cpp}` | the render page's `render` object over the Qt panel: layout, state, and slots that reach the panel's own edit path (both presets) |
+| `web/RenderPage.{h,cpp}` | the render page's `WebHost` (web build): `render` + `theme`, whether it is live; `attach()` hands its view to a `RenderStudio` |
 | `web/SettingsBridge.{h,cpp}` | the page's `settings` object: layout, live spec, the rows' actions; edits land in `SettingsEdits`; triggers only its rows' actions |
 | `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast, status strip, the Settings, Versions and Joints cards; `ChromeBridge` is its channel object, the page's hit rects its mask |
 | `web/WebOverlay.{h,cpp}` | the Phase 0 spike's overlay over the viewport (`--web-spike`), on `WebHost` |
@@ -4067,6 +4087,15 @@ document-only predicate.
   calls. The rule it stood for still holds for anything that needs the CONTEXT:
   `GridRenderer::update()`'s discipline — a no-op until one exists, desired state recorded
   first and re-applied on the first real frame.
+- **A `V3d_View` setter can REDRAW, and a redraw needs the viewport's GL context current.**
+  `SetBackgroundColor()` redraws on the spot (the view's immediate update) and
+  `SetBackgroundImage()` frees the texture it replaces, both on whatever context happens to be
+  current. Called from an ordinary slot that was the theme-switch crash (the user switching to
+  Aurora: `nvoglv64.dll`, an access violation in `OpenGl_View::updateSkydomeBg`) - and it
+  reproduced on demand only once the render page's WebEngine view left a context of its own
+  current. Both calls now sit in a `GlScope`. A crash inside the GL driver from a plain Qt
+  slot means this before it means anything else. The app writes a symbolized stack to
+  `%TEMP%\furnifyme-crash.txt` on any crash, and chrome_smoke carries the same reporter.
 - **A custom Z-layer that clears depth also clears the SHADOW MAP, unless it is `Immediate`.**
   OCCT renders the shadow-map pass from the *normal* layer list, so a `SetClearDepth(true)`
   layer sitting in that list wipes the depth texture the Shadows render tier is built on —

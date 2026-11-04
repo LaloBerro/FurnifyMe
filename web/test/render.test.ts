@@ -112,9 +112,36 @@ describe('the render page', () => {
     expect(q('.shot b')).toBeNull();
     await fireEvent.click(qa('.shot .apply')[1]);
     await fireEvent.click(qa('.shot .drop')[0]);
-    expect(calls(api, 'applyShot')[0].args).toEqual([1]);
-    expect(calls(api, 'removeShot')[0].args).toEqual([0]);
+    // The shot's NAME travels with its index, so a row that slid into a
+    // removed one's place is never taken for it (review I1).
+    expect(calls(api, 'applyShot')[0].args).toEqual([1, '<b>Back</b>']);
+    expect(calls(api, 'removeShot')[0].args).toEqual([0, 'Front']);
     expect(qa('.shot .drop')[0].getAttribute('title')).toBe('Forget this shot');
+  });
+
+  it('a double-click on a shot forgets or applies it once (review I1)', async () => {
+    const { api } = mount();
+    api.update({ shots: ['Front', 'Back'] });
+    await tick();
+    await fireEvent.click(qa('.shot .drop')[0], { detail: 1 });
+    await fireEvent.click(qa('.shot .drop')[0], { detail: 2 });
+    await fireEvent.click(qa('.shot .apply')[1], { detail: 1 });
+    await fireEvent.click(qa('.shot .apply')[1], { detail: 2 });
+    expect(calls(api, 'removeShot').length).toBe(1);
+    expect(calls(api, 'applyShot').length).toBe(1);
+  });
+
+  it('lets go of a dial when the drag ends however it ends (review M2)', async () => {
+    const { api } = mount();
+    const angle = q('.dial[data-dial="lightAngle"] input') as HTMLInputElement;
+    await fireEvent.pointerDown(angle);
+    await fireEvent.input(angle, { target: { value: '90' } });
+    // No pointerup - the release was lost - but the range input still
+    // reports the end of the drag.
+    await fireEvent.change(angle);
+    api.update({ dials: { ...api.state.dials, lightAngle: { value: 200, readout: '200°' } } });
+    await tick();
+    expect(angle.value).toBe('200');
   });
 
   it('shows the wood tiles, rings the one worn, chooses on a click and edits on a double-click', async () => {
