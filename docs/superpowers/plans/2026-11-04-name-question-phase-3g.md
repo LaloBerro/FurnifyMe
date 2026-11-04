@@ -67,4 +67,44 @@ Phase 2); this is the editor's copy, the last Qt question over the viewport.
 4. Gate, docs, board.
 
 ## Gate record
-(filled in at the end)
+
+**Commits** (branch `name-card` from `main` at `23ba7e8`): `ada9d2f` the phase; `3e4cc4d` review
+fixes.
+
+**Tests:** vitest 184 (15 new); chrome_smoke 260 (38 new: the close-then-name hand-over, the
+words and the suggestion, the keyboard at once and through a blur, presses on the viewport, the
+rail and the window buttons, keys reaching the page's field through the claim, Ctrl+D dead, no
+version, the mirror, a blank name, Escape, Cancel, the re-seed, Enter creating under the typed
+name, an answer's own name over the mirror, a stray claim refused, and - with the render process
+killed - the close question over the name question, then the Qt name card drawing what was typed
+on the page); ctest 22/22 in both presets; hub_smoke 36; svelte-check clean.
+
+**gui_smoke:** 6448 + 1, 0 failures, twice, on the final tree `3e4cc4d` (it never enables HTML;
+the Qt card's own path is unchanged).
+
+**The page was written before its tests** (a ledgered departure from TDD): each behaviour was then
+switched off in turn and watched red on its own test - the name riding with Enter, the seed guard,
+the composition guard, the release on destroy. The C++ checks and the review's were all watched
+red before their fixes (five named failures in one run); M3's, a test-strength finding, by mutation
+(`create()` ignoring its name: red on "the answer creates under the name it carries").
+
+**One unexplained red, recorded:** the second chrome_smoke run on `ada9d2f`, straight after a
+build, failed the render block's "the Qt panel docks back at once, and render mode stays on"
+(Phase 3e, untouched here) and cascaded into a driver crash leaving render mode. The check now
+prints its four terms; five runs since (three on `ada9d2f`, two on the final tree) were clean. Not
+called a flake on that evidence - a recurrence will name its term.
+
+**Review (Opus, read-only):** 0 Critical, 1 Important, 6 Minor. Re-graded M1 to Important (fast
+"Ctrl+N, type, Enter" created the suggestion - Review Focus 1 by another door). Fixed: I1 the field
+gave the keyboard back on a blur and could never take it again; M1 C++ claims the keyboard as the
+name question is sent; M2 a "question" claim with no name question holds nothing; M3 the test
+pins an answer's own name; M4 an edit under the close question still reaches the name; M5 focus
+never returns to a hidden widget; M6 the card does not raise itself over the page.
+
+**Rulings:** R1-R3 as planned. A press on the field always claims (C++ counts and clears the
+question's claims), never released on a blur. Bare Alt aimed at the page passes the claim to the
+menu bar's own handling exactly as it did with the Qt card's field (the reviewer's declined item)
+- unchanged behaviour, not pursued.
+
+**Deferred minors:** M5's card-side half and M6 carry no check of their own (the hidden-widget
+case needs a question asked before the page is ready; M6 is invisible by construction).
