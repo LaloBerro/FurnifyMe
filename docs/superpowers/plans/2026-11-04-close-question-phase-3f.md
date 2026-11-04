@@ -64,4 +64,35 @@ window buttons back on top - the scrim blocks the viewport, not the window. When
 4. Gate, docs, board.
 
 ## Gate record
-(filled in at the end)
+
+**Commits** (branch `close-card` from `main` at `d03a456`): `b92d6c7` the phase; `fb7a936` review
+fixes.
+
+**Tests:** vitest 169 (9 new); chrome_smoke 222 (21 new: the question, the press, Esc and Ctrl+Z,
+the page's answers, the rail after, a long name, the window buttons crisp under the wash, no
+version, the hole after a resize, and the Qt card painting again when the page dies mid-question);
+ctest 22/22 in both presets; hub_smoke 36; svelte-check clean.
+
+**gui_smoke:** 6448 + 1, 0 failures, twice, on `b92d6c7`. On the final tree `fb7a936`: run 1 clean;
+run 2 failed ONE wall-clock budget - "a selection restyle at 130 rows" at 22.2 ms against 16, in the
+Items drawer this branch does not touch, with OBS, DaVinci Resolve and Unity Hub busy on the machine
+(the same check read 12.9-13.8 ms in the three runs before). Not called a flake on that story: the pair
+was run again, quiet, and both were clean - **6448 + 1, 0 failures, twice** (12.3 ms and 12.0 ms).
+
+**Found while looking:** the wash dimmed the window buttons although they stood above the page in
+widget order and took their presses - Qt composites the web page over plain widgets whatever their
+stacking. Measured (the close glyph at 52 against the Qt card's 152); fixed by an even-odd hole the
+page cuts from its wash at the rectangle C++ passes.
+
+**Review (Opus, read-only):** 0 Critical, 3 Important, 3 Minor. Fixed, each watched red with its fix
+switched off (three named failures, one run): I1 a version saved behind the question by a field's
+blur; I2 the hole stale after a resize; I3 presses reaching the editor before the page reported its
+wash; M4 the card's signals blocked during the window's destruction.
+
+**Rulings:** R1 and R2 as planned. The wash stops above the status strip (the Qt scrim covered the
+viewport, which held no strip then), so the unsaved dot stays readable; the strip is the page's own
+hit region, so its presses still reach nothing behind.
+
+**Deferred minors:** the page's full-viewport hit rect lingers for a frame after an answer (a press
+in that frame is swallowed); the first ask emits questionChanged(true) twice (harmless - an equal
+map is not re-sent).

@@ -397,6 +397,20 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   `RenderStudio::refresh()` shows only the one the dock holds (a Qt panel shown by the old
   line stood loose in the window's corner). Attached by `useHtmlChrome()` for the editor and
   by `main.cpp` for the scene window, under the chrome's rule; `gui_smoke` attaches neither.
+- **The close question (Phase 3f, branch `close-card`): the page draws it, the Qt card
+  still asks it.** In HTML-chrome mode `UnsavedCloseCard::setDrawnElsewhere(true)` makes the
+  card paint nothing, hide its buttons and pass the pointer through, while it stays SHOWN -
+  so `isAsking()`, its app-wide key claim (every `ShortcutOverride`, Enter = save, Esc =
+  keep) and every gate that reads it are untouched. `questionChanged()` carries the words to
+  `EditorChrome::setQuestion()`; the page's `Question.svelte` draws the wash and the card and
+  answers through `ChromeBridge::answerQuestion()` into the card's own `answer()` (hide
+  first, then report). Four things the port had to add, each found by a check or a review:
+  the page's view is raised over every Qt card while it asks (`raiseCloseQuestion()`, re-run
+  after every relayout); **the mask takes the whole viewport the moment the question is
+  asked** (`EditorChrome`'s asking flag), not a page render and report later; **the wash cuts
+  a hole for the window buttons**, because Qt composites the web page over plain widgets
+  whatever their stacking (they read 52 under it against 152); and **no version can be saved
+  behind the question** - a Versions field blurred as the page goes inert, and a blur commits.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a
