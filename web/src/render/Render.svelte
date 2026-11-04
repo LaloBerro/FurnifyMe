@@ -32,6 +32,22 @@
     { id: 'fov', label: () => layout.rows.fov, section: 'camera' },
   ];
   const move = (id: DialId, value: number) => render.setDial(id, value);
+
+  // The Qt panel's gutter: while - and only while - the sections scroll, a
+  // 6 px gap opens between the rows and the bar, so a readout or the Studio
+  // chip never stands flush against the track (the 2026-10 review's F18).
+  let scroller = $state<HTMLElement>();
+  let content = $state<HTMLElement>();
+  let scrolls = $state(false);
+  $effect(() => {
+    if (!scroller || !content) return;
+    const measure = () => (scrolls = scroller!.scrollHeight > scroller!.clientHeight + 1);
+    const observer = new ResizeObserver(measure);
+    observer.observe(scroller);
+    observer.observe(content);
+    measure();
+    return () => observer.disconnect();
+  });
   const pick = (current: number, index: number, send: (i: number) => void) => {
     if (index !== current) send(index);
   };
@@ -60,7 +76,8 @@
 <div class="panel">
   <div class="title">{layout.title}</div>
 
-  <div class="scroll">
+  <div class="scroll" class:scrolls bind:this={scroller}>
+   <div class="content" bind:this={content}>
     <div class="heading">{layout.sections.frame}</div>
     {@render chips(layout.aspects, now.aspect, (i) => render.aspect(i), true, 'aspects')}
     {@render chips(layout.guides, now.guides, (i) => render.guides(i), false, 'guides')}
@@ -147,6 +164,7 @@
         onclick={() => render.cutout()}>{layout.cutout.label}</button
       >
     </div>
+   </div>
   </div>
 
   <div class="pinned">
@@ -213,9 +231,29 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+  }
+  .content {
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+  .scroll.scrolls .content {
+    padding-right: 6px;
+  }
+  /* The app's one scrollbar description (Theme::install()): a quiet
+     chipActive handle on a transparent track, no arrows. */
+  .scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+  .scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scroll::-webkit-scrollbar-thumb {
+    background: var(--chip-active);
+    border-radius: var(--r-tiny, 4px);
+  }
+  .scroll::-webkit-scrollbar-button {
+    display: none;
   }
   .pinned {
     display: flex;
@@ -247,6 +285,12 @@
   .note {
     font-size: var(--font-badge);
     color: var(--text-muted);
+  }
+  /* The Qt panel paints the export note unstyled: the body text, at the
+     body size - it is the line that says what the pinned button will write. */
+  .note.export-note {
+    font-size: var(--font-body);
+    color: var(--text);
   }
   .chips {
     display: flex;
@@ -295,7 +339,6 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    text-align: left;
   }
   .shot .drop {
     width: 26px;

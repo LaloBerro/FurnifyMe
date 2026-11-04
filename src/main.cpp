@@ -9,6 +9,7 @@
 #include "web/HubWindow.h"
 #include "web/WebHost.h"
 #include "web/WebOverlay.h"
+#include "web/RenderPage.h"
 #endif
 
 #include <memory>
@@ -191,6 +192,13 @@ int main(int argc, char* argv[])
     // is chosen - the same contract the editor keeps above, and for the same
     // lazy-initializeViewer() reason.
     SceneWindow sceneWindow(&window.furnitureStore());
+#ifdef FURNIFYME_WEB_UI
+    // The scene window's render settings panel as the same page the editor's
+    // is (migration Phase 3e), under the chrome's rule.
+    if (!QCoreApplication::arguments().contains(QStringLiteral("--qt-chrome")) &&
+        WebHost::pageAvailable(QStringLiteral("render")))
+        RenderPage::attach(sceneWindow.studio(), &sceneWindow);
+#endif
 
     // The whole handoff - both directions, and the selector's own close -
     // is ONE shared implementation (EditorSelectorHandoff::wire()), also

@@ -5879,6 +5879,13 @@ void OcctViewWidget::applyRenderLightsForTier(RenderTier tier)
 void OcctViewWidget::applyRenderBackgroundColourForTier(RenderTier tier)
 {
     if (myView.IsNull()) return;
+    // SetBackgroundColor() REDRAWS on the spot (the view's immediate update),
+    // and a redraw needs the viewport's own GL context current - with another
+    // context current (the HTML layer's, or none) the driver faulted inside
+    // updateSkydomeBg(). That was the crash on a theme change and on leaving
+    // render mode after the render page died; the backdrop image's swap below
+    // carries its own GlScope for the same reason. Nesting-safe.
+    GlScope gl(this);
     if (!myRenderModeActive) {
         myView->SetBackgroundColor(toOcctColor(Theme::viewport()));
         applyThemeBackdrop(true);

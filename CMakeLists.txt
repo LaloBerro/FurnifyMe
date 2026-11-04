@@ -317,6 +317,7 @@ if(FURNIFYME_BUILD_APP)
         src/web/ThemeBridge.cpp
         src/web/HubWindow.cpp
         src/web/EditorChrome.cpp
+        src/web/RenderPage.cpp
         src/web/WebOverlay.cpp
       )
       target_link_libraries(furnify_app PUBLIC Qt6::WebEngineWidgets Qt6::WebChannel Qt6::Quick)
@@ -367,6 +368,9 @@ if(FURNIFYME_BUILD_APP)
       target_link_libraries(hub_smoke PRIVATE furnify_app)
       add_executable(chrome_smoke tests/chrome_smoke.cpp)
       target_link_libraries(chrome_smoke PRIVATE furnify_app)
+      if(WIN32)
+        target_link_libraries(chrome_smoke PRIVATE dbghelp)
+      endif()
       # The mockups' scene per theme, for the side-by-side (themes part 2).
       add_executable(theme_shots tests/theme_shots.cpp)
       target_link_libraries(theme_shots PRIVATE furnify_app)

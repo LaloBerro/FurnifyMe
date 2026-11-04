@@ -8,6 +8,8 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <dbghelp.h>
+#include <cstring>
 #ifndef PW_RENDERFULLCONTENT
 #define PW_RENDERFULLCONTENT 0x00000002
 #endif
@@ -31,6 +33,9 @@
 #include "ui/ItemsPanel.h"
 #include "ui/Toast.h"
 #include "web/EditorChrome.h"
+#include "web/RenderPage.h"
+#include "ui/RenderStudio.h"
+#include "ui/RenderSettingsPanel.h"
 #include "web/WebHost.h"
 
 #include <QAction>
@@ -190,8 +195,69 @@ QStringList bannedIn(const QString& text)
 
 }  // namespace
 
+#ifdef _WIN32
+// A CRASH THAT SAYS WHERE. The app is a GUI-subsystem binary with no console
+// and this machine has no debugger, so an access violation (one in the GL
+// driver on a theme change, the first time) left nothing but a module name
+// in the event log. The unhandled-exception filter runs before the stack
+// unwinds, so the faulting frames are still there: symbolized through DbgHelp
+// (RelWithDebInfo carries our PDBs) and written to %TEMP%\furnifyme-crash.txt.
+// A file, not stderr, because this process has no stderr anyone can read.
+static LONG WINAPI reportCrash(EXCEPTION_POINTERS* info)
+{
+    static bool reported = false;
+    if (reported) return EXCEPTION_CONTINUE_SEARCH;
+    reported = true;
+    char path[MAX_PATH] = {};
+    const DWORD n = GetTempPathA(MAX_PATH, path);
+    if (n == 0 || n > MAX_PATH - 32) return EXCEPTION_CONTINUE_SEARCH;
+    std::strcat(path, "furnifyme-crash.txt");
+    FILE* out = std::fopen(path, "w");
+    if (!out) return EXCEPTION_CONTINUE_SEARCH;
+    std::fprintf(out, "exception 0x%08lx at %p\n", info->ExceptionRecord->ExceptionCode,
+                 info->ExceptionRecord->ExceptionAddress);
+    void* frames[62] = {};
+    const USHORT count = CaptureStackBackTrace(0, 62, frames, nullptr);
+    const HANDLE process = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitialize(process, nullptr, TRUE);
+    char buffer[sizeof(SYMBOL_INFO) + 512] = {};
+    auto* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 500;
+    for (USHORT i = 0; i < count; ++i) {
+        const DWORD64 address = reinterpret_cast<DWORD64>(frames[i]);
+        DWORD64 displacement = 0;
+        char module[MAX_PATH] = "?";
+        HMODULE handle = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(frames[i]), &handle))
+            GetModuleFileNameA(handle, module, MAX_PATH);
+        const char* base = std::strrchr(module, '\\');
+        IMAGEHLP_LINE64 line{};
+        line.SizeOfStruct = sizeof(line);
+        DWORD lineDisplacement = 0;
+        if (SymFromAddr(process, address, &displacement, symbol)) {
+            if (SymGetLineFromAddr64(process, address, &lineDisplacement, &line))
+                std::fprintf(out, "%02u %s!%s  %s:%lu\n", unsigned(i), base ? base + 1 : module, symbol->Name,
+                             line.FileName, line.LineNumber);
+            else
+                std::fprintf(out, "%02u %s!%s\n", unsigned(i), base ? base + 1 : module, symbol->Name);
+        } else {
+            std::fprintf(out, "%02u %s+%p\n", unsigned(i), base ? base + 1 : module,
+                         reinterpret_cast<void*>(address - reinterpret_cast<DWORD64>(handle)));
+        }
+    }
+    std::fclose(out);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(reportCrash);
+#endif
     QSurfaceFormat::setDefaultFormat(OcctViewWidget::surfaceFormat());
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     WebHost::prepareApplication();
@@ -1245,6 +1311,125 @@ int main(int argc, char* argv[])
         broken.close();
         pump(200);
     }
+    // --- the render settings panel as a page (Phase 3e) -----------------------------
+    {
+        RenderStudio* studio = window.findChild<RenderStudio*>();
+        RenderPage* renderPage = window.findChild<RenderPage*>();
+        check(studio && renderPage, "the editor carries the render page beside its studio");
+        QAction* renderMode = actionNamed(&window, QStringLiteral("Render mode"));
+        check(renderMode != nullptr, "the editor has Render mode");
+        if (studio && renderPage && renderMode) {
+            auto* rv = static_cast<QWebEngineView*>(renderPage->view());
+            RenderSettingsPanel* panel = studio->panel();
+            check(waitFor([&] { return renderPage->isLive(); }, 20000), "the render page loads and says it is listening");
+            check(!rv->isVisible() && studio->dockedPanel() == nullptr, "and stays out of sight outside render mode");
+            renderMode->trigger();
+            pump(600);
+            check(studio->dockedPanel() == rv && rv->isVisible() && !panel->isVisible(),
+                  "render mode docks the PAGE beside the viewport, not the Qt panel");
+            check(rv->width() == panel->minimumWidth() && rv->height() > 400,
+                  QStringLiteral("at the Qt panel's own width, full height (%1 x %2)").arg(rv->width()).arg(rv->height()));
+            check(waitFor([&] { return js(rv, "!!document.querySelector('.panel .title')").toBool(); }, 5000) &&
+                      jsString(rv, "document.querySelector('.panel .title').textContent") == QStringLiteral("Render settings"),
+                  "the page draws the panel, titled as the Qt one");
+            const QString headings =
+                jsString(rv, "[...document.querySelectorAll('.scroll .heading')].map(h => h.textContent).join('|')");
+            check(headings.startsWith(QStringLiteral("Frame|Shots|Light|")) &&
+                      headings.endsWith(QStringLiteral("Studio|Camera|Quality")),
+                  "its sections in the Qt panel's order - " + headings);
+
+            // A chip click reaches the panel, and the viewport behind it.
+            js(rv, "document.querySelectorAll('.qualities .chip')[0].click()");
+            check(waitFor([&] { return panel->quality() == RenderSettingsPanel::Quality::Simple; }, 3000) &&
+                      window.view()->renderQuality() == OcctViewWidget::RenderQuality::Simple,
+                  "Simple on the page sets the panel's quality and the viewport's");
+            check(waitFor([&] {
+                      return js(rv, "document.querySelectorAll('.qualities .chip')[0].classList.contains('current')").toBool();
+                  }, 3000),
+                  "and the page marks it current");
+
+            // A slider drag, live.
+            js(rv, "(() => { const i = document.querySelector('.dial[data-dial=\"lightAngle\"] input'); i.value = '123';"
+                   " i.dispatchEvent(new Event('input', {bubbles: true})); })()");
+            check(waitFor([&] { return panel->dialValue(RenderSettingsPanel::Dial::LightAngle) == 123; }, 3000) &&
+                      std::abs(window.view()->renderLightAngleDeg() - 123.0) < 0.5,
+                  "dragging Angle on the page turns the studio light");
+            check(waitFor([&] {
+                      return jsString(rv, "document.querySelector('.dial[data-dial=\"lightAngle\"] .readout').textContent") ==
+                             QString::fromUtf8("123\u00b0");
+                  }, 3000),
+                  "and its readout is the panel's own");
+
+            // Save this view: a shot the page lists.
+            const int shotsBefore = js(rv, "document.querySelectorAll('.shot').length").toInt();
+            js(rv, "document.querySelector('.save-shot').click()");
+            check(waitFor([&] { return js(rv, "document.querySelectorAll('.shot').length").toInt() == shotsBefore + 1; }, 3000),
+                  "Save this view on the page adds a shot row to it");
+
+            // The woods: the folder's tiles, and a click that wears one.
+            const QStringList tiles = panel->materialTileNames();
+            check(js(rv, "document.querySelectorAll('.tile').length").toInt() == tiles.size() && !tiles.isEmpty(),
+                  QStringLiteral("the page shows every wood tile the Qt panel has (%1)").arg(tiles.size()));
+            QString other;
+            for (const QString& name : tiles)
+                if (name != panel->woodSelection()) other = name;
+            if (!other.isEmpty()) {
+                js(rv, QStringLiteral("document.querySelector('.tile[data-tile=\"%1\"]').click()").arg(other));
+                check(waitFor([&] { return panel->woodSelection() == other && panel->wood(); }, 3000),
+                      "a tile click on the page wears that wood - " + other);
+            }
+
+            // The shutter mirrors Save Screenshot.
+            if (QAction* shoot = panel->shutter() ? panel->shutter()->action() : nullptr) {
+                const bool disabled = js(rv, "document.querySelector('.shutter').disabled").toBool();
+                check(disabled == !shoot->isEnabled(), "the shutter is enabled exactly when Save Screenshot is");
+                check(jsString(rv, "document.querySelector('.shutter span').textContent") ==
+                          QString(shoot->text()).remove(QLatin1Char('&')).remove(QStringLiteral("...")),
+                      "and wears its words");
+            }
+
+            // A theme switch while render mode is on (Review Focus 3).
+            const QString before = Themes::currentId();
+            Themes::select(QStringLiteral("violet-glass-float"));
+            pump(700);
+#ifdef _WIN32
+            capture(&window, outDir + "/render-panel-violet.png");
+#endif
+            check(js(rv, "document.querySelectorAll('.qualities .chip.current').length").toInt() == 1 &&
+                      js(rv, "document.documentElement.dataset.theme").toString() == QStringLiteral("violet-glass-float"),
+                  "a theme switch re-styles the page and keeps its marks");
+            Themes::select(QStringLiteral("ultraviolet-grid"));
+            pump(700);
+#ifdef _WIN32
+            capture(&window, outDir + "/render-panel-ultraviolet.png");
+#endif
+            Themes::select(before);
+            pump(300);
+
+#ifdef _WIN32
+            // The page dies mid-render-mode (Review Focus 1): the Qt panel docks
+            // back at once, every value intact, and render mode stays on.
+            const qint64 pid = rv->page()->renderProcessPid();
+            if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
+                TerminateProcess(h, 1);
+                CloseHandle(h);
+            }
+            check(waitFor([&] { return !renderPage->isLive(); }, 5000), "a render page whose process died is not live");
+            pump(300);
+            check(studio->dockedPanel() == panel && panel->isVisible() && !rv->isVisible() && renderMode->isChecked(),
+                  "the Qt panel docks back at once, and render mode stays on");
+            check(panel->quality() == RenderSettingsPanel::Quality::Simple &&
+                      panel->dialValue(RenderSettingsPanel::Dial::LightAngle) == 123,
+                  "with every value the page set");
+            capture(&window, outDir + "/render-panel-fallback.png");
+#endif
+            panel->chooseQuality(RenderSettingsPanel::Quality::Deep);
+            renderMode->trigger();
+            pump(400);
+            check(studio->dockedPanel() == nullptr && !renderMode->isChecked(), "leaving render mode undocks it");
+        }
+    }
+
 #ifdef _WIN32
     {
         // A render process that dies: the same fallback, from then on.

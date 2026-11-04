@@ -10,6 +10,8 @@
 #include "GridRenderer.h"
 #ifdef FURNIFYME_WEB_UI
 #include "web/EditorChrome.h"
+#include "web/RenderPage.h"
+#include "web/WebHost.h"
 #include "web/SettingsBridge.h"
 #endif
 
@@ -1149,7 +1151,9 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // both exist ONLY while render mode is on, so `hiddenForRenderMode`
         // is read as their whole visibility rather than negated into it.
         if (myRenderSettingsPanel) {
-            myRenderSettingsPanel->setVisible(hiddenForRenderMode);
+            // Its VISIBILITY is RenderStudio::refresh()'s, called above: the
+            // dock may hold the HTML panel instead (Phase 3e), and a Qt panel
+            // shown here then stood loose in the window's corner.
             myRenderSettingsPanel->setCutout(myView->renderCutout());
             // The saved shots, by name. setShots() rebuilds only when the
             // list actually changed, which matters because this runs on
@@ -10397,6 +10401,10 @@ void MainWindow::useHtmlChrome()
 #ifdef FURNIFYME_WEB_UI
     if (myHtmlChrome) return;
     myHtmlChrome = new EditorChrome(myView, this);
+    // The render settings panel as its own page, docked in the Qt panel's
+    // place while it is live (migration Phase 3e) - under the chrome's own
+    // rule, so `--qt-chrome` keeps the Qt panel too.
+    if (myStudio && WebHost::pageAvailable(QStringLiteral("render"))) RenderPage::attach(myStudio, this);
     // The page's Undo pill: through the ACTION, with the same two guards the
     // Qt toast's pill keeps (see the ToastHost::undoRequested connection).
     connect(myHtmlChrome, &EditorChrome::undoRequested, this, [this](int stamp) {
