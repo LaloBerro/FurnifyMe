@@ -73,12 +73,24 @@ describe('the name question', () => {
     expect(field().maxLength).toBe(120);
   });
 
-  it('takes the keyboard for the question while the field is focused, and gives it back', async () => {
+  it('takes the keyboard for the question, and keeps it through a blur (review I1)', async () => {
     const chrome = mount();
     await asked(chrome);
     expect(calls(chrome, 'claimKeyboardFor').map((c) => c.args[0])).toEqual(['question']);
+    // The window losing activation blurs the field: giving the keyboard back
+    // there left it with no way to take it again, so it is kept until the
+    // question ends.
     await fireEvent.blur(field());
-    expect(calls(chrome, 'releaseKeyboardFor').map((c) => c.args[0])).toEqual(['question']);
+    expect(calls(chrome, 'releaseKeyboardFor')).toEqual([]);
+  });
+
+  it('a press on the field claims the keyboard again, as every typed field does (R5)', async () => {
+    const chrome = mount();
+    await asked(chrome);
+    // Whatever the page believes it holds: C++ counts claims and takes every
+    // one of the question's back when it ends, so a press always asks.
+    await fireEvent.mouseDown(field());
+    expect(calls(chrome, 'claimKeyboardFor').map((c) => c.args[0])).toEqual(['question', 'question']);
   });
 
   it('gives the keyboard back when the question ends with the field still focused', async () => {

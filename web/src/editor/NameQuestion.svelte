@@ -57,8 +57,13 @@
     });
   });
 
+  // Claimed as the field is seeded and again on every press (R5) - whatever
+  // the page believes it holds, since C++ counts the claims and takes all of
+  // the question's back when it ends. NEVER given back on a blur (review I1):
+  // the window losing activation blurs the field, and a page whose view has
+  // given up the keyboard gets no focus event to take it again with.
   function claim() {
-    if (holding || !field) return;
+    if (!field) return;
     holding = true;
     keyboard.claimKeyboard();
   }
@@ -115,8 +120,7 @@
       bind:this={field}
       bind:value={name}
       oninput={() => onedit(name)}
-      onfocus={claim}
-      onblur={release}
+      onmousedown={claim}
     />
     <div class="body" id="name-question-body">{question.body}</div>
     <div class="answers">

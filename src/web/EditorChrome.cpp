@@ -67,7 +67,9 @@ void ChromeBridge::answerNameQuestion(const QString& which, const QString& name)
 
 void ChromeBridge::nameQuestionEdited(const QString& name)
 {
-    if (!asks(QStringLiteral("name"))) return;
+    // Not gated on the kind shown (review M4): an edit in flight as the close
+    // question takes over is still the name's. The Qt card takes it only
+    // while it asks.
     emit nameQuestionTyped(name);
 }
 
@@ -235,6 +237,10 @@ int EditorChrome::keyboardClaimCount() const
 void EditorChrome::claimKeyboard(const QString& card)
 {
     if (!myLive) return;
+    // The name question's field claims in the question's name; with no name
+    // question standing - a late claim from a page tearing down - it holds
+    // nothing, or every window shortcut would stay dead (review M2).
+    if (card == QLatin1String("question") && !myBridge->asks(QStringLiteral("name"))) return;
     ++myKeyboardClaims[card];
     if (myHoldsKeyboard) return;
     QWebEngineView* view = myHost->view();
@@ -275,7 +281,10 @@ void EditorChrome::dropKeyboard()
     const bool stillOurs = !now || now == view || view->isAncestorOf(now);
     refuseFocus();
     if (stillOurs) {
-        if (myFocusBefore) myFocusBefore->setFocus(Qt::OtherFocusReason);
+        // Never back to a widget that has since been hidden - the name card's
+        // own field, hidden while the page draws the question, would take every
+        // plain-letter shortcut afterwards (Phase 3g review M5).
+        if (myFocusBefore && myFocusBefore->isVisible()) myFocusBefore->setFocus(Qt::OtherFocusReason);
         else view->clearFocus();
     }
     myFocusBefore = nullptr;
@@ -347,6 +356,12 @@ void EditorChrome::setQuestion(bool asking, const QVariantMap& words)
     // back, whoever ended it (Phase 3g).
     if (!asking || map.value(QStringLiteral("kind")).toString() != QLatin1String("name")) {
         if (myKeyboardClaims.remove(QStringLiteral("question")) && keyboardClaimCount() == 0) dropKeyboard();
+    }
+    // ...and takes it the moment the name question is asked, before the page
+    // has drawn a field: letters typed straight after Ctrl+N queue for the
+    // page instead of meeting the Qt claim, which swallows them (review M1).
+    else if (!myKeyboardClaims.contains(QStringLiteral("question"))) {
+        claimKeyboard(QStringLiteral("question"));
     }
     if (asking) myHost->view()->raise();
 }

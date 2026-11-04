@@ -129,8 +129,13 @@ void NameFurnitureCard::setDrawnElsewhere(bool drawnElsewhere, QWidget* keyTarge
     setAttribute(Qt::WA_TransparentForMouseEvents, drawnElsewhere);
     myField->setVisible(!drawnElsewhere);
     for (CloseCardButton* button : {myCreate, myCancel}) button->setVisible(!drawnElsewhere);
-    // The page takes over with what is in the field now.
-    if (drawnElsewhere) ++mySeed;
+    // The page takes over with what is in the field now - and the field gives
+    // up focus: Qt leaves a hidden widget as an inactive window's focus widget,
+    // and the page's claim would hand focus back to it after (review M5).
+    if (drawnElsewhere) {
+        ++mySeed;
+        if (window()->focusWidget() == myField) myField->clearFocus();
+    }
     // The page went away mid-question: the field is back, holding what was
     // typed there, and takes the keys.
     else if (isAsking()) myField->setFocus(Qt::OtherFocusReason);
@@ -185,7 +190,9 @@ void NameFurnitureCard::replace()
     if (!parentWidget()) return;
     setGeometry(parentWidget()->rect());
     layoutCard();
-    if (isAsking()) raise();
+    // Drawn elsewhere, the page stands on top while it asks; MainWindow's
+    // raiseQuestions() orders the two (review M6).
+    if (isAsking() && !myDrawnElsewhere) raise();
 }
 
 int NameFurnitureCard::titleHeight(int textWidth) const

@@ -104,9 +104,11 @@ public slots:
     // Each edit of the page's name field, mirrored into the Qt card's.
     void nameQuestionEdited(const QString& name);
 
-private:
+public:
     // Whether the question of this kind ("close", "name") stands.
     bool asks(const QString& kind) const;
+
+private:
     QVariantMap myQuestion;
     bool myUndoEnabled = true;
     QVariantList myObstacles;

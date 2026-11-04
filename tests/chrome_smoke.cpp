@@ -1484,6 +1484,11 @@ int main(int argc, char* argv[])
         check(nameCard && newFurniture && saveFurniture, "the editor has its name question, New furniture and Save");
         if (nameCard && newFurniture && saveFurniture) {
             const QString benchId = window.currentFurnitureId();
+            // A claim for a question that is not asked holds nothing (review
+            // M2): a late page claim would otherwise kill every shortcut.
+            chrome->bridge()->claimKeyboardFor(QStringLiteral("question"));
+            check(!chrome->holdsKeyboard(), "a keyboard claim for a name question that is not asked is refused");
+            chrome->bridge()->releaseKeyboardFor(QStringLiteral("question"));
             // Unsaved changes: the close question first, then the name question,
             // each drawn by the page in turn (Review Focus 5).
             check(window.isFurnitureDirty(), "the furniture still has unsaved changes to ask about");
@@ -1506,6 +1511,11 @@ int main(int argc, char* argv[])
                       nameField() == suggestion,
                   "with the Qt card's words and the suggested name - " + nameField());
             check(waitFor([&] { return chrome->holdsKeyboard(); }, 2000), "its field takes the keyboard");
+            // The window losing activation blurs the field; the keyboard stays
+            // the field's, or typing never came back (review I1).
+            js(page, "document.querySelector('.name-question input').dispatchEvent(new FocusEvent('blur'))");
+            pump(200);
+            check(chrome->holdsKeyboard(), "a blur - the window losing activation - leaves the keyboard with the field");
             // A press anywhere behind it lands on the page; the window buttons
             // keep theirs (the close question's wash, shared).
             QWidget* atCentre = window.view()->childAt(window.view()->rect().center());
@@ -1599,6 +1609,14 @@ int main(int argc, char* argv[])
             newFurniture->trigger();
             check(window.isAskingForName() && chrome->hitRegion().contains(window.view()->rect().center()),
                   "asked again, the page takes every press over the viewport at once");
+            // And the keyboard: letters typed before the page has drawn go to
+            // the page, never to the Qt claim that swallows them (review M1).
+            {
+                QWidget* proxy = page->focusProxy() ? page->focusProxy() : page;
+                check(chrome->holdsKeyboard() && window.focusWidget() == proxy,
+                      QStringLiteral("and the keyboard at once, before the page has drawn (focus on %1)")
+                          .arg(window.focusWidget() ? window.focusWidget()->metaObject()->className() : "none"));
+            }
             check(waitFor(nameShown, 3000) && nameField() == suggestion,
                   "and the page re-seeds the field with the suggestion, not what was typed before");
             js(page, "document.querySelector('.name-question .answer.cancel').click()");
@@ -1617,6 +1635,16 @@ int main(int argc, char* argv[])
                   "Enter creates the furniture under the name typed and opens it - " + window.currentFurnitureName());
             check(waitFor([&] { return !chrome->holdsKeyboard() && !nameShown(); }, 3000),
                   "and the keyboard and the wash go with the question");
+            // The answer's own name is the one used - never the mirror, which a
+            // page's ordered messages would otherwise always have updated first
+            // (review M3): a name the mirror never saw.
+            newFurniture->trigger();
+            waitFor(nameShown, 3000);
+            typeThen(QStringLiteral("Mirrored"), QString());
+            waitFor([&] { return nameCard->name() == QStringLiteral("Mirrored"); }, 2000);
+            chrome->bridge()->answerNameQuestion(QStringLiteral("create"), QStringLiteral("Side table"));
+            check(waitFor([&] { return window.currentFurnitureName() == QStringLiteral("Side table"); }, 5000),
+                  "the answer creates under the name it carries, not the mirrored one - " + window.currentFurnitureName());
             // Back to the bench, with something unsaved again for the blocks below.
             window.openFurniture(benchId);
             pump(300);
@@ -1805,10 +1833,16 @@ int main(int argc, char* argv[])
         if (closeFurniture) closeFurniture->trigger();
         pump(300);
         const bool askedBeforeDeath = window.isAskingBeforeClose();
-        if (namingBeforeDeath)
+        if (namingBeforeDeath) {
             check(askedBeforeDeath && window.isAskingForName() &&
                       waitFor([&] { return js(page, "!!document.querySelector('.answer.save')").toBool(); }, 3000),
                   "the close question stands over the name question, and the page draws the close one");
+            // An edit already in flight as the close question took over is
+            // still the name's (review M4).
+            chrome->bridge()->nameQuestionEdited(QStringLiteral("Typed before, more"));
+            check(nameCard->name() == QStringLiteral("Typed before, more"),
+                  "an edit arriving under the close question still reaches the name - " + nameCard->name());
+        }
         const qint64 pid = page->page()->renderProcessPid();
         if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
             TerminateProcess(h, 1);
@@ -1831,7 +1865,7 @@ int main(int argc, char* argv[])
         }
         if (nameCard && namingBeforeDeath) {
             check(window.isAskingForName() && !window.isAskingBeforeClose() && !nameCard->drawnElsewhere() &&
-                      nameCard->field()->isVisible() && nameCard->name() == QStringLiteral("Typed before"),
+                      nameCard->field()->isVisible() && nameCard->name() == QStringLiteral("Typed before, more"),
                   "the name question still stands under it, drawn by the Qt card, holding what was typed - " +
                       nameCard->name());
             QWidget* at = window.view()->childAt(nameCard->createButton()->geometry().center());
