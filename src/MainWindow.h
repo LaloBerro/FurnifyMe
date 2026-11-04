@@ -88,6 +88,9 @@ public:
     // The Joints drawer's model on the chrome page (Phase 3d); null until
     // useHtmlChrome().
     class JointsModel* jointsModel() const { return myJointsModel; }
+    // The Items drawer's model on the chrome page (Phase 3h); null until
+    // useHtmlChrome().
+    class ItemsModel* itemsModel() const { return myItemsModel; }
     // Not = default (M1): a drawer drag still live when the window dies is
     // ended HERE, while the document and every member it reads are alive.
     // Left to member order, ~QWidget's own hide would reach
@@ -2403,6 +2406,22 @@ private:
     class JointsModel* myJointsModel = nullptr;
     QWidget* jointsSurface() const;
     void syncJointsModel();
+    // The Items card's place and model (Phase 3h), on the same terms. The Qt
+    // drawer stays built and is told every state change too (it defers its
+    // rebuild while hidden); the GESTURES - a rename, a fold, the drag line -
+    // go to whichever of the two is on screen (itemsCardLive()).
+    class HtmlCardSlot* myItemsSlot = nullptr;
+    class ItemsModel* myItemsModel = nullptr;
+    QWidget* itemsSurface() const;
+    bool itemsCardLive() const;
+    void syncItemsModel();
+    // An item rename opened over whichever drawer is on screen.
+    void beginItemRename(int id, bool isOutline);
+    void beginFolderRename(int folderId);
+    void setItemsFolderOpen(int folderId, bool open);
+    QString itemsDragStatusText() const;
+    // The Qt drawer's visibilityToggled() step, shared by the page's eye.
+    void afterItemVisibilityChanged();
     void reportColourSaveFailed(const QString& path);
     void reportColourLoadRefused(const QString& path);
     void syncHtmlChrome();

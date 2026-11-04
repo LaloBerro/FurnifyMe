@@ -365,7 +365,11 @@ private:
     // the user, which is the reason this card was fixed-width to begin with.
     // It was 240 while rows also painted a dimension; the user narrowed it
     // once rows became a name and an eye button.
+public:
+    // Public since Phase 3h: the HTML card's slot is this wide.
     static int cardWidth();
+
+private:
 
     // One row's widgets, kept so applyTheme() can restyle in place. Replaces
     // the four parallel vectors this held before, which had to be indexed in

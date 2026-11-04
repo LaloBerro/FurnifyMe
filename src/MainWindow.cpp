@@ -5,6 +5,7 @@
 // compiled since the Settings card, because only build-web was built).
 #include "session/VersionsModel.h"
 #include "session/JointsModel.h"
+#include "session/ItemsModel.h"
 #include "ui/HtmlCardSlot.h"
 #include "ui/ThemeDecor.h"
 #include "GridRenderer.h"
@@ -1063,10 +1064,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // see ItemsPanel's visibilityToggled() comment. updateActions() ends in
     // appStateChanged, which re-runs the refresh above, re-deriving the
     // rows' own dimming from the view's composed answer.
-    connect(myItemsPanel, &ItemsPanel::visibilityToggled, this, [this] {
-        if (isolateActive()) applyIsolation();
-        updateActions();
-    });
+    connect(myItemsPanel, &ItemsPanel::visibilityToggled, this, &MainWindow::afterItemVisibilityChanged);
     // A row's grain mark. The DOCUMENT is the writer and this window is its
     // one caller, exactly as the eye above is: the drawer announces the
     // gesture and never writes. NO CHECKPOINT - presentation, like
@@ -1114,7 +1112,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // CLAUDE.md's sibling-visibility law applied to a fourth surface
         // rather than a new mechanism.
         const bool hiddenForRenderMode = myRenderModeOn;
-        myItemsPanel->setVisible(myItemsPanelAction->isChecked() && !hiddenForRenderMode);
+        if (QWidget* items = itemsSurface())
+            items->setVisible(myItemsPanelAction->isChecked() && !hiddenForRenderMode);
         // Derived on every state change from the action, exactly as the
         // drawer above is and for exactly the same reason - a one-shot hide
         // is not a state, and QWidget::showChildren() on the window's first
@@ -1276,7 +1275,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(myItemsPanel, &ItemsPanel::outlineActivated, this,
             [this](int id) { selectOutline(id); });
     connect(myView, &OcctViewWidget::selectionChanged, this,
-            [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
+            [this] {
+                myItemsPanel->showSelection(myView->selectedSolidIds());
+                // The page's drawer reveals a pick the same way (Phase 3h).
+                if (myItemsModel) myItemsModel->showSelection(myView->selectedSolidIds());
+            });
     // A row's rename gesture (double-click, or F2 through onRenameSelected())
     // committed. MainWindow does the checkpoint/setItemName/toast, exactly as
     // the panel's own header says - see onItemRenameCommitted().
@@ -1352,7 +1355,9 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // underneath it until the next resize. relayout() only reads and moves
     // geometry, so it cannot recurse back into updateActions().
     connect(myItemsPanelAction, &QAction::toggled, this, [this](bool shown) {
-        myItemsPanel->setVisible(shown);
+        if (QWidget* items = itemsSurface()) items->setVisible(shown);
+        // At once: a hidden drawer reads nothing (Phase 3h).
+        syncItemsModel();
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -2453,7 +2458,7 @@ void MainWindow::buildOverlay()
     auto* decor = new ThemeDecor(
         myView, myOverlay,
         [this]() -> QRect {
-            if (myItemsPanel && myItemsPanel->isVisible()) return myItemsPanel->geometry();
+            if (QWidget* items = itemsSurface(); items && items->isVisible()) return items->geometry();
             if (myRail && myRail->isVisible()) return myRail->geometry();
             return QRect();
         },
@@ -4399,6 +4404,7 @@ void MainWindow::showInitScreen()
     // (M2) - here and in openFurniture(), the two furniture swaps, and never
     // in resyncView(), which undo and redo go through too.
     if (myItemsPanel) myItemsPanel->forgetFurniture();
+    if (myItemsModel) myItemsModel->forgetFurniture();
 
     updateActions();
     mySession.reportStatus(tr("Choose a furniture to open, or start a new one"));
@@ -4492,6 +4498,7 @@ bool MainWindow::openFurniture(const QString& id)
     resyncView();
     // A new furniture never opens filtered (M2) - see showInitScreen().
     if (myItemsPanel) myItemsPanel->forgetFurniture();
+    if (myItemsModel) myItemsModel->forgetFurniture();
 
     myView->fitAll();
     closeCard();
@@ -5318,8 +5325,8 @@ void MainWindow::updateStateLabel()
 
     // A LIVE DRAG IN THE ITEMS DRAWER owns the right channel while it lasts
     // (F9: mode and next step), in the same words its Note will use.
-    if (myItemsPanel && !myItemsPanel->dragStatusText().isEmpty()) {
-        showStateLine(myItemsPanel->dragStatusText());
+    if (const QString line = itemsDragStatusText(); !line.isEmpty()) {
+        showStateLine(line);
         return;
     }
 
@@ -5522,6 +5529,7 @@ void MainWindow::resyncView()
     // from the live selection, and clearSolids() below empties that.
     myView->resetPickGesture();
     if (myItemsPanel) myItemsPanel->resetPick();
+    if (myItemsModel) myItemsModel->resetPick();
     // ...and the sentence it dropped comes off the bar with it. Called
     // directly rather than through the signal, because resetPickGesture()
     // promises on its own header to emit nothing.
@@ -5784,11 +5792,10 @@ void MainWindow::onRenameSelected()
     // argument for Delete's two targets).
     const std::vector<int> ids = myView->selectedSolidIds();
     if (ids.size() == 1) {
-        myItemsPanel->beginRenameForItem(ids.front(), /*isOutline=*/false);
+        beginItemRename(ids.front(), /*isOutline=*/false);
         return;
     }
-    if (ids.empty() && hasPendingFace())
-        myItemsPanel->beginRenameForItem(pendingOutlineId(), /*isOutline=*/true);
+    if (ids.empty() && hasPendingFace()) beginItemRename(pendingOutlineId(), /*isOutline=*/true);
 }
 
 // --- slats (improvements item 11) -------------------------------------------
@@ -6084,9 +6091,9 @@ void MainWindow::onGroupSelection()
     // being made is opened - its contents are what the user just chose, and a
     // folder that swallowed them with no sign of where they went would read
     // as a delete.
-    if (myItemsPanel && myItemsPanel->isVisible()) {
-        myItemsPanel->setGroupExpanded(folder, true);
-        myItemsPanel->beginRenameForGroup(folder);
+    if (QWidget* items = itemsSurface(); items && items->isVisible()) {
+        setItemsFolderOpen(folder, true);
+        beginFolderRename(folder);
     }
 }
 
@@ -6154,9 +6161,9 @@ void MainWindow::onWrapFolder(int folderId)
     mySession.reportNote(message, true, myDocument.revision());
     // Straight into the rename, as New Folder with These does - opened, so
     // the folder it swallowed is still in sight.
-    if (myItemsPanel && myItemsPanel->isVisible()) {
-        myItemsPanel->setGroupExpanded(made, true);
-        myItemsPanel->beginRenameForGroup(made);
+    if (QWidget* items = itemsSurface(); items && items->isVisible()) {
+        setItemsFolderOpen(made, true);
+        beginFolderRename(made);
     }
 }
 
@@ -10545,6 +10552,13 @@ void MainWindow::useHtmlChrome()
             if (live) myOverlay->replaceWidget(myJointsPanel, myJointsSlot);
             else myOverlay->replaceWidget(myJointsSlot, myJointsPanel);
         }
+        if (myOverlay && myItemsSlot && myItemsPanel) {
+            // A drag or a rename in the drawer that is leaving ends here.
+            if (live) myItemsPanel->cancelDrag();
+            else if (myItemsModel) myItemsModel->cancelDrag();
+            if (live) myOverlay->replaceWidget(myItemsPanel, myItemsSlot);
+            else myOverlay->replaceWidget(myItemsSlot, myItemsPanel);
+        }
         // The close question (Phase 3f): the page draws it while it can, and
         // the Qt card paints again the moment it cannot - mid-question too.
         if (myCloseCard) myCloseCard->setDrawnElsewhere(live);
@@ -10627,6 +10641,79 @@ void MainWindow::useHtmlChrome()
     myHtmlChrome->registerObject(QStringLiteral("joints"), myJointsModel);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncJointsModel);
     syncJointsModel();
+
+    // THE ITEMS CARD (Phase 3h): the Versions card's shape - a slot whose
+    // height is the page's, in the Qt drawer's TopLeft place - over
+    // ItemsModel, whose hooks land on exactly what the Qt drawer's signals
+    // reach (see the constructor's connections), so every change checkpoints
+    // and reports the same way.
+    if (myOverlay && myItemsPanel) {
+        myItemsSlot = new HtmlCardSlot(QStringLiteral("items"), QSize(ItemsPanel::cardWidth(), 176), myView);
+        myItemsSlot->hide();
+        myHtmlChrome->addCard(myItemsSlot);
+        connect(myItemsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+            if (myOverlay) myOverlay->relayout();
+        });
+        connect(Theme::notifier(), &Theme::Notifier::changed, myItemsSlot, [this] {
+            myItemsSlot->setFixedWidth(Theme::wholeDevicePixels(ItemsPanel::cardWidth()));
+        });
+    }
+    ItemsModel::Hooks itemHooks;
+    itemHooks.select = [this](const std::vector<int>& ids) { myView->setSelectedSolids(ids); };
+    itemHooks.activateOutline = [this](int id) { selectOutline(id); };
+    itemHooks.setVisible = [this](const std::vector<int>& ids, bool outline, bool show) {
+        if (myShowingInitScreen) return;
+        // The eye's two writes, as the Qt drawer makes them: the document
+        // first, the view second.
+        for (int id : ids) {
+            myDocument.setVisible(id, show);
+            if (outline) myView->setOutlineVisible(id, show);
+            else myView->setSolidVisible(id, show);
+        }
+        afterItemVisibilityChanged();
+    };
+    itemHooks.toggleGrain = [this](int bodyId) {
+        if (myShowingInitScreen || bodyId <= 0) return;
+        myDocument.setBodyGrainAcross(bodyId, !myDocument.bodyGrainAcross(bodyId));
+        updateActions();
+    };
+    itemHooks.renameItem = [this](int id, bool outline, const QString& name) {
+        onItemRenameCommitted(id, outline, name);
+    };
+    itemHooks.renameFolder = [this](int id, const QString& name) { onGroupRenameCommitted(id, name); };
+    itemHooks.move = [this](const std::vector<int>& ids, int parent, int before) {
+        onItemsMoveRequested(ids, parent, before);
+    };
+    itemHooks.newFolder = [this] {
+        if (myGroupAction && myGroupAction->isEnabled()) myGroupAction->trigger();
+    };
+    itemHooks.wrapFolder = [this](int id) { onWrapFolder(id); };
+    itemHooks.removeFolder = [this](int id) { removeFolderKeepContents(id); };
+    itemHooks.deleteFolder = [this](int id) { onDeleteGroup(id); };
+    itemHooks.moveRefused = [this](const QString& reason) {
+        myPaintedMoveRefusal = reason;
+        mySession.reportStatus(reason);
+    };
+    itemHooks.withdrawRefusal = [this] {
+        if (myPaintedMoveRefusal.isEmpty()) return;
+        const bool showing = statusBar()->currentMessage() == myPaintedMoveRefusal;
+        myPaintedMoveRefusal.clear();
+        if (showing) showSelectionStatus();
+    };
+    itemHooks.dragStatusChanged = [this] { updateStateLabel(); };
+    myItemsModel = new ItemsModel(itemHooks, myHtmlChrome);
+    myHtmlChrome->registerObject(QStringLiteral("items"), myItemsModel);
+    // The list's hold claims F2 only over a live row, as the Qt drawer's
+    // claimsKey() does: with none, F2 goes on to the Rename action.
+    myHtmlChrome->setListKeyClaim([this](QKeyCombination combo) {
+        const ItemsKeys::Key* entry = ItemsKeys::forKey(combo, false);
+        if (!entry) return false;
+        if (entry->command == ItemsKeys::Command::Rename)
+            return myItemsModel && myItemsModel->currentRowId() != 0;
+        return true;
+    });
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncItemsModel);
+    syncItemsModel();
     myHtmlChrome->start();
     connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);
@@ -10693,6 +10780,68 @@ void MainWindow::syncJointsModel()
     // but a hidden drawer asks for nothing at all (JointsModel reads nothing).
     myJointsModel->setState(&myDocument, shown ? jointDerivations() : std::vector<Joinery::Derivation>(),
                             selectedJointId(), live, live && !mySketching && !myRenderModeOn, shown);
+}
+
+QWidget* MainWindow::itemsSurface() const
+{
+    // settingsSurface()'s rule: the page's card only while the page can draw it.
+    if (myItemsSlot && htmlChromeLive()) return myItemsSlot;
+    return myItemsPanel;
+}
+
+bool MainWindow::itemsCardLive() const { return myItemsSlot && myItemsModel && htmlChromeLive(); }
+
+void MainWindow::syncItemsModel()
+{
+    if (!myItemsModel) return;
+    QWidget* surface = itemsSurface();
+    ItemsModel::Inputs in;
+    in.document = &myDocument;
+    in.onScreen = [this](int id) { return myView->isSolidVisible(id); };
+    in.selected = myView->selectedSolidIds();
+    in.pendingOutline = pendingOutlineId();
+    in.folderEditsAllowed = folderEditsAllowed();
+    in.newFolderEnabled = myGroupAction && myGroupAction->isEnabled();
+    in.newFolderTip = myGroupAction ? myGroupAction->toolTip() : QString();
+    // ItemsPanel::beginRenameForItem()'s mirror-placement guard.
+    in.renameAllowed = !myView->mirrorPlacementActive();
+    in.live = !myShowingInitScreen;
+    in.shown = itemsCardLive() && surface && surface->isVisible();
+    myItemsModel->setState(std::move(in));
+}
+
+void MainWindow::beginItemRename(int id, bool isOutline)
+{
+    if (itemsCardLive()) myItemsModel->beginRenameFor(id);
+    else if (myItemsPanel) myItemsPanel->beginRenameForItem(id, isOutline);
+}
+
+void MainWindow::beginFolderRename(int folderId)
+{
+    if (itemsCardLive()) myItemsModel->beginRenameFor(folderId);
+    else if (myItemsPanel) myItemsPanel->beginRenameForGroup(folderId);
+}
+
+void MainWindow::setItemsFolderOpen(int folderId, bool open)
+{
+    // Both: a fold is where the user last looked, and either drawer may be the
+    // one on screen next.
+    if (myItemsPanel) myItemsPanel->setGroupExpanded(folderId, open);
+    if (myItemsModel) myItemsModel->setFolderOpen(folderId, open);
+}
+
+QString MainWindow::itemsDragStatusText() const
+{
+    if (itemsCardLive()) return myItemsModel->dragStatusText();
+    return myItemsPanel ? myItemsPanel->dragStatusText() : QString();
+}
+
+void MainWindow::afterItemVisibilityChanged()
+{
+    // ItemsPanel's visibilityToggled() comment: the eye's direct write is
+    // composed with the session filter at the one writer.
+    if (isolateActive()) applyIsolation();
+    updateActions();
 }
 
 bool MainWindow::htmlChromeLive() const
