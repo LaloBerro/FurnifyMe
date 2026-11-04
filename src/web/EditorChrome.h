@@ -171,6 +171,9 @@ private:
     QRegion myHitRegion;
     QPoint myPointer{-1, -1};
     bool myLive = false;
+    // The close question stands (Phase 3f review I3): the mask takes the whole
+    // viewport at once, without waiting for the page to draw and report.
+    bool myAsking = false;
     bool myHoldsKeyboard = false;
     // How many of the page's fields hold the keyboard. Moving from field A
     // to field B arrives as B's claim THEN A's release (the browser's

@@ -1462,6 +1462,10 @@ MainWindow::~MainWindow()
         const QSignalBlocker quiet(myItemsPanel);
         myItemsPanel->cancelDrag();
     }
+    // The close question, for good: ~QWidget's hide of a window destroyed
+    // with the question standing would report questionChanged(false) into a
+    // relayout of this half-destroyed window (Phase 3f review M4).
+    if (myCloseCard) myCloseCard->blockSignals(true);
     // THE THEME IS GIVEN BACK (T-072). A persisted window took the app-wide
     // theme over and installed a store that writes QSettings; neither may
     // outlive it - in the app this is the exit, in gui_smoke a window built
@@ -3086,6 +3090,12 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
         if (!myCloseCard || !myCloseCard->isAsking()) return;
         myCloseCard->replace();
+#ifdef FURNIFYME_WEB_UI
+        // The window buttons may have moved (a resize, a theme): the wash's
+        // hole follows them (Phase 3f review I2). An unchanged map is not sent.
+        if (myCloseCard->drawnElsewhere() && myHtmlChrome && myHtmlChrome->isLive())
+            myHtmlChrome->setQuestion(true, closeQuestionWords());
+#endif
         raiseCloseQuestion();
     });
     connect(myCloseCard, &UnsavedCloseCard::saveChosen, this, &MainWindow::onCloseSaveChosen);
@@ -4860,9 +4870,13 @@ bool MainWindow::canOpenSaveVersion() const
     // genuine fourth application-wide Enter/Escape/X/Y/Z claim, unlike the
     // transform gizmo, so a pending version-create card and a live plane
     // placement really would fight over the same key.
+    // And never while the close question stands (Phase 3f review I1): the HTML
+    // Versions field blurs as the page goes inert under the question, a blur
+    // commits, and the version would write the unsaved document into the
+    // file "Close without saving" promises to leave alone.
     return !myShowingInitScreen && !myRenderModeOn && !mySketching && !hasPendingFace() &&
            !canPullSelectedFace() && !canBevelSelectedEdge() && !myView->mirrorPlacementActive() &&
-           !myMitreActive && !myResizeActive;
+           !myMitreActive && !myResizeActive && !isAskingBeforeClose();
 }
 
 void MainWindow::onSaveVersion()
@@ -4888,6 +4902,9 @@ void MainWindow::onSaveVersion()
 bool MainWindow::saveVersion(const QString& name)
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+    // The gate above, held here too: a route that reaches this directly must
+    // not write behind the close question either.
+    if (isAskingBeforeClose()) return false;
 
     // A version's own thumbnail, captured straight to a temp PNG via
     // OcctViewWidget::saveSnapshot() - the path FurnitureStore::saveVersion()

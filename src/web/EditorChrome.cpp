@@ -315,6 +315,10 @@ void EditorChrome::setQuestion(bool asking, const QVariantMap& words)
     QVariantMap map = asking ? words : QVariantMap();
     map.insert(QStringLiteral("asking"), asking);
     myBridge->setQuestionMap(map);
+    if (myAsking != asking) {
+        myAsking = asking;
+        applyMask();
+    }
     if (asking) myHost->view()->raise();
 }
 
@@ -325,6 +329,7 @@ void EditorChrome::setLive(bool live)
     // A dead page leaves the viewport outright: its mask would otherwise
     // keep swallowing presses on the strip's band over nothing at all.
     if (!live) {
+        myAsking = false;
         dropKeyboard();
         myHost->view()->hide();
         // Nothing of the page takes the pointer any more - the wheel shield
@@ -352,6 +357,10 @@ void EditorChrome::applyMask()
 {
     QRegion region;
     for (const QRect& r : myBridge->hitRects()) region += r;
+    // While the close question stands, every press over the viewport is the
+    // page's from the moment it is asked - the Qt card has already stopped
+    // swallowing, and the page's own wash arrives a render and a report later.
+    if (myAsking && myViewport) region += myViewport->rect();
     myHitRegion = region;
     // An empty region would CLEAR the mask - the whole page taking the
     // pointer. One pixel outside the widget is a mask that contains nothing.

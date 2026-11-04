@@ -1349,6 +1349,10 @@ int main(int argc, char* argv[])
 #endif
         if (closeCard && closeFurniture) {
             closeFurniture->trigger();
+            // Before the page has drawn a thing: the press is already the
+            // page's, the whole viewport (review I3) - no event loop between.
+            check(chrome->hitRegion().contains(window.view()->rect().center()),
+                  "the moment the question is asked, the page takes every press over the viewport");
             pump(300);
             check(window.isAskingBeforeClose() && closeCard->drawnElsewhere() && !closeCard->saveButton()->isVisible(),
                   "Close furniture asks - the Qt card stands, drawn elsewhere, its own buttons hidden");
@@ -1387,6 +1391,27 @@ int main(int argc, char* argv[])
                           .arg(during).arg(before));
             }
 #endif
+            // No version can be written while it stands - a field blurred as the
+            // page goes inert would otherwise commit one (review I1).
+            if (VersionsModel* versionsModel = window.versionsModel()) {
+                const int before = window.furnitureStore().versions(furnitureId).size();
+                check(!versionsModel->canSave() && !versionsModel->save(QStringLiteral("Behind the question")) &&
+                          window.furnitureStore().versions(furnitureId).size() == before,
+                      "no version is saved while the question stands");
+            }
+            // The window moves its buttons: the wash's hole follows them (review I2).
+            {
+                const QSize was = window.size();
+                window.resize(was.width() - 120, was.height());
+                pump(400);
+                WindowButtons* buttons = window.findChild<WindowButtons*>();
+                const int x = buttons ? buttons->mapTo(window.view(), QPoint(0, 0)).x() : -1;
+                const QString clip = jsString(page, "document.querySelector('.wash').style.clipPath");
+                check(buttons && clip.contains(QStringLiteral("%1px").arg(x)),
+                      QStringLiteral("a resize while it asks moves the hole with the window buttons (x %1)").arg(x));
+                window.resize(was);
+                pump(400);
+            }
             // Esc still answers - the Qt card's key claim (Review Focus 2).
             {
                 QWidget* target = window.focusWidget() ? window.focusWidget() : window.view();
