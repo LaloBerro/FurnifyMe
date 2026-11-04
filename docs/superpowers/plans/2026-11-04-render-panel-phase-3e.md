@@ -234,4 +234,52 @@ URL; the layout is re-read (`layoutChanged`) if tiles are added after constructi
 
 ## Gate record
 
-(filled in at the end)
+**Commits** (branch `render-card`, cut from `main` at `7ca510c`): `2d37399` copy table and edit
+slots; `04568a2` RenderBridge; `2a2b73c` RenderStudio docks the page; `fc8e7bf` the page;
+`cadb0e3` attached in both windows, plus the background-colour crash; `e79009d` the scene
+window check; `775b5b2` review fixes.
+
+**Tests:** render_bridge_tests 76 (new, offscreen); ctest 22/22 in `build-web` and 22/22 in
+`build`; vitest 160 (17 new); svelte-check clean; chrome_smoke 201 (25 new, twice clean in a row
+after one run straight off a build failed two unrelated timing checks - the toast's hover fade
+and the Joints card's height - both green on the next two runs of the same binary); hub_smoke 36.
+
+**gui_smoke:** 6448 checks + 1 environment skip, 0 failures, twice, on `e79009d` (the tree before
+the review fixes, which touch only the page, the bridge and RenderPage - none of it reached by
+the suite) - and again on the final tree `775b5b2`: **6448 + 1, 0 failures, twice**. Both presets build
+(`windows` linked once the user's running copy was closed).
+
+**Found while driving it, not planned:**
+- `MainWindow` set the Qt panel's visibility itself after `RenderStudio::refresh()`, so with the
+  page docked the Qt panel also stood loose in the window's corner. The line is gone;
+  `RenderStudio` alone decides. Caught by the block's first dock check.
+- The theme-switch crash's real mechanism: `SetBackgroundColor()` redraws on the spot, with no GL
+  context of the viewport's own current. Reproduced deterministically by leaving render mode
+  after the render page's process died; the colour change now runs in a `GlScope`. The earlier
+  fix (the backdrop image's swap) covered only the half after it.
+
+**Review (Opus, read-only):** 0 Critical, 1 Important, 6 Minor.
+- Fixed, each by a check watched red first: I1 (a shot's index alone, stale under a double-click
+  or a click after a removal - the name now travels and a mismatch is refused, and the second
+  click of a double-click sends nothing); M2 (a dial stuck on a lost release - re-graded up and
+  fixed); M3 (RenderPage holds its studio by `QPointer` - re-graded up and fixed).
+
+**Rulings:**
+- R6 as built differs from the plan's words: the editor's page is attached inside
+  `useHtmlChrome()`, so a missing EDITOR chrome page also means the Qt render panel; the scene
+  window needs only the render page. Kept - the editor's HTML layer is one switch - cost if wrong:
+  an editor whose chrome page is missing shows the Qt render panel.
+- The shutter's `isEnabled()` guard in `RenderBridge::shoot()` is redundant - Qt's own
+  `QAction::trigger()` refuses a disabled action, which is why its mutation stayed green. Kept as
+  the panel's stated rule; the check is true of the behaviour, not proof of the guard.
+- Review Focus 2 (render mode entered before the page is live) is not driven by a check: the
+  page loads at window construction, long before render mode can be entered. The code path is
+  the same swap Review Focus 1 drives (the Qt panel docked, the page taking its place on
+  `liveChanged`).
+
+**Deferred minors:** every Quality click hides, reparents and re-shows the web view through the
+existing render-mode round trip (a possible one-frame flash); `RenderSettingsCopy`'s strings are
+not extractable by lupdate (no translations ship); thumbnails are PNG at twice tile size, ~30-45
+KB each in the channel's first message and on each layoutChanged (JPEG would be smaller for a
+big materials folder); `layout` is NOTIFY rather than the plan's CONSTANT (the right choice, the
+tiles can change).
