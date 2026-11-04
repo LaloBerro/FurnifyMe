@@ -1466,6 +1466,7 @@ MainWindow::~MainWindow()
     // with the question standing would report questionChanged(false) into a
     // relayout of this half-destroyed window (Phase 3f review M4).
     if (myCloseCard) myCloseCard->blockSignals(true);
+    if (myNameCard) myNameCard->blockSignals(true);   // the same, for the name question (Phase 3g)
     // THE THEME IS GIVEN BACK (T-072). A persisted window took the app-wide
     // theme over and installed a store that writes QSettings; neither may
     // outlive it - in the app this is the exit, in gui_smoke a window built
@@ -3090,13 +3091,10 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
         if (!myCloseCard || !myCloseCard->isAsking()) return;
         myCloseCard->replace();
-#ifdef FURNIFYME_WEB_UI
         // The window buttons may have moved (a resize, a theme): the wash's
         // hole follows them (Phase 3f review I2). An unchanged map is not sent.
-        if (myCloseCard->drawnElsewhere() && myHtmlChrome && myHtmlChrome->isLive())
-            myHtmlChrome->setQuestion(true, closeQuestionWords());
-#endif
-        raiseCloseQuestion();
+        syncHtmlQuestion();
+        raiseQuestions();
     });
     connect(myCloseCard, &UnsavedCloseCard::saveChosen, this, &MainWindow::onCloseSaveChosen);
     connect(myCloseCard, &UnsavedCloseCard::discardChosen, this,
@@ -3131,7 +3129,9 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
         if (!myNameCard || !myNameCard->isAsking()) return;
         myNameCard->replace();
-        if (myWindowButtons) myWindowButtons->raise();
+        // The hole in the page's wash follows the window buttons (Phase 3g).
+        syncHtmlQuestion();
+        raiseQuestions();
     });
     connect(myNameCard, &NameFurnitureCard::created, this,
             &MainWindow::createAndOpenFurniture);
@@ -4124,12 +4124,16 @@ void MainWindow::askBeforeClosing(CloseRoute route)
     // on the way - over the scrim, where a live control would be clickable
     // through the question. The window controls go back on top last: the
     // scrim blocks the viewport, not the window.
-    raiseCloseQuestion();
+    raiseQuestions();
 }
 
-QVariantMap MainWindow::closeQuestionWords() const
+bool MainWindow::isAskingForName() const
 {
-    QVariantMap words = myCloseCard ? myCloseCard->words() : QVariantMap();
+    return myNameCard && myNameCard->isAsking();
+}
+
+QVariantMap MainWindow::withKeepClear(QVariantMap words) const
+{
     // WHERE THE WASH STOPS: the window buttons. Raised over it they still take
     // their presses, but Qt composites the web page over plain widgets
     // whatever their stacking, so the page's wash dimmed them (measured: the
@@ -4146,14 +4150,43 @@ QVariantMap MainWindow::closeQuestionWords() const
     return words;
 }
 
-void MainWindow::raiseCloseQuestion()
+void MainWindow::raiseQuestions()
 {
-    if (!myCloseCard || !myCloseCard->isAsking()) return;
-    myCloseCard->raise();
+    // The close question can stand over the name question (the window's X
+    // pressed while a name is asked), so it goes on top when both do.
+    const bool closing = myCloseCard && myCloseCard->isAsking();
+    const bool naming = myNameCard && myNameCard->isAsking();
+    if (!closing && !naming) return;
+    if (naming) myNameCard->raise();
+    if (closing) myCloseCard->raise();
 #ifdef FURNIFYME_WEB_UI
-    if (myCloseCard->drawnElsewhere() && myHtmlChrome) myHtmlChrome->view()->raise();
+    const bool drawnElsewhere = closing ? myCloseCard->drawnElsewhere() : myNameCard->drawnElsewhere();
+    if (drawnElsewhere && myHtmlChrome) myHtmlChrome->view()->raise();
 #endif
     if (myWindowButtons) myWindowButtons->raise();
+}
+
+void MainWindow::syncHtmlQuestion()
+{
+#ifdef FURNIFYME_WEB_UI
+    if (!myHtmlChrome || !myHtmlChrome->isLive()) return;
+    QVariantMap words;
+    if (myCloseCard && myCloseCard->isAsking() && myCloseCard->drawnElsewhere()) words = myCloseCard->words();
+    else if (myNameCard && myNameCard->isAsking() && myNameCard->drawnElsewhere()) words = myNameCard->words();
+    const bool asking = !words.isEmpty();
+    myHtmlChrome->setQuestion(asking, asking ? withKeepClear(words) : QVariantMap());
+#endif
+}
+
+void MainWindow::onHtmlQuestionChanged()
+{
+#ifdef FURNIFYME_WEB_UI
+    if (!myHtmlChrome || !myHtmlChrome->isLive()) return;
+    syncHtmlQuestion();
+    if (isAskingBeforeClose() || isAskingForName()) raiseQuestions();
+    // The Qt cards go back over the page once nothing stands over them.
+    else if (myOverlay) myOverlay->relayout();
+#endif
 }
 
 void MainWindow::finishClose(CloseRoute route, const QString& statusMessage)
@@ -4203,8 +4236,7 @@ void MainWindow::askNewFurnitureName()
     if (myRenderModeOn) setRenderModeEnabled(false);
     myNameCard->ask(myStore.nextFurnitureName());
     updateActions();
-    myNameCard->raise();
-    if (myWindowButtons) myWindowButtons->raise();
+    raiseQuestions();
 }
 
 void MainWindow::createAndOpenFurniture(const QString& name)
@@ -4876,7 +4908,7 @@ bool MainWindow::canOpenSaveVersion() const
     // file "Close without saving" promises to leave alone.
     return !myShowingInitScreen && !myRenderModeOn && !mySketching && !hasPendingFace() &&
            !canPullSelectedFace() && !canBevelSelectedEdge() && !myView->mirrorPlacementActive() &&
-           !myMitreActive && !myResizeActive && !isAskingBeforeClose();
+           !myMitreActive && !myResizeActive && !isAskingBeforeClose() && !isAskingForName();
 }
 
 void MainWindow::onSaveVersion()
@@ -4903,8 +4935,9 @@ bool MainWindow::saveVersion(const QString& name)
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
     // The gate above, held here too: a route that reaches this directly must
-    // not write behind the close question either.
-    if (isAskingBeforeClose()) return false;
+    // not write behind the close question - or the name question (Phase 3g),
+    // under which the page goes inert and a blurred Versions field commits.
+    if (isAskingBeforeClose() || isAskingForName()) return false;
 
     // A version's own thumbnail, captured straight to a temp PNG via
     // OcctViewWidget::saveSnapshot() - the path FurnitureStore::saveVersion()
@@ -10454,13 +10487,20 @@ void MainWindow::useHtmlChrome()
         else if (which == QLatin1String("discard")) myCloseCard->answer(UnsavedCloseCard::Answer::Discard);
         else if (which == QLatin1String("keep")) myCloseCard->answer(UnsavedCloseCard::Answer::Keep);
     });
-    if (myCloseCard) {
-        connect(myCloseCard, &UnsavedCloseCard::questionChanged, this, [this](bool asking) {
-            if (!myHtmlChrome || !myHtmlChrome->isLive()) return;
-            myHtmlChrome->setQuestion(asking, closeQuestionWords());
-            if (asking) raiseCloseQuestion();
-            // The Qt cards go back over the page once nothing stands over them.
-            else if (myOverlay) myOverlay->relayout();
+    if (myCloseCard)
+        connect(myCloseCard, &UnsavedCloseCard::questionChanged, this, &MainWindow::onHtmlQuestionChanged);
+    // The name question (Phase 3g): the page answers with the name its field
+    // holds, and mirrors every edit into the Qt card's own field.
+    if (myNameCard) {
+        connect(myNameCard, &NameFurnitureCard::questionChanged, this, &MainWindow::onHtmlQuestionChanged);
+        connect(myHtmlChrome, &EditorChrome::nameQuestionAnswered, this,
+                [this](const QString& which, const QString& name) {
+                    if (!myNameCard) return;
+                    if (which == QLatin1String("create")) myNameCard->create(name);
+                    else if (which == QLatin1String("cancel")) myNameCard->cancel();
+                });
+        connect(myHtmlChrome, &EditorChrome::nameQuestionTyped, this, [this](const QString& name) {
+            if (myNameCard) myNameCard->setName(name);
         });
     }
     // The render settings panel as its own page, docked in the Qt panel's
@@ -10507,11 +10547,12 @@ void MainWindow::useHtmlChrome()
         }
         // The close question (Phase 3f): the page draws it while it can, and
         // the Qt card paints again the moment it cannot - mid-question too.
-        if (myCloseCard) {
-            myCloseCard->setDrawnElsewhere(live);
-            myHtmlChrome->setQuestion(live && myCloseCard->isAsking(), closeQuestionWords());
-            raiseCloseQuestion();
-        }
+        if (myCloseCard) myCloseCard->setDrawnElsewhere(live);
+        // The name question the same way (Phase 3g); keys aimed at the page's
+        // view go through the card's claim to the page's field.
+        if (myNameCard) myNameCard->setDrawnElsewhere(live, live ? myHtmlChrome->view() : nullptr);
+        syncHtmlQuestion();
+        raiseQuestions();
         updateActions();
         syncHtmlChrome();
     });

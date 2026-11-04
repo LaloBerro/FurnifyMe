@@ -10,6 +10,7 @@
   import Toast, { type ToastMessage } from './Toast.svelte';
   import StatusStrip from './StatusStrip.svelte';
   import Question, { type QuestionState } from './Question.svelte';
+  import NameQuestion from './NameQuestion.svelte';
   import Settings from './settings/Settings.svelte';
   import type { CardRect, SettingsApi } from './settings/api';
   import Versions from './versions/Versions.svelte';
@@ -44,8 +45,8 @@
   let viewH = $state(window.innerHeight);
   let toast: Toast | undefined = $state();
   let cards: Record<string, CardRect> = $state({});
-  // The close question (Phase 3f): while it stands everything else here is
-  // inert and under its wash.
+  // The close question (Phase 3f) or the name question (Phase 3g), one at a
+  // time: while one stands everything else here is inert and under its wash.
   let question: QuestionState = $state({ asking: false });
   // File -> Save version... asked for a pending version (Phase 3c, ruling
   // R4). Kept here, where something is always listening, until the card takes
@@ -132,6 +133,15 @@
 {#if status.shown}
   <StatusStrip {status} />
 {/if}
-{#if question.asking}
+{#if question.asking && question.kind === 'name'}
+  <NameQuestion
+    {question}
+    {host}
+    keyboard={keyboardFor('question')}
+    oncreate={(name) => chrome.answerNameQuestion?.('create', name)}
+    oncancel={() => chrome.answerNameQuestion?.('cancel', '')}
+    onedit={(name) => chrome.nameQuestionEdited?.(name)}
+  />
+{:else if question.asking}
   <Question {question} {host} onanswer={(which) => chrome.answerQuestion?.(which)} />
 {/if}

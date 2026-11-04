@@ -70,6 +70,8 @@ signals:
     void questionChanged(const QVariantMap& question);
     // Observed on the C++ side
     void questionAnswered(const QString& which);
+    void nameQuestionAnswered(const QString& which, const QString& name);
+    void nameQuestionTyped(const QString& name);
     void undoRequested(int stamp);
     void hitRectsChanged();
     void pageReady();
@@ -95,8 +97,16 @@ public slots:
     // The close question's answer: "save", "discard" or "keep". Anything else,
     // or an answer while no question stands, is refused.
     void answerQuestion(const QString& which);
+    // The name question's answer (Phase 3g): "create" with the name the
+    // page's field holds - it rides WITH the answer - or "cancel". Refused
+    // unless the name question stands.
+    void answerNameQuestion(const QString& which, const QString& name);
+    // Each edit of the page's name field, mirrored into the Qt card's.
+    void nameQuestionEdited(const QString& name);
 
 private:
+    // Whether the question of this kind ("close", "name") stands.
+    bool asks(const QString& kind) const;
     QVariantMap myQuestion;
     bool myUndoEnabled = true;
     QVariantList myObstacles;
@@ -132,9 +142,11 @@ public:
     void setObstacles(const std::vector<QRect>& rects);
     void setStatus(const QString& left, const QString& right, const QString& name, bool unsaved,
                    bool shown);
-    // The close question stands (words from UnsavedCloseCard::words()) or
-    // does not (an empty map). While it stands the page's view is raised over
-    // every Qt card, so its wash takes every press (Phase 3f, ruling R2).
+    // A question stands (words from UnsavedCloseCard::words() or
+    // NameFurnitureCard::words(), told apart by `kind`) or none does (an
+    // empty map). While one stands the page's view is raised over every Qt
+    // card, so its wash takes every press (Phase 3f, ruling R2). One at a
+    // time: MainWindow::syncHtmlQuestion() picks which (Phase 3g, R2).
     void setQuestion(bool asking, const QVariantMap& words);
 
     ChromeBridge* bridge() const { return myBridge; }
@@ -153,6 +165,8 @@ signals:
     void undoRequested(int stamp);
     void liveChanged(bool live);
     void questionAnswered(const QString& which);
+    void nameQuestionAnswered(const QString& which, const QString& name);
+    void nameQuestionTyped(const QString& name);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

@@ -43,11 +43,32 @@ void ChromeBridge::setQuestionMap(const QVariantMap& map)
     emit questionChanged(map);
 }
 
+bool ChromeBridge::asks(const QString& kind) const
+{
+    if (!myQuestion.value(QStringLiteral("asking")).toBool()) return false;
+    // A map from before kinds existed is the close question's.
+    const QString shown = myQuestion.value(QStringLiteral("kind"), QStringLiteral("close")).toString();
+    return shown == kind;
+}
+
 void ChromeBridge::answerQuestion(const QString& which)
 {
-    if (!myQuestion.value(QStringLiteral("asking")).toBool()) return;
+    if (!asks(QStringLiteral("close"))) return;
     if (which != QLatin1String("save") && which != QLatin1String("discard") && which != QLatin1String("keep")) return;
     emit questionAnswered(which);
+}
+
+void ChromeBridge::answerNameQuestion(const QString& which, const QString& name)
+{
+    if (!asks(QStringLiteral("name"))) return;
+    if (which != QLatin1String("create") && which != QLatin1String("cancel")) return;
+    emit nameQuestionAnswered(which, name);
+}
+
+void ChromeBridge::nameQuestionEdited(const QString& name)
+{
+    if (!asks(QStringLiteral("name"))) return;
+    emit nameQuestionTyped(name);
 }
 
 void ChromeBridge::setCardMap(const QVariantMap& map)
@@ -132,6 +153,8 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     connect(myBridge, &ChromeBridge::hitRectsChanged, this, &EditorChrome::applyMask);
     connect(myBridge, &ChromeBridge::undoRequested, this, &EditorChrome::undoRequested);
     connect(myBridge, &ChromeBridge::questionAnswered, this, &EditorChrome::questionAnswered);
+    connect(myBridge, &ChromeBridge::nameQuestionAnswered, this, &EditorChrome::nameQuestionAnswered);
+    connect(myBridge, &ChromeBridge::nameQuestionTyped, this, &EditorChrome::nameQuestionTyped);
     connect(myBridge, &ChromeBridge::keyboardClaimed, this, &EditorChrome::claimKeyboard);
     connect(myBridge, &ChromeBridge::keyboardReleased, this, &EditorChrome::releaseKeyboard);
     // A card that sizes itself tells us its height; its slot takes it, and
@@ -318,6 +341,12 @@ void EditorChrome::setQuestion(bool asking, const QVariantMap& words)
     if (myAsking != asking) {
         myAsking = asking;
         applyMask();
+    }
+    // The name question's field holds the keyboard in the question's name;
+    // the question ending - or giving way to the close question - gives it
+    // back, whoever ended it (Phase 3g).
+    if (!asking || map.value(QStringLiteral("kind")).toString() != QLatin1String("name")) {
+        if (myKeyboardClaims.remove(QStringLiteral("question")) && keyboardClaimCount() == 0) dropKeyboard();
     }
     if (asking) myHost->view()->raise();
 }

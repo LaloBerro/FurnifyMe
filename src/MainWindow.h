@@ -1148,6 +1148,10 @@ public:
     // card's own hidden flag, never a stored bool.
     bool isAskingBeforeClose() const;
     class UnsavedCloseCard* closeQuestion() const { return myCloseCard; }
+    // Whether File -> New furniture's name question stands - the card's own
+    // hidden flag, like isAskingBeforeClose().
+    bool isAskingForName() const;
+    class NameFurnitureCard* nameQuestion() const { return myNameCard; }
     class FurnitureNameMark* furnitureNameMark() const { return myNameMark; }
     // File -> Autosave (Milestone 5, item 10): a submenu of five exclusive
     // modes, replacing the old single checkable entry. "Off" and "After
@@ -1988,14 +1992,22 @@ private:
     // autosave debounce, raises the card. Asked again while it stands, the
     // latest route wins (an X over Close furniture's question means quit).
     void askBeforeClosing(CloseRoute route);
-    // The close question on top: the card (its key claim), then - while the
-    // chrome page draws it (Phase 3f) - the page's view over every Qt card,
-    // then the window buttons back over both. After every relayout too,
-    // which raises each anchored card as it places it.
-    void raiseCloseQuestion();
-    // The close question's words for the page, with the window buttons'
-    // rectangle the wash must leave clear (Phase 3f).
-    QVariantMap closeQuestionWords() const;
+    // Whichever question stands, on top: its card (the key claim), then -
+    // while the chrome page draws it (Phases 3f, 3g) - the page's view over
+    // every Qt card, then the window buttons back over both. After every
+    // relayout too, which raises each anchored card as it places it.
+    void raiseQuestions();
+    // `words` for the page, with the window buttons' rectangle the wash must
+    // leave clear (Phase 3f).
+    QVariantMap withKeepClear(QVariantMap words) const;
+    // THE ONE SENDER of the page's question (Phase 3g, ruling R2): the close
+    // question if it stands, else the name question, else none - so neither
+    // card going away can wipe the other's question, in whatever order their
+    // signals arrive. A no-op unless the page is live.
+    void syncHtmlQuestion();
+    // syncHtmlQuestion(), then the raise - or, once nothing stands, the
+    // relayout that puts the Qt cards back over the page.
+    void onHtmlQuestionChanged();
     // Performs the close itself once nothing more needs asking: the library
     // route through showInitScreen(), the quit route through quitRequested().
     void finishClose(CloseRoute route, const QString& statusMessage);

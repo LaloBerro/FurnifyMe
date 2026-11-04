@@ -101,6 +101,8 @@ QStringList NameFurnitureCard::paintedTexts() const
 
 void NameFurnitureCard::ask(const QString& suggestion)
 {
+    const bool wasAsking = isAsking();
+    ++mySeed;
     myField->setText(suggestion);
     myCreate->setEnabled(!name().isEmpty());
     replace();
@@ -108,10 +110,63 @@ void NameFurnitureCard::ask(const QString& suggestion)
     raise();
     // Focus and a full selection together: the suggested name is a
     // suggestion, so the first character typed replaces it rather than
-    // landing in the middle of it.
-    myField->setFocus(Qt::OtherFocusReason);
-    myField->selectAll();
+    // landing in the middle of it. Drawn elsewhere, the page's field does
+    // this, and focus stays out of a field nobody can see.
+    if (!myDrawnElsewhere) {
+        myField->setFocus(Qt::OtherFocusReason);
+        myField->selectAll();
+    }
     update();
+    // A re-ask while it stands shows nothing new to Qt - the page is told.
+    if (wasAsking) emit questionChanged(true);
+}
+
+void NameFurnitureCard::setDrawnElsewhere(bool drawnElsewhere, QWidget* keyTarget)
+{
+    myKeyTarget = drawnElsewhere ? keyTarget : nullptr;
+    if (myDrawnElsewhere == drawnElsewhere) return;
+    myDrawnElsewhere = drawnElsewhere;
+    setAttribute(Qt::WA_TransparentForMouseEvents, drawnElsewhere);
+    myField->setVisible(!drawnElsewhere);
+    for (CloseCardButton* button : {myCreate, myCancel}) button->setVisible(!drawnElsewhere);
+    // The page takes over with what is in the field now.
+    if (drawnElsewhere) ++mySeed;
+    // The page went away mid-question: the field is back, holding what was
+    // typed there, and takes the keys.
+    else if (isAsking()) myField->setFocus(Qt::OtherFocusReason);
+    update();
+}
+
+QVariantMap NameFurnitureCard::words() const
+{
+    return {{QStringLiteral("kind"), QStringLiteral("name")},
+            {QStringLiteral("title"), titleText()},
+            {QStringLiteral("body"), bodyText()},
+            {QStringLiteral("name"), myField->text()},
+            {QStringLiteral("seed"), mySeed},
+            {QStringLiteral("maxLength"), myField->maxLength()},
+            {QStringLiteral("create"), myCreate->label()},
+            {QStringLiteral("createKey"), myCreate->keyHint()},
+            {QStringLiteral("cancel"), myCancel->label()},
+            {QStringLiteral("cancelKey"), myCancel->keyHint()}};
+}
+
+void NameFurnitureCard::setName(const QString& name)
+{
+    if (!isAsking() || myField->text() == name) return;
+    myField->setText(name.left(myField->maxLength()));
+}
+
+void NameFurnitureCard::create(const QString& name)
+{
+    if (!isAsking()) return;
+    setName(name);
+    accept();
+}
+
+void NameFurnitureCard::cancel()
+{
+    if (isAsking()) reject();
 }
 
 void NameFurnitureCard::applyTheme()
@@ -205,6 +260,19 @@ bool NameFurnitureCard::eventFilter(QObject* watched, QEvent* event)
     auto* widget = qobject_cast<QWidget*>(watched);
     if (!widget || widget->window() != window()) return QWidget::eventFilter(watched, event);
 
+    // Drawn elsewhere, the page's field is where a name is typed: every key
+    // aimed at the page goes through, Enter and Escape too - the page answers
+    // with the name it holds (Phase 3g, ruling R3). Its ShortcutOverride is
+    // still claimed, so no window shortcut takes the key first.
+    if (myDrawnElsewhere && myKeyTarget &&
+        (widget == myKeyTarget || myKeyTarget->isAncestorOf(widget))) {
+        if (type == QEvent::ShortcutOverride) {
+            event->accept();
+            return true;
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
     if (type == QEvent::ShortcutOverride) {
         // Every key, back from QShortcutMap - a shortcut reaching an action
         // behind this question would act on the furniture it is about to
@@ -236,6 +304,8 @@ bool NameFurnitureCard::eventFilter(QObject* watched, QEvent* event)
 
 void NameFurnitureCard::paintEvent(QPaintEvent* /*event*/)
 {
+    // The chrome page draws the question (Phase 3g); this widget only asks it.
+    if (myDrawnElsewhere) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
@@ -275,6 +345,7 @@ void NameFurnitureCard::showEvent(QShowEvent* event)
     if (!myClaimInstalled) {
         QCoreApplication::instance()->installEventFilter(this);
         myClaimInstalled = true;
+        emit questionChanged(true);
     }
 }
 
@@ -284,5 +355,6 @@ void NameFurnitureCard::hideEvent(QHideEvent* event)
     if (myClaimInstalled) {
         QCoreApplication::instance()->removeEventFilter(this);
         myClaimInstalled = false;
+        emit questionChanged(false);
     }
 }

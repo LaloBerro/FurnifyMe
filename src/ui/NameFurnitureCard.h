@@ -25,8 +25,21 @@
 // WHAT the name is then used for is the caller's - this widget only asks. It
 // hides itself before reporting, exactly as the close question does, so a
 // failure raised by the creation that follows lands on a clear window.
+//
+// IN HTML-CHROME MODE THE PAGE DRAWS IT (migration Phase 3g, UnsavedCloseCard's
+// Phase 3f shape). setDrawnElsewhere() makes this widget paint nothing, hide
+// its field and buttons and pass the pointer through, while it stays SHOWN -
+// so isAsking(), the key claim and "hide first, then report" all hold. One
+// difference from the close question: the field is the page's, so every key
+// aimed at the page's view goes THROUGH the claim, Enter and Escape included,
+// and the page answers with the name its field holds (create()) - never one
+// mirrored a channel message earlier, which a fast "type, Enter" would beat.
+// The page mirrors each edit too (setName()), so a key that reaches this
+// filter from elsewhere, or a page that dies mid-question, has the typed name.
+#include <QPointer>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 #include <QWidget>
 
 class CloseCardButton;
@@ -69,9 +82,31 @@ public:
     // banned-word sweep. The field's own text is the user's and is not here.
     QStringList paintedTexts() const;
 
+    // --- HTML-chrome mode (Phase 3g) -----------------------------------------
+    // `keyTarget` is the page's view: keys aimed at it, or at anything inside
+    // it, go through the claim untouched (ShortcutOverride still claimed, so no
+    // window shortcut fires). Back to false, mid-question too, the card paints
+    // again and its field takes focus holding what was typed on the page.
+    void setDrawnElsewhere(bool drawnElsewhere, QWidget* keyTarget = nullptr);
+    bool drawnElsewhere() const { return myDrawnElsewhere; }
+    // {kind: "name", title, body, name, seed, maxLength, create, createKey,
+    // cancel, cancelKey}. `name` is the field's text; `seed` moves on every
+    // ask and every hand-over to the page, and the page re-seeds its field
+    // only when it does - so an edit mirrored back never retypes the field.
+    QVariantMap words() const;
+    // The page's field, mirrored into this card's own.
+    void setName(const QString& name);
+    // The page's answers. create() takes the name the page holds and refuses
+    // an empty one exactly as Enter does; both are no-ops unless asking.
+    void create(const QString& name);
+    void cancel();
+
 signals:
     void created(const QString& name);
     void cancelled();
+    // The question stood up (or was asked again) or went away - when the key
+    // claim is installed or removed, and on a re-ask while it stands.
+    void questionChanged(bool asking);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -98,4 +133,7 @@ private:
     CloseCardButton* myCreate = nullptr;
     CloseCardButton* myCancel = nullptr;
     bool myClaimInstalled = false;
+    bool myDrawnElsewhere = false;
+    QPointer<QWidget> myKeyTarget;
+    int mySeed = 0;
 };

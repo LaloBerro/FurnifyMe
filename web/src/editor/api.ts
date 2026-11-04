@@ -63,4 +63,9 @@ export interface ChromeApi {
   questionChanged?: Signal<[QuestionState]>;
   // "save", "discard" or "keep" - answered through the Qt card's own answer().
   answerQuestion?(which: 'save' | 'discard' | 'keep'): void;
+  // The name question (Phase 3g, kind "name"): "create" carries the name the
+  // field holds WITH the answer; "cancel" carries none. Every edit is
+  // mirrored too, so the Qt card has the typed name if the page goes away.
+  answerNameQuestion?(which: 'create' | 'cancel', name: string): void;
+  nameQuestionEdited?(name: string): void;
 }

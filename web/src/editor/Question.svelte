@@ -1,6 +1,9 @@
 <script lang="ts" module>
+  // One question at a time, told apart by `kind` (Phase 3g): "close" (this
+  // card; a map with no kind is this one too) or "name" (NameQuestion).
   export interface QuestionState {
     asking: boolean;
+    kind?: 'close' | 'name';
     title?: string;
     body?: string;
     save?: string;
@@ -11,6 +14,14 @@
     // The window buttons' rectangle in viewport pixels: the wash leaves it
     // clear, as the Qt card's raise did.
     keepClear?: { x: number; y: number; w: number; h: number };
+    // The name question's own (NameFurnitureCard::words()).
+    name?: string;
+    seed?: number;
+    maxLength?: number;
+    create?: string;
+    createKey?: string;
+    cancel?: string;
+    cancelKey?: string;
   }
 </script>
 
@@ -23,6 +34,7 @@
   // takes every press over the viewport (data-hit), stopping above the status
   // strip so the unsaved dot stays readable, as the Qt bar did.
   import { chip } from '../actions';
+  import Wash from './Wash.svelte';
 
   let {
     question,
@@ -40,18 +52,9 @@
   const width = $derived(Math.min(kCardWidth, Math.max(80, host.w - kGutter * 2)));
   const left = $derived(Math.round((host.w - width) / 2));
   const top = $derived(Math.max(kGutter, Math.round(host.h * 0.48 - cardHeight / 2)));
-  // An even-odd hole where the window buttons stand: Qt composites this page
-  // over plain widgets whatever their stacking, so they would read dimmed.
-  const hole = $derived.by(() => {
-    const k = question.keepClear;
-    if (!k || k.w <= 0 || k.h <= 0) return undefined;
-    const x2 = k.x + k.w;
-    const y2 = k.y + k.h;
-    return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${k.x}px ${k.y}px, ${k.x}px ${y2}px, ${x2}px ${y2}px, ${x2}px ${k.y}px, ${k.x}px ${k.y}px)`;
-  });
 </script>
 
-<div class="wash" data-hit style:height="{host.h}px" style:clip-path={hole} role="presentation">
+<Wash {host} keepClear={question.keepClear}>
   <div
     class="card"
     role="alertdialog"
@@ -77,17 +80,9 @@
       </button>
     </div>
   </div>
-</div>
+</Wash>
 
 <style>
-  .wash {
-    position: fixed;
-    left: 0;
-    top: 0;
-    width: 100%;
-    /* The Qt card's #0a0a0dcc: the viewport's own token at 204 of 255. */
-    background: color-mix(in srgb, var(--viewport) 80%, transparent);
-  }
   .card {
     position: absolute;
     box-sizing: border-box;

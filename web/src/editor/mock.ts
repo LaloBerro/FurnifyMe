@@ -29,6 +29,8 @@ export function mockChrome() {
     question: { asking: false } as QuestionState,
     questionChanged: new MockSignal<[QuestionState]>(),
     answerQuestion: (which) => calls.push({ method: 'answerQuestion', args: [which] }),
+    answerNameQuestion: (which, name) => calls.push({ method: 'answerNameQuestion', args: [which, name] }),
+    nameQuestionEdited: (name) => calls.push({ method: 'nameQuestionEdited', args: [name] }),
     reportHitRects: (rects) => calls.push({ method: 'reportHitRects', args: [rects] }),
     undo: (stamp) => calls.push({ method: 'undo', args: [stamp] }),
     ready: () => calls.push({ method: 'ready', args: [] }),

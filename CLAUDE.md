@@ -411,6 +411,23 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   a hole for the window buttons**, because Qt composites the web page over plain widgets
   whatever their stacking (they read 52 under it against 152); and **no version can be saved
   behind the question** - a Versions field blurred as the page goes inert, and a blur commits.
+- **The name question (Phase 3g, branch `name-card`): the close question's shape, and the
+  FIELD is the page's.** File -> New furniture's "Name this furniture" is drawn by the chrome
+  page (`NameQuestion.svelte` on the shared `Wash.svelte`) while `NameFurnitureCard` stays
+  shown, drawn elsewhere, keeping its claim. **One question on the page at a time**: the
+  chrome's `question` map carries a `kind`, and `MainWindow::syncHtmlQuestion()` is its one
+  sender - the close question if it stands, else the name question - so the window's X asking
+  the close question over a name question shows the close one and hands back to the name
+  after. **Keys aimed at the page's view go THROUGH the Qt card's claim, Enter and Escape
+  too** (its `ShortcutOverride` still claimed): the field claims the keyboard outright as it
+  is seeded (a `focus()` in a page whose window is not active fires no focus event), and its
+  Enter answers `answerNameQuestion("create", name)` with the name it holds, never a name
+  mirrored a message earlier. Each edit is mirrored (`nameQuestionEdited`), so a key reaching
+  the card from outside the page, or a page that dies mid-question, has the typed name; the
+  page re-seeds only when the card's `seed` moves (a new ask, a hand-over), so a mirrored
+  edit never retypes the field. The claim goes back when the question ends, whoever ends it,
+  and no version is saved behind it. The library hub asks the same question in its own page
+  (`web/src/hub/NameCard.svelte`).
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a

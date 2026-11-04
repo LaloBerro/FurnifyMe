@@ -146,7 +146,10 @@ void UnsavedCloseCard::setDrawnElsewhere(bool drawnElsewhere)
 
 QVariantMap UnsavedCloseCard::words() const
 {
-    return {{QStringLiteral("title"), titleText()},
+    // `kind`: the chrome page draws one question at a time and picks its card
+    // by it (Phase 3g - the name question shares the channel).
+    return {{QStringLiteral("kind"), QStringLiteral("close")},
+            {QStringLiteral("title"), titleText()},
             {QStringLiteral("body"), bodyText()},
             {QStringLiteral("save"), mySave->label()},
             {QStringLiteral("saveKey"), mySave->keyHint()},

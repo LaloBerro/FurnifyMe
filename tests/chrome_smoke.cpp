@@ -37,6 +37,7 @@
 #include "ui/RenderStudio.h"
 #include "ui/SceneWindow.h"
 #include "ui/UnsavedCloseCard.h"
+#include "ui/NameFurnitureCard.h"
 #include "ui/WindowChrome.h"
 #include "ui/ToolCluster.h"
 #include "ui/RenderSettingsPanel.h"
@@ -1465,6 +1466,169 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --- the name question as HTML (Phase 3g) --------------------------------------
+    NameFurnitureCard* nameCard = window.nameQuestion();
+    QAction* newFurniture = actionNamed(&window, QStringLiteral("New furniture"));
+    QAction* saveFurniture = actionNamed(&window, QStringLiteral("Save"));
+    const auto nameShown = [&] { return js(page, "!!document.querySelector('.name-question input')").toBool(); };
+    const auto nameField = [&] { return jsString(page, "(document.querySelector('.name-question input') || {}).value || ''"); };
+    // Types into the page's field and, in the same turn, presses `key` there.
+    const auto typeThen = [&](const QString& name, const QString& key) {
+        js(page, QStringLiteral("(() => { const f = document.querySelector('.name-question input'); f.value = '%1'; "
+                                "f.dispatchEvent(new Event('input', {bubbles: true})); %2 })()")
+                     .arg(name, key.isEmpty() ? QString()
+                                              : QStringLiteral("f.dispatchEvent(new KeyboardEvent('keydown', {key: '%1', bubbles: true}));")
+                                                    .arg(key)));
+    };
+    {
+        check(nameCard && newFurniture && saveFurniture, "the editor has its name question, New furniture and Save");
+        if (nameCard && newFurniture && saveFurniture) {
+            const QString benchId = window.currentFurnitureId();
+            // Unsaved changes: the close question first, then the name question,
+            // each drawn by the page in turn (Review Focus 5).
+            check(window.isFurnitureDirty(), "the furniture still has unsaved changes to ask about");
+            newFurniture->trigger();
+            pump(300);
+            check(window.isAskingBeforeClose() && waitFor(washShown, 3000) &&
+                      js(page, "!!document.querySelector('.answer.save')").toBool(),
+                  "New furniture with unsaved changes asks the close question first, on the page");
+            js(page, "document.querySelector('.answer.save').click()");
+            check(waitFor([&] { return window.isAskingForName(); }, 3000) && !window.isAskingBeforeClose() &&
+                      !window.isFurnitureDirty(),
+                  "Save and close saves, then hands over to the name question");
+            check(waitFor(nameShown, 3000) && !js(page, "!!document.querySelector('.answer.save')").toBool(),
+                  "which the page draws in the close question's place");
+            check(nameCard->drawnElsewhere() && !nameCard->field()->isVisible() && !nameCard->createButton()->isVisible(),
+                  "the Qt card stands, drawn elsewhere, its own field and buttons hidden");
+            const QString suggestion = window.furnitureStore().nextFurnitureName();
+            check(jsString(page, "document.querySelector('.name-question .title').textContent") ==
+                          QStringLiteral("Name this furniture") &&
+                      nameField() == suggestion,
+                  "with the Qt card's words and the suggested name - " + nameField());
+            check(waitFor([&] { return chrome->holdsKeyboard(); }, 2000), "its field takes the keyboard");
+            // A press anywhere behind it lands on the page; the window buttons
+            // keep theirs (the close question's wash, shared).
+            QWidget* atCentre = window.view()->childAt(window.view()->rect().center());
+            check(atCentre && (atCentre == page || page->isAncestorOf(atCentre)),
+                  "a press on the viewport behind the name question lands on the page");
+            if (ToolCluster* rail = window.findChild<ToolCluster*>()) {
+                QWidget* at = window.view()->childAt(rail->geometry().center());
+                check(at && (at == page || page->isAncestorOf(at)), "and so does a press on the rail");
+            }
+            if (WindowButtons* buttons = window.findChild<WindowButtons*>()) {
+                const QPoint on = window.view()->mapFrom(&window, buttons->mapTo(&window, buttons->rect().center()));
+                QWidget* at = window.view()->childAt(on);
+                check(at == buttons || (at && buttons->isAncestorOf(at)), "the window buttons stay usable");
+                const int x = buttons->mapTo(window.view(), QPoint(0, 0)).x();
+                check(jsString(page, "document.querySelector('.wash').style.clipPath").contains(QStringLiteral("%1px").arg(x)),
+                      "and the wash leaves them clear");
+            }
+            check(js(page, "document.querySelector('.behind').inert").toBool(), "everything else on the page is inert");
+#ifdef _WIN32
+            capture(&window, outDir + "/name-question.png");
+#endif
+            // Every key aimed at the page goes THROUGH the Qt card's claim -
+            // Enter and Escape too - while no window shortcut fires (Review
+            // Focus 2). A filter on the page's render widget counts what reaches
+            // it; the card's claim, an application-wide filter, runs first.
+            {
+                struct KeyCounter : QObject {
+                    int presses = 0;
+                    bool eventFilter(QObject*, QEvent* e) override
+                    {
+                        if (e->type() == QEvent::KeyPress) ++presses;
+                        return false;
+                    }
+                } counter;
+                // Blank first: should Chromium act on the Enter, it creates nothing.
+                typeThen(QString(), QString());
+                QWidget* proxy = page->focusProxy() ? page->focusProxy() : page;
+                proxy->installEventFilter(&counter);
+                for (int key : {int(Qt::Key_B), int(Qt::Key_Return), int(Qt::Key_Escape)}) {
+                    QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
+                    QCoreApplication::sendEvent(proxy, &press);
+                }
+                proxy->removeEventFilter(&counter);
+                check(counter.presses == 3,
+                      QStringLiteral("keys aimed at the page's field reach it, Enter and Escape too (%1 of 3)").arg(counter.presses));
+                const int solids = static_cast<int>(window.document().solids().size());
+                const int revision = window.document().revision();
+                for (QWidget* target : {proxy, static_cast<QWidget*>(window.view())}) {
+                    QKeyEvent over(QEvent::ShortcutOverride, Qt::Key_D, Qt::ControlModifier);
+                    over.ignore();
+                    QCoreApplication::sendEvent(target, &over);
+                    check(over.isAccepted(), "Ctrl+D is claimed before any window shortcut, wherever it is aimed");
+                }
+                check(static_cast<int>(window.document().solids().size()) == solids &&
+                          window.document().revision() == revision,
+                      "so nothing was duplicated and the document did not move");
+                pump(200);
+            }
+            // Should a synthesized key have answered on the page, ask again.
+            if (!window.isAskingForName()) {
+                newFurniture->trigger();
+                pump(300);
+            }
+            waitFor(nameShown, 3000);
+            // No version can be written behind it either.
+            if (VersionsModel* versionsModel = window.versionsModel()) {
+                const int before = window.furnitureStore().versions(benchId).size();
+                check(!versionsModel->canSave() && !versionsModel->save(QStringLiteral("Behind the name")) &&
+                          window.furnitureStore().versions(benchId).size() == before,
+                      "no version is saved while the name question stands");
+            }
+            // Each edit is mirrored into the Qt card's own field.
+            typeThen(QStringLiteral("Bookcase"), QString());
+            check(waitFor([&] { return nameCard->name() == QStringLiteral("Bookcase"); }, 2000),
+                  "an edit on the page reaches the Qt card's field - " + nameCard->name());
+            // A blank name creates nothing (Review Focus 3).
+            typeThen(QStringLiteral("   "), QStringLiteral("Enter"));
+            pump(300);
+            check(window.isAskingForName() && window.currentFurnitureId() == benchId &&
+                      js(page, "document.querySelector('.name-question .answer.create').disabled").toBool(),
+                  "a blank name creates nothing - Create dims and Enter does nothing");
+            // Escape on the page cancels.
+            typeThen(QStringLiteral("Not this one"), QStringLiteral("Escape"));
+            check(waitFor([&] { return !window.isAskingForName(); }, 3000) && window.currentFurnitureId() == benchId,
+                  "Escape cancels - the furniture stays open");
+            check(waitFor([&] { return !nameShown() && !chrome->holdsKeyboard(); }, 3000) &&
+                      !js(page, "document.querySelector('.behind').inert").toBool(),
+                  "the question goes and gives the keyboard back");
+            // Asked again with nothing unsaved: straight to the name, and the
+            // press is the page's before it has drawn a thing.
+            newFurniture->trigger();
+            check(window.isAskingForName() && chrome->hitRegion().contains(window.view()->rect().center()),
+                  "asked again, the page takes every press over the viewport at once");
+            check(waitFor(nameShown, 3000) && nameField() == suggestion,
+                  "and the page re-seeds the field with the suggestion, not what was typed before");
+            js(page, "document.querySelector('.name-question .answer.cancel').click()");
+            check(waitFor([&] { return !window.isAskingForName(); }, 3000), "the page's Cancel cancels");
+            if (ToolCluster* rail = window.findChild<ToolCluster*>()) {
+                QWidget* at = window.view()->childAt(rail->geometry().center());
+                check(at == rail || (at && rail->isAncestorOf(at)), "the rail takes its own presses again");
+            }
+            // Typed and Enter in one turn: the furniture is made under the name
+            // the field holds (Review Focus 1).
+            newFurniture->trigger();
+            waitFor(nameShown, 3000);
+            typeThen(QStringLiteral("Hall bench"), QStringLiteral("Enter"));
+            check(waitFor([&] { return window.currentFurnitureName() == QStringLiteral("Hall bench"); }, 5000) &&
+                      window.currentFurnitureId() != benchId && !window.isAskingForName(),
+                  "Enter creates the furniture under the name typed and opens it - " + window.currentFurnitureName());
+            check(waitFor([&] { return !chrome->holdsKeyboard() && !nameShown(); }, 3000),
+                  "and the keyboard and the wash go with the question");
+            // Back to the bench, with something unsaved again for the blocks below.
+            window.openFurniture(benchId);
+            pump(300);
+            gp_Trsf nudge;
+            nudge.SetTranslation(gp_Vec(0, 0, 5));
+            window.transformBody(window.document().solids().front().id, nudge);
+            pump(200);
+            check(window.currentFurnitureId() == benchId && window.isFurnitureDirty(),
+                  "the bench is open again, with unsaved changes");
+        }
+    }
+
     // --- the render settings panel as a page (Phase 3e) -----------------------------
     {
         RenderStudio* studio = window.findChild<RenderStudio*>();
@@ -1571,7 +1735,8 @@ int main(int argc, char* argv[])
             check(waitFor([&] { return !renderPage->isLive(); }, 5000), "a render page whose process died is not live");
             pump(300);
             check(studio->dockedPanel() == panel && panel->isVisible() && !rv->isVisible() && renderMode->isChecked(),
-                  "the Qt panel docks back at once, and render mode stays on");
+                  QStringLiteral("the Qt panel docks back at once, and render mode stays on (docked %1, shown %2, page hidden %3, on %4)")
+                      .arg(studio->dockedPanel() == panel).arg(panel->isVisible()).arg(!rv->isVisible()).arg(renderMode->isChecked()));
             check(panel->quality() == RenderSettingsPanel::Quality::Simple &&
                       panel->dialValue(RenderSettingsPanel::Dial::LightAngle) == 123,
                   "with every value the page set");
@@ -1621,10 +1786,29 @@ int main(int argc, char* argv[])
     {
         // A render process that dies: the same fallback, from then on - and
         // with the close question standing when it does (Phase 3f, Review
-        // Focus 3), the Qt card paints it again at once.
+        // Focus 3), the Qt card paints it again at once. Under it stands the
+        // name question with a name typed on the page (Phase 3g, Review Focus
+        // 4): the window's X can ask the close question over a name question.
+        bool namingBeforeDeath = false;
+        if (nameCard && newFurniture && saveFurniture) {
+            saveFurniture->trigger();
+            pump(300);
+            newFurniture->trigger();
+            namingBeforeDeath = waitFor(nameShown, 3000);
+            typeThen(QStringLiteral("Typed before"), QString());
+            waitFor([&] { return nameCard->name() == QStringLiteral("Typed before"); }, 2000);
+            gp_Trsf nudge;
+            nudge.SetTranslation(gp_Vec(0, 0, 5));
+            window.transformBody(window.document().solids().front().id, nudge);
+            pump(200);
+        }
         if (closeFurniture) closeFurniture->trigger();
         pump(300);
         const bool askedBeforeDeath = window.isAskingBeforeClose();
+        if (namingBeforeDeath)
+            check(askedBeforeDeath && window.isAskingForName() &&
+                      waitFor([&] { return js(page, "!!document.querySelector('.answer.save')").toBool(); }, 3000),
+                  "the close question stands over the name question, and the page draws the close one");
         const qint64 pid = page->page()->renderProcessPid();
         if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
             TerminateProcess(h, 1);
@@ -1644,6 +1828,22 @@ int main(int argc, char* argv[])
             QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
             QCoreApplication::sendEvent(window.focusWidget() ? window.focusWidget() : window.view(), &esc);
             pump(200);
+        }
+        if (nameCard && namingBeforeDeath) {
+            check(window.isAskingForName() && !window.isAskingBeforeClose() && !nameCard->drawnElsewhere() &&
+                      nameCard->field()->isVisible() && nameCard->name() == QStringLiteral("Typed before"),
+                  "the name question still stands under it, drawn by the Qt card, holding what was typed - " +
+                      nameCard->name());
+            QWidget* at = window.view()->childAt(nameCard->createButton()->geometry().center());
+            check(at == nameCard->createButton(), "its own Create takes the press");
+#ifdef _WIN32
+            capture(&window, outDir + "/name-question-fallback.png");
+#endif
+            nameCard->field()->setFocus();
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(nameCard->field(), &esc);
+            pump(200);
+            check(!window.isAskingForName(), "and Escape cancels it there");
         }
         check(window.statusBar()->isVisible() && !page->isVisible(),
               "the Qt status bar comes back and the dead page leaves the viewport");
