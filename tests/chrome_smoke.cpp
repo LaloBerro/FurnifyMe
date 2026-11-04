@@ -657,6 +657,61 @@ int main(int argc, char* argv[])
         delete elsewhere;
     }
 
+    // --- a LIST holds only its own keys (Phase 3h, ruling R3; Review Focus 1) -------------
+    {
+        QWidget* proxy = page->focusProxy() ? page->focusProxy() : page;
+        const auto claimed = [&](int key, Qt::KeyboardModifiers mods) {
+            QKeyEvent over(QEvent::ShortcutOverride, key, mods);
+            over.ignore();
+            QCoreApplication::sendEvent(proxy, &over);
+            return over.isAccepted();
+        };
+        window.view()->setFocus();
+        chrome->holdListKeys(QStringLiteral("items"));
+        check(chrome->holdsListKeys() && window.focusWidget() == proxy, "a list hold puts focus in the page");
+        check(claimed(Qt::Key_Up, Qt::NoModifier) && claimed(Qt::Key_Down, Qt::NoModifier) &&
+                  claimed(Qt::Key_Home, Qt::NoModifier) && claimed(Qt::Key_Up, Qt::AltModifier),
+              "it claims the list's keys from the shortcut map - the arrows, Home, Alt+Up");
+        check(!claimed(Qt::Key_Z, Qt::ControlModifier), "but not Ctrl+Z: Undo still fires while the list has focus");
+        check(!claimed(Qt::Key_E, Qt::NoModifier) && !claimed(Qt::Key_D, Qt::ControlModifier) &&
+                  !claimed(Qt::Key_Delete, Qt::NoModifier),
+              "nor E, Ctrl+D or Delete - every other shortcut stays the window's");
+        // A field in the same card (the filter) claims and lets go: the keys
+        // go back to the list, not to the viewport.
+        chrome->claimKeyboard(QStringLiteral("items"));
+        check(claimed(Qt::Key_Z, Qt::ControlModifier), "a field claiming the keyboard takes every key");
+        chrome->releaseKeyboard(QStringLiteral("items"));
+        check(chrome->holdsListKeys() && window.focusWidget() == proxy && !claimed(Qt::Key_Z, Qt::ControlModifier),
+              "and letting go hands the keys back to the list");
+        // The window losing activation is not the user leaving the list.
+        QFocusEvent away(QEvent::FocusOut, Qt::ActiveWindowFocusReason);
+        QCoreApplication::sendEvent(proxy, &away);
+        check(chrome->holdsListKeys(), "the window losing activation keeps the hold");
+        // Focus moving away for any other reason ends the hold - a Qt field
+        // the user clicks, in an active window.
+        QFocusEvent moved(QEvent::FocusOut, Qt::MouseFocusReason);
+        QCoreApplication::sendEvent(proxy, &moved);
+        check(!chrome->holdsListKeys(), "focus moving elsewhere ends the hold");
+        check(page->focusPolicy() == Qt::NoFocus, "and the page refuses focus again");
+        // A click on the viewport ends it too, active window or not.
+        window.view()->setFocus();
+        chrome->holdListKeys(QStringLiteral("items"));
+        const QPoint spot = window.view()->rect().center();
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(spot), QPointF(window.view()->mapToGlobal(spot)),
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window.view(), &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(spot), QPointF(window.view()->mapToGlobal(spot)),
+                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window.view(), &release);
+        pump(100);
+        check(!chrome->holdsListKeys() && window.focusWidget() == window.view(),
+              "a click on the viewport gives every key back");
+        chrome->holdListKeys(QStringLiteral("items"));
+        chrome->releaseListKeys(QStringLiteral("items"));
+        check(!chrome->holdsListKeys() && window.focusWidget() == window.view(),
+              "a release hands focus back to where it was");
+    }
+
     // --- a wheel over the card never zooms (Review Focus 2) -----------------------------
     if (settingsSlot) {
         const double distance = window.view()->camera().state().distance;

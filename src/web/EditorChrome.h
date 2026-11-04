@@ -12,6 +12,9 @@
 
 #include <QHash>
 #include <QObject>
+#include <QSet>
+
+#include <functional>
 #include <QPoint>
 #include <QPointer>
 #include <QRect>
@@ -78,6 +81,8 @@ signals:
     // card: the HTML card whose field claims ('' for an anonymous claim).
     void keyboardClaimed(const QString& card);
     void keyboardReleased(const QString& card);
+    void listKeysHeld(const QString& card);
+    void listKeysReleased(const QString& card);
     void cardHeightReported(const QString& name, int height);
 
 public slots:
@@ -91,6 +96,14 @@ public slots:
     // takes back only its own claims, never another card's.
     void claimKeyboardFor(const QString& card);
     void releaseKeyboardFor(const QString& card);
+    // A LIST holds its keys (Phase 3h, ruling R3): the page's view takes Qt
+    // focus, but only the list's own keys (session/ItemsKeys) are claimed
+    // from the shortcut map - Ctrl+Z, E and every other shortcut still fire,
+    // as they do while the Qt drawer's list has focus. The hold ends when
+    // focus leaves the page (a click on the viewport), on release, when the
+    // card goes, and when the page dies.
+    void holdListKeys(const QString& card);
+    void releaseListKeys(const QString& card);
     // A card that sizes itself (the Versions drawer, Phase 3c) says how tall
     // it is; its slot takes the height.
     void reportCardHeight(const QString& name, int height);
@@ -135,6 +148,13 @@ public:
     void claimKeyboard(const QString& card = QString());
     void releaseKeyboard(const QString& card = QString());
     bool holdsKeyboard() const { return myHoldsKeyboard; }
+    // See ChromeBridge::holdListKeys().
+    void holdListKeys(const QString& card);
+    void releaseListKeys(const QString& card);
+    bool holdsListKeys() const { return !myListHolds.isEmpty(); }
+    // Which keys a list hold claims: the table's list-scope keys by default.
+    // MainWindow narrows it (F2 only over a live row, as the Qt drawer does).
+    void setListKeyClaim(std::function<bool(QKeyCombination)> claim) { myListKeyClaim = std::move(claim); }
     ~EditorChrome() override;
 
     enum class Kind { Note, Failure };
@@ -200,6 +220,13 @@ private:
     QHash<QString, int> myKeyboardClaims;
     int keyboardClaimCount() const;
     void dropKeyboard();
+    void dropListHolds();
+    // Puts Qt focus in the page (a claim or a hold arriving with neither
+    // standing), and gives it back when the last of them goes.
+    void takeFocus();
+    void giveFocusBack();
+    QSet<QString> myListHolds;
+    std::function<bool(QKeyCombination)> myListKeyClaim;
     QPointer<QWidget> myFocusBefore;
     QPointer<QWidget> myWatchedProxy;
     std::vector<QPointer<HtmlCardSlot>> myCards;

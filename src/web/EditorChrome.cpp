@@ -1,5 +1,7 @@
 #include "EditorChrome.h"
 
+#include "session/ItemsKeys.h"
+
 #include "HtmlCardSlot.h"
 #include "OcctViewWidget.h"
 #include "ThemeBridge.h"
@@ -7,6 +9,7 @@
 
 #include <QApplication>
 #include <QEvent>
+#include <QFocusEvent>
 #include <QKeyEvent>
 #include <QWheelEvent>
 #include <QMouseEvent>
@@ -100,6 +103,16 @@ void ChromeBridge::releaseKeyboardFor(const QString& card)
     emit keyboardReleased(card);
 }
 
+void ChromeBridge::holdListKeys(const QString& card)
+{
+    emit listKeysHeld(card);
+}
+
+void ChromeBridge::releaseListKeys(const QString& card)
+{
+    emit listKeysReleased(card);
+}
+
 void ChromeBridge::reportCardHeight(const QString& name, int height)
 {
     emit cardHeightReported(name, height);
@@ -159,6 +172,8 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     connect(myBridge, &ChromeBridge::nameQuestionTyped, this, &EditorChrome::nameQuestionTyped);
     connect(myBridge, &ChromeBridge::keyboardClaimed, this, &EditorChrome::claimKeyboard);
     connect(myBridge, &ChromeBridge::keyboardReleased, this, &EditorChrome::releaseKeyboard);
+    connect(myBridge, &ChromeBridge::listKeysHeld, this, &EditorChrome::holdListKeys);
+    connect(myBridge, &ChromeBridge::listKeysReleased, this, &EditorChrome::releaseListKeys);
     // A card that sizes itself tells us its height; its slot takes it, and
     // the overlay re-stacks around it (Phase 3c).
     connect(myBridge, &ChromeBridge::cardHeightReported, this, [this](const QString& name, int height) {
@@ -224,6 +239,10 @@ void EditorChrome::syncCards()
     // card still open keeps the keyboard (Phase 3c review I2).
     for (const QString& name : gone) myKeyboardClaims.remove(name);
     if (!gone.isEmpty() && myHoldsKeyboard && keyboardClaimCount() == 0) dropKeyboard();
+    // ...and its list's hold on the keys (Phase 3h).
+    bool held = false;
+    for (const QString& name : gone) held = myListHolds.remove(name) || held;
+    if (held && myListHolds.isEmpty() && !myHoldsKeyboard) giveFocusBack();
     myBridge->setCardMap(map);
 }
 
@@ -243,6 +262,13 @@ void EditorChrome::claimKeyboard(const QString& card)
     if (card == QLatin1String("question") && !myBridge->asks(QStringLiteral("name"))) return;
     ++myKeyboardClaims[card];
     if (myHoldsKeyboard) return;
+    const bool hadFocus = !myListHolds.isEmpty();
+    myHoldsKeyboard = true;
+    if (!hadFocus) takeFocus();
+}
+
+void EditorChrome::takeFocus()
+{
     QWebEngineView* view = myHost->view();
     QWidget* proxy = view->focusProxy() ? view->focusProxy() : view;
     // The WINDOW's focus widget, not QApplication's: that one is null for a
@@ -251,11 +277,39 @@ void EditorChrome::claimKeyboard(const QString& card)
     // Only a widget OUTSIDE the page is somewhere to go back to: handing focus
     // back to the page's own render widget would keep it claiming keys.
     if (myFocusBefore && (myFocusBefore == view || view->isAncestorOf(myFocusBefore))) myFocusBefore = nullptr;
-    myHoldsKeyboard = true;
     watchFocusProxy();
     view->setFocusPolicy(Qt::StrongFocus);
     proxy->setFocusPolicy(Qt::StrongFocus);
     proxy->setFocus(Qt::OtherFocusReason);
+}
+
+void EditorChrome::holdListKeys(const QString& card)
+{
+    if (!myLive) return;
+    const bool hadFocus = myHoldsKeyboard || !myListHolds.isEmpty();
+    myListHolds.insert(card);
+    if (!hadFocus) {
+        takeFocus();
+        return;
+    }
+    // Already the page's: a press on a row while a field held the keys, or a
+    // second press on the list - focus stays in the page.
+    QWebEngineView* view = myHost->view();
+    QWidget* proxy = view->focusProxy() ? view->focusProxy() : view;
+    if (view->window()->focusWidget() != proxy) proxy->setFocus(Qt::OtherFocusReason);
+}
+
+void EditorChrome::releaseListKeys(const QString& card)
+{
+    if (!myListHolds.remove(card)) return;
+    if (myListHolds.isEmpty() && !myHoldsKeyboard) giveFocusBack();
+}
+
+void EditorChrome::dropListHolds()
+{
+    if (myListHolds.isEmpty()) return;
+    myListHolds.clear();
+    if (!myHoldsKeyboard) giveFocusBack();
 }
 
 void EditorChrome::releaseKeyboard(const QString& card)
@@ -272,6 +326,15 @@ void EditorChrome::dropKeyboard()
     myKeyboardClaims.clear();
     if (!myHoldsKeyboard) return;
     myHoldsKeyboard = false;
+    // A list still holding its keys keeps the focus it already had: a field
+    // in the same card (the filter) letting go hands the keys to the list,
+    // not back to the viewport.
+    if (!myListHolds.isEmpty()) return;
+    giveFocusBack();
+}
+
+void EditorChrome::giveFocusBack()
+{
     QWebEngineView* view = myHost->view();
     QWidget* now = view->window()->focusWidget();
     // Focus goes back only if it is still the page's. A release that follows
@@ -375,6 +438,7 @@ void EditorChrome::setLive(bool live)
     if (!live) {
         myAsking = false;
         dropKeyboard();
+        dropListHolds();
         myHost->view()->hide();
         // Nothing of the page takes the pointer any more - the wheel shield
         // and the mask read this region (review I3).
@@ -391,7 +455,7 @@ void EditorChrome::refuseFocus()
     // render widget behind the view is its focus proxy, created at load.
     // Not while a typed field holds the keyboard - releaseKeyboard() comes
     // back here when it ends.
-    if (myHoldsKeyboard) return;
+    if (myHoldsKeyboard || !myListHolds.isEmpty()) return;
     QWebEngineView* view = myHost->view();
     view->setFocusPolicy(Qt::NoFocus);
     if (QWidget* proxy = view->focusProxy()) proxy->setFocusPolicy(Qt::NoFocus);
@@ -419,6 +483,31 @@ bool EditorChrome::eventFilter(QObject* watched, QEvent* event)
         event->accept();
         return true;
     }
+    if (watched == myWatchedProxy && event->type() == QEvent::ShortcutOverride && !myListHolds.isEmpty()) {
+        // A LIST holds only its own keys (ruling R3). Decided HERE for every
+        // key, never left to WebEngine, which answers some editing shortcuts
+        // itself whether or not a field is focused: a key the list does not
+        // own is refused so the window's shortcut fires - Ctrl+Z undoes, E
+        // extrudes - exactly as while the Qt drawer's list has focus.
+        auto* key = static_cast<QKeyEvent*>(event);
+        const QKeyCombination combo(key->modifiers() & ~Qt::KeypadModifier, Qt::Key(key->key()));
+        const bool ours = myListKeyClaim ? myListKeyClaim(combo) : ItemsKeys::forKey(combo, false) != nullptr;
+        if (ours) event->accept();
+        else event->ignore();
+        return true;
+    }
+    if (watched == myWatchedProxy && event->type() == QEvent::FocusOut && !myListHolds.isEmpty() &&
+        !myHoldsKeyboard) {
+        // Focus left the page - a click on the viewport, which takes focus:
+        // the list gives every key back. Not for the window losing activation
+        // or a popup: focus comes back to the list with the window.
+        const Qt::FocusReason reason = static_cast<QFocusEvent*>(event)->reason();
+        if (reason != Qt::ActiveWindowFocusReason && reason != Qt::PopupFocusReason) {
+            myListHolds.clear();
+            myFocusBefore = nullptr;
+            refuseFocus();
+        }
+    }
     if (watched == myViewport && event->type() == QEvent::Wheel && myLive) {
         // THE WHEEL SHIELD (Review Focus 2). A wheel the page did not consume
         // - over a card's title, or a list already at its end - is handed by
@@ -443,6 +532,12 @@ bool EditorChrome::eventFilter(QObject* watched, QEvent* event)
             break;
         case QEvent::Leave:
             myPointer = QPoint(-1, -1);
+            break;
+        case QEvent::MouseButtonPress:
+            // A press on the 3D view is the user leaving the list: every key
+            // goes back, whether or not the window is active enough for the
+            // focus change to send a FocusOut (ruling R3).
+            if (!myListHolds.isEmpty() && !myHoldsKeyboard) dropListHolds();
             break;
         default:
             break;
