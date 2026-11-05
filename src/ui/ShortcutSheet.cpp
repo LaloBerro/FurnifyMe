@@ -1,5 +1,7 @@
 #include "ShortcutSheet.h"
 
+#include <limits>
+
 #include "Theme.h"
 
 #include <QAction>
@@ -23,6 +25,8 @@ constexpr int kRowHeight = 26;
 constexpr int kTitleHeight = 44;
 constexpr int kGroupHeight = 30;
 constexpr int kColumnGap = 48;
+// What the sheet keeps clear of its window's edges when it has to fit.
+constexpr int kWindowMargin = 16;
 
 QString plainText(const QAction* action)
 {
@@ -172,11 +176,30 @@ void ShortcutSheet::showSheet()
                                           badgeMetrics.horizontalAdvance(row.keys));
         }
     }
-    const int width = widest + kColumnGap + kPadding * 2;
-    int height = kTitleHeight + kPadding;
+    // IN COLUMNS WHEN ONE WOULD NOT FIT (T-064): one column grew past 1500 px,
+    // taller than a 1080-row screen. Groups flow down a column and on to the
+    // next once the window's height is reached - a group is never split, so a
+    // heading always stands over its own rows.
+    myColumnWidth = widest + kColumnGap;
+    const int room = parentWidget() ? parentWidget()->height() - 2 * kWindowMargin - kTitleHeight - kPadding
+                                    : std::numeric_limits<int>::max();
+    myPlaces.clear();
+    myColumns = 1;
+    int columnHeight = 0;
+    int tallest = 0;
     for (const Group& group : myGroups) {
-        height += kGroupHeight + kRowHeight * static_cast<int>(group.rows.size());
+        const int groupHeight = kGroupHeight + kRowHeight * static_cast<int>(group.rows.size());
+        if (columnHeight > 0 && columnHeight + groupHeight > room) {
+            ++myColumns;
+            columnHeight = 0;
+        }
+        myPlaces.emplace_back((myColumns - 1) * (myColumnWidth + kColumnGap), columnHeight);
+        columnHeight += groupHeight;
+        tallest = std::max(tallest, columnHeight);
     }
+    const int width = kPadding * 2 + myColumns * myColumnWidth + (myColumns - 1) * kColumnGap;
+    const int height = kTitleHeight + kPadding + tallest;
+    myContentExtent = QSize(width, height);
 
     // Grown by Theme::surfaceShadowMargin() per side beyond the content size
     // computed above. That margin is zero - the family paints no shadow and
@@ -278,16 +301,19 @@ void ShortcutSheet::paintEvent(QPaintEvent* /*event*/)
     painter.drawText(QRect(body.left() + kPadding, body.top(), body.width() - kPadding * 2, kTitleHeight),
                      Qt::AlignVCenter | Qt::AlignLeft, tr("Keyboard shortcuts"));
 
-    int y = body.top() + kTitleHeight;
-    for (const Group& group : myGroups) {
+    for (std::size_t g = 0; g < myGroups.size(); ++g) {
+        const Group& group = myGroups[g];
+        // Where showSheet() stood this group: its column, its depth in it.
+        const QPoint at = g < myPlaces.size() ? myPlaces[g] : QPoint();
+        const int x = body.left() + kPadding + at.x();
+        int y = body.top() + kTitleHeight + at.y();
         painter.setFont(groupFont());
         painter.setPen(Theme::accentText());
-        painter.drawText(QRect(body.left() + kPadding, y, body.width() - kPadding * 2, kGroupHeight),
-                         Qt::AlignBottom | Qt::AlignLeft, group.title);
+        painter.drawText(QRect(x, y, myColumnWidth, kGroupHeight), Qt::AlignBottom | Qt::AlignLeft, group.title);
         y += kGroupHeight;
 
         for (const Row& row : group.rows) {
-            const QRect line(body.left() + kPadding, y, body.width() - kPadding * 2, kRowHeight);
+            const QRect line(x, y, myColumnWidth, kRowHeight);
             painter.setFont(Theme::bodyFont());
             painter.setPen(Theme::text());
             painter.drawText(line, Qt::AlignVCenter | Qt::AlignLeft, row.label);

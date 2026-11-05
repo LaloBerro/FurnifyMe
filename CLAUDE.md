@@ -106,7 +106,9 @@ box, the mitre frame, the whole joinery layer (665 on its own) and `resizeAlongA
 its stretch. (`ctest` is **14/14** as of 2026-10-07 - the scene model, booleans and
 `headless_colour_literals`, which holds hex to `Theme.cpp`, came after that count; the check
 total above was not re-measured with them. `ctest` is **15/15** as of 2026-10-08 with
-`headless_item_order`, the Items drawer's stored order, at 57 checks on its own.)
+`headless_item_order`, the Items drawer's stored order, at 57 checks on its own. `ctest` is **24/24** as of 2026-11-05, in both presets: the HTML
+migration's model tests (hub, versions, joints, items, menu) and their session and
+settings suites joined it.)
 
 Verified by driving the running app and reading the screenshots:
 viewport renders with grid, triedron and lighting; sketch mode draws a live yellow polyline
@@ -197,7 +199,9 @@ phase, **5374** after the board sweep that worked every open card to a close, **
 after the review-fixes branch worked the 2026-10 whole-app review's 26 cards, **6298**
 after the items-drawer branch (T-063), and **6324** after that branch's final-review fix wave
 (RF1-RF5, M1-M6), and **6449** on the `themes` branch (6448 checks + 1 skip, twice; the
-+78 are the six new theme strings through the banned-word sweep, 13 times each). The floor
++78 are the six new theme strings through the banned-word sweep, 13 times each), and
+**6454** on the `items-followups` branch (6453 checks + 1 skip, twice: the five checks of the
+new `the-shortcut-sheet-fits-its-window` block, T-064). The floor
 has never been computed from a predicted delta at any of those steps, which is the whole
 point of the paragraph below.
 
@@ -3097,7 +3101,7 @@ composes the largest scene's pieces into one furniture in the copy, derives the 
 from that room rather than from today's board names, and falls back to a 122-body stand-in,
 printing which of its four reasons applied, when the room cannot express what C4 checks.
 **That the real library is only read is held structurally, not by a snapshot** (RF5):
-`copyLibraryTree()` is the only code that touches it — QDir, QDirIterator and `QFile::copy()`,
+`copyLibraryTree()` is the only code that copies from it — QDir, QDirIterator and `QFile::copy()`,
 refusing when the copy and the library overlap either way — and the block checks that the two
 are disjoint and that every `FurnitureStore` the composition opened (read back off
 `rootPath()`) stands on the copy. The before/after snapshot of its file count, size and

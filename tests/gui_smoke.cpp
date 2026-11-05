@@ -813,7 +813,7 @@ void skipByEnvironment(int checks, const QString& why)
 // keeping a folder's order, and C4's library guard made structural. TWO
 // consecutive unfiltered runs on one binary measured 6323 checks + 1
 // environment skip, agreeing to the digit; the floor is their sum, 6324.
-constexpr int kCheckFloor = 6449;
+constexpr int kCheckFloor = 6454;
 
 void check(bool condition, const QString& what)
 {
@@ -1042,6 +1042,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-row-menu-acts-on-what-was-right-clicked", false, true },
     { "the-drawer-is-reached-filed-and-heard", false, true },
     { "the-items-drawer-evidence", false, true },
+    { "the-shortcut-sheet-fits-its-window", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -6480,6 +6481,42 @@ void cancelOpenRename(ItemsPanel* drawer)
         if (firing) emit firing->activated();
     });
     settle(80);
+}
+
+// T-064: the shortcut sheet was one column some 1500 px tall - taller than a
+// 1080-row screen. It flows its groups into side-by-side columns until it
+// stands inside its window, a group never split, every row still painted.
+void shortcutSheetFitsBlock()
+{
+    RequiredTempDir dir;
+    MainWindow probe(nullptr, /*persistProgress=*/false, dir.path());
+    probe.setAttribute(Qt::WA_ShowWithoutActivating);
+    probe.resize(1600, 1000);   // a window maximized on a 1080-row screen
+    probe.show();
+    settle(300);
+    QAction* open = action(probe, QStringLiteral("Keyboard Shortcuts"));
+    check(open != nullptr, "sheet fits: the window has Keyboard Shortcuts");
+    if (!open) return;
+    open->trigger();
+    settle(150);
+    ShortcutSheet* sheet = probe.findChild<ShortcutSheet*>();
+    check(sheet && sheet->isVisible(), "sheet fits: it opens");
+    if (!sheet) return;
+    const QWidget* host = sheet->parentWidget();
+    check(host && sheet->height() <= host->height() - 32 && sheet->width() <= host->width() - 32 &&
+              host->rect().contains(sheet->geometry()),
+          QStringLiteral("sheet fits: it stands inside its %1 x %2 window with a margin (%3 x %4 at %5,%6)")
+              .arg(host ? host->width() : 0).arg(host ? host->height() : 0)
+              .arg(sheet->width()).arg(sheet->height()).arg(sheet->x()).arg(sheet->y()));
+    check(sheet->columnCount() > 1,
+          QStringLiteral("sheet fits: by flowing into columns (%1)").arg(sheet->columnCount()));
+    check(sheet->contentExtent().width() <= sheet->width() && sheet->contentExtent().height() <= sheet->height(),
+          QStringLiteral("sheet fits: and every row it paints is inside it (%1 x %2 in %3 x %4)")
+              .arg(sheet->contentExtent().width()).arg(sheet->contentExtent().height())
+              .arg(sheet->width()).arg(sheet->height()));
+    QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QCoreApplication::sendEvent(sheet, &escape);
+    settle(50);
 }
 
 void rowMenuActsOnWhatWasClickedBlock()
@@ -47733,6 +47770,7 @@ int main(int argc, char* argv[])
     if (blockEnabled("the-row-menu-acts-on-what-was-right-clicked")) rowMenuActsOnWhatWasClickedBlock();
     if (blockEnabled("the-drawer-is-reached-filed-and-heard")) drawerBatchABlock(outDir);
     if (blockEnabled("the-items-drawer-evidence")) itemsEvidenceBlock(outDir);
+    if (blockEnabled("the-shortcut-sheet-fits-its-window")) shortcutSheetFitsBlock();
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
     // about how many checks ran must not be one of the checks it counts, or

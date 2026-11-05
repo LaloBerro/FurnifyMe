@@ -29,6 +29,11 @@ public:
     // Total shortcut rows, headings excluded - one per bound action, plus one
     // per row of every key table added below.
     int rowCount() const;
+    // How the sheet laid its groups out at the last showSheet() (T-064): in as
+    // many side-by-side columns as it needs to stand inside its window, a
+    // group never split across two. The extent is the painted content's.
+    int columnCount() const { return myColumns; }
+    QSize contentExtent() const { return myContentExtent; }
 
     // Keys that NO QAction carries - a widget's own keys, such as the Items
     // list's arrows (ruling D19) - listed as a group of their own after the
@@ -74,6 +79,11 @@ private:
     void recentre();
 
     std::vector<Group> myGroups;
+    // Where each group of myGroups stands, from the last showSheet().
+    std::vector<QPoint> myPlaces;
+    int myColumnWidth = 0;
+    int myColumns = 1;
+    QSize myContentExtent;
     std::vector<std::pair<QString, std::function<KeyRows()>>> myKeyTables;
     // A click outside is swallowed so it cannot also pick in the viewport
     // behind an apparently-modal sheet; its release has to go the same way,
