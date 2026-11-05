@@ -338,6 +338,56 @@ int main()
         }
     }
 
+    // --- T-064: Remove folder puts its contents in its place ----------------
+    {
+        // Stored order at the root: Front, Carcass, Back - and Carcass holds
+        // Top then Side in its own order.
+        DocumentModel doc;
+        const int front = body(doc, "Front", 0);
+        const int carcass = doc.createGroup("Carcass", 0);
+        const int side = body(doc, "Side", 100, carcass);
+        const int top = body(doc, "Top", 200, carcass);
+        const int back = body(doc, "Back", 300);
+        doc.moveItems({front}, 0, carcass);
+        doc.moveItems({top}, carcass, side);
+        check(namesIn(doc, 0) == "Front, Carcass, Back" && namesIn(doc, carcass) == "Top, Side",
+              "set up: Front, Carcass {Top, Side}, Back - " + namesIn(doc, 0));
+        check(doc.removeGroup(carcass), "the folder is removed");
+        check(namesIn(doc, 0) == "Front, Top, Side, Back",
+              "its contents take its place, in its order - " + namesIn(doc, 0));
+    }
+    {
+        // No stored order at the root: the folder's place in the automatic
+        // order (folders first) is still where its contents land.
+        DocumentModel doc;
+        body(doc, "Loose", 0);
+        const int folder = doc.createGroup("Box", 0);
+        body(doc, "Inside A", 100, folder);
+        body(doc, "Inside B", 200, folder);
+        check(namesIn(doc, 0) == "Box, Loose", "set up: Box first by the automatic order - " + namesIn(doc, 0));
+        doc.removeGroup(folder);
+        check(namesIn(doc, 0) == "Inside A, Inside B, Loose",
+              "with no stored order, the contents still stand where the folder stood - " + namesIn(doc, 0));
+    }
+
+    // --- T-064: a body leaving a parent leaves its stored rank there ----------
+    {
+        DocumentModel doc;
+        const int a = body(doc, "A", 0);
+        const int x = body(doc, "X", 100);
+        const int b = body(doc, "B", 200);
+        const int elsewhere = doc.createGroup("Elsewhere", 0);
+        // A stored order with X in the middle: Elsewhere, B, X, A.
+        doc.moveItems({b}, 0, a);
+        doc.moveItems({x}, 0, a);
+        check(namesIn(doc, 0) == "Elsewhere, B, X, A" && doc.hasStoredOrder(0),
+              "set up: a stored order, Elsewhere, B, X, A - " + namesIn(doc, 0));
+        doc.setItemGroup(x, elsewhere);
+        doc.setItemGroup(x, 0);
+        check(namesIn(doc, 0) == "Elsewhere, B, A, X",
+              "a body that comes back lands at the end, not at a rank it left - " + namesIn(doc, 0));
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

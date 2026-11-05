@@ -875,6 +875,14 @@ bool DocumentModel::setItemGroup(int itemId, int groupId)
 {
     if (!contains(itemId) && !containsOutline(itemId)) return false;
     if (groupId != 0 && !groupExists(groupId)) return false;
+    // Leaving a parent leaves its stored rank there too (T-064): kept, it
+    // put an item that came back at the rank it once had rather than at the
+    // end, where every arrival lands.
+    const int from = groupOf(itemId);
+    if (from != groupId) {
+        if (const auto seq = myOrder.find(from); seq != myOrder.end())
+            seq->second.erase(std::remove(seq->second.begin(), seq->second.end(), itemId), seq->second.end());
+    }
     if (groupId == 0) {
         if (myItemGroup.erase(itemId) == 0) return true;   // already at the root
     } else {
@@ -905,6 +913,19 @@ bool DocumentModel::removeGroup(int groupId)
     if (it == myGroups.end()) return false;
 
     const int parent = it->parent;
+    // ITS CONTENTS TAKE ITS PLACE (T-064): the parent's rows as they read now,
+    // with the folder's own rows - in their order - where the folder stood.
+    // Read before anything moves; written as the parent's stored order below,
+    // so the rows do not drop to the end of the parent (or, with no stored
+    // order, to wherever the automatic order would put them).
+    std::vector<int> placed;
+    {
+        const std::vector<int> inside = orderedChildren(groupId);
+        for (int id : orderedChildren(parent)) {
+            if (id == groupId) placed.insert(placed.end(), inside.begin(), inside.end());
+            else placed.push_back(id);
+        }
+    }
     // Everything directly inside moves UP one level. Nothing is deleted by an
     // ungroup - a folder is organisation, and dissolving it must not take a
     // body with it.
@@ -919,9 +940,9 @@ bool DocumentModel::removeGroup(int groupId)
             kv = kv->second == 0 ? myItemGroup.erase(kv) : std::next(kv);
         }
     }
-    // Its own sequence goes with it; its children are unranked in the parent
-    // now and read in the automatic order there.
+    // Its own sequence goes with it; its children stand where it stood.
     myOrder.erase(groupId);
+    myOrder[parent] = std::move(placed);
     myGroups.erase(it);
     ++myRevision;
     return true;
