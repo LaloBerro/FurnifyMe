@@ -239,3 +239,44 @@ TypeScript + Vite, vitest + jsdom.
   skipping only the early toggle passes 357/357). Filed as T-083 rather than fixed here.
 
 ## Gate record
+
+**Commits** (branch `rail-pill` from `main` at `12eaeb3`): `121377a` MenuModel; `2197cda` glyph
+masks and the theme's shell numbers; `0a11c4a` ShellBridge, the three slots, the page; `ca3e885`
+slot width, a non-vacuous Delete check, no colour literal; `d5a5762` review fixes.
+
+| Gate | Result |
+|---|---|
+| ctest (both presets) | 24/24 in windows-web and in windows (vcpkg) |
+| menu_model_tests | 65/65 |
+| settings_tests | 145/145 |
+| vitest / svelte-check | 235/235; 0 errors, 0 warnings |
+| chrome_smoke | 367/367 (44 new for this phase) |
+| hub_smoke | 36/36 |
+| gui_smoke run 1 | PASS 6448 + 1 skip, floor 6449 |
+| gui_smoke run 2 | PASS 6448 + 1 skip, floor 6449 |
+
+An earlier gui_smoke run, taken while builds and the reviewer ran alongside, failed one wall-clock
+check (`reveal: restyling 130 rows ... under 16 ms`, 17.98 ms) with the count at 6448 + 1; both
+runs above were taken with nothing else running.
+
+**Mutations, each to a named red line:** the pill slot without the menus' actions (`Ctrl+Z fires
+through the shortcut map ... (R5)`); the menu filter not claiming ShortcutOverride (`Delete with a
+menu open deletes nothing`, after a vacuous version was found: with both mutations applied the first
+killed Delete's shortcut too, so the check gained its control); a disabled entry chosen (two
+menu_model checks). The review's C1/I1 checks were watched red against the pre-fix page (File
+reported at y -46, drawn at 20; chips not square inside the card).
+
+**Review (Opus, read-only):** 1 Critical, 2 Important, 6 Minor. Fixed, each watched red first: C1
+the pill and the rail fly in on the Web Animations API, which fires no `transitionend`, so the mask
+and the title rectangles kept the first frame's off-screen positions (a press on File could drag the
+window) - the page now measures from layout and `hits.ts` re-reports on `introend`/`outroend`;
+I1 the rail and view slots never resized after a theme switch - the clusters report their natural
+size (`ChromeBridge::reportCardSize`); I2 chip rectangles went stale on a theme switch - read from
+layout and re-sent when a chip resizes. Re-graded and fixed: M2, a menu flashed at the corner for
+a frame on every open (not placed until its title's rectangle is known).
+
+**Deferred minors:** M1 a press on the pill's own ground (mark, wordmark) does not close an open
+menu; M3 a mouse click on a submenu row switches the menu to keyboard mode (underlines, first entry
+current); M4 a level's entries are fixed when it opens (an action hidden meanwhile stays drawn);
+M5 before the page's first report the whole pill slot, titles included, answers Caption; M6 a bar
+menu can open over an open Items row menu, and Escape closes only the bar's.
