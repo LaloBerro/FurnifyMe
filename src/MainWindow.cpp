@@ -9418,7 +9418,6 @@ bool MainWindow::duplicateSelectedBody()
     // Source body -> its copy, and copy -> the fresh twin mirroring gave it:
     // what a cloned folder's order is translated through (M5, below).
     std::map<int, int> copyOf;
-    std::map<int, int> twinOfCopy;
     for (const auto& copy : copies) {
         const int id = myDocument.addSolid(copy.second);
         if (id <= 0) continue;
@@ -9468,7 +9467,6 @@ bool MainWindow::duplicateSelectedBody()
                     ++twins;
                     if (sourceFolder == 0) myDocument.placeAfter(twinId, id);
                     lastTwinId = twinId;
-                    twinOfCopy[id] = twinId;
                 }
             } else {
                 qWarning("Symmetry: creation-pair mirror failed on duplicate: %s",
@@ -9485,8 +9483,8 @@ bool MainWindow::duplicateSelectedBody()
     // carries a stored sequence; its clone, built child by child above, would
     // otherwise read in the automatic order (folders, then bodies by
     // creation) - the same folder, shuffled. Each source child is translated
-    // to its copy (a folder through cloneOf, a body through copyOf, with a
-    // fresh twin right behind its copy), and each is moved to the END of the
+    // to its copy (a folder through cloneOf, a body through copyOf - its fresh
+    // twin travels with it), and each is moved to the END of the
     // clone in turn, so the clone ends up reading exactly that sequence. One
     // at a time, because a single moveItems() call puts what it carries in
     // the list's CURRENT order - the order this is replacing.
@@ -9497,10 +9495,11 @@ bool MainWindow::duplicateSelectedBody()
             if (const auto folder = cloneOf.find(child); folder != cloneOf.end()) {
                 sequence.push_back(folder->second);
             } else if (const auto body = copyOf.find(child); body != copyOf.end()) {
+                // The copy alone: moveItems() carries a body's mirror twin
+                // with it (T-063), right behind it. Moving the twin as well,
+                // as its own step, carried the copy back behind IT - each pair
+                // read twin first (T-064).
                 sequence.push_back(body->second);
-                if (const auto twin = twinOfCopy.find(body->second); twin != twinOfCopy.end() &&
-                                                                    myDocument.groupOf(twin->second) == clone)
-                    sequence.push_back(twin->second);
             }
         }
         for (int id : sequence) myDocument.moveItems({id}, clone, 0);

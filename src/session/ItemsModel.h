@@ -216,6 +216,9 @@ private:
     void selectRow(int id, Kind kind, bool ctrl, bool shift);
     void request(const std::vector<int>& ids);
     bool rowInSelection(int id, Kind kind) const;
+    // The rows a drag of the whole selection carries (T-064): wholly selected
+    // folders whole, and the selected bodies no such folder holds, in list order.
+    std::vector<int> representingRows() const;
     bool selected(int id) const;
     void stepTo(int index, bool shift);
     int folderAbove(int id) const;

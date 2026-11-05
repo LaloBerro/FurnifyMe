@@ -74,6 +74,8 @@
 #include <QTest>
 
 #include <TopExp_Explorer.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <TopoDS.hxx>
 
 #include <cstdio>
@@ -357,6 +359,24 @@ int main(int argc, char* argv[])
         const int carcass = doc.createGroup("Carcass");
         for (int id : {sideL, sideR, top}) doc.setItemGroup(id, carcass);
         store.saveFurniture(cabinetId, doc, QImage());
+    }
+
+    // T-064: mirroring on, a folder "Pair" reading B then A (a stored order).
+    QString mirroredId;
+    {
+        FurnitureStore store(library.path());
+        mirroredId = store.createFurniture(QStringLiteral("Mirrored"));
+        DocumentModel doc;
+        doc.setSymmetry(true, gp_Pln(gp_Pnt(-50, 0, 0), gp_Dir(1, 0, 0)));
+        const int a = doc.addSolid(ModelingOps::makeBox(gp_Pnt(0, 0, 0), 18, 300, 400));
+        doc.setItemName(a, "A");
+        const int b = doc.addSolid(ModelingOps::makeBox(gp_Pnt(100, 0, 0), 18, 300, 400));
+        doc.setItemName(b, "B");
+        const int pair = doc.createGroup("Pair");
+        doc.setItemGroup(a, pair);
+        doc.setItemGroup(b, pair);
+        doc.moveItems({b}, pair, a);
+        store.saveFurniture(mirroredId, doc, QImage());
     }
 
     MainWindow window(nullptr, /*persistProgress=*/false, library.path());
@@ -1101,6 +1121,7 @@ int main(int argc, char* argv[])
               QStringLiteral("a long list scrolls inside 384 px (%1 of %2)")
                   .arg(list.value("client").toInt()).arg(list.value("scroll").toInt()));
         check(list.value("bar").toInt() == 8, QStringLiteral("with the app's 8 px scrollbar (%1)").arg(list.value("bar").toInt()));
+        waitFor(settled, 3000);   // the card follows its slot a channel message later
         check(settled(), "and the card still covers its slot exactly");
 #ifdef _WIN32
         capture(&window, outDir + "/chrome-versions-long.png");
@@ -2066,6 +2087,40 @@ int main(int argc, char* argv[])
                 pump(100);
             }
         }
+    }
+
+    // --- Ctrl+D on a folder with mirroring on (T-064) ---------------------------------
+    {
+        check(window.openFurniture(mirroredId), "the mirrored furniture opens");
+        pump(200);
+        const DocumentModel& doc = window.document();
+        int pair = 0;
+        for (const DocumentModel::Group& g : doc.groups())
+            if (g.name == "Pair") pair = g.id;
+        check(pair != 0 && doc.symmetryOn() && doc.hasStoredOrder(pair), "set up: mirroring on, Pair in a stored order");
+        window.view()->setSelectedSolids(doc.bodiesUnderGroup(pair));
+        pump(100);
+        QAction* duplicate = actionNamed(&window, QStringLiteral("Duplicate"));
+        if (duplicate) duplicate->trigger();
+        pump(300);
+        int clone = 0;
+        for (const DocumentModel::Group& g : doc.groups())
+            if (g.name == "Pair copy") clone = g.id;
+        const std::vector<int> made = window.view()->selectedSolidIds();
+        const std::vector<int> seq = clone ? doc.orderedChildren(clone) : std::vector<int>();
+        QStringList read;
+        for (int id : seq)
+            read << QString::fromStdString(doc.nameOf(id)) +
+                        (std::find(made.begin(), made.end(), id) != made.end() ? QStringLiteral("(copy)") : QStringLiteral("(twin)"));
+        const bool paired = seq.size() == 4 && std::find(made.begin(), made.end(), seq[0]) != made.end() &&
+                            std::find(made.begin(), made.end(), seq[2]) != made.end() &&
+                            doc.twinOf(seq[0]) == seq[1] && doc.twinOf(seq[2]) == seq[3];
+        check(clone != 0 && paired,
+              "Ctrl+D on a mirrored folder reads each copy, then its own twin - " + read.join(QStringLiteral(", ")));
+        check(seq.size() == 4 && doc.nameOf(seq[0]).empty() == false,
+              "four rows in the copy (two copies, two twins)");
+        window.openFurniture(furnitureId);
+        pump(300);
     }
 
     // --- a page that is not there reports through Qt (review I3) ---------------------

@@ -553,6 +553,77 @@ int main(int argc, char* argv[])
     for (const QString& text : model.paintedTexts())
         if (text.isEmpty()) check(false, "an empty painted text");
 
+    // --- T-064 -------------------------------------------------------------------
+    {
+        // A fresh furniture: Box { Inner A, Inner B }, then Loose.
+        DocumentModel d;
+        auto plank = [&](const char* name, double x) {
+            const int id = d.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(x, 0.0, 0.0), 18.0, 300.0, 600.0).Shape());
+            d.setItemName(id, name);
+            return id;
+        };
+        const int innerA = plank("Inner A", 0.0);
+        const int innerB = plank("Inner B", 100.0);
+        const int loose = plank("Loose", 200.0);
+        const int box = d.createGroup("Box");
+        d.setItemGroup(innerA, box);
+        d.setItemGroup(innerB, box);
+
+        Calls c;
+        ItemsModel* m = nullptr;
+        ItemsModel::Inputs i2;
+        i2.document = &d;
+        i2.live = true;
+        i2.shown = true;
+        ItemsModel::Hooks h;
+        h.select = [&](const std::vector<int>& v) {
+            c.selects.push_back(v);
+            i2.selected = v;
+            m->showSelection(v);
+            m->setState(i2);
+        };
+        h.move = [&](const std::vector<int>& v, int p, int b) { c.moves.push_back({v, p, b}); };
+        h.removeFolder = [&](int id) { c.removes.push_back(id); };
+        ItemsModel fresh(h);
+        m = &fresh;
+        fresh.setState(i2);
+
+        // A furniture swap forgets which folders were open (T-064).
+        fresh.setFolderOpen(box, true);
+        check(fresh.isFolderOpen(box), "set up: Box is open");
+        fresh.forgetFurniture();
+        check(!fresh.isFolderOpen(box), "a furniture swap forgets the open folders, as it clears the filter");
+
+        // Remove folder, keep contents - from a BODY row: the row's own folder.
+        fresh.setFolderOpen(box, true);
+        fresh.openMenu(innerA);
+        check(entryOf(fresh, QStringLiteral("ungroup")).value(QStringLiteral("enabled")).toBool(),
+              "a body row's menu offers Remove folder, keep contents");
+        fresh.chooseMenu(QStringLiteral("ungroup"));
+        check(c.removes == std::vector<int>{box},
+              QStringLiteral("and it removes the body's own folder (asked: %1)").arg(ids(c.removes)));
+
+        // A press on an already-selected FOLDER row carries the whole
+        // selection - the folder whole, and the loose body beside it.
+        fresh.activate(box, false, false);
+        fresh.activate(loose, true, false);
+        check(i2.selected.size() == 3, QStringLiteral("set up: Box's two bodies and Loose are selected (%1)").arg(ids(i2.selected)));
+        fresh.beginDrag(box, true);
+        fresh.dragOver(QStringLiteral("line"), 0, 0);
+        fresh.endDrag(true);
+        check(!c.moves.empty() && c.moves.back().ids == std::vector<int>({box, loose}),
+              QStringLiteral("a drag pressed on the selected folder carries the folder and Loose (%1)")
+                  .arg(c.moves.empty() ? QStringLiteral("no move") : ids(c.moves.back().ids)));
+        // ...and one pressed on the selected loose body carries the same rows -
+        // the folder whole, never its bodies pulled out of it.
+        fresh.beginDrag(loose, true);
+        fresh.dragOver(QStringLiteral("line"), 0, 0);
+        fresh.endDrag(true);
+        check(!c.moves.empty() && c.moves.back().ids == std::vector<int>({box, loose}),
+              QStringLiteral("and one pressed on Loose carries the folder whole too (%1)")
+                  .arg(c.moves.empty() ? QStringLiteral("no move") : ids(c.moves.back().ids)));
+    }
+
     std::printf("\n%s (%d failures, %d checks)\n", gFailures ? "FAIL" : "PASS", gFailures, gChecks);
     return gFailures ? 1 : 0;
 }

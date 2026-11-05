@@ -167,6 +167,13 @@ void ItemsModel::showSelection(const std::vector<int>& ids)
 void ItemsModel::forgetFurniture()
 {
     if (!myFilter.isEmpty()) setFilter(QString());
+    // The open folders were the furniture that just closed (T-064): folder
+    // ids restart with every document, so a kept fold would open whatever
+    // folder the next one numbers the same.
+    if (!myExpanded.empty()) {
+        myExpanded.clear();
+        if (myIn.shown) rebuild();
+    }
 }
 
 void ItemsModel::resetPick()
@@ -567,6 +574,43 @@ void ItemsModel::activate(int id, bool ctrl, bool shift)
     // left comes down.
     if (myCurrentId != before && myHooks.withdrawRefusal) myHooks.withdrawRefusal();
     if (myIn.shown && !myDrag.active) rebuild();
+}
+
+std::vector<int> ItemsModel::representingRows() const
+{
+    // In the list's own order (folded rows included): a folder every body of
+    // which is selected stands for them all; a selected body no such folder
+    // already holds stands for itself.
+    std::vector<int> rows;
+    if (!myIn.document) return rows;
+    std::set<int> covered;
+    std::vector<int> order;
+    std::function<void(int)> walk = [&](int parent) {
+        for (int id : myIn.document->orderedChildren(parent)) {
+            order.push_back(id);
+            if (myIn.document->groupExists(id)) walk(id);
+        }
+    };
+    walk(0);
+    for (int id : order) {
+        if (covered.count(id)) continue;
+        if (myIn.document->groupExists(id)) {
+            const int parent = myIn.document->groupOf(id);
+            if (parent != 0 && covered.count(parent)) {
+                covered.insert(id);
+                continue;
+            }
+            if (rowInSelection(id, Kind::Folder)) {
+                rows.push_back(id);
+                covered.insert(id);
+                for (int body : myIn.document->bodiesUnderGroup(id)) covered.insert(body);
+            }
+        } else if (selected(id)) {
+            rows.push_back(id);
+            covered.insert(id);
+        }
+    }
+    return rows;
 }
 
 bool ItemsModel::rowInSelection(int id, Kind kind) const
@@ -1025,8 +1069,15 @@ void ItemsModel::beginDrag(int id, bool plain)
     myDrag.active = true;
     const Kind kind = kindOf(id);
     // A press on a row that is ALREADY part of a multiple selection carries
-    // the whole of it; one anywhere else carries just that row.
-    if (kind == Kind::Body && selected(id) && myIn.selected.size() > 1 && plain) myDrag.ids = myIn.selected;
+    // the whole of it; one anywhere else carries just that row. A folder row
+    // counts as part of it when every body under it is selected (T-064, the
+    // design review's F10), and what is carried is the selection's REPRESENTING
+    // rows: a wholly selected folder goes whole, never its bodies pulled out.
+    const std::size_t under =
+        kind == Kind::Folder ? myIn.document->bodiesUnderGroup(id).size() : std::size_t(1);
+    const bool partOfMore = plain && rowInSelection(id, kind) && kind != Kind::Outline &&
+                            myIn.selected.size() > under;
+    if (partOfMore) myDrag.ids = representingRows();
     else myDrag.ids = {id};
     // The ghost names the first carried row in LIST order.
     int first = myDrag.ids.front();
