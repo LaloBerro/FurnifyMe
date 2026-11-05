@@ -63,7 +63,7 @@ void CardSlide::setShown(bool shown)
     if (shown == myShown && myCard->isVisible() == (shown || myLeaving)) return;
     myShown = shown;
 
-    const bool animate = myViewport && myViewport->animationsEnabled();
+    const bool animate = myAnimated && myViewport && myViewport->animationsEnabled();
     if (!animate) {
         // Synchronous, exactly as before this class existed - the suite's
         // drawer checks read the answer the instant setShown() returns.
@@ -117,4 +117,15 @@ void CardSlide::settle()
     mySlide->setStartValue(current);
     mySlide->setEndValue(myLeaving ? parkedPosition(myCard, myFrom, home) : home);
     mySlide->start(QAbstractAnimation::KeepWhenStopped);
+}
+
+void CardSlide::retarget(QWidget* card, bool animated)
+{
+    if (!card) return;
+    mySlide->stop();
+    myLeaving = false;
+    myAnimated = animated;
+    myCard = card;
+    mySlide->setTargetObject(card);
+    card->setVisible(myShown);
 }

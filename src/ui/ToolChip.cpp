@@ -148,6 +148,24 @@ void ToolChip::applyTheme()
     update();
 }
 
+QString ToolChip::iconOnlyTip(const QAction* action)
+{
+    if (!action) return QString();
+    const QString label = action->text().remove(QLatin1Char('&'));
+    QString tip = action->toolTip();
+    // An icon-only button paints no name, so the tooltip has to carry
+    // one. It is COMPOSED from the action's own two strings - its label
+    // and its existing tooltip, which is already where the shortcut
+    // lives - rather than written here: no new copy enters the app, and
+    // the vocabulary sweep still sees words it has always seen. The
+    // startsWith guard is what stops "Undo" being followed by "Undo the
+    // last change to your bodies (Ctrl+Z)"; several actions already open
+    // with their own name and do not need it twice.
+    if (tip.isEmpty())              tip = label;
+    else if (!tip.startsWith(label)) tip = label + QLatin1Char('\n') + tip;
+    return tip;
+}
+
 void ToolChip::syncFromAction()
 {
     const QString label = myAction->text().remove(QLatin1Char('&'));
@@ -156,19 +174,7 @@ void ToolChip::syncFromAction()
     setCheckable(myAction->isCheckable());
     setChecked(myAction->isChecked());
 
-    QString tip = myAction->toolTip();
-    if (myMode == ChipMode::IconOnly) {
-        // An icon-only button paints no name, so the tooltip has to carry
-        // one. It is COMPOSED from the action's own two strings - its label
-        // and its existing tooltip, which is already where the shortcut
-        // lives - rather than written here: no new copy enters the app, and
-        // the vocabulary sweep still sees words it has always seen. The
-        // startsWith guard is what stops "Undo" being followed by "Undo the
-        // last change to your bodies (Ctrl+Z)"; several actions already open
-        // with their own name and do not need it twice.
-        if (tip.isEmpty())              tip = label;
-        else if (!tip.startsWith(label)) tip = label + QLatin1Char('\n') + tip;
-    }
+    const QString tip = myMode == ChipMode::IconOnly ? iconOnlyTip(myAction) : myAction->toolTip();
     setToolTip(tip);
     // WHAT ASSISTIVE TECHNOLOGY READS (the 2026-10 review's F26). An
     // icon-only chip paints no word, so without these a screen reader met

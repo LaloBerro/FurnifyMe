@@ -19,6 +19,10 @@
   import type { JointsApi } from './joints/api';
   import Items from './items/Items.svelte';
   import type { ItemsApi } from './items/api';
+  import Cluster from './shell/Cluster.svelte';
+  import Pill from './shell/Pill.svelte';
+  import Menu from './shell/Menu.svelte';
+  import type { ChipState, MenuApi, MenuOpen, MenuTitle, ShellApi } from './shell/api';
   import { applyTokens } from '../theme';
   import { reportHitsOnChange } from '../overlay/hits';
 
@@ -29,6 +33,8 @@
     versions,
     joints,
     items,
+    shell,
+    menu,
   }: {
     chrome: ChromeApi;
     theme: ThemeApi;
@@ -36,6 +42,8 @@
     versions?: VersionsApi;
     joints?: JointsApi;
     items?: ItemsApi;
+    shell?: ShellApi;
+    menu?: MenuApi;
   } = $props();
 
   const kStripHeight = 24;
@@ -56,6 +64,25 @@
   // R4). Kept here, where something is always listening, until the card takes
   // it - the request can arrive before the card has mounted.
   let versionsRequest = $state(0);
+  // The rail, the view cluster, the pill and the open menu (Phase 3i).
+  let chips: Record<string, ChipState> = $state({});
+  let titles: MenuTitle[] = $state([]);
+  let menuOpen: MenuOpen = $state({ menu: -1, byKeyboard: false, levels: [] });
+  let menuAnchor: { x: number; y: number; w: number; h: number } | null = $state(null);
+  let animate = $state(true);
+  $effect(() => {
+    // Where the open menu's title stands, read after the pill has drawn.
+    const index = menuOpen.menu;
+    if (index < 0) {
+      menuAnchor = null;
+      return;
+    }
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(`[data-pill] [data-title="${index}"]`);
+      const r = el?.getBoundingClientRect();
+      menuAnchor = r ? { x: r.left, y: r.top, w: r.width, h: r.height } : null;
+    });
+  });
   // Each card claims the keyboard in its own name, so one closing never takes
   // it from a field in another (Phase 3c review I2).
   const keyboardFor = (card: string) => ({
@@ -92,6 +119,20 @@
       if (message && message.stamp >= 0 && stamp !== message.stamp) toast?.dismiss();
     });
     versions?.newRequested.connect(() => versionsRequest++);
+    if (shell) {
+      chips = { ...shell.chips };
+      shell.chipsChanged.connect(() => (chips = { ...shell.chips }));
+    }
+    if (menu) {
+      titles = [...menu.titles];
+      menuOpen = { ...menu.open };
+      menu.changed.connect(() => {
+        titles = [...menu.titles];
+        menuOpen = { ...menu.open };
+      });
+    }
+    animate = chrome.animate ?? true;
+    chrome.animateChanged?.connect(() => (animate = chrome.animate ?? true));
     applyTokens(theme.tokens);
     theme.changed.connect(() => applyTokens(theme.tokens));
     const resize = () => {
@@ -107,6 +148,42 @@
 </script>
 
 <div class="behind" inert={question.asking}>
+{#if shell && cards.rail?.shown}
+  <Cluster
+    name="rail"
+    entries={shell.rail}
+    {chips}
+    glyphs={shell.glyphs}
+    rect={cards.rail}
+    {animate}
+    from="left"
+    ontrigger={(id) => shell.trigger(id)}
+    report={(rects) => shell.reportChipRects(rects)}
+  />
+{/if}
+{#if shell && cards.view?.shown}
+  <Cluster
+    name="view"
+    entries={shell.view}
+    {chips}
+    glyphs={shell.glyphs}
+    rect={cards.view}
+    {animate}
+    ontrigger={(id) => shell.trigger(id)}
+    report={(rects) => shell.reportChipRects(rects)}
+  />
+{/if}
+{#if shell && menu && cards.pill?.shown}
+  <Pill
+    {menu}
+    {titles}
+    open={menuOpen}
+    wordmark={shell.wordmark}
+    rect={cards.pill}
+    {animate}
+    report={(w, h, rects) => shell.reportPill(w, h, rects)}
+  />
+{/if}
 <Toast
   bind:this={toast}
   {message}
@@ -142,6 +219,9 @@
 {/if}
 {#if settings && cards.settings?.shown}
   <Settings {settings} keyboard={keyboardFor('settings')} rect={cards.settings} />
+{/if}
+{#if menu && menuOpen.menu >= 0}
+  <Menu {menu} open={menuOpen} anchor={menuAnchor} bounds={{ w: viewW, h: viewH }} />
 {/if}
 </div>
 {#if status.shown}

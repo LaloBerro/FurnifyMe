@@ -380,6 +380,25 @@ int main(int argc, char* argv[])
             if (it.key().startsWith(QStringLiteral("--shell-"))) clean = false;
         check(clean, "Graphite sends no --shell- key: the page's fallbacks are Graphite");
 
+        // The slots (R9 and the rail): a height report keeps the width a
+        // drawer was given, and a stretched slot still answers its natural size.
+        {
+            QWidget host;
+            HtmlCardSlot drawer(QStringLiteral("t"), QSize(200, 100), &host);
+            drawer.setFixedWidth(240);
+            drawer.setContentHeight(300);
+            check(drawer.width() == 240 && drawer.height() == 300,
+                  QByteArray("a height report keeps the drawer's width (") + QByteArray::number(drawer.width()) + ")");
+            HtmlCardSlot rail(QStringLiteral("r"), QSize(48, 400), &host);
+            rail.setStretchable(true);
+            rail.resize(48, 900);
+            check(rail.height() == 900 && rail.sizeHint() == QSize(48, 400),
+                  "a stretchable slot stretches, and its sizeHint stays the card's natural size");
+            rail.setContentSize(QSize(52, 420));
+            check(rail.minimumSize() == QSize(52, 420) && rail.height() >= 420,
+                  "and takes a new natural size as its minimum");
+        }
+
         // R2: one glyph source - IconSet paints the page's glyphs as masks.
         const QImage mask = IconSet::glyphMask(IconSet::Glyph::Undo, 48);
         bool inked = false;

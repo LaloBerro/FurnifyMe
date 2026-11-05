@@ -41,8 +41,15 @@
 #include "ui/NameFurnitureCard.h"
 #include "ui/WindowChrome.h"
 #include "ui/ToolCluster.h"
+#include "ui/AxisGizmo.h"
+#include "ui/ToolChip.h"
+#include "session/ActionRegistry.h"
 #include "ui/RenderSettingsPanel.h"
 #include "web/WebHost.h"
+#include "web/ShellBridge.h"
+#include "session/MenuModel.h"
+#include "ui/AppBar.h"
+#include "ui/HtmlCardSlot.h"
 
 #include <QAction>
 #include <QApplication>
@@ -64,6 +71,7 @@
 #include <QTimer>
 #include <QWebEnginePage>
 #include <QWebEngineView>
+#include <QTest>
 
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -180,6 +188,20 @@ void keepBehind()
 }
 #endif
 
+#ifdef _WIN32
+// What Windows itself asks the window: WM_NCHITTEST at a point of its client
+// area (logical px), answered by WindowChrome's filter - a message to our own
+// window, not OS input (hub_smoke's helper).
+LRESULT nativeHit(QWidget* window, const QPoint& logical)
+{
+    HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    const double dpr = window->devicePixelRatioF();
+    POINT p{LONG(logical.x() * dpr), LONG(logical.y() * dpr)};
+    ClientToScreen(hwnd, &p);
+    return SendMessageW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(p.x, p.y));
+}
+#endif
+
 QStringList bannedIn(const QString& text)
 {
     static const QStringList words = {"Fuse",  "Solid", "OCCT",    "mm3",      "(s)",    "Merge", "Join",
@@ -264,6 +286,8 @@ int main(int argc, char* argv[])
 #ifdef _WIN32
     SetUnhandledExceptionFilter(reportCrash);
 #endif
+    // Unbuffered: a crash's last line tells where it happened.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     QSurfaceFormat::setDefaultFormat(OcctViewWidget::surfaceFormat());
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     WebHost::prepareApplication();
@@ -1664,6 +1688,269 @@ int main(int argc, char* argv[])
         pump(300);
     }
 
+    // --- the rail, the view cluster, the pill and the menus (Phase 3i) -------------
+    {
+        auto slotNamed = [&](const char* name) {
+            return window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_") + QLatin1String(name));
+        };
+        HtmlCardSlot* pillSlot = slotNamed("pill");
+        HtmlCardSlot* railSlot = slotNamed("rail");
+        HtmlCardSlot* viewSlot = slotNamed("view");
+        ToolCluster* qtRail = window.findChild<ToolCluster*>();
+        AppBar* qtPill = window.findChild<AppBar*>();
+        check(pillSlot && railSlot && viewSlot, "the pill, the rail and the view cluster each have a slot");
+        if (pillSlot && railSlot && viewSlot && qtRail && qtPill && window.viewControls()) {
+            check(pillSlot->isVisible() && !qtPill->isVisible(), "the pill's slot stands in the Qt pill's place");
+            check(railSlot->isVisible() && !qtRail->isVisible(), "the rail's slot stands in the Qt rail's place");
+            check(viewSlot->isVisible() && !window.viewControls()->isVisible(),
+                  "the view cluster's slot stands in the Qt cluster's place");
+            check(railSlot->geometry().top() > pillSlot->geometry().bottom() &&
+                      railSlot->geometry().left() == pillSlot->geometry().left(),
+                  "the rail stands under the pill, in one column");
+            ShellBridge* shell = window.shellBridge();
+            check(shell != nullptr, "the page's `shell` object exists");
+
+            // R5: shortcuts fire with the Qt menu bar hidden. Through Qt's own
+            // shortcut map (QTest's key click runs it), with Qt's record of the
+            // active window moved for the length of the press - never the OS's.
+            auto withActive = [&](const std::function<void()>& run) {
+                QT_WARNING_PUSH
+                QT_WARNING_DISABLE_DEPRECATED
+                QWidget* before = QApplication::activeWindow();
+                QApplication::setActiveWindow(&window);
+                run();
+                QApplication::setActiveWindow(before);
+                QT_WARNING_POP
+            };
+            const int bodiesNow = static_cast<int>(window.document().solids().size());
+            window.view()->setSelectedSolids({window.document().solids().front().id});
+            pump(100);
+            if (del) del->trigger();
+            pump(200);
+            check(static_cast<int>(window.document().solids().size()) == bodiesNow - 1, "a body was deleted to undo");
+            withActive([&] { QTest::keyClick(window.view(), Qt::Key_Z, Qt::ControlModifier); });
+            pump(200);
+            check(static_cast<int>(window.document().solids().size()) == bodiesNow,
+                  "Ctrl+Z fires through the shortcut map while the HTML pill stands in for the Qt one (R5)");
+
+#ifdef _WIN32
+            // R10: the pill's ground drags the window; the slot's corner is ground.
+            const QPoint ground = window.view()->mapTo(&window, pillSlot->geometry().topLeft() + QPoint(6, pillSlot->height() / 2));
+            const LRESULT groundHit = nativeHit(&window, ground);
+            check(groundHit == HTCAPTION, QStringLiteral("the pill's ground answers Caption (R10) - got %1 at %2,%3")
+                                              .arg(groundHit).arg(ground.x()).arg(ground.y()));
+            const QPoint viewport = window.view()->mapTo(&window, window.view()->rect().center());
+            capture(&window, outDir + "/shell.png");
+            const LRESULT viewportHit = nativeHit(&window, viewport);
+            check(viewportHit == HTCLIENT, QStringLiteral("the viewport answers Client - got %1").arg(viewportHit));
+#endif
+
+            // --- the page draws them ---
+            const auto chipCount = [&](const char* cluster) {
+                return js(page, QStringLiteral("document.querySelectorAll('[data-cluster=\"%1\"] [data-chip]').length")
+                                    .arg(QLatin1String(cluster))).toInt();
+            };
+            check(waitFor([&] { return chipCount("rail") == 10 && chipCount("view") == 3; }, 5000),
+                  QStringLiteral("the page draws the rail's 10 chips and the view cluster's 3 (got %1 and %2)")
+                      .arg(chipCount("rail")).arg(chipCount("view")));
+            QAction* itemsAction = actionNamed(&window, QStringLiteral("Items"));
+            QAction* undoAction = actionNamed(&window, QStringLiteral("Undo"));
+            QAction* orthoAction = actionNamed(&window, QStringLiteral("Orthographic"));
+            QAction* fitAction = actionNamed(&window, QStringLiteral("Fit All"));
+            const auto chipAttr = [&](const QString& id, const char* attr) {
+                return jsString(page, QStringLiteral("(document.querySelector('[data-chip=\"%1\"]') || {getAttribute: () => ''}).getAttribute('%2') || ''")
+                                          .arg(id, QLatin1String(attr)));
+            };
+            const auto idOf = [](QAction* a) { return a ? ActionRegistry::idFor(a->text()) : QString(); };
+            check(itemsAction && chipAttr(idOf(itemsAction), "aria-label") == QStringLiteral("Items"),
+                  "each chip is named by its action - " + chipAttr(idOf(itemsAction), "aria-label"));
+            check(undoAction && chipAttr(idOf(undoAction), "title") == ToolChip::iconOnlyTip(undoAction),
+                  "and carries the Qt chip's own composed tooltip");
+            {
+                const bool wasOpen = itemsAction && itemsAction->isChecked();
+                js(page, QStringLiteral("document.querySelector('[data-chip=\"%1\"]').click()").arg(idOf(itemsAction)));
+                check(waitFor([&] { return itemsAction->isChecked() != wasOpen; }, 3000),
+                      "a click on the Items chip toggles the Items action (Review Focus 5)");
+                check(waitFor([&] { return chipAttr(idOf(itemsAction), "aria-pressed") ==
+                                           (itemsAction->isChecked() ? QStringLiteral("true") : QStringLiteral("false")); }, 3000),
+                      "and the chip shows the action's new state");
+                js(page, QStringLiteral("document.querySelector('[data-chip=\"%1\"]').click()").arg(idOf(itemsAction)));
+                waitFor([&] { return itemsAction->isChecked() == wasOpen; }, 3000);
+            }
+            {
+                // Undo follows the undo stack, live.
+                window.view()->setSelectedSolids({window.document().solids().front().id});
+                pump(100);
+                if (del) del->trigger();
+                check(waitFor([&] { return chipAttr(idOf(undoAction), "aria-disabled") == QStringLiteral("false"); }, 3000),
+                      "Undo's chip enables the moment there is something to undo");
+                const int before = static_cast<int>(window.document().solids().size());
+                js(page, QStringLiteral("document.querySelector('[data-chip=\"%1\"]').click()").arg(idOf(undoAction)));
+                check(waitFor([&] { return static_cast<int>(window.document().solids().size()) == before + 1; }, 3000),
+                      "and a click on it undoes");
+            }
+            {
+                // A disabled chip runs nothing (Review Focus 3).
+                window.view()->setSelectedSolids({});
+                pump(100);
+                QAction* extrude = actionNamed(&window, QStringLiteral("Union"));
+                int extrudes = 0;
+                QMetaObject::Connection c;
+                if (extrude) c = QObject::connect(extrude, &QAction::triggered, [&] { ++extrudes; });
+                check(extrude && !extrude->isEnabled() && chipAttr(idOf(extrude), "aria-disabled") == QStringLiteral("true"),
+                      "Union is disabled with nothing selected, and its chip says so");
+                js(page, QStringLiteral("document.querySelector('[data-chip=\"%1\"]').click()").arg(idOf(extrude)));
+                check(!window.shellBridge()->trigger(idOf(extrude)), "and the bridge refuses it too");
+                pump(200);
+                check(extrudes == 0, "a click on a disabled chip runs nothing");
+                QObject::disconnect(c);
+            }
+            check(!window.shellBridge()->trigger(QStringLiteral("delete-everything")) &&
+                      !window.shellBridge()->trigger(QStringLiteral("export-step")),
+                  "the bridge triggers only its own chips' actions");
+            {
+                const bool ortho = orthoAction && orthoAction->isChecked();
+                js(page, QStringLiteral("document.querySelector('[data-chip=\"%1\"]').click()").arg(idOf(orthoAction)));
+                check(waitFor([&] { return orthoAction->isChecked() != ortho; }, 3000),
+                      "the view cluster's projection chip flips the projection");
+                js(page, QStringLiteral("document.querySelector('[data-chip=\"%1\"]').click()").arg(idOf(orthoAction)));
+                waitFor([&] { return orthoAction->isChecked() == ortho; }, 3000);
+            }
+
+            // --- the pill and its menus ---
+            MenuModel* menu = shell->menu();
+            check(waitFor([&] { return js(page, "document.querySelectorAll('[data-pill] [data-title]').length").toInt() == menu->menuCount(); }, 3000),
+                  QStringLiteral("the pill draws every menu title (%1)").arg(menu->menuCount()));
+            {
+                const auto pageWidth = [&] { return js(page, "Math.ceil(document.querySelector('[data-pill]').getBoundingClientRect().width)").toInt(); };
+                check(waitFor([&] { return pillSlot->width() == Theme::wholeDevicePixels(QSize(pageWidth(), 1)).width(); }, 3000),
+                      QStringLiteral("the pill's slot takes the width the page measured (slot %1, page %2) (R9)").arg(pillSlot->width()).arg(pageWidth()));
+            }
+            js(page, "document.querySelector('[data-pill] [data-title=\"0\"]').dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0}))");
+            check(waitFor([&] { return menu->isOpen() && menu->openIndex() == 0; }, 3000), "a press on File opens File");
+            check(waitFor([&] { return js(page, "!!document.querySelector('[data-menu-level=\"0\"]')").toBool(); }, 3000),
+                  "and the page draws it");
+            check(chrome->menuOpen() && chrome->hitRegion().contains(window.view()->rect().center()),
+                  "an open menu takes the whole viewport's pointer (R7)");
+            {
+                QWidget* at = window.view()->childAt(window.view()->rect().center());
+                check(at && (at == page || page->isAncestorOf(at)), "a press on the viewport lands on the page's outside layer");
+            }
+#ifdef _WIN32
+            {
+                const QPoint groundNow = window.view()->mapTo(&window, pillSlot->geometry().topLeft() + QPoint(6, pillSlot->height() / 2));
+                check(nativeHit(&window, groundNow) == HTCLIENT, "while a menu is open the pill's ground does not drag (R10)");
+            }
+            capture(&window, outDir + "/shell-menu-file.png");
+#endif
+            {
+                // Escape closes it: keys go to the menu through its filter.
+                QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &esc);
+                check(!menu->isOpen(), "Escape closes the menu");
+                check(waitFor([&] { return !js(page, "!!document.querySelector('[data-menu-level]')").toBool(); }, 3000) &&
+                          !chrome->menuOpen(),
+                      "the page draws no menu and gives the viewport its pointer back");
+            }
+#ifdef _WIN32
+            {
+                // A title does not drag the window; the page reported where they stand.
+                waitFor([&] { return !shell->titleRects().isEmpty(); }, 2000);
+                const QRect title = shell->titleRects().value(0);
+                check(!title.isEmpty() && nativeHit(&window, window.view()->mapTo(&window, title.center())) == HTCLIENT,
+                      "a title answers Client, not Caption (R10)");
+            }
+#endif
+            {
+                // Alt+V opens View with its first live entry current, Down
+                // moves, Enter runs it - through Qt's own shortcut map.
+                int fits = 0;
+                const QMetaObject::Connection c = QObject::connect(fitAction, &QAction::triggered, [&] { ++fits; });
+                withActive([&] { QTest::keyClick(window.view(), Qt::Key_V, Qt::AltModifier); });
+                pump(100);
+                const int viewIndex = menu->menuForMnemonic(QLatin1Char('v'));
+                check(menu->isOpen() && menu->openIndex() == viewIndex, "Alt+V opens View (R6)");
+                const QVariantList entries = menu->open().value(QStringLiteral("levels")).toList().value(0).toMap()
+                                                 .value(QStringLiteral("entries")).toList();
+                const int current = menu->open().value(QStringLiteral("levels")).toList().value(0).toMap()
+                                        .value(QStringLiteral("current")).toInt();
+                check(entries.value(current).toMap().value(QStringLiteral("text")).toString() == fitAction->text().remove(QLatin1Char('&')),
+                      "on its first live entry, Fit All");
+                QKeyEvent down(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &down);
+                QKeyEvent up(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &up);
+                QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &enter);
+                check(!menu->isOpen(), "Enter closes the menu");
+                pump(200);
+                check(fits == 1, QStringLiteral("and runs Fit All once (%1)").arg(fits));
+                QObject::disconnect(c);
+                // A menu standing open swallows a window shortcut.
+                const int bodiesBefore = static_cast<int>(window.document().solids().size());
+                window.view()->setSelectedSolids({window.document().solids().front().id});
+                pump(100);
+                withActive([&] { QTest::keyClick(window.view(), Qt::Key_V, Qt::AltModifier); });
+                pump(100);
+                withActive([&] { QTest::keyClick(window.view(), Qt::Key_Delete, Qt::NoModifier); });
+                pump(100);
+                check(static_cast<int>(window.document().solids().size()) == bodiesBefore,
+                      "Delete with a menu open deletes nothing - the menu holds every key");
+                menu->close();
+                pump(100);
+            }
+            {
+                // View -> Theme -> a theme, by the model's own gestures (the
+                // page's clicks land on these), and every chip re-inks.
+                const QString inkBefore = jsString(page, QStringLiteral("getComputedStyle(document.querySelector('[data-chip=\"%1\"]')).color").arg(idOf(fitAction)));
+                menu->openMenu(menu->menuForMnemonic(QLatin1Char('v')), false);
+                pump(100);
+                auto indexOf = [&](int level, const QString& text) {
+                    const QVariantList levels = menu->open().value(QStringLiteral("levels")).toList();
+                    const QVariantList e = levels.value(level).toMap().value(QStringLiteral("entries")).toList();
+                    for (int i = 0; i < e.size(); ++i)
+                        if (e.at(i).toMap().value(QStringLiteral("text")).toString() == text) return i;
+                    return -1;
+                };
+                const int themeEntry = indexOf(0, QStringLiteral("Theme"));
+                menu->hover(0, themeEntry);
+                pump(100);
+                check(menu->open().value(QStringLiteral("levels")).toList().size() == 2, "hovering Theme opens its submenu");
+                check(waitFor([&] { return js(page, "!!document.querySelector('[data-menu-level=\"1\"]')").toBool(); }, 3000),
+                      "and the page draws it beside");
+#ifdef _WIN32
+                capture(&window, outDir + "/shell-menu-theme.png");
+#endif
+                const int nightshade = indexOf(1, QStringLiteral("Nightshade Glass"));
+                js(page, QStringLiteral("document.querySelector('[data-menu-level=\"1\"] [data-entry=\"%1\"]').click()").arg(nightshade));
+                check(waitFor([&] { return Themes::currentId() == QStringLiteral("nightshade-glass"); }, 3000),
+                      "a click on Nightshade Glass puts it on - " + Themes::currentId());
+                check(!menu->isOpen(), "and the menu closed first");
+                check(waitFor([&] { return jsString(page, QStringLiteral("getComputedStyle(document.querySelector('[data-chip=\"%1\"]')).color").arg(idOf(fitAction))) != inkBefore; }, 3000),
+                      "every glyph re-inks in the theme's chip ink (Review Focus 5)");
+#ifdef _WIN32
+                pump(300);
+                capture(&window, outDir + "/shell-nightshade.png");
+#endif
+                for (const QString& id : {QStringLiteral("violet-glass-float"), QStringLiteral("aurora-mesh-gradient"),
+                                          QStringLiteral("ultraviolet-grid")}) {
+                    Themes::select(id);
+                    pump(400);
+                    menu->openMenu(0, true);
+                    pump(300);
+#ifdef _WIN32
+                    capture(&window, outDir + "/shell-" + id + ".png");
+#endif
+                    menu->close();
+                }
+                Themes::select(Themes::graphiteId());
+                pump(300);
+            }
+            // Render mode taking them away is checked in the render page's
+            // block below, where render mode is entered once for the run.
+        }
+    }
+
     // --- a page that is not there reports through Qt (review I3) ---------------------
     check(chrome->isLive(), "the page said it is listening");
     {
@@ -1753,7 +2040,7 @@ int main(int argc, char* argv[])
             QWidget* atCentre = window.view()->childAt(centre);
             check(atCentre && (atCentre == page || page->isAncestorOf(atCentre)),
                   "a press on the viewport behind the question lands on the page");
-            if (ToolCluster* rail = window.findChild<ToolCluster*>()) {
+            if (QWidget* rail = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"))) {
                 const QPoint onRail = rail->geometry().center();
                 QWidget* at = window.view()->childAt(onRail);
                 check(at && (at == page || page->isAncestorOf(at)), "and so does a press on the rail");
@@ -1826,10 +2113,11 @@ int main(int argc, char* argv[])
             check(waitFor([&] { return !window.isAskingBeforeClose(); }, 3000) && window.isFurnitureDirty(),
                   "the page's Keep editing answers - the furniture stays open and unsaved");
             check(waitFor([&] { return !washShown(); }, 3000), "and the wash goes with it");
-            // The Qt cards stand over the page again once it has gone.
-            if (ToolCluster* rail = window.findChild<ToolCluster*>()) {
-                QWidget* at = window.view()->childAt(rail->geometry().center());
-                check(at == rail || (at && rail->isAncestorOf(at)), "the rail takes its own presses again");
+            // The Qt cards stand over the page again once it has gone - the
+            // axis card, since the rail is the page's own (Phase 3i).
+            if (AxisGizmo* gizmo = window.findChild<AxisGizmo*>()) {
+                QWidget* at = window.view()->childAt(gizmo->geometry().center());
+                check(at == gizmo || (at && gizmo->isAncestorOf(at)), "the axis card takes its own presses again");
             }
             // A long name wraps the title rather than widening the card (Review Focus 5).
             closeFurniture->trigger();
@@ -2004,9 +2292,11 @@ int main(int argc, char* argv[])
                   "and the page re-seeds the field with the suggestion, not what was typed before");
             js(page, "document.querySelector('.name-question .answer.cancel').click()");
             check(waitFor([&] { return !window.isAskingForName(); }, 3000), "the page's Cancel cancels");
-            if (ToolCluster* rail = window.findChild<ToolCluster*>()) {
-                QWidget* at = window.view()->childAt(rail->geometry().center());
-                check(at == rail || (at && rail->isAncestorOf(at)), "the rail takes its own presses again");
+            // The Qt cards stand over the page again once it has gone - the
+            // axis card, since the rail is the page's own (Phase 3i).
+            if (AxisGizmo* gizmo = window.findChild<AxisGizmo*>()) {
+                QWidget* at = window.view()->childAt(gizmo->geometry().center());
+                check(at == gizmo || (at && gizmo->isAncestorOf(at)), "the axis card takes its own presses again");
             }
             // Typed and Enter in one turn: the furniture is made under the name
             // the field holds (Review Focus 1).
@@ -2056,6 +2346,17 @@ int main(int argc, char* argv[])
             pump(600);
             check(studio->dockedPanel() == rv && rv->isVisible() && !panel->isVisible(),
                   "render mode docks the PAGE beside the viewport, not the Qt panel");
+            {
+                // The rail and the pill leave with render mode (Phase 3i) - the
+                // page's, and the Qt ones stay hidden behind them.
+                auto* railSlot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"));
+                auto* pillSlot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_pill"));
+                check(railSlot && pillSlot && !railSlot->isVisible() && !pillSlot->isVisible() &&
+                          waitFor([&] { return !js(page, "!!document.querySelector('[data-cluster=\"rail\"]') || !!document.querySelector('[data-pill]')").toBool(); }, 3000),
+                      "render mode takes the page's rail and pill away");
+                check(!window.findChild<ToolCluster*>()->isVisible() && !window.findChild<AppBar*>()->isVisible(),
+                      "and the Qt ones stay hidden");
+            }
             check(rv->width() == panel->minimumWidth() && rv->height() > 400,
                   QStringLiteral("at the Qt panel's own width, full height (%1 x %2)").arg(rv->width()).arg(rv->height()));
             check(waitFor([&] { return js(rv, "!!document.querySelector('.panel .title')").toBool(); }, 5000) &&
@@ -2118,6 +2419,8 @@ int main(int argc, char* argv[])
             }
 
             // A theme switch while render mode is on (Review Focus 3).
+            std::printf("[info] render tier %d (0 path tracing, 1 ray tracing, 2 shadows, 3 plain)\n",
+                        int(window.view()->renderModeTier()));
             const QString before = Themes::currentId();
             Themes::select(QStringLiteral("violet-glass-float"));
             pump(700);
@@ -2157,6 +2460,14 @@ int main(int argc, char* argv[])
             renderMode->trigger();
             pump(400);
             check(studio->dockedPanel() == nullptr && !renderMode->isChecked(), "leaving render mode undocks it");
+            {
+                auto* railSlot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"));
+                auto* pillSlot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_pill"));
+                check(railSlot && pillSlot && railSlot->isVisible() && pillSlot->isVisible() &&
+                          !window.findChild<ToolCluster*>()->isVisible() &&
+                          waitFor([&] { return js(page, "document.querySelectorAll('[data-cluster=\"rail\"] [data-chip]').length").toInt() == 10; }, 3000),
+                      "leaving render mode brings the page's rail and pill back, never the Qt ones");
+            }
         }
     }
 
@@ -2264,6 +2575,10 @@ int main(int argc, char* argv[])
         }
         check(window.statusBar()->isVisible() && !page->isVisible(),
               "the Qt status bar comes back and the dead page leaves the viewport");
+        if (ToolCluster* rail = window.findChild<ToolCluster*>())
+            check(rail->isVisible() && window.findChild<AppBar*>()->isVisible() && window.viewControls()->isVisible(),
+                  "the Qt rail, pill and view cluster come back in their places (Phase 3i)");
+        check(!window.shellBridge()->menu()->isOpen(), "and no menu stands open");
         TopoDS_Face live;
         for (TopExp_Explorer e(window.document().solids().front().shape, TopAbs_FACE); e.More(); e.Next()) {
             live = TopoDS::Face(e.Current());

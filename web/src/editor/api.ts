@@ -37,6 +37,10 @@ export interface ChromeApi {
   // card name, and whether it is shown - the overlay's call, not the page's.
   cards: Record<string, CardRect>;
   cardsChanged: Signal;
+  // Whether the page may animate (the viewport's switch; the suites turn it
+  // off) - Phase 3i, ruling R8.
+  animate?: boolean;
+  animateChanged?: Signal;
   // page -> C++
   reportHitRects(rects: Rect[]): void;
   // stamp: the change the toast names; C++ refuses it once the document has

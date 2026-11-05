@@ -108,6 +108,9 @@ public:
     QWidget* dockedPanel() const { return myDocked; }
     RenderFrameGuides* frame() const { return myFrame; }
     ToolChip* exitChip() const { return myExitChip; }
+    // The app bar's slide-away, so the window can hand it the HTML pill's
+    // slot while the chrome page draws the pill (Phase 3i).
+    CardSlide* barSlide() const { return myBarSlide; }
 
 private:
     // THE PANEL'S CONTROLS, wired to the viewport once. Every one of these is

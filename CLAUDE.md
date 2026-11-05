@@ -464,6 +464,42 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
     `DocumentModel` at once and the page a channel message later, and a drag aimed at row positions
     read in between landed one row off. chrome_smoke's waits compare the page's rows with the
     model's.
+- **The rail, the pill and the menus (Phase 3i, branch `rail-pill`): the last of Phase 3's
+  chrome.** Three slots take the Qt surfaces' places while the page is live - the pill
+  (`htmlCardSlot_pill`, the LeftEdge header, its size the PAGE's: `HtmlCardSlot::setContentSize`),
+  the rail (`htmlCardSlot_rail`, the spine, `setStretchable(true)` so a full-height theme can
+  stretch it - a fixed size refuses `resize()`) and the view cluster (`htmlCardSlot_view`). A slot's
+  `sizeHint()` is its card's natural size, so `minimumWidthBeside()` and the stacked minimum
+  height read the page's real card. `web/ShellBridge` (`shell`) lists the chips (registry id +
+  glyph), mirrors their actions through one `ActionWatch`, sends each glyph as an `IconSet`
+  alpha mask (`glyphMaskUrl()`, one glyph source) and triggers only its own chips' actions;
+  `session/MenuModel` (`menu`, headless) is the menu bar walked into a tree of QActions with
+  QMenu's keyboard rules, and a trigger that closes the menu FIRST and runs the action on the next
+  turn if it is still enabled. A theme's chip, menu and card numbers travel as `--shell-*`
+  custom properties (`Themes::shellCssTokens()`), never hand-copied into CSS; `applyTokens()`
+  removes a property the next theme does not send. Five rules this phase paid for:
+  - **A Qt menu shortcut fires only while a widget carrying its menu is VISIBLE.** Qt's matcher
+    walks a menu action up to its `QMenuBar` and refuses a hidden one, so hiding the Qt pill killed
+    every Ctrl+ shortcut. The pill's slot carries the six menus' `menuAction()`s: shortcuts fire
+    while the HTML pill shows, exactly as while the Qt one does (render mode hides both).
+  - **An open menu takes the keys through an application-wide filter, never the page.** Every
+    `ShortcutOverride` in its window is claimed and the menu's own keys go to `MenuModel::key()`
+    (ExtrudePreview's shape), so it needs no focus move and a Qt field keeps its focus. Alt+letter
+    is one `QShortcut` per title, enabled only while the page's pill shows (the hidden Qt bar would
+    otherwise answer too, and two answers run neither).
+  - **An open menu owns the pointer** (`EditorChrome::setMenuOpen`): the mask takes the whole
+    viewport, the view is raised, a press outside closes the menu and is swallowed, the pill stands
+    over the outside layer so another title switches menus, and the pill's ground stops answering
+    Caption. The caption hit test reads the pill slot and the title rectangles the page reports.
+  - **The slides follow the surface on screen** (`CardSlide::retarget()`): instant for a slot, and
+    the page flies its card in and out itself - a slot moved every frame would cost a mask and a
+    repaint per frame.
+  - **A test reaching the shortcut map needs Qt's active window, not the OS's**:
+    `QTest::keyClick()` runs the shortcut map, and `QApplication::setActiveWindow()` (deprecated,
+    Qt's own record only) is moved for the length of the press.
+  Out, staying Qt: the axis gizmo, the window buttons, the Add-shape flyout (placed beside the chip
+  rectangle the page reports) and the render Back chip. Found on the way and filed, not fixed:
+  T-083, a driver crash on a theme switch during a SECOND render-mode session.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a
@@ -602,6 +638,7 @@ Source files under `src/`, plus `tests/`:
 | `session/JointsModel.{h,cpp}` | the Joints drawer's model for the HTML card - rows broken first, open rows by joint id, hooks; Core + OCCT, tested by `joints_model_tests` |
 | `session/ItemsKeys.{h,cpp}` | the Items list's ONE key table (ruling D19): read by `ItemsPanel`, the shortcut sheet, `ItemsModel` and the chrome's list hold |
 | `session/ItemsModel.{h,cpp}` | the Items drawer's model for the HTML card - visible rows, folds, filter, marks, reveal, the row menu, key commands, a drag's dry run; writes nothing, every change through hooks; tested by `items_model_tests` |
+| `session/MenuModel.{h,cpp}` | the menu bar for the page - a tree of QActions, open levels, QMenu's keyboard rules, a trigger that closes first and runs on the next turn; tested by `menu_model_tests` |
 | `session/VersionsModel.{h,cpp}` | the Versions drawer's model for the HTML card - list, thumbnail URLs, default name, words, gates; the four requests through hooks; Core + Gui, tested by `versions_model_tests` |
 | `session/HubModel.{h,cpp}` | the library hub's logic for the HTML hub - lists, dates, create/rename/delete and their sentences; Core + Gui, tested by `hub_model_tests` |
 | `web/WebHost.{h,cpp}` | one HTML page in a `QWebEngineView`: profile, channel, qwebchannel.js, `pageUrl()`; `prepareApplication()` puts Qt Quick on OpenGL |
@@ -615,6 +652,7 @@ Source files under `src/`, plus `tests/`:
 | `session/ActionWatch.{h,cpp}` | a few actions' state for a page, one `changed()` per event-loop turn |
 | `ui/RenderSettingsCopy.{h,cpp}` | every word the render settings panel paints, once - read by the Qt panel and the page's bridge |
 | `web/RenderBridge.{h,cpp}` | the render page's `render` object over the Qt panel: layout, state, and slots that reach the panel's own edit path (both presets) |
+| `web/ShellBridge.{h,cpp}` | the page's `shell` object (web build): the rail's and view cluster's chips, glyph masks, the menus (`menu`), what the page measured; an open menu's key filter |
 | `web/RenderPage.{h,cpp}` | the render page's `WebHost` (web build): `render` + `theme`, whether it is live; `attach()` hands its view to a `RenderStudio` |
 | `web/SettingsBridge.{h,cpp}` | the page's `settings` object: layout, live spec, the rows' actions; edits land in `SettingsEdits`; triggers only its rows' actions |
 | `web/EditorChrome.{h,cpp}` | the editor's chrome as one page over the viewport - toast, status strip, the Settings, Versions and Joints cards; `ChromeBridge` is its channel object, the page's hit rects its mask |

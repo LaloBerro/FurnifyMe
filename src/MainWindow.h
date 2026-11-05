@@ -91,6 +91,9 @@ public:
     // The Items drawer's model on the chrome page (Phase 3h); null until
     // useHtmlChrome().
     class ItemsModel* itemsModel() const { return myItemsModel; }
+    // The rail, the view cluster, the pill and the menus on the chrome page
+    // (Phase 3i); null until useHtmlChrome().
+    class ShellBridge* shellBridge() const { return myShellBridge; }
     // Not = default (M1): a drawer drag still live when the window dies is
     // ended HERE, while the document and every member it reads are alive.
     // Left to member order, ~QWidget's own hide would reach
@@ -2415,6 +2418,21 @@ private:
     QWidget* itemsSurface() const;
     bool itemsCardLive() const;
     void syncItemsModel();
+    // The rail, the view cluster and the pill on the page (Phase 3i): slots in
+    // the Qt surfaces' places while the page is live, as the drawers' are.
+    class HtmlCardSlot* myRailSlot = nullptr;
+    class HtmlCardSlot* myViewSlot = nullptr;
+    class HtmlCardSlot* myPillSlot = nullptr;
+    class ShellBridge* myShellBridge = nullptr;
+    // Alt+F, Alt+S... - the hidden Qt menu bar's mnemonics, while the page's
+    // pill shows (ruling R6).
+    QList<class QShortcut*> myMenuShortcuts;
+    bool shellCardsLive() const;
+    QWidget* railSurface() const;
+    QWidget* pillSurface() const;
+    void syncMenuShortcuts();
+    // The viewport's minimum height, from whichever pill and rail stand.
+    void syncViewportMinimumHeight();
     // An item rename opened over whichever drawer is on screen.
     void beginItemRename(int id, bool isOutline);
     void beginFolderRename(int folderId);

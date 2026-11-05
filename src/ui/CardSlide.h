@@ -60,6 +60,15 @@ public:
     // What was last asked for - NOT the card's live visibility, which lags
     // by one flight on the way out.
     bool shown() const { return myShown; }
+    // Drives a different card from now on (migration Phase 3i): the HTML
+    // rail's or pill's slot while the chrome page draws it, the Qt card again
+    // when the page dies. What was asked for carries over and is applied to
+    // the new card at once; a live flight stops. `animated` false makes every
+    // later show and hide instant - a slot moving every frame would cost the
+    // page a mask and a repaint per frame, so the page animates its own card
+    // instead (ruling R8).
+    void retarget(QWidget* card, bool animated);
+    QWidget* card() const { return myCard; }
 
 private:
     // Re-aims a live flight at wherever relayout() has just put the card.
@@ -75,4 +84,5 @@ private:
     // finished handler know whether to hide at the end of it.
     bool myLeaving = false;
     bool myShown = false;
+    bool myAnimated = true;
 };

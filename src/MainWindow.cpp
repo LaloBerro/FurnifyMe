@@ -6,6 +6,7 @@
 #include "session/VersionsModel.h"
 #include "session/JointsModel.h"
 #include "session/ItemsModel.h"
+#include "session/MenuModel.h"
 #include "ui/HtmlCardSlot.h"
 #include "ui/ThemeDecor.h"
 #include "GridRenderer.h"
@@ -14,6 +15,7 @@
 #include "web/RenderPage.h"
 #include "web/WebHost.h"
 #include "web/SettingsBridge.h"
+#include "web/ShellBridge.h"
 #endif
 
 #include <cstdio>
@@ -100,6 +102,7 @@
 #include <QSequentialAnimationGroup>
 #include <QPushButton>
 #include <QSettings>
+#include <QShortcut>
 #include <QShowEvent>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -1037,9 +1040,31 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // wordmark, the pill's own empty ground - the menu bar is a real child
     // and stays clickable) answers Caption, which buys native drag,
     // double-click-to-maximize and the right-click system menu in one word.
-    WindowChrome::attach(this,
-                         WindowChrome::captionHitTest(this, myAppBar, myWindowButtons),
-                         myWindowButtons);
+    // In HTML-chrome mode the pill is the page's (Phase 3i, ruling R10): its
+    // ground drags the window as the Qt pill's does, its titles do not, and
+    // nothing does while a menu is open - the menu's outside layer takes the
+    // press. The maximize chip still answers first.
+    {
+        auto qtHit = WindowChrome::captionHitTest(this, myAppBar, myWindowButtons);
+        WindowChrome::attach(
+            this,
+            [this, qtHit](const QPoint& p) {
+                const WindowChrome::Hit hit = qtHit(p);
+#ifdef FURNIFYME_WEB_UI
+                if (hit != WindowChrome::Hit::MaxButton && myPillSlot && myShellBridge && shellCardsLive() &&
+                    myPillSlot->isVisible()) {
+                    const QPoint at = myView->mapFrom(this, p);
+                    if (!myPillSlot->geometry().contains(at)) return hit;
+                    if (myShellBridge->menu()->isOpen()) return WindowChrome::Hit::Client;
+                    for (const QRect& title : myShellBridge->titleRects())
+                        if (title.contains(at)) return WindowChrome::Hit::Client;
+                    return WindowChrome::Hit::Caption;
+                }
+#endif
+                return hit;
+            },
+            myWindowButtons);
+    }
 
     myShortcutSheet = new ShortcutSheet(this);
     connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
@@ -2283,7 +2308,7 @@ void MainWindow::buildAppBar(QMenuBar* menus)
 
 void MainWindow::syncViewportMinimumWidth()
 {
-    if (!myView || !myAppBar || !myWindowButtons) return;
+    if (!myView || !pillSurface() || !myWindowButtons) return;
     // THE TOP ROW: the pill leads the left column at the rail's own margin,
     // the window buttons hold the top-right corner, and nothing in between
     // may cover a menu title. Derived from the two widgets' own sizeHint()s
@@ -2291,7 +2316,7 @@ void MainWindow::syncViewportMinimumWidth()
     // minimum height's rule, sideways. The window follows its central
     // widget's minimum, so a QMainWindow that is narrower grows to it.
     myView->setMinimumWidth(ViewportOverlay::minimumWidthBeside(
-        myAppBar, ViewportOverlay::Anchor::LeftEdge, myWindowButtons));
+        pillSurface(), ViewportOverlay::Anchor::LeftEdge, myWindowButtons));
 }
 
 void MainWindow::buildOverlay()
@@ -2428,6 +2453,16 @@ void MainWindow::buildOverlay()
         // way every control in this shell is.
         QPoint at(rail->geometry().right() + ViewportOverlay::kStackGap,
                   rail->geometry().top());
+#ifdef FURNIFYME_WEB_UI
+        // The page's rail: beside the chip where the page says it stands.
+        if (QWidget* surface = railSurface(); surface && surface != rail && myShellBridge) {
+            at = QPoint(surface->geometry().right() + ViewportOverlay::kStackGap, surface->geometry().top());
+            const QRect chip = myShellBridge->chipRect(ActionRegistry::idFor(myAddShapeAction->text()));
+            if (!chip.isEmpty()) at.setY(chip.top());
+            myShapeFlyout->openAt(at);
+            return;
+        }
+#endif
         for (ToolChip* chip : rail->findChildren<ToolChip*>()) {
             if (chip->action() == myAddShapeAction) {
                 at.setY(chip->mapTo(myView, QPoint(0, 0)).y());
@@ -2459,7 +2494,7 @@ void MainWindow::buildOverlay()
         myView, myOverlay,
         [this]() -> QRect {
             if (QWidget* items = itemsSurface(); items && items->isVisible()) return items->geometry();
-            if (myRail && myRail->isVisible()) return myRail->geometry();
+            if (QWidget* rail = railSurface(); rail && rail->isVisible()) return rail->geometry();
             return QRect();
         },
         [this]() -> QString {
@@ -10538,6 +10573,39 @@ void MainWindow::useHtmlChrome()
     // Until the page says it is listening, and for good once it dies, the
     // Qt toast and status bar carry every report (review I3).
     connect(myHtmlChrome, &EditorChrome::liveChanged, this, [this](bool live) {
+        // THE SHELL FIRST (Phase 3i): the pill, the rail and the view cluster
+        // trade places with their slots exactly as the drawers do below. The
+        // slides that show and hide the pill and the rail follow whichever
+        // card is on screen - instant for a slot, whose card the page
+        // animates itself (ruling R8).
+        if (myOverlay && myPillSlot && myAppBar) {
+            if (live) myOverlay->replaceWidget(myAppBar, myPillSlot);
+            else myOverlay->replaceWidget(myPillSlot, myAppBar);
+            if (myStudio && myStudio->barSlide()) {
+                if (live) myStudio->barSlide()->retarget(myPillSlot, false);
+                else myStudio->barSlide()->retarget(myAppBar, true);
+            } else {
+                (live ? static_cast<QWidget*>(myPillSlot) : myAppBar)->show();
+            }
+        }
+        if (myOverlay && myRailSlot && myRail) {
+            if (live) myOverlay->replaceWidget(myRail, myRailSlot);
+            else myOverlay->replaceWidget(myRailSlot, myRail);
+            if (myRailSlide) {
+                if (live) myRailSlide->retarget(myRailSlot, false);
+                else myRailSlide->retarget(myRail, true);
+            }
+        }
+        if (myOverlay && myViewSlot && myViewControls) {
+            // Never hidden by render mode - shown whenever it is anchored.
+            if (live) myOverlay->replaceWidget(myViewControls, myViewSlot);
+            else myOverlay->replaceWidget(myViewSlot, myViewControls);
+            (live ? static_cast<QWidget*>(myViewSlot) : myViewControls)->show();
+        }
+        if (!live && myShellBridge) myShellBridge->menu()->close();
+        syncViewportMinimumHeight();
+        syncViewportMinimumWidth();
+        syncMenuShortcuts();
         // The card's place follows the page: the slot while it can draw,
         // the Qt drawer back in its anchor when it cannot.
         if (myOverlay && mySettingsSlot && myAppearancePanel) {
@@ -10714,6 +10782,90 @@ void MainWindow::useHtmlChrome()
     });
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncItemsModel);
     syncItemsModel();
+
+    // THE RAIL, THE VIEW CLUSTER, THE PILL AND THE MENUS (Phase 3i): three
+    // slots in the Qt surfaces' places - the rail's stretchable, as the
+    // LeftEdge spine is; the pill's sized by the page - over ShellBridge,
+    // whose chips are the very actions the Qt chips mirror and whose menus
+    // are the Qt menu bar's own.
+    if (myOverlay && myRail && myViewControls && myAppBar && myAppBar->menus()) {
+        myPillSlot = new HtmlCardSlot(QStringLiteral("pill"), myAppBar->sizeHint(), myView);
+        myPillSlot->hide();
+        myHtmlChrome->addCard(myPillSlot);
+        myRailSlot = new HtmlCardSlot(QStringLiteral("rail"), myRail->sizeHint(), myView);
+        myRailSlot->setStretchable(true);
+        myRailSlot->hide();
+        myHtmlChrome->addCard(myRailSlot);
+        myViewSlot = new HtmlCardSlot(QStringLiteral("view"), myViewControls->sizeHint(), myView);
+        myViewSlot->hide();
+        myHtmlChrome->addCard(myViewSlot);
+
+        auto chip = [](QAction* action, IconSet::Glyph glyph, const char* name) {
+            return ShellBridge::Chip{action, glyph, QString::fromLatin1(name)};
+        };
+        const ShellBridge::Chip separator;
+        std::vector<ShellBridge::Chip> rail = {
+            chip(myItemsPanelAction, IconSet::Glyph::Items, "items"), separator,
+            chip(myStartSketchAction, IconSet::Glyph::Sketch, "sketch"),
+            chip(myExtrudeAction, IconSet::Glyph::Extrude, "extrude"),
+            chip(myAddShapeAction, IconSet::Glyph::Shapes, "shapes"), separator,
+            chip(myUnionAction, IconSet::Glyph::Fuse, "union"),
+            chip(mySubtractAction, IconSet::Glyph::Cut, "subtract"),
+            chip(myIntersectAction, IconSet::Glyph::Intersect, "intersect"), separator,
+            chip(myDeleteAction, IconSet::Glyph::Delete, "delete"), separator,
+            chip(myUndoAction, IconSet::Glyph::Undo, "undo"),
+            chip(myRedoAction, IconSet::Glyph::Redo, "redo")};
+        std::vector<ShellBridge::Chip> view = {
+            chip(myOrthographicAction, IconSet::Glyph::Projection, "projection"),
+            chip(myDisplayModeAction, IconSet::Glyph::Wireframe, "wireframe"),
+            chip(myFitAction, IconSet::Glyph::FitAll, "fitAll")};
+        myShellBridge = new ShellBridge(&mySession.actions(), std::move(rail), std::move(view), myAppBar->menus(),
+                                        this, myHtmlChrome);
+        myHtmlChrome->registerObject(QStringLiteral("shell"), myShellBridge);
+        myHtmlChrome->registerObject(QStringLiteral("menu"), myShellBridge->menu());
+        // R5: every menu shortcut fires while the page's pill shows, exactly
+        // as it fires while the Qt pill does - Qt matches a menu action's
+        // shortcut only while a widget carrying its menu is visible, and the
+        // Qt menu bar is hidden with the Qt pill.
+        myPillSlot->addActions(myShellBridge->menuActions());
+        // The pill measures itself (R9): its row in the page's own font.
+        connect(myShellBridge, &ShellBridge::pillReported, this, [this](int w, int h) {
+            if (myPillSlot) myPillSlot->setContentSize(QSize(w, h));
+        });
+        connect(myPillSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+            if (myOverlay) myOverlay->relayout();
+            syncViewportMinimumHeight();
+            syncViewportMinimumWidth();
+        });
+        connect(myPillSlot, &HtmlCardSlot::placed, this, &MainWindow::syncMenuShortcuts);
+        // R7: an open menu takes the whole viewport's pointer and stands over
+        // every Qt card; it closes when a question is asked over it.
+        connect(myShellBridge->menu(), &MenuModel::openChanged, this, [this](bool open) {
+            if (myHtmlChrome) myHtmlChrome->setMenuOpen(open);
+        });
+        connect(this, &MainWindow::appStateChanged, this, [this] {
+            if (!myShellBridge || !myShellBridge->menu()->isOpen()) return;
+            const bool asking = isAskingBeforeClose() || (myNameCard && myNameCard->isAsking());
+            if (asking || !pillSurface() || !pillSurface()->isVisible()) myShellBridge->menu()->close();
+        });
+        // R6: Alt+letter opens that menu, as the Qt menu bar's mnemonics do.
+        const QVariantList titles = myShellBridge->menu()->titles();
+        for (int i = 0; i < titles.size(); ++i) {
+            const QString title = titles.at(i).toMap().value(QStringLiteral("title")).toString();
+            const int at = titles.at(i).toMap().value(QStringLiteral("mnemonicAt")).toInt();
+            if (at < 0 || at >= title.size()) continue;
+            const QChar letter = title.at(at).toUpper();
+            if (letter < QLatin1Char('A') || letter > QLatin1Char('Z')) continue;
+            const int key = Qt::Key_A + (letter.unicode() - u'A');
+            auto* shortcut = new QShortcut(QKeySequence(QKeyCombination(Qt::AltModifier, Qt::Key(key))), this);
+            shortcut->setContext(Qt::WindowShortcut);
+            shortcut->setEnabled(false);
+            connect(shortcut, &QShortcut::activated, this, [this, i] {
+                if (myShellBridge && shellCardsLive()) myShellBridge->menu()->openMenu(i, true);
+            });
+            myMenuShortcuts << shortcut;
+        }
+    }
     myHtmlChrome->start();
     connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);
@@ -10791,6 +10943,43 @@ QWidget* MainWindow::itemsSurface() const
 
 bool MainWindow::itemsCardLive() const { return myItemsSlot && myItemsModel && htmlChromeLive(); }
 
+bool MainWindow::shellCardsLive() const { return myPillSlot && myShellBridge && htmlChromeLive(); }
+
+QWidget* MainWindow::railSurface() const
+{
+    // settingsSurface()'s rule: the page's card only while the page can draw it.
+    if (myRailSlot && htmlChromeLive()) return myRailSlot;
+    return myRail;
+}
+
+QWidget* MainWindow::pillSurface() const
+{
+    if (myPillSlot && htmlChromeLive()) return myPillSlot;
+    return myAppBar;
+}
+
+void MainWindow::syncMenuShortcuts()
+{
+    // Only while the page's pill shows: with the Qt pill up its own menu bar
+    // answers Alt+letter, and two answers to one key is an ambiguity Qt
+    // resolves by running neither.
+    const bool on = shellCardsLive() && myPillSlot->isVisible();
+    for (QShortcut* shortcut : myMenuShortcuts) shortcut->setEnabled(on);
+}
+
+void MainWindow::syncViewportMinimumHeight()
+{
+    // buildOverlay()'s stacked sum, read off whichever pill and rail stand -
+    // a slot answers its card's natural size (HtmlCardSlot::sizeHint()).
+    QWidget* pill = pillSurface();
+    QWidget* rail = railSurface();
+    if (!pill || !rail || !myView) return;
+    myViewMinimumHeight = pill->sizeHint().height() + ViewportOverlay::kStackGap + rail->sizeHint().height() +
+                          2 * ViewportOverlay::kEdgeMargin;
+    syncHtmlChromeInset();
+    if (!myHtmlChrome) myView->setMinimumHeight(myViewMinimumHeight);
+}
+
 void MainWindow::syncItemsModel()
 {
     if (!myItemsModel) return;
@@ -10867,6 +11056,10 @@ void MainWindow::syncHtmlChrome()
 {
 #ifdef FURNIFYME_WEB_UI
     if (!myHtmlChrome) return;
+    // Whether the page may animate follows the viewport's switch, which a
+    // suite turns off after the page has started loading (Phase 3i, R8).
+    myHtmlChrome->bridge()->setAnimate(myView->animationsEnabled());
+    syncMenuShortcuts();
     // The status bar, as the hidden Qt bar holds it. The state label's
     // TOOLTIP is its whole sentence (its text is elided to the Qt bar's room;
     // the strip elides for itself).

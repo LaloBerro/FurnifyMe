@@ -40,6 +40,10 @@ class ChromeBridge : public QObject
     Q_PROPERTY(QVariantMap status READ status NOTIFY statusChanged)
     Q_PROPERTY(QVariantMap cards READ cards NOTIFY cardsChanged)
     Q_PROPERTY(QVariantMap question READ question NOTIFY questionChanged)
+    // Whether the page may animate (the viewport's switch: the suites turn it
+    // off). The rail and the pill fly in and out on the page's own clock while
+    // it does (Phase 3i, ruling R8).
+    Q_PROPERTY(bool animate READ animate NOTIFY animateChanged)
 public:
     using QObject::QObject;
     bool undoEnabled() const { return myUndoEnabled; }
@@ -50,6 +54,8 @@ public:
     // discard, keep, keepKey}. Also sent WITH questionChanged, which a page
     // must not wait a batch for.
     QVariantMap question() const { return myQuestion; }
+    bool animate() const { return myAnimate; }
+    void setAnimate(bool on);
     void setQuestionMap(const QVariantMap& map);
     const QVector<QRect>& hitRects() const { return myHitRects; }
 
@@ -71,6 +77,7 @@ signals:
     void statusChanged();
     void cardsChanged();
     void questionChanged(const QVariantMap& question);
+    void animateChanged();
     // Observed on the C++ side
     void questionAnswered(const QString& which);
     void nameQuestionAnswered(const QString& which, const QString& name);
@@ -123,6 +130,7 @@ public:
 
 private:
     QVariantMap myQuestion;
+    bool myAnimate = true;
     bool myUndoEnabled = true;
     QVariantList myObstacles;
     QVariantMap myStatus;
@@ -170,6 +178,11 @@ public:
     // card, so its wash takes every press (Phase 3f, ruling R2). One at a
     // time: MainWindow::syncHtmlQuestion() picks which (Phase 3g, R2).
     void setQuestion(bool asking, const QVariantMap& words);
+    // A menu stands open (Phase 3i, ruling R7): the mask takes the whole
+    // viewport at once and the view is raised, so a press anywhere reaches
+    // the page's outside layer, which closes the menu and swallows it.
+    void setMenuOpen(bool open);
+    bool menuOpen() const { return myMenuOpen; }
 
     ChromeBridge* bridge() const { return myBridge; }
     WebHost* host() const { return myHost; }
@@ -210,6 +223,7 @@ private:
     // The close question stands (Phase 3f review I3): the mask takes the whole
     // viewport at once, without waiting for the page to draw and report.
     bool myAsking = false;
+    bool myMenuOpen = false;
     bool myHoldsKeyboard = false;
     // How many of the page's fields hold the keyboard. Moving from field A
     // to field B arrives as B's claim THEN A's release (the browser's

@@ -25,6 +25,19 @@ public:
     // The page measured its card (Phase 3c: the Versions drawer grows with
     // its list). Rounded through Theme::wholeDevicePixels(); the width stays.
     void setContentHeight(int logicalHeight);
+    // The page measured both (Phase 3i: the pill's row is as wide as its menu
+    // titles in the page's own font). Emits contentHeightChanged() too - the
+    // overlay relays out either way.
+    void setContentSize(QSize logicalSize);
+    // A slot the overlay may stretch past its natural size (Phase 3i: the
+    // rail is the LeftEdge spine, as tall as the viewport in a theme whose
+    // rail runs full height). Its natural size stays the minimum and the
+    // sizeHint; resize() reaches it, where a fixed size would refuse.
+    void setStretchable(bool stretchable);
+    // The natural size - the Qt card's, or what the page last measured -
+    // never the stretched one, so minimum-size derivations that read
+    // sizeHint() read the card, not the window.
+    QSize sizeHint() const override { return myNatural; }
 
 signals:
     // Moved, resized, shown or hidden - the page re-reads the rectangle.
@@ -40,5 +53,9 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private:
+    void applyNatural();
+
     QString myName;
+    QSize myNatural;
+    bool myStretchable = false;
 };

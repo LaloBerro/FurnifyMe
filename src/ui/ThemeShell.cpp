@@ -481,19 +481,30 @@ QVariantMap shellCssTokens(const Shell& shell)
         t.insert(QStringLiteral("--shell-chip-size"), cssPx(c.size));
         t.insert(QStringLiteral("--shell-chip-radius"), cssPx(c.radius));
         t.insert(QStringLiteral("--shell-chip-edge-width"), cssPx(c.edgeWidth));
-        putColour(t, "--shell-chip-idle-fill", c.idleFill);
-        putColour(t, "--shell-chip-idle-edge", c.idleEdge);
+        // ToolChip's theme branch paints NO fill and NO edge where a colour is
+        // absent, so those cross as transparent - never left to the page's
+        // Graphite fallbacks. An absent ink keeps the fallback, as the
+        // painter keeps Theme::text() / textDisabled().
+        const auto orClear = [](const QColor& c) { return c.isValid() ? c : QColor(0, 0, 0, 0); };
+        putColour(t, "--shell-chip-idle-fill", orClear(c.idleFill));
+        putColour(t, "--shell-chip-idle-edge", orClear(c.idleEdge));
         putColour(t, "--shell-chip-idle-ink", c.idleInk);
-        putColour(t, "--shell-chip-hover-fill", c.hoverFill);
-        putColour(t, "--shell-chip-hover-edge", c.hoverEdge);
-        putColour(t, "--shell-chip-hover-ink", c.hoverInk);
+        putColour(t, "--shell-chip-hover-fill", orClear(c.hoverFill));
+        putColour(t, "--shell-chip-hover-edge", orClear(c.hoverEdge));
+        putColour(t, "--shell-chip-hover-ink", c.hoverInk.isValid() ? c.hoverInk : c.idleInk);
         putColour(t, "--shell-chip-on-top", c.onTop);
         putColour(t, "--shell-chip-on-bottom", c.onBottom);
-        putColour(t, "--shell-chip-on-edge", c.onEdge);
+        putColour(t, "--shell-chip-on-edge", orClear(c.onEdge));
         putColour(t, "--shell-chip-on-ink", c.onInk);
-        putColour(t, "--shell-chip-on-inner-top", c.onInnerTop);
+        putColour(t, "--shell-chip-on-inner-top", orClear(c.onInnerTop));
         putColour(t, "--shell-chip-off-ink", c.offInk);
-        putColour(t, "--shell-chip-off-edge", c.offEdge);
+        putColour(t, "--shell-chip-off-edge", orClear(c.offEdge));
+        // What Graphite draws and a theme's chip does not: the disabled
+        // chip's darker fill and the checked chip's inset accent ring. The
+        // glyph is 18 px on a theme's chip, 16 on Graphite's.
+        t.insert(QStringLiteral("--shell-chip-off-fill"), QStringLiteral("transparent"));
+        t.insert(QStringLiteral("--shell-chip-on-ring"), QStringLiteral("transparent"));
+        t.insert(QStringLiteral("--shell-chip-glyph"), QStringLiteral("18px"));
     }
     if (const Menu& m = shell.menu; m.on) {
         t.insert(QStringLiteral("--shell-menu-weight"), QString::number(m.weight));

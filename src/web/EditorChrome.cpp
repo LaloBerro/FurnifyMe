@@ -76,6 +76,13 @@ void ChromeBridge::nameQuestionEdited(const QString& name)
     emit nameQuestionTyped(name);
 }
 
+void ChromeBridge::setAnimate(bool on)
+{
+    if (on == myAnimate) return;
+    myAnimate = on;
+    emit animateChanged();
+}
+
 void ChromeBridge::setCardMap(const QVariantMap& map)
 {
     if (myCards == map) return;
@@ -202,6 +209,7 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
 void EditorChrome::start()
 {
     if (myHost->loaded()) return;
+    if (myViewport) myBridge->setAnimate(myViewport->animationsEnabled());
     myHost->load(WebHost::pageUrl(QStringLiteral("editor")));
 }
 
@@ -434,6 +442,15 @@ void EditorChrome::setQuestion(bool asking, const QVariantMap& words)
     if (asking) myHost->view()->raise();
 }
 
+void EditorChrome::setMenuOpen(bool open)
+{
+    if (!myLive) open = false;
+    if (open == myMenuOpen) return;
+    myMenuOpen = open;
+    applyMask();
+    if (open) myHost->view()->raise();
+}
+
 void EditorChrome::setLive(bool live)
 {
     if (myLive == live) return;
@@ -442,6 +459,7 @@ void EditorChrome::setLive(bool live)
     // keep swallowing presses on the strip's band over nothing at all.
     if (!live) {
         myAsking = false;
+        myMenuOpen = false;
         dropKeyboard();
         dropListHolds();
         myHost->view()->hide();
@@ -473,7 +491,7 @@ void EditorChrome::applyMask()
     // While the close question stands, every press over the viewport is the
     // page's from the moment it is asked - the Qt card has already stopped
     // swallowing, and the page's own wash arrives a render and a report later.
-    if (myAsking && myViewport) region += myViewport->rect();
+    if ((myAsking || myMenuOpen) && myViewport) region += myViewport->rect();
     myHitRegion = region;
     // An empty region would CLEAR the mask - the whole page taking the
     // pointer. One pixel outside the widget is a mask that contains nothing.

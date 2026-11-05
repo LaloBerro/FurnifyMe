@@ -334,6 +334,7 @@ if(FURNIFYME_BUILD_APP)
         src/web/ThemeBridge.cpp
         src/web/HubWindow.cpp
         src/web/EditorChrome.cpp
+        src/web/ShellBridge.cpp
         src/web/RenderPage.cpp
         src/web/WebOverlay.cpp
       )
@@ -384,7 +385,7 @@ if(FURNIFYME_BUILD_APP)
       add_executable(hub_smoke tests/hub_smoke.cpp)
       target_link_libraries(hub_smoke PRIVATE furnify_app)
       add_executable(chrome_smoke tests/chrome_smoke.cpp)
-      target_link_libraries(chrome_smoke PRIVATE furnify_app)
+      target_link_libraries(chrome_smoke PRIVATE furnify_app Qt6::Test)
       if(WIN32)
         target_link_libraries(chrome_smoke PRIVATE dbghelp)
       endif()

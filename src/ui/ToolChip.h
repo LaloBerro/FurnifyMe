@@ -38,6 +38,11 @@ public:
     // controls.
     enum class ChipMode { Labelled, IconOnly };
 
+    // An icon-only chip's tooltip, composed from its action's own two strings
+    // (see syncFromAction()) - also what the HTML rail's chips carry (Phase
+    // 3i), so the two rails cannot word a tool differently.
+    static QString iconOnlyTip(const QAction* action);
+
     ToolChip(QAction* action, IconSet::Glyph glyph,
              ChipMode mode = ChipMode::Labelled, QWidget* parent = nullptr);
 

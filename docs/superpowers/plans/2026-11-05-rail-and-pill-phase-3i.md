@@ -214,4 +214,28 @@ TypeScript + Vite, vitest + jsdom.
 - [ ] Opus whole-branch review; fix Critical and Important findings test-first; build both presets.
 - [ ] Board card done with notes; nothing merged.
 
+## Ledger (rulings made while executing)
+
+- **R7 revised: the menu's keys never reach the page.** An open menu installs an
+  application-wide filter for its window (`ShellBridge::eventFilter`, ExtrudePreview's shape):
+  every `ShortcutOverride` is claimed and the menu's own keys go straight to `MenuModel::key()`.
+  Planned as a page keyboard claim; the filter needs no focus move (the suite's windows are never
+  active) and works with focus left in a Qt field. *Cost if wrong:* none found - Escape, arrows,
+  Enter, letters and Alt+letter are pinned in chrome_smoke.
+- **R8 revised: the page plays the entrance on mount.** When the page goes live the Qt rail and
+  pill are hidden at once and the page's fly in (animations on); `playShellEntrance()` still plays
+  on the Qt cards before that. *Cost if wrong:* a frame of Qt chrome before the page's at startup.
+- **Theme shell numbers grew three keys** (`--shell-chip-off-fill`, `--shell-chip-on-ring`,
+  `--shell-chip-glyph`) for what Graphite paints and a theme's chip does not, and a chip colour a
+  theme leaves out crosses as transparent - ToolChip's theme branch paints nothing there.
+- **The pill follows the theme's card radius** (`Themes::paintCard()` clamps it to half the short
+  side: Ultraviolet's is square), not always a full pill.
+- **Menus are opaque under the theme's glass.** A nearly-opaque card fill let a card's words show
+  through the entries (Violet's first capture).
+- **The render-mode checks moved into the render page's block.** Entering render mode in the shell
+  block and again later made a theme switch in the second session crash in the GL driver
+  (`renderShadowMap` -> `clearMemoryGL`), on this machine's Shadows tier; with one render session
+  per run the same switches pass. Not caused by anything this phase draws (A/B on one binary:
+  skipping only the early toggle passes 357/357). Filed as T-083 rather than fixed here.
+
 ## Gate record
