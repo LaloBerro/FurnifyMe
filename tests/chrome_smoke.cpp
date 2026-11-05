@@ -1898,6 +1898,15 @@ int main(int argc, char* argv[])
                       "Delete with a menu open deletes nothing - the menu holds every key");
                 menu->close();
                 pump(100);
+                // Not vacuous: the same press with no menu open deletes.
+                window.view()->setSelectedSolids({window.document().solids().front().id});
+                pump(100);
+                withActive([&] { QTest::keyClick(window.view(), Qt::Key_Delete, Qt::NoModifier); });
+                pump(100);
+                check(static_cast<int>(window.document().solids().size()) == bodiesBefore - 1,
+                      "and the same Delete with no menu open deletes the body");
+                if (undoAction) undoAction->trigger();
+                pump(200);
             }
             {
                 // View -> Theme -> a theme, by the model's own gestures (the

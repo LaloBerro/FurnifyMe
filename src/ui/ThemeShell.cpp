@@ -485,7 +485,7 @@ QVariantMap shellCssTokens(const Shell& shell)
         // absent, so those cross as transparent - never left to the page's
         // Graphite fallbacks. An absent ink keeps the fallback, as the
         // painter keeps Theme::text() / textDisabled().
-        const auto orClear = [](const QColor& c) { return c.isValid() ? c : QColor(0, 0, 0, 0); };
+        const auto orClear = [](const QColor& c) { return c.isValid() ? c : QColor(Qt::transparent); };
         putColour(t, "--shell-chip-idle-fill", orClear(c.idleFill));
         putColour(t, "--shell-chip-idle-edge", orClear(c.idleEdge));
         putColour(t, "--shell-chip-idle-ink", c.idleInk);
