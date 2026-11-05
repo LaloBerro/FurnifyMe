@@ -1,5 +1,7 @@
 #include "IconSet.h"
 
+#include <QBuffer>
+
 #include "Theme.h"
 
 #include <QPainter>
@@ -343,6 +345,20 @@ QPixmap render(Glyph glyph, const QColor& colour, int size)
 }
 
 }  // namespace
+
+QImage glyphMask(Glyph glyph, int px)
+{
+    return render(glyph, Qt::white, px).toImage().convertToFormat(QImage::Format_ARGB32);
+}
+
+QString glyphMaskUrl(Glyph glyph, int px)
+{
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    glyphMask(glyph, px).save(&buffer, "PNG");
+    return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(bytes.toBase64());
+}
 
 QIcon icon(Glyph glyph)
 {

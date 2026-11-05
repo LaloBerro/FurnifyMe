@@ -2,6 +2,7 @@
 
 #include "Theme.h"
 #include "Themes.h"
+#include "ThemeShell.h"
 
 #include <QFont>
 
@@ -51,6 +52,11 @@ QVariantMap ThemeBridge::tokens() const
     // The theme in use (T-072): its id, which the page puts on <html> for the
     // whole style in themes.css, and its page-only tokens.
     t.insert(QStringLiteral("--theme"), Themes::currentId());
+    // The theme's shell numbers for the rail, the pill and the menus (Phase
+    // 3i, ruling R3), and the chips' stroke - Graphite's chip border width.
+    const QVariantMap shell = Themes::shellCssTokens(Themes::shell());
+    for (auto it = shell.cbegin(); it != shell.cend(); ++it) t.insert(it.key(), it.value());
+    t.insert(QStringLiteral("--chip-stroke"), QStringLiteral("%1px").arg(Theme::chipStrokePx()));
     const QVariantMap page = Themes::pageTokens(Themes::currentId());
     for (auto it = page.cbegin(); it != page.cend(); ++it)
         t.insert(QStringLiteral("--") + it.key(), it.value().toString());

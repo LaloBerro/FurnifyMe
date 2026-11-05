@@ -33,6 +33,15 @@ describe('the theme on the page', () => {
     expect(document.documentElement.dataset.theme).toBe('graphite');
   });
 
+  it("drops a theme's --shell- numbers when the next theme sends none (Phase 3i)", () => {
+    applyTokens({ '--theme': 'violet-glass-float', '--shell-chip-size': '42px', '--accent': '#6a00ff' });
+    const root = document.documentElement.style;
+    expect(root.getPropertyValue('--shell-chip-size')).toBe('42px');
+    applyTokens({ '--theme': 'graphite', '--accent': '#6a00ff' });
+    expect(root.getPropertyValue('--shell-chip-size')).toBe('');
+    expect(root.getPropertyValue('--accent')).toBe('#6a00ff');
+  });
+
   it('every theme but Graphite has a block, and Graphite has none', () => {
     for (const id of ids) {
       if (id === 'graphite') expect(Object.keys(block(id))).toHaveLength(0);

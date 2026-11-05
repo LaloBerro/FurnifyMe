@@ -19,6 +19,7 @@
 // tint unblurred.
 
 #include <QColor>
+#include <QVariantMap>
 #include <QImage>
 #include <QJsonObject>
 #include <QPointF>
@@ -215,6 +216,12 @@ struct Shell {
 
 // Parses a theme's "shell" object; an empty object gives every part off.
 Shell parseShell(const QJsonObject& o);
+// The shell's numbers a page draws the rail, the pill and the menus with
+// (migration Phase 3i, ruling R3): "--shell-chip-*", "--shell-menu-*",
+// "--shell-card-radius" and "--shell-rail-full", for each part that is on.
+// Graphite's shell has every part off and gives none - the page's CSS
+// fallbacks are Graphite's Qt paint.
+QVariantMap shellCssTokens(const Shell& shell);
 // "#rrggbb", "#aarrggbb" or "rgba(r,g,b,a)" - the mockups' own spellings.
 QColor parseColour(const QString& text);
 

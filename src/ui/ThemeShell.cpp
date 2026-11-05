@@ -451,4 +451,65 @@ QImage renderBackdrop(const Backdrop& b, QSize size, const QColor& viewport)
     return out;
 }
 
+namespace {
+QString cssColour(const QColor& c)
+{
+    // rgba() with the alpha as CSS writes it: 1 for opaque, else up to three
+    // decimals without trailing zeros (0.6, not 0.600).
+    QString alpha = QString::number(c.alphaF(), 'f', 3);
+    while (alpha.contains(QLatin1Char('.')) && alpha.endsWith(QLatin1Char('0'))) alpha.chop(1);
+    if (alpha.endsWith(QLatin1Char('.'))) alpha.chop(1);
+    return QStringLiteral("rgba(%1, %2, %3, %4)").arg(c.red()).arg(c.green()).arg(c.blue()).arg(alpha);
+}
+QString cssPx(double v)
+{
+    QString n = QString::number(v, 'f', 2);
+    while (n.contains(QLatin1Char('.')) && n.endsWith(QLatin1Char('0'))) n.chop(1);
+    if (n.endsWith(QLatin1Char('.'))) n.chop(1);
+    return n + QStringLiteral("px");
+}
+void putColour(QVariantMap& t, const char* name, const QColor& c)
+{
+    if (c.isValid()) t.insert(QString::fromLatin1(name), cssColour(c));
+}
+}  // namespace
+
+QVariantMap shellCssTokens(const Shell& shell)
+{
+    QVariantMap t;
+    if (const Chip& c = shell.chip; c.on) {
+        t.insert(QStringLiteral("--shell-chip-size"), cssPx(c.size));
+        t.insert(QStringLiteral("--shell-chip-radius"), cssPx(c.radius));
+        t.insert(QStringLiteral("--shell-chip-edge-width"), cssPx(c.edgeWidth));
+        putColour(t, "--shell-chip-idle-fill", c.idleFill);
+        putColour(t, "--shell-chip-idle-edge", c.idleEdge);
+        putColour(t, "--shell-chip-idle-ink", c.idleInk);
+        putColour(t, "--shell-chip-hover-fill", c.hoverFill);
+        putColour(t, "--shell-chip-hover-edge", c.hoverEdge);
+        putColour(t, "--shell-chip-hover-ink", c.hoverInk);
+        putColour(t, "--shell-chip-on-top", c.onTop);
+        putColour(t, "--shell-chip-on-bottom", c.onBottom);
+        putColour(t, "--shell-chip-on-edge", c.onEdge);
+        putColour(t, "--shell-chip-on-ink", c.onInk);
+        putColour(t, "--shell-chip-on-inner-top", c.onInnerTop);
+        putColour(t, "--shell-chip-off-ink", c.offInk);
+        putColour(t, "--shell-chip-off-edge", c.offEdge);
+    }
+    if (const Menu& m = shell.menu; m.on) {
+        t.insert(QStringLiteral("--shell-menu-weight"), QString::number(m.weight));
+        t.insert(QStringLiteral("--shell-menu-text"), cssPx(m.textPx));
+        putColour(t, "--shell-menu-ink", m.ink);
+        putColour(t, "--shell-menu-hover", m.hover);
+        t.insert(QStringLiteral("--shell-menu-item-radius"), cssPx(m.itemRadius));
+        t.insert(QStringLiteral("--shell-menu-item-pad-x"), cssPx(m.itemPadX));
+        t.insert(QStringLiteral("--shell-menu-wordmark-size"), cssPx(m.wordmarkPx));
+        t.insert(QStringLiteral("--shell-menu-wordmark-weight"), QString::number(m.wordmarkWeight));
+    }
+    if (const Card& c = shell.card; c.on) {
+        t.insert(QStringLiteral("--shell-card-radius"), cssPx(c.radius));
+        t.insert(QStringLiteral("--shell-rail-full"), c.railFull ? QStringLiteral("1") : QStringLiteral("0"));
+    }
+    return t;
+}
+
 }  // namespace Themes

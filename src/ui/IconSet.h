@@ -3,6 +3,8 @@
 // separate qtsvg module, which is not installed, so the icons are drawn in code
 // - which also means they are crisp at any DPI and recolour with the theme.
 #include <QIcon>
+#include <QImage>
+#include <QString>
 
 namespace IconSet {
 
@@ -132,6 +134,13 @@ QIcon toggleIcon(Glyph on, Glyph off);
 // engine, exposed for the one consumer whose ink is state-dependent
 // (WindowButtons); everything else goes through icon().
 void paintGlyph(QPainter& p, Glyph glyph);
+
+// A glyph as an ALPHA MASK - white ink on transparent, `px` square, drawn as
+// icon() draws it - for a page that tints it with CSS (migration Phase 3i,
+// ruling R2: one glyph source for the Qt chips and the page's). The URL is a
+// PNG data URL of the same image.
+QImage glyphMask(Glyph glyph, int px);
+QString glyphMaskUrl(Glyph glyph, int px);
 
 // The APPLICATION icon: the wordmark's accent mark on a rounded Graphite tile.
 // The window's title bar and the taskbar show appIcon(); the committed

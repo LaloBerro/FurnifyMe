@@ -9,6 +9,8 @@
 #include "HtmlCardSlot.h"
 #include "SettingsEdits.h"
 #include "Themes.h"
+#include "ThemeShell.h"
+#include "IconSet.h"
 #include "session/ActionRegistry.h"
 #include "web/SettingsBridge.h"
 #include "ViewportOverlay.h"
@@ -347,6 +349,51 @@ int main(int argc, char* argv[])
         grid->setChecked(true);
         QCoreApplication::processEvents();
         check(actionChanges == 1, "and so does an action's change");
+    }
+
+    // --- the rail, the pill and the menus on the page (Phase 3i) -----------
+    {
+        // R3: a theme's shell numbers travel as CSS custom properties, never
+        // copied by hand into the page's CSS.
+        const QVariantMap violet = Themes::shellCssTokens(Themes::shellOf(QStringLiteral("violet-glass-float")));
+        check(violet.value(QStringLiteral("--shell-chip-on-top")).toString() == QStringLiteral("rgba(122, 28, 255, 1)"),
+              "Violet's chip on-gradient top reaches the page as rgba(122, 28, 255, 1)");
+        check(violet.value(QStringLiteral("--shell-chip-size")).toString() == QStringLiteral("42px") &&
+                  violet.value(QStringLiteral("--shell-chip-radius")).toString() == QStringLiteral("14px"),
+              "Violet's chip is 42 px at a 14 px radius");
+        check(violet.value(QStringLiteral("--shell-chip-hover-edge")).toString() == QStringLiteral("rgba(6, 209, 255, 0.6)"),
+              "a translucent colour keeps its alpha");
+        check(violet.value(QStringLiteral("--shell-menu-weight")).toString() == QStringLiteral("700") &&
+                  violet.value(QStringLiteral("--shell-menu-text")).toString() == QStringLiteral("13px") &&
+                  violet.value(QStringLiteral("--shell-menu-wordmark-size")).toString() == QStringLiteral("17px"),
+              "Violet's menu titles: weight 700 at 13 px, the wordmark 17 px");
+        check(violet.value(QStringLiteral("--shell-card-radius")).toString() == QStringLiteral("26px"),
+              "Violet's cards are 26 px round");
+        bool anyFullRail = false;
+        for (const Themes::Info& info : Themes::all())
+            if (Themes::shellCssTokens(Themes::shellOf(info.id)).value(QStringLiteral("--shell-rail-full")) == QStringLiteral("1"))
+                anyFullRail = true;
+        check(anyFullRail, "a full-height rail theme says so (--shell-rail-full: 1)");
+        const QVariantMap graphite = Themes::shellCssTokens(Themes::shellOf(Themes::graphiteId()));
+        bool clean = true;
+        for (auto it = graphite.cbegin(); it != graphite.cend(); ++it)
+            if (it.key().startsWith(QStringLiteral("--shell-"))) clean = false;
+        check(clean, "Graphite sends no --shell- key: the page's fallbacks are Graphite");
+
+        // R2: one glyph source - IconSet paints the page's glyphs as masks.
+        const QImage mask = IconSet::glyphMask(IconSet::Glyph::Undo, 48);
+        bool inked = false;
+        for (int y = 0; y < mask.height() && !inked; ++y)
+            for (int x = 0; x < mask.width(); ++x)
+                if (qAlpha(mask.pixel(x, y)) > 128) {
+                    inked = true;
+                    break;
+                }
+        check(mask.size() == QSize(48, 48) && inked, "a glyph mask is the size asked and carries ink");
+        check(qAlpha(mask.pixel(0, 0)) == 0 && qAlpha(mask.pixel(47, 47)) == 0, "its corners are transparent");
+        check(!IconSet::glyphMaskUrl(IconSet::Glyph::Redo, 48).isEmpty() &&
+                  IconSet::glyphMaskUrl(IconSet::Glyph::Redo, 48).startsWith(QStringLiteral("data:image/png;base64,")),
+              "and crosses to the page as a PNG data URL");
     }
 
     std::printf("\n%s (%d failures, %d checks)\n", gFailures ? "FAIL" : "PASS", gFailures, gChecks);
