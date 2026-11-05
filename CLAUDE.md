@@ -330,6 +330,18 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   page's click mask (`QWidget::setMask` from rects the page reports) that changes every
   frame makes Qt repaint the viewport behind it every frame - moving elements leave the
   mask while the camera moves.
+- **The pages are composited in software (T-083).** `WebHost::prepareApplication()` adds
+  `--disable-gpu-compositing` to `QTWEBENGINE_CHROMIUM_FLAGS` (a user's own flags kept). GPU-
+  composited, a page's frames reach Qt's OpenGL from Chromium's Direct3D, and OCCT drawing beside
+  them died inside the NVIDIA driver - a theme switch or a quality change in a SECOND render-mode
+  session, every time in chrome_smoke's sequence, at the same three driver addresses whichever OCCT
+  call was on the stack. A synchronous GL debug context hid it and reported no GL error; Qt Quick's
+  basic render loop did not help; with the pages' GPU compositing off the sequence passes, the pages
+  draw, and web_spike's gate 2 measured the same frame cost. **Not `--use-angle=gl`**: its shared
+  images fail and the pages are intermittently not drawn at all - which chrome_smoke, reading only
+  the DOM, called green. So chrome_smoke now looks: the window composited with the page and with its
+  view hidden must differ where the pill and the rail stand. The repro is kept in its render block
+  (a short render session before the measured one).
 - **What every page owes, learned on the hub (its review's fix pass):** every control
   wears `use:chip` (out of the tab order, a press that never moves focus - an armed
   Delete once took a stray Enter); a page that fills its window gives `#app` a height,

@@ -19,6 +19,26 @@
 void WebHost::prepareApplication()
 {
     QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+#ifdef Q_OS_WIN
+    // THE PAGES ARE COMPOSITED IN SOFTWARE (T-083). GPU-composited, a page's
+    // frames reach Qt's OpenGL from Chromium's Direct3D, and OCCT drawing in
+    // the same process alongside them died inside the NVIDIA driver: a theme
+    // switch or a quality change in a SECOND render-mode session, every time,
+    // in chrome_smoke's sequence, at the same driver addresses whichever OCCT
+    // call was on the stack (a synchronous GL debug context hid it, and
+    // reported no GL error). Composited in software the same sequence passes,
+    // the pages still draw, and the viewport's frame cost measured the same
+    // (web_spike gate 2, 17.8 against 17.7 ms per move). NOT --use-angle=gl:
+    // its shared images fail and the pages are not drawn at all. Read by
+    // QtWebEngine when it starts, so it is set here, before QApplication; a
+    // user's own flags are kept.
+    QByteArray flags = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS");
+    if (!flags.contains("--disable-gpu-compositing")) {
+        if (!flags.isEmpty()) flags += ' ';
+        flags += "--disable-gpu-compositing";
+        qputenv("QTWEBENGINE_CHROMIUM_FLAGS", flags);
+    }
+#endif
 }
 
 QUrl WebHost::pageUrl(const QString& page)

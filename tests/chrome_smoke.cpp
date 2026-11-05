@@ -149,8 +149,11 @@ QAction* actionNamed(QWidget* window, const QString& text)
 }
 
 #ifdef _WIN32
-void capture(QWidget* window, const QString& path)
+// The window as the screen composites it (PrintWindow, client area, device
+// pixels): the page's pixels included, which a DOM read never sees.
+QImage captureImage(QWidget* window)
 {
+    QImage image;
     HWND hwnd = reinterpret_cast<HWND>(window->winId());
     RECT rect{};
     GetClientRect(hwnd, &rect);
@@ -169,13 +172,20 @@ void capture(QWidget* window, const QString& path)
     if (bitmap && bits) {
         HGDIOBJ previous = SelectObject(memory, bitmap);
         if (PrintWindow(hwnd, memory, PW_CLIENTONLY | PW_RENDERFULLCONTENT))
-            QImage(static_cast<const uchar*>(bits), w, h, QImage::Format_RGB32).copy().save(path);
+            image = QImage(static_cast<const uchar*>(bits), w, h, QImage::Format_RGB32).copy();
         SelectObject(memory, previous);
     }
     if (bitmap) DeleteObject(bitmap);
     DeleteDC(memory);
     ReleaseDC(nullptr, screen);
+    return image;
 }
+
+void capture(QWidget* window, const QString& path)
+{
+    captureImage(window).save(path);
+}
+
 
 void keepBehind()
 {
@@ -1753,6 +1763,52 @@ int main(int argc, char* argv[])
             check(waitFor([&] { return chipCount("rail") == 10 && chipCount("view") == 3; }, 5000),
                   QStringLiteral("the page draws the rail's 10 chips and the view cluster's 3 (got %1 and %2)")
                       .arg(chipCount("rail")).arg(chipCount("view")));
+#ifdef _WIN32
+            {
+                // THE PAGE IS SEEN, not only present in its DOM (T-083): a
+                // Chromium switch once left every page invisible while every
+                // DOM check here stayed green. The window composited with the
+                // page, then with the page's view hidden: where the pill and the
+                // rail stand, the two must differ. Nothing else moves between
+                // the two captures, and Graphite's pill fill sits only a few
+                // levels from the viewport behind it, so a small step counts -
+                // and only its words and border move (about 12% of it), where
+                // the rail's chips move about half of it. A page that is not
+                // drawn moves neither.
+                pump(300);
+                const QImage withPage = captureImage(&window);
+                page->hide();
+                pump(300);
+                const QImage without = captureImage(&window);
+                page->show();
+                pump(300);
+                withPage.save(outDir + "/seen-with-page.png");
+                without.save(outDir + "/seen-without-page.png");
+                const double dpr = window.devicePixelRatioF();
+                auto changed = [&](const QRect& logical) {
+                    const QRect r(qRound(logical.x() * dpr), qRound(logical.y() * dpr), qRound(logical.width() * dpr),
+                                  qRound(logical.height() * dpr));
+                    int moved = 0, all = 0;
+                    for (int y = r.top(); y <= r.bottom(); ++y)
+                        for (int x = r.left(); x <= r.right(); ++x) {
+                            if (!withPage.rect().contains(x, y) || !without.rect().contains(x, y)) continue;
+                            const QColor p1 = withPage.pixelColor(x, y), p2 = without.pixelColor(x, y);
+                            ++all;
+                            if (std::abs(p1.red() - p2.red()) + std::abs(p1.green() - p2.green()) +
+                                    std::abs(p1.blue() - p2.blue()) > 9)
+                                ++moved;
+                        }
+                    return all ? double(moved) / all : 0.0;
+                };
+                const QRect pillAt(window.view()->mapTo(&window, pillSlot->geometry().topLeft()), pillSlot->size());
+                const QRect railAt(window.view()->mapTo(&window, railSlot->geometry().topLeft()), railSlot->size());
+                const double pillMoved = changed(pillAt), railMoved = changed(railAt);
+                check(pillMoved > 0.05 && railMoved > 0.3,
+                      QStringLiteral("the composited window SHOWS the page's pill and rail (%1% and %2% of their pixels "
+                                     "change when the page is hidden)")
+                          .arg(pillMoved * 100, 0, 'f', 1).arg(railMoved * 100, 0, 'f', 1));
+            }
+#endif
             QAction* itemsAction = actionNamed(&window, QStringLiteral("Items"));
             QAction* undoAction = actionNamed(&window, QStringLiteral("Undo"));
             QAction* orthoAction = actionNamed(&window, QStringLiteral("Orthographic"));
@@ -1837,6 +1893,7 @@ int main(int argc, char* argv[])
                 check(at && (at == page || page->isAncestorOf(at)), "a press on the viewport lands on the page's outside layer");
             }
 #ifdef _WIN32
+            pump(300);
             {
                 const QPoint groundNow = window.view()->mapTo(&window, pillSlot->geometry().topLeft() + QPoint(6, pillSlot->height() / 2));
                 check(nativeHit(&window, groundNow) == HTCLIENT, "while a menu is open the pill's ground does not drag (R10)");
@@ -2402,6 +2459,19 @@ int main(int argc, char* argv[])
             RenderSettingsPanel* panel = studio->panel();
             check(waitFor([&] { return renderPage->isLive(); }, 20000), "the render page loads and says it is listening");
             check(!rv->isVisible() && studio->dockedPanel() == nullptr, "and stays out of sight outside render mode");
+            // T-083: a render-mode session before this one. With the pages
+            // GPU-composited, the second session's theme switch below (or a
+            // quality change) died in the NVIDIA driver - every time, in this
+            // sequence. WebHost::prepareApplication() composites the pages in
+            // software; this session keeps the sequence that crashed.
+            check(qEnvironmentVariable("QTWEBENGINE_CHROMIUM_FLAGS").contains(QStringLiteral("--disable-gpu-compositing")),
+                  "Chromium composites the pages in software, so no Direct3D frame is handed to OpenGL (T-083) - " +
+                      qEnvironmentVariable("QTWEBENGINE_CHROMIUM_FLAGS"));
+            renderMode->trigger();
+            pump(300);
+            renderMode->trigger();
+            pump(300);
+            check(!renderMode->isChecked(), "a first render-mode session has come and gone");
             renderMode->trigger();
             pump(600);
             check(studio->dockedPanel() == rv && rv->isVisible() && !panel->isVisible(),
