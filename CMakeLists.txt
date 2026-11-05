@@ -184,6 +184,9 @@ if(FURNIFYME_BUILD_APP)
       src/session/ItemsKeys.h
       src/session/ItemsModel.cpp
       src/session/ItemsModel.h
+      # The menu bar's model (Phase 3i).
+      src/session/MenuModel.cpp
+      src/session/MenuModel.h
     )
     target_include_directories(furnify_session PUBLIC src)
     target_link_libraries(furnify_session PUBLIC furnify_geometry Qt6::Core Qt6::Gui)
@@ -221,6 +224,10 @@ if(FURNIFYME_BUILD_APP)
     add_executable(items_model_tests tests/items_model.cpp)
     target_link_libraries(items_model_tests PRIVATE furnify_session)
     add_test(NAME items_model COMMAND items_model_tests)
+
+    add_executable(menu_model_tests tests/menu_model.cpp)
+    target_link_libraries(menu_model_tests PRIVATE furnify_session)
+    add_test(NAME menu_model COMMAND menu_model_tests)
 
     add_executable(session_tests tests/session.cpp)
     target_link_libraries(session_tests PRIVATE furnify_session)
