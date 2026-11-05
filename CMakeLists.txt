@@ -262,6 +262,10 @@ if(FURNIFYME_BUILD_APP)
       src/web/SettingsBridge.h
       src/web/RenderBridge.cpp
       src/web/RenderBridge.h
+      src/ui/ChipFace.cpp
+      src/ui/ChipFace.h
+      src/web/ChipsBridge.cpp
+      src/web/ChipsBridge.h
       src/ui/AxisGizmo.cpp
       src/ui/CardSlide.cpp
       src/ui/DimensionRenderer.cpp
@@ -412,6 +416,11 @@ if(FURNIFYME_BUILD_APP)
     add_executable(render_bridge_tests tests/render_bridge.cpp)
     target_link_libraries(render_bridge_tests PRIVATE furnify_app)
     add_test(NAME render_bridge COMMAND render_bridge_tests)
+
+    # The gesture chips' face and bridge (migration Phase 4a), offscreen.
+    add_executable(chip_face_tests tests/chip_face.cpp)
+    target_link_libraries(chip_face_tests PRIVATE furnify_app)
+    add_test(NAME chip_face COMMAND chip_face_tests)
 
     # The bundled material textures (Milestone 5): every image in
     # assets/materials ships beside the executable, where MainWindow's scan
