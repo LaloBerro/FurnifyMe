@@ -16,6 +16,8 @@
 #include "web/WebHost.h"
 #include "web/SettingsBridge.h"
 #include "web/ShellBridge.h"
+#include "web/ChipsBridge.h"
+#include "ChipFace.h"
 #endif
 
 #include <cstdio>
@@ -10632,6 +10634,13 @@ void MainWindow::useHtmlChrome()
         // The name question the same way (Phase 3g); keys aimed at the page's
         // view go through the card's claim to the page's field.
         if (myNameCard) myNameCard->setDrawnElsewhere(live, live ? myHtmlChrome->view() : nullptr);
+        // The gesture chips (Phase 4a): drawn by the page while it can, by
+        // themselves again the moment it cannot - mid-gesture too, with what
+        // the page's fields had mirrored into theirs.
+        for (ChipFace* face : {myBooleanTool ? myBooleanTool->face() : nullptr,
+                               mySlatsTool ? mySlatsTool->face() : nullptr}) {
+            if (face) face->setDrawnElsewhere(live);
+        }
         syncHtmlQuestion();
         raiseQuestions();
         updateActions();
@@ -10874,6 +10883,22 @@ void MainWindow::useHtmlChrome()
             myMenuShortcuts << shortcut;
         }
     }
+    // THE GESTURE CHIPS (Phase 4a): each Qt chip stays the chip - its place,
+    // its claim, its preview, its commit - and the page draws it from its
+    // face while it is live (ruling R2). A key aimed at the page passes the
+    // chip's claim only while a field of THAT chip holds the keyboard (R3).
+    myChipsBridge = new ChipsBridge(myHtmlChrome);
+    for (ChipFace* face : {myBooleanTool ? myBooleanTool->face() : nullptr,
+                           mySlatsTool ? mySlatsTool->face() : nullptr}) {
+        if (!face) continue;
+        myChipsBridge->add(face);
+        myHtmlChrome->addChip(face);
+        const QString name = face->name();
+        face->setPageKeys(myHtmlChrome->view(), [this, name] {
+            return myHtmlChrome && myHtmlChrome->claimsKeyboardFor(name);
+        });
+    }
+    myHtmlChrome->registerObject(QStringLiteral("chips"), myChipsBridge);
     myHtmlChrome->start();
     connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);

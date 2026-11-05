@@ -1,6 +1,7 @@
 #include "BooleanTool.h"
 
 #include "../MainWindow.h"
+#include "ChipFace.h"
 #include "KeyClaim.h"
 #include "../OcctViewWidget.h"
 #include "Theme.h"
@@ -61,6 +62,26 @@ BooleanTool::BooleanTool(MainWindow* window, OcctViewWidget* view)
     });
     myKeepTool = keep;
 
+    // The chrome page's face of this chip (Phase 4a): the verb, the switch
+    // and the keys, read off this card's own words and checkbox.
+    myFace = new ChipFace(QStringLiteral("boolean"), this);
+    myFace->addButton(QStringLiteral("keep"), keep);
+    myFace->setActions([this] { commit(); }, [this] { cancel(); });
+    myFace->setDescriber([this] {
+        return QVariantList{QVariantList{ChipFace::text(myTitle, QStringLiteral("title")),
+                                         myFace->button(QStringLiteral("keep")),
+                                         ChipFace::text(myHint, QStringLiteral("hint"))}};
+    });
+    connect(myFace, &ChipFace::drawnChanged, this, [this] {
+        layoutCard();
+        replace();
+        update();
+    });
+    connect(myFace, &ChipFace::faceSizeChanged, this, [this] {
+        layoutCard();
+        replace();
+    });
+
     applyStyles();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
         applyStyles();
@@ -99,6 +120,7 @@ void BooleanTool::refresh()
     if (isHidden()) show();
     raise();
     update();
+    myFace->notify();
 }
 
 void BooleanTool::syncControls()
@@ -126,6 +148,11 @@ void BooleanTool::applyStyles()
 
 void BooleanTool::layoutCard()
 {
+    // Drawn by the page, the card is the size the page measured (ruling R2).
+    if (myFace && myFace->drawnElsewhere()) {
+        if (myFace->faceSize().isValid()) setFixedSize(Theme::wholeDevicePixels(myFace->faceSize()));
+        return;
+    }
     const QFontMetrics title(titleFontBold());
     const QFontMetrics label(Theme::labelFont());
     const int titleWidth = title.horizontalAdvance(myTitle);
@@ -189,6 +216,7 @@ void BooleanTool::commit()
 
 void BooleanTool::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myFace && myFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     Theme::paintSurface(painter, rect(), kCardRadius);
@@ -228,6 +256,8 @@ void BooleanTool::hideEvent(QHideEvent* event)
 bool BooleanTool::eventFilter(QObject* watched, QEvent* event)
 {
     if (isHidden()) return QWidget::eventFilter(watched, event);
+    // A key aimed at the page's own field is the page's (ruling R3).
+    if (myFace && myFace->keyBelongsToPage(watched)) return QWidget::eventFilter(watched, event);
 
     const bool isKey = event->type() == QEvent::KeyPress ||
                        event->type() == QEvent::ShortcutOverride;

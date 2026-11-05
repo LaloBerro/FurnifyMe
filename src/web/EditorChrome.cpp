@@ -2,6 +2,7 @@
 
 #include "session/ItemsKeys.h"
 
+#include "ChipFace.h"
 #include "HtmlCardSlot.h"
 #include "OcctViewWidget.h"
 #include "ThemeBridge.h"
@@ -235,10 +236,28 @@ void EditorChrome::addCard(HtmlCardSlot* slot)
     syncCards();
 }
 
+void EditorChrome::addChip(ChipFace* face)
+{
+    if (!face || !face->chip()) return;
+    myChips.push_back(face);
+    face->chip()->installEventFilter(this);
+    syncCards();
+}
+
 void EditorChrome::syncCards()
 {
     QVariantMap map;
     QStringList gone;
+    for (const QPointer<ChipFace>& face : myChips) {
+        if (!face || !face->chip()) continue;
+        QVariantMap card = rectMap(face->chip()->geometry());
+        const bool shown = face->chip()->isVisible();
+        card.insert(QStringLiteral("shown"), shown);
+        card.insert(QStringLiteral("chip"), true);
+        if (myCardShown.value(face->name()) && !shown) gone << face->name();
+        myCardShown.insert(face->name(), shown);
+        map.insert(face->name(), card);
+    }
     for (const QPointer<HtmlCardSlot>& slot : myCards) {
         if (!slot) continue;
         QVariantMap card = rectMap(slot->geometry());
@@ -509,6 +528,21 @@ void EditorChrome::applyMask()
 
 bool EditorChrome::eventFilter(QObject* watched, QEvent* event)
 {
+    switch (event->type()) {
+    case QEvent::Move:
+    case QEvent::Resize:
+    case QEvent::Show:
+    case QEvent::Hide:
+        for (const QPointer<ChipFace>& face : myChips) {
+            if (face && face->chip() == watched) {
+                syncCards();
+                break;
+            }
+        }
+        break;
+    default:
+        break;
+    }
     if (watched == myWatchedProxy && event->type() == QEvent::ShortcutOverride && myHoldsKeyboard) {
         // Every key is the field's while it holds the keyboard: claimed
         // here, before QShortcutMap can hand it to a window shortcut.

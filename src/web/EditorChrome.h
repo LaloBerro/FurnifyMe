@@ -30,6 +30,7 @@ class ThemeBridge;
 class WebHost;
 class QWebEngineView;
 class HtmlCardSlot;
+class ChipFace;
 
 // The page's `chrome` object.
 class ChromeBridge : public QObject
@@ -154,6 +155,13 @@ public:
     // An HTML card's place (Phase 3b): the page is told where the slot
     // stands and whether it shows, every time it moves, shows or hides.
     void addCard(HtmlCardSlot* slot);
+    // A gesture chip (Phase 4a, ruling R2): the Qt chip IS its own slot. Its
+    // rectangle and visibility go in the same `cards` map, under its face's
+    // name, every time it moves, resizes, shows or hides.
+    void addChip(ChipFace* face);
+    // Whether a field of this card holds the keyboard (ruling R3: a chip's
+    // claim lets keys aimed at the page through only while one does).
+    bool claimsKeyboardFor(const QString& card) const { return myKeyboardClaims.value(card) > 0; }
     // A typed field on the page holds the keyboard (ruling R5). While it
     // does, the view claims every ShortcutOverride, so Delete, Ctrl+Z or a
     // digit in a field never reaches a window shortcut.
@@ -248,6 +256,7 @@ private:
     QPointer<QWidget> myFocusBefore;
     QPointer<QWidget> myWatchedProxy;
     std::vector<QPointer<HtmlCardSlot>> myCards;
+    std::vector<QPointer<ChipFace>> myChips;
     // Whether each card was shown at the last sync, by name.
     QHash<QString, bool> myCardShown;
 };

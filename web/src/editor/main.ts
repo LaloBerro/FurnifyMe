@@ -19,6 +19,8 @@ import type { ItemsApi } from './items/api';
 import { mockItems } from './items/mock';
 import type { MenuApi, ShellApi } from './shell/api';
 import { mockMenu, mockShell } from './shell/mock';
+import type { ChipsApi } from './chips/api';
+import { booleanFace, mockChips, slatsFace } from './chips/mock';
 
 async function start() {
   let chrome: ChromeApi;
@@ -29,6 +31,7 @@ async function start() {
   let items: ItemsApi | undefined;
   let shell: ShellApi | undefined;
   let menu: MenuApi | undefined;
+  let chips: ChipsApi | undefined;
   if (hosted()) {
     const objects = await channelObjects();
     chrome = objects.chrome as ChromeApi;
@@ -39,6 +42,7 @@ async function start() {
     items = objects.items as ItemsApi | undefined;
     shell = objects.shell as ShellApi | undefined;
     menu = objects.menu as MenuApi | undefined;
+    chips = objects.chips as ChipsApi | undefined;
   } else {
     // The dev server: a status strip and a toast to look at.
     const mock = mockChrome();
@@ -51,6 +55,7 @@ async function start() {
     items = mockItems();
     shell = mockShell();
     menu = mockMenu();
+    chips = mockChips({ boolean: booleanFace(), slats: slatsFace() });
     mock.cards = {
       settings: { x: window.innerWidth - 320, y: 120, w: 296, h: 380, shown: true },
       versions: { x: 60, y: 120, w: 240, h: 400, shown: true },
@@ -59,12 +64,14 @@ async function start() {
       pill: { x: 16, y: 16, w: 420, h: 44, shown: true },
       rail: { x: 16, y: 68, w: 50, h: 470, shown: true },
       view: { x: window.innerWidth - 66, y: 150, w: 50, h: 124, shown: true },
+      boolean: { x: 400, y: window.innerHeight - 160, w: 380, h: 44, shown: true, chip: true },
+      slats: { x: 400, y: window.innerHeight - 100, w: 330, h: 70, shown: true, chip: true },
     };
     setTimeout(() => mock.toast.emit('Deleted Body 02', 'note', true, 1), 300);
   }
   // The theme goes on before the first mount - see hub/main.ts.
   applyTokens(theme.tokens);
-  mount(Editor, { target: document.getElementById('app')!, props: { chrome, theme, settings, versions, joints, items, shell, menu } });
+  mount(Editor, { target: document.getElementById('app')!, props: { chrome, theme, settings, versions, joints, items, shell, menu, chips } });
 }
 
 start();

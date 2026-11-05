@@ -1,5 +1,7 @@
 #include "SlatsTool.h"
 
+#include "ChipFace.h"
+
 #include "GestureChip.h"
 #include "KeyClaim.h"
 #include "MainWindow.h"
@@ -80,6 +82,34 @@ SlatsTool::SlatsTool(MainWindow* window, OcctViewWidget* view)
     flip->hide();
     myFlip = flip;
 
+    // The chrome page's face of this chip (Phase 4a): the three fields, Flip,
+    // the live count, the keys and the reason - this card's own controls and
+    // words, in the rows it paints them in.
+    myFace = new ChipFace(QStringLiteral("slats"), this);
+    myFace->addField(QStringLiteral("width"), myWidth);
+    myFace->addField(QStringLiteral("gap"), myGap);
+    myFace->addField(QStringLiteral("depth"), myDepth);
+    myFace->addButton(QStringLiteral("flip"), flip);
+    myFace->setActions([this] { commit(); }, [this] { cancel(); });
+    myFace->setDescriber([this] {
+        QVariantList rows{
+            QVariantList{myFace->field(QStringLiteral("width"), labelFor(0)),
+                         myFace->field(QStringLiteral("gap"), labelFor(1)),
+                         myFace->field(QStringLiteral("depth"), labelFor(2))},
+            QVariantList{myFace->button(QStringLiteral("flip")),
+                         ChipFace::text(countText(), myCount > 0 ? QStringLiteral("muted") : QStringLiteral("danger")),
+                         ChipFace::text(hintText(), QStringLiteral("hint"))},
+        };
+        if (!myReason.isEmpty()) rows.push_back(QVariantList{ChipFace::text(myReason, QStringLiteral("danger"))});
+        return rows;
+    });
+    connect(myFace, &ChipFace::drawnChanged, this, [this] {
+        applySize();
+        syncControls();
+        update();
+    });
+    connect(myFace, &ChipFace::faceSizeChanged, this, &SlatsTool::applySize);
+
     applyControlStyles();
     applySize();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
@@ -146,6 +176,8 @@ void SlatsTool::begin()
     markInvalid(false);
 
     seedFields();
+    // A new gesture: the page seeds its fields and focuses Width (R5).
+    myFace->reseed(QStringLiteral("width"));
     applySize();
     show();
     raise();
@@ -364,6 +396,19 @@ QRect SlatsTool::reasonRect() const
 
 void SlatsTool::applySize()
 {
+    if (myFace) myFace->notify();
+    // Drawn by the page, the card is the size the page measured (ruling R2).
+    if (myFace && myFace->drawnElsewhere()) {
+        if (myFace->faceSize().isValid()) {
+            const QSize wanted = Theme::wholeDevicePixels(myFace->faceSize());
+            if (wanted != QWidget::size()) {
+                setFixedSize(wanted);
+                reposition();
+            }
+        }
+        syncControls();
+        return;
+    }
     // Measured with the fonts it paints with, so a longer reason cannot clip.
     const QFontMetrics badge(Theme::badgeFont());
     int w = rowWidth();
@@ -404,6 +449,7 @@ void SlatsTool::applyControlStyles()
 void SlatsTool::markInvalid(bool invalid)
 {
     myInvalid = invalid;
+    if (myFace) myFace->setInvalid(invalid);
     const QColor border = invalid ? Theme::danger() : Theme::accent();
     for (QLineEdit* field : {myWidth.data(), myGap.data(), myDepth.data()}) {
         if (!field) continue;
@@ -419,18 +465,20 @@ void SlatsTool::syncControls()
 {
     // Sibling geometry is this card's local rect translated by pos() - the
     // ExtrudePreview idiom - and visibility is DERIVED from the card's own.
+    // Drawn by the page, the page's controls are the ones on screen.
+    const bool shown = isVisible() && (!myFace || myFace->controlsShown());
     const QLineEdit* fields[kFieldCount] = {myWidth.data(), myGap.data(), myDepth.data()};
     for (int i = 0; i < kFieldCount; ++i) {
         QLineEdit* field = const_cast<QLineEdit*>(fields[i]);
         if (!field) continue;
         field->setGeometry(fieldRect(i).translated(pos()));
-        field->setVisible(isVisible());
-        if (isVisible()) field->raise();
+        field->setVisible(shown);
+        if (shown) field->raise();
     }
     if (myFlip) {
         myFlip->setGeometry(flipRect().translated(pos()));
-        myFlip->setVisible(isVisible());
-        if (isVisible()) myFlip->raise();
+        myFlip->setVisible(shown);
+        if (shown) myFlip->raise();
     }
 }
 
@@ -466,6 +514,7 @@ void SlatsTool::replace()
 
 void SlatsTool::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myFace && myFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     GestureChip::paintFrame(painter, this, myInvalid);
@@ -524,6 +573,8 @@ bool SlatsTool::eventFilter(QObject* watched, QEvent* event)
     // whatever holds focus - the one KeyClaim implementation every gesture
     // chip shares. Not exempting line edits: Enter IN a size field is exactly
     // what the claim routes to commit().
+    // A key aimed at the page's own field is the page's (ruling R3).
+    if (myFace && myFace->keyBelongsToPage(watched)) return QWidget::eventFilter(watched, event);
     int key = 0;
     if (KeyClaim::claim(this, watched, event, /*wantEnter=*/true,
                         /*exemptLineEdits=*/false, &key)) {

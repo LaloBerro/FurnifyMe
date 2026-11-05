@@ -4,6 +4,7 @@
 #include <QStringList>
 #include <QWidget>
 
+class ChipFace;
 class MainWindow;
 class OcctViewWidget;
 class QAbstractButton;
@@ -54,6 +55,8 @@ public:
     void replace();
 
     QAbstractButton* keepToolBox() const;
+    // What the chrome page draws in this chip's place (migration Phase 4a).
+    ChipFace* face() const { return myFace; }
 
     QStringList paintedTexts() const;
 
@@ -78,6 +81,7 @@ private:
     MainWindow* myWindow = nullptr;
     OcctViewWidget* myView = nullptr;
     QPointer<QCheckBox> myKeepTool;
+    ChipFace* myFace = nullptr;
     bool myClaimInstalled = false;
     QString myTitle;
     QString myHint;

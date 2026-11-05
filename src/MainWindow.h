@@ -94,6 +94,7 @@ public:
     // The rail, the view cluster, the pill and the menus on the chrome page
     // (Phase 3i); null until useHtmlChrome().
     class ShellBridge* shellBridge() const { return myShellBridge; }
+    class ChipsBridge* chipsBridge() const { return myChipsBridge; }
     // Not = default (M1): a drawer drag still live when the window dies is
     // ended HERE, while the document and every member it reads are alive.
     // Left to member order, ~QWidget's own hide would reach
@@ -2424,6 +2425,7 @@ private:
     class HtmlCardSlot* myViewSlot = nullptr;
     class HtmlCardSlot* myPillSlot = nullptr;
     class ShellBridge* myShellBridge = nullptr;
+    class ChipsBridge* myChipsBridge = nullptr;
     // Alt+F, Alt+S... - the hidden Qt menu bar's mnemonics, while the page's
     // pill shows (ruling R6).
     QList<class QShortcut*> myMenuShortcuts;

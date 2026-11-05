@@ -112,4 +112,6 @@ export interface CardRect {
   w: number;
   h: number;
   shown?: boolean;
+  // A gesture chip's own Qt widget, not a slot (Phase 4a, ruling R2).
+  chip?: boolean;
 }

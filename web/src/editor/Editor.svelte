@@ -23,6 +23,8 @@
   import Pill from './shell/Pill.svelte';
   import Menu from './shell/Menu.svelte';
   import type { ChipState, MenuApi, MenuOpen, MenuTitle, ShellApi } from './shell/api';
+  import GestureChip from './chips/Chip.svelte';
+  import type { ChipsApi, Face } from './chips/api';
   import { applyTokens } from '../theme';
   import { reportHitsOnChange } from '../overlay/hits';
 
@@ -35,6 +37,7 @@
     items,
     shell,
     menu,
+    chips: chipsApi,
   }: {
     chrome: ChromeApi;
     theme: ThemeApi;
@@ -44,6 +47,7 @@
     items?: ItemsApi;
     shell?: ShellApi;
     menu?: MenuApi;
+    chips?: ChipsApi;
   } = $props();
 
   const kStripHeight = 24;
@@ -70,6 +74,8 @@
   let menuOpen: MenuOpen = $state({ menu: -1, byKeyboard: false, levels: [] });
   let menuAnchor: { x: number; y: number; w: number; h: number } | null = $state(null);
   let animate = $state(true);
+  // The gesture chips' faces (Phase 4a), by chip name.
+  let faces: Record<string, Face> = $state({});
   $effect(() => {
     // Where the open menu's title stands, read after the pill has drawn.
     const index = menuOpen.menu;
@@ -122,6 +128,10 @@
     if (shell) {
       chips = { ...shell.chips };
       shell.chipsChanged.connect(() => (chips = { ...shell.chips }));
+    }
+    if (chipsApi) {
+      faces = { ...(chipsApi.faces ?? {}) };
+      chipsApi.facesChanged.connect((next) => (faces = { ...(next ?? chipsApi.faces) }));
     }
     if (menu) {
       titles = [...menu.titles];
@@ -221,6 +231,13 @@
 {/if}
 {#if settings && cards.settings?.shown}
   <Settings {settings} keyboard={keyboardFor('settings')} rect={cards.settings} />
+{/if}
+{#if chipsApi}
+  {#each Object.keys(faces) as name (name)}
+    {#if cards[name]?.chip && cards[name].shown}
+      <GestureChip {name} face={faces[name]} rect={cards[name]} chips={chipsApi} keyboard={keyboardFor(name)} />
+    {/if}
+  {/each}
 {/if}
 {#if menu && menuOpen.menu >= 0}
   <Menu {menu} open={menuOpen} anchor={menuAnchor} bounds={{ w: viewW, h: viewH }} />

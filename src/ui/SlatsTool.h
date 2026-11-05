@@ -18,6 +18,7 @@
 #include <QStringList>
 #include <QWidget>
 
+class ChipFace;
 class MainWindow;
 class OcctViewWidget;
 class QAbstractButton;
@@ -78,6 +79,8 @@ public:
     QLineEdit* gapField() const { return myGap; }
     QLineEdit* depthField() const { return myDepth; }
     QAbstractButton* flipButton() const;
+    // What the chrome page draws in this chip's place (migration Phase 4a).
+    ChipFace* face() const { return myFace; }
 
     // The plan the fields currently read, in millimetres.
     ModelingOps::SlatPlan plan() const { return myPlan; }
@@ -129,6 +132,7 @@ private:
 
     MainWindow* myWindow = nullptr;
     OcctViewWidget* myView = nullptr;
+    ChipFace* myFace = nullptr;
 
     bool myActive = false;
     int myBodyId = 0;
