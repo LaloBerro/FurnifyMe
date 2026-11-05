@@ -125,6 +125,11 @@ void ChromeBridge::reportCardHeight(const QString& name, int height)
     emit cardHeightReported(name, height);
 }
 
+void ChromeBridge::reportCardSize(const QString& name, int width, int height)
+{
+    if (width > 0 && height > 0) emit cardSizeReported(name, width, height);
+}
+
 void ChromeBridge::reportHitRects(const QVariantList& rects)
 {
     QVector<QRect> parsed;
@@ -186,6 +191,10 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     connect(myBridge, &ChromeBridge::cardHeightReported, this, [this](const QString& name, int height) {
         for (const QPointer<HtmlCardSlot>& slot : myCards)
             if (slot && slot->name() == name) slot->setContentHeight(height);
+    });
+    connect(myBridge, &ChromeBridge::cardSizeReported, this, [this](const QString& name, int width, int height) {
+        for (const QPointer<HtmlCardSlot>& slot : myCards)
+            if (slot && slot->name() == name) slot->setContentSize(QSize(width, height));
     });
     connect(myBridge, &ChromeBridge::pageReady, this, [this] {
         refuseFocus();

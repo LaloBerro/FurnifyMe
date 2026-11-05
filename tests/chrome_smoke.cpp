@@ -1941,6 +1941,27 @@ int main(int argc, char* argv[])
                 pump(300);
                 capture(&window, outDir + "/shell-nightshade.png");
 #endif
+                {
+                    // The rail and the view cluster take the theme's chip size
+                    // (review I1): the slot follows what the page measured, and
+                    // every chip stands inside its card.
+                    const Themes::Chip& c = Themes::shell().chip;
+                    const int chipPx = c.on ? c.size : 34;
+                    const int wanted = Theme::wholeDevicePixels(QSize(chipPx + 16, 1)).width();
+                    check(waitFor([&] { return railSlot->width() == wanted && viewSlot->width() == wanted; }, 3000),
+                          QStringLiteral("after a theme switch the rail and the view cluster are the new chips' width (%1 and %2, wanted %3)")
+                              .arg(railSlot->width()).arg(viewSlot->width()).arg(wanted));
+                    const bool inside = js(page, "(() => { for (const c of document.querySelectorAll('[data-cluster]')) { "
+                                                 "const r = c.getBoundingClientRect(); "
+                                                 "for (const chip of c.querySelectorAll('[data-chip]')) { const b = chip.getBoundingClientRect(); "
+                                                 "if (b.left < r.left || b.right > r.right + 0.5 || b.top < r.top || b.bottom > r.bottom + 0.5 || "
+                                                 "Math.abs(b.width - b.height) > 0.5) return false; } } return true; })()").toBool();
+                    check(inside, "and every chip stands square inside its card");
+                    const QRect addShape = shell->chipRect(QStringLiteral("add-shape"));
+                    const int domTop = js(page, "Math.round(document.querySelector('[data-chip=\"add-shape\"]').getBoundingClientRect().top)").toInt();
+                    check(std::abs(addShape.top() - domTop) <= 1,
+                          QStringLiteral("and the chips' rectangles follow (Add shape at %1, drawn at %2) (review I2)").arg(addShape.top()).arg(domTop));
+                }
                 for (const QString& id : {QStringLiteral("violet-glass-float"), QStringLiteral("aurora-mesh-gradient"),
                                           QStringLiteral("ultraviolet-grid")}) {
                     Themes::select(id);
@@ -1957,6 +1978,36 @@ int main(int argc, char* argv[])
             }
             // Render mode taking them away is checked in the render page's
             // block below, where render mode is entered once for the run.
+            {
+                // WITH ANIMATIONS ON - the shipping default (review C1): the pill
+                // and the rail fly in under a transform, and what the page
+                // reports must be where they LAND - the mask, and the titles
+                // the caption hit test reads.
+                window.view()->setAnimationsEnabled(true);
+                chrome->bridge()->setAnimate(true);
+                pillSlot->hide();
+                railSlot->hide();
+                pump(300);
+                pillSlot->show();
+                railSlot->show();
+                pump(900);
+                check(chrome->hitRegion().contains(pillSlot->geometry().center()) &&
+                          chrome->hitRegion().contains(railSlot->geometry().center()),
+                      "after the fly-in the page's mask holds the pill and the rail where they landed");
+                const QRect title = shell->titleRects().value(0);
+                const int domLeft = js(page, "Math.floor(document.querySelector('[data-pill] [data-title=\"0\"]').getBoundingClientRect().left)").toInt();
+                const int domTop = js(page, "Math.floor(document.querySelector('[data-pill] [data-title=\"0\"]').getBoundingClientRect().top)").toInt();
+                check(!title.isEmpty() && std::abs(title.left() - domLeft) <= 1 && std::abs(title.top() - domTop) <= 1,
+                      QStringLiteral("and File's rectangle is where it is drawn (%1,%2 against %3,%4)")
+                          .arg(title.left()).arg(title.top()).arg(domLeft).arg(domTop));
+#ifdef _WIN32
+                check(!title.isEmpty() && nativeHit(&window, window.view()->mapTo(&window, title.center())) == HTCLIENT,
+                      "so a press on File opens the menu rather than dragging the window");
+#endif
+                window.view()->setAnimationsEnabled(false);
+                chrome->bridge()->setAnimate(false);
+                pump(100);
+            }
         }
     }
 

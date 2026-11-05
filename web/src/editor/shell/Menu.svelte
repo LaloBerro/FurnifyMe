@@ -37,8 +37,14 @@
       let left = 0;
       let top = 0;
       if (level === 0) {
-        left = anchor ? anchor.x : 8;
-        top = anchor ? anchor.y + anchor.h + 4 : 8;
+        // Not placed until its title's rectangle is known: a menu drawn at
+        // the corner for a frame flashed over the pill on every open.
+        if (!anchor) {
+          places = [];
+          return;
+        }
+        left = anchor.x;
+        top = anchor.y + anchor.h + 4;
       } else {
         const parent = boxes[level - 1];
         const row = parent?.querySelector<HTMLElement>(`[data-entry="${open.levels[level - 1].current}"]`);

@@ -34,17 +34,19 @@
   let pill: HTMLElement | undefined = $state();
   let lastSent = '';
 
+  // Read from LAYOUT - the slot's rectangle plus each title's offset - never
+  // from getBoundingClientRect(): the pill flies in under a transform, and a
+  // rectangle read mid-flight put the titles above the viewport, where the
+  // caption hit test then called them window ground (review C1).
   async function measure() {
     await tick();
     if (!pill) return;
-    const box = pill.getBoundingClientRect();
     const rects: Rect[] = [];
     for (const el of pill.querySelectorAll<HTMLElement>('[data-title]')) {
-      const r = el.getBoundingClientRect();
-      rects.push({ x: Math.floor(r.left), y: Math.floor(r.top), w: Math.ceil(r.width), h: Math.ceil(r.height) });
+      rects.push({ x: Math.floor(rect.x + el.offsetLeft), y: Math.floor(rect.y + el.offsetTop), w: el.offsetWidth, h: el.offsetHeight });
     }
-    const width = Math.ceil(box.width);
-    const height = Math.ceil(box.height);
+    const width = pill.offsetWidth;
+    const height = pill.offsetHeight;
     const key = JSON.stringify([width, height, rects]);
     if (key === lastSent) return;
     lastSent = key;

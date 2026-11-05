@@ -10838,6 +10838,15 @@ void MainWindow::useHtmlChrome()
             syncViewportMinimumWidth();
         });
         connect(myPillSlot, &HtmlCardSlot::placed, this, &MainWindow::syncMenuShortcuts);
+        // The rail and the view cluster measure themselves too (review I1): a
+        // theme's chips are their own size, and a card sized once for the
+        // first theme squashed or padded them after a switch.
+        for (HtmlCardSlot* slot : {myRailSlot, myViewSlot}) {
+            connect(slot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+                if (myOverlay) myOverlay->relayout();
+                syncViewportMinimumHeight();
+            });
+        }
         // R7: an open menu takes the whole viewport's pointer and stands over
         // every Qt card; it closes when a question is asked over it.
         connect(myShellBridge->menu(), &MenuModel::openChanged, this, [this](bool open) {

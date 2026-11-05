@@ -47,8 +47,14 @@ export function reportHitsOnChange(bridge: HitSink) {
     schedule();
   }).observe(document.body, { subtree: true, childList: true, attributes: true });
   window.addEventListener('resize', schedule);
-  // Transitions move a card without resizing it or mutating the DOM.
+  // Transitions move a card without resizing it or mutating the DOM - and a
+  // Svelte transition runs on the Web Animations API, which fires no
+  // transitionend: its own introend/outroend (dispatched on the element, not
+  // bubbling - a capture listener still hears them) is the end of the flight
+  // (Phase 3i review C1).
   document.addEventListener('transitionend', schedule, true);
+  document.addEventListener('introend', schedule, true);
+  document.addEventListener('outroend', schedule, true);
   observeAll();
   schedule();
   return schedule;

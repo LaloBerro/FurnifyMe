@@ -66,6 +66,8 @@ export interface ChromeApi {
   // A card that sizes itself (the Versions drawer, Phase 3c) says how tall it
   // is; its slot takes the height and the overlay re-stacks around it.
   reportCardHeight(name: string, height: number): void;
+  // Both ways (Phase 3i: the rail and the view cluster).
+  reportCardSize?(name: string, width: number, height: number): void;
   // The close question (Phase 3f): read once at load, then carried WITH each
   // change - a property's NOTIFY would arrive a batch late.
   question?: QuestionState;

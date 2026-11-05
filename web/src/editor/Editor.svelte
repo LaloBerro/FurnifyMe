@@ -159,6 +159,7 @@
     from="left"
     ontrigger={(id) => shell.trigger(id)}
     report={(rects) => shell.reportChipRects(rects)}
+    reportSize={(w, h) => chrome.reportCardSize?.('rail', w, h)}
   />
 {/if}
 {#if shell && cards.view?.shown}
@@ -171,6 +172,7 @@
     {animate}
     ontrigger={(id) => shell.trigger(id)}
     report={(rects) => shell.reportChipRects(rects)}
+    reportSize={(w, h) => chrome.reportCardSize?.('view', w, h)}
   />
 {/if}
 {#if shell && menu && cards.pill?.shown}

@@ -91,6 +91,7 @@ signals:
     void listKeysHeld(const QString& card);
     void listKeysReleased(const QString& card);
     void cardHeightReported(const QString& name, int height);
+    void cardSizeReported(const QString& name, int width, int height);
 
 public slots:
     // page -> C++
@@ -114,6 +115,9 @@ public slots:
     // A card that sizes itself (the Versions drawer, Phase 3c) says how tall
     // it is; its slot takes the height.
     void reportCardHeight(const QString& name, int height);
+    // A card that sizes itself both ways (Phase 3i: the rail and the view
+    // cluster follow the theme's chip size); its slot takes the size.
+    void reportCardSize(const QString& name, int width, int height);
     // The close question's answer: "save", "discard" or "keep". Anything else,
     // or an answer while no question stands, is refused.
     void answerQuestion(const QString& which);
