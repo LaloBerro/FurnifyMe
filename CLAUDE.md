@@ -629,10 +629,11 @@ state, and the surfaces with no page yet, is Phase 7. Everything below that spea
   it - before the page's late save can arrive - and chrome_smoke dispatches that blur itself.
   A page check that only passes because the harness window is inactive is the focus-ring
   lesson again.
-- **Build BOTH presets before calling a phase done.** The vcpkg `windows` preset (web UI
-  off) did not compile from the Settings card until the Versions review found it:
-  `HtmlCardSlot.h` was included only under `FURNIFYME_WEB_UI` while `settingsSurface()`
-  used the type in every build. Only `build-web` had been built for two phases.
+- **Build BOTH presets before calling a phase done** - since Phase 6 that means `windows`
+  (the app, `build-web`) and `windows-headless` (no Qt app at all). It used to mean the
+  vcpkg app build with the web UI off, which did not compile from the Settings card until
+  the Versions review found it: `HtmlCardSlot.h` was included only under `FURNIFYME_WEB_UI`
+  while `settingsSurface()` used the type in every build.
 - **A typed field takes the keyboard and gives it back** (ruling R5). The view is
   `Qt::NoFocus`; a field calls `claimKeyboard()` when pressed and `releaseKeyboard()` on
   Enter, Escape, blur or unmount, and while held the view accepts every `ShortcutOverride`

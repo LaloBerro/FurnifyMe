@@ -3478,18 +3478,6 @@ int main(int argc, char* argv[])
                   "the Qt rail, pill and view cluster come back in their places (Phase 3i)");
         check(!window.shellBridge()->menu()->isOpen(), "and no menu stands open");
 
-        // --- and then the page comes back (Phase 6): a dead page reloads -------
-        chrome->host()->setReloadOnCrash(true);
-        check(waitFor([&] { return chrome->isLive(); }, 20000) && chrome->host()->crashReloads() == 1,
-              "the dead page loads again and says it is listening");
-        pump(300);
-        check(page->isVisible() && !window.statusBar()->isVisible(),
-              "it stands over the viewport again, and the Qt status bar steps aside");
-        check(window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail")) &&
-                  window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"))->isVisible() &&
-                  !window.findChild<ToolCluster*>()->isVisible() &&
-                  waitFor([&] { return js(page, "document.querySelectorAll('[data-cluster=\"rail\"] [data-chip]').length").toInt() == 10; }, 5000),
-              "and the page's rail is back in the Qt rail's place");
         TopoDS_Face live;
         for (TopExp_Explorer e(window.document().solids().front().shape, TopAbs_FACE); e.More(); e.Next()) {
             live = TopoDS::Face(e.Current());
@@ -3512,6 +3500,19 @@ int main(int argc, char* argv[])
             check(chrome->hitRegion().isEmpty(),
                   "a dead page keeps no part of the viewport for itself (review I3)");
         }
+
+        // --- and then the page comes back (Phase 6): a dead page reloads -------
+        chrome->host()->setReloadOnCrash(true);
+        check(waitFor([&] { return chrome->isLive(); }, 20000) && chrome->host()->crashReloads() == 1,
+              "the dead page loads again and says it is listening");
+        pump(300);
+        check(page->isVisible() && !window.statusBar()->isVisible(),
+              "it stands over the viewport again, and the Qt status bar steps aside");
+        check(window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail")) &&
+                  window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"))->isVisible() &&
+                  !window.findChild<ToolCluster*>()->isVisible() &&
+                  waitFor([&] { return js(page, "document.querySelectorAll('[data-cluster=\"rail\"] [data-chip]').length").toInt() == 10; }, 5000),
+              "and the page's rail is back in the Qt rail's place");
     }
 #endif
 
