@@ -189,6 +189,7 @@ if(FURNIFYME_BUILD_APP)
       src/session/ItemMoveText.h
       src/session/ItemsKeys.cpp
       src/session/StatusLine.cpp
+      src/session/ToastHost.cpp
       src/session/ItemsKeys.h
       src/session/ItemsModel.cpp
       src/session/ItemsModel.h
@@ -296,7 +297,6 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ShortcutSheet.cpp
       src/ui/WalkthroughPanel.cpp
       src/ui/HintBalloon.cpp
-      src/ui/Toast.cpp
       src/ui/ExtrudePreview.cpp
       src/ui/PullArrow.cpp
       src/ui/BevelArrow.cpp

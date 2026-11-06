@@ -6,7 +6,6 @@
 #include "MainWindow.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
-#include "Toast.h"
 #include "UserProgress.h"
 #include "ViewportOverlay.h"
 
@@ -341,12 +340,6 @@ void HintBalloon::reposition()
         if (obstacle.center().x() < parentWidget()->width() / 2) continue;
         stepAside(obstacle);
     }
-
-    // The toast places itself and is not an overlay entry, so it is still
-    // named here - it lands in this same bottom strip whenever an outcome is
-    // reported while a hint is up.
-    const Toast* toast = parentWidget()->findChild<Toast*>();
-    if (toast && toast->isVisible()) stepAside(toast->geometry());
 
     // Never off either edge, whatever the floor and the steps above worked
     // out between them - but clamped against the FLOOR, not against zero.

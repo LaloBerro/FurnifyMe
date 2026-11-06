@@ -78,7 +78,7 @@
 #include "BevelArrow.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
-#include "Toast.h"
+#include "session/ToastHost.h"
 #include "UnsavedCloseCard.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
@@ -7594,28 +7594,19 @@ int main(int argc, char* argv[])
             settle(150);
 
             check(toasts->isShowing(), "deleting a body raises a toast");
-            check(toasts->toast() != nullptr && toasts->toast()->isVisible(),
+            check(toasts->isShowing(),
                   "the toast is actually visible");
             check(!toasts->currentText().isEmpty(),
                   QStringLiteral("the toast says what happened (\"%1\")")
                       .arg(toasts->currentText()));
 
-            // The Undo control must be reachable by a real click, not merely
-            // present: a transparent overlay hides its whole subtree from
-            // hit-testing, which is how Phase 2 shipped an unclickable control.
-            QWidget* undo = toasts->undoControl();
-            check(undo != nullptr && undo->isVisible(), "the toast offers Undo");
-            if (undo) {
-                const QPoint centre =
-                    undo->mapTo(view, QPoint(undo->width() / 2, undo->height() / 2));
-                check(view->childAt(centre) == undo,
-                      "the Undo control is reachable by a real click");
-                clickAt(undo, QPointF(undo->width() / 2.0, undo->height() / 2.0));
-                settle(200);
-                check(static_cast<int>(window.document().solids().size()) == before,
-                      "using the toast's Undo restores the body");
-                check(!toasts->isShowing(), "using Undo dismisses the toast");
-            }
+            // The pill's reach is the page's (chrome_smoke); its rule is here.
+            check(toasts->hasUndo() && toasts->undoEnabled(), "the toast offers Undo");
+            toasts->requestUndo();
+            settle(200);
+            check(static_cast<int>(window.document().solids().size()) == before,
+                  "using the toast's Undo restores the body");
+            check(!toasts->isShowing(), "using Undo dismisses the toast");
 
             // A second message replaces the first; a stack of toasts is a
             // dialog with extra steps.
@@ -7623,8 +7614,6 @@ int main(int argc, char* argv[])
             settle(50);
             toasts->show(QStringLiteral("Second"), Toast::Kind::Note, false);
             settle(50);
-            check(window.findChildren<Toast*>().size() == 1,
-                  "a second message replaces the first rather than stacking");
             check(toasts->currentText() == QStringLiteral("Second"),
                   "the newest message is the one showing");
 
@@ -7657,8 +7646,7 @@ int main(int argc, char* argv[])
                 settle(100);
                 trigger(window, QStringLiteral("Delete Selected"));
                 settle(150);
-                check(toasts->isShowing() && toasts->undoControl() &&
-                          toasts->undoControl()->isVisible(),
+                check(toasts->isShowing() && toasts->hasUndo() && toasts->undoEnabled(),
                       "a delete raises a toast whose Undo is offered");
 
                 trigger(window, QStringLiteral("Start Sketch"));
@@ -7673,8 +7661,7 @@ int main(int argc, char* argv[])
                 check(undoAction != nullptr && !undoAction->isEnabled(),
                       "with a sketch open and no point placed yet, Undo has nothing "
                       "to take back and is disabled");
-                QWidget* pill = toasts->undoControl();
-                check(pill != nullptr && !pill->isVisible(),
+                check(!toasts->undoEnabled(),
                       "and the toast's Undo control is unusable while it is");
 
                 // The corner the whole departure exists for, and it needs a
@@ -7699,16 +7686,14 @@ int main(int argc, char* argv[])
                 // Hidden, not disabled: Qt drops mouse events aimed at a
                 // DISABLED widget, which would have made the click below a
                 // no-op for the wrong reason.
-                check(pill != nullptr && !pill->isVisible(),
+                check(!toasts->undoEnabled(),
                       "and the pill is still not offered, because the toast is about the "
                       "document and Undo is not");
                 const int afterGuard = static_cast<int>(window.document().solids().size());
-                if (pill) {
-                    // Straight at the control, the most generous thing a user
-                    // could manage: even reached, it must do nothing.
-                    clickAt(pill, QPointF(pill->width() / 2.0, pill->height() / 2.0));
-                    settle(150);
-                }
+                // Straight at the pill, the most generous thing a user could
+                // manage: even reached, it must do nothing.
+                toasts->requestUndo();
+                settle(150);
                 check(static_cast<int>(window.document().solids().size()) == afterGuard,
                       "clicking the toast's Undo mid-sketch undoes nothing");
                 check(static_cast<int>(window.sketch().pointCount()) == pointsUnderToast,
@@ -7734,8 +7719,7 @@ int main(int argc, char* argv[])
                 settle(100);
                 trigger(window, QStringLiteral("Delete Selected"));
                 settle(150);
-                check(toasts->isShowing() && toasts->undoControl() &&
-                          toasts->undoControl()->isVisible(),
+                check(toasts->isShowing() && toasts->hasUndo() && toasts->undoEnabled(),
                       "the fresh delete raises an armed toast");
                 trigger(window, QStringLiteral("Undo"));
                 settle(200);
@@ -9532,7 +9516,7 @@ int main(int argc, char* argv[])
                   toasts->currentText().contains(QStringLiteral("Outline ")),
               QStringLiteral("closing it raises a Note naming the outline (\"%1\")")
                   .arg(toasts ? toasts->currentText() : QString()));
-        check(toasts && toasts->undoControl() && toasts->undoControl()->isVisible(),
+        check(toasts && toasts->hasUndo() && toasts->undoEnabled(),
               "with an Undo control, like every other change to the document");
 
         // --- and it is on screen, on its own channel ---------------------
@@ -9937,8 +9921,7 @@ int main(int argc, char* argv[])
                   lockoutToasts->currentText().contains(strandedName),
               QStringLiteral("reported by a Note naming the outline that went (\"%1\")")
                   .arg(lockoutToasts ? lockoutToasts->currentText() : QString()));
-        check(lockoutToasts && lockoutToasts->toast() != nullptr &&
-                  lockoutToasts->toast()->hasUndo(),
+        check(lockoutToasts && lockoutToasts->hasUndo(),
               "which offers Undo, like every other change to the document");
         check(lockoutToasts && lockoutToasts->remainingMs() < 5000,
               QStringLiteral("as a Note rather than a Failure - it is a change, not a "
@@ -10137,8 +10120,7 @@ int main(int argc, char* argv[])
                       .arg(grown).arg(targetArea * 30.0));
 
             ToastHost* toasts = window.findChild<ToastHost*>();
-            check(toasts != nullptr && toasts->isShowing() && toasts->toast() != nullptr &&
-                      toasts->toast()->hasUndo(),
+            check(toasts != nullptr && toasts->isShowing() && toasts->hasUndo(),
                   "the pull is reported through a toast that offers Undo");
 
             trigger(window, QStringLiteral("Undo"));
@@ -11243,8 +11225,7 @@ int main(int argc, char* argv[])
                                  "(%1 -> %2)").arg(startFaces).arg(faceCount()));
 
             ToastHost* toasts = window.findChild<ToastHost*>();
-            check(toasts != nullptr && toasts->isShowing() && toasts->toast() != nullptr &&
-                      toasts->toast()->hasUndo(),
+            check(toasts != nullptr && toasts->isShowing() && toasts->hasUndo(),
                   "it is reported through a toast that offers Undo");
 
             // --- the Phase 4 annotation rules, on a CURVED edge -----------
@@ -11796,8 +11777,7 @@ int main(int argc, char* argv[])
                           multiToasts->currentText().contains(QStringLiteral("2 edges")),
                       QStringLiteral("reported by ONE toast that names the count (\"%1\")")
                           .arg(multiToasts ? multiToasts->currentText() : QString()));
-                check(multiToasts != nullptr && multiToasts->toast() != nullptr &&
-                          multiToasts->toast()->hasUndo(),
+                check(multiToasts != nullptr && multiToasts->hasUndo(),
                       "which offers Undo, because it is one change");
                 if (!outDir.isEmpty())
                     printWindowCapture(&window,
@@ -12517,7 +12497,7 @@ int main(int argc, char* argv[])
 
                 ToastHost* aonToasts = window.findChild<ToastHost*>();
                 check(aonToasts != nullptr && aonToasts->isShowing() &&
-                          aonToasts->toast() != nullptr && !aonToasts->toast()->hasUndo(),
+                          !aonToasts->hasUndo(),
                       "and it is reported as a Failure - nothing to undo, because "
                       "nothing changed");
             }
@@ -13737,17 +13717,12 @@ int main(int argc, char* argv[])
         check(!view->animationsEnabled(), "animations re-disabled for the rest of the suite");
     }
 
-    // --- a fade cannot be double-clicked into a second undo -------------------
-    // The suite otherwise runs with animations off, so ToastHost::dismiss()
-    // is synchronous there and this exact bug is invisible to it - the toast
-    // and its Undo pill vanish together in the same call that pops the undo
-    // stack, leaving nothing for a second click to land on. With animations
-    // on (the shipping default), a fade used to leave the pill visible and
-    // clickable for the whole 160 ms, so an ordinary impatient double-click
-    // undid two operations - one of them silently.
+    // --- a double-click on Undo cannot undo twice ------------------------------
+    // The pill names ONE change. Its first press undoes it, which moves the
+    // document and so dismisses the toast; the impatient second press then
+    // finds no message offering Undo and must do nothing. (The page's fade
+    // and its stamp check are chrome_smoke's; this pins the model's half.)
     if (blockEnabled("a-fade-cannot-be-double-clicked-into-a-second-undo")) {
-        view->setAnimationsEnabled(true);
-
         check(!window.document().solids().empty(),
               "there is a body to delete for the double-click check");
         const int before = static_cast<int>(window.document().solids().size());
@@ -13757,82 +13732,18 @@ int main(int argc, char* argv[])
         settle(150);
 
         ToastHost* toasts = window.findChild<ToastHost*>();
-        check(toasts != nullptr && toasts->isShowing(),
-              "deleting a body raises a toast with animations enabled");
-        QWidget* undo = toasts ? toasts->undoControl() : nullptr;
-        check(undo != nullptr && undo->isVisible(), "the toast offers Undo");
-
-        if (toasts && undo) {
-            const QPoint centre = undo->mapTo(view, QPoint(undo->width() / 2, undo->height() / 2));
-            check(view->childAt(centre) == undo,
-                  "the Undo control is reachable before the first click");
-
-            clickAt(undo, QPointF(undo->width() / 2.0, undo->height() / 2.0));
-            // Deliberately not settled for the full fade duration - this is
-            // the impatient double-click, landing mid fade-out.
+        check(toasts != nullptr && toasts->isShowing() && toasts->hasUndo(),
+              "deleting a body raises a toast that offers Undo");
+        if (toasts) {
+            toasts->requestUndo();
             const int afterFirstClick = static_cast<int>(window.document().solids().size());
             check(afterFirstClick == before, "the first click's Undo restored the body");
-
-            // dismiss() hides the Undo control at its own top, before the
-            // fade even starts - so real hit-testing must already find
-            // something other than the control here, exactly as it would
-            // for a genuine second click a user fires off before the toast
-            // has visibly finished fading.
-            QWidget* hitDuringFade = view->childAt(centre);
-            check(hitDuringFade != undo,
-                  "the Undo control is not reachable by a real click during the fade");
-
-            // The second click a real user's double-click would produce -
-            // sent to whatever hit-testing actually finds there (nothing
-            // claims this point once the control is hidden, so it falls
-            // through to the viewport, same as clicking empty space).
-            clickAt(view, QPointF(centre));
-            waitFully(250);   // outlasts the 160 ms fade either way
+            check(!toasts->hasUndo(), "and the toast no longer offers Undo");
+            toasts->requestUndo();
+            settle(150);
             check(static_cast<int>(window.document().solids().size()) == afterFirstClick,
-                  "a second click during the fade did not undo a second time");
+                  "a second click did not undo a second time");
         }
-
-        // A resize mid-fade is the OTHER trigger for the same race:
-        // ToastHost's own event filter re-derives the Undo control's
-        // geometry - and, through Toast::syncUndoGeometry(), its visibility
-        // - on every viewport resize for as long as the toast itself is
-        // still isVisible(), which it is for the whole fade, not just until
-        // dismiss() returns. A one-shot hide() at the top of dismiss() does
-        // not survive that; folding "is this toast dismissing?" into the
-        // same predicate syncUndoGeometry() already computes does.
-        check(!window.document().solids().empty(),
-              "there is a body to delete for the resize-mid-fade check");
-        const int beforeResizeCheck = static_cast<int>(window.document().solids().size());
-        view->setSelectedSolids({window.document().solids().front().id});
-        settle(100);
-        trigger(window, QStringLiteral("Delete Selected"));
-        settle(150);
-
-        QWidget* undo2 = toasts ? toasts->undoControl() : nullptr;
-        check(undo2 != nullptr && undo2->isVisible(),
-              "the toast offers Undo again for the resize-mid-fade check");
-        if (undo2) {
-            clickAt(undo2, QPointF(undo2->width() / 2.0, undo2->height() / 2.0));
-            // Deliberately not settled for the fade duration - the resize
-            // below has to land while it is still running.
-            check(static_cast<int>(window.document().solids().size()) == beforeResizeCheck,
-                  "Undo restored the body before the resize");
-
-            const QSize original = view->size();
-            view->resize(original.width() + 40, original.height());
-            waitFully(30);   // well inside the 160 ms fade
-
-            const QPoint centreAfterResize =
-                undo2->mapTo(view, QPoint(undo2->width() / 2, undo2->height() / 2));
-            check(view->childAt(centreAfterResize) != undo2,
-                  "a viewport resize mid-fade does not re-show the Undo control");
-
-            view->resize(original);
-            waitFully(250);   // outlasts the fade, and lets the resize settle back
-        }
-
-        view->setAnimationsEnabled(false);
-        check(!view->animationsEnabled(), "animations re-disabled again after the double-click check");
     }
 
     // --- grid subdivision policy ----------------------------------------------
@@ -14436,13 +14347,13 @@ int main(int argc, char* argv[])
                   "and the probe leaves no toast standing over the viewport");
         }
 
-        Toast* sweptToast = window.findChild<Toast*>();
+        ToastHost* sweptToast = window.findChild<ToastHost*>();
         check(sweptToast != nullptr && sweptToast->paintedTexts().size() > 2,
               QStringLiteral("the toast sweep covers every message shown this run, "
                              "not just the live one (%1 strings)")
                   .arg(sweptToast ? sweptToast->paintedTexts().size() : 0));
         QStringList toastOffenders;
-        for (Toast* toastWidget : window.findChildren<Toast*>()) {
+        for (ToastHost* toastWidget : window.findChildren<ToastHost*>()) {
             for (const QString& text : toastWidget->paintedTexts()) {
                 for (const QString& word : banned) {
                     if (usesBannedWord(text, word))
@@ -15068,118 +14979,12 @@ int main(int argc, char* argv[])
               "the narrow probe starts with a guide up and a toast host");
 
         if (guide && toasts) {
-            toasts->show(QStringLiteral("This outline can't close into a flat face"),
-                         Toast::Kind::Failure, false);
-            settle(150);
-            Toast* toast = narrow.findChild<Toast*>();
-            check(toast != nullptr && toast->isVisible(),
-                  "a failure message is up alongside the guide");
-
-            // The shrink, to the 800-wide viewport the defect names, at the
-            // shortest height this window can actually reach.
-            //
-            // Regression: the defect this block guards against was found at
-            // a LITERAL 800x500, but 500 is no longer a height this window
-            // can be shrunk to - MainWindow::buildOverlay() now derives the
-            // viewport's minimum height from the rail's own sizeHint(), and
-            // that floor (nv->minimumHeight()) is taller than 500. Aiming
-            // past a real floor does not skip the collision-avoidance case
-            // this test exists for, it just means the shortest viewport
-            // really is the floor now - which is also the single most
-            // cramped case left to test, so reading the floor here rather
-            // than hard-coding 500 keeps this check meaningful instead of
-            // quietly aiming at an unreachable size forever.
-            const int floorHeight = nv->minimumHeight();
-            resizeViewport(800, floorHeight);
-            check(nv->width() == 800 && nv->height() == floorHeight,
-                  QStringLiteral("the probe really is at the 800-wide viewport's own "
-                                 "floor height under test (got %1x%2, floor %3)")
-                      .arg(nv->width()).arg(nv->height()).arg(floorHeight));
-
-            if (toast) {
-                check(!toast->geometry().intersects(guide->geometry()),
-                      QStringLiteral("after a shrink the toast is clear of the guide "
-                                     "(viewport %1 wide - toast %2,%3 %4x%5 - guide "
-                                     "%6,%7 %8x%9)")
-                          .arg(nv->width())
-                          .arg(toast->x()).arg(toast->y())
-                          .arg(toast->width()).arg(toast->height())
-                          .arg(guide->x()).arg(guide->y())
-                          .arg(guide->width()).arg(guide->height()));
-
-                QStringList collisions;
-                for (ToolCluster* cluster : nv->findChildren<ToolCluster*>()) {
-                    if (cluster->isVisible() &&
-                        cluster->geometry().intersects(toast->geometry()))
-                        collisions << QStringLiteral("%1,%2 %3x%4")
-                                          .arg(cluster->x()).arg(cluster->y())
-                                          .arg(cluster->width()).arg(cluster->height());
-                }
-                check(collisions.isEmpty(),
-                      QStringLiteral("and clear of every anchored widget too "
-                                     "(viewport %1x%2, toast %3,%4 %5x%6; hits: %7)")
-                          .arg(nv->width()).arg(nv->height())
-                          .arg(toast->x()).arg(toast->y())
-                          .arg(toast->width()).arg(toast->height())
-                          .arg(collisions.isEmpty() ? QStringLiteral("none")
-                                                    : collisions.join(QStringLiteral("; "))));
-                check(nv->rect().contains(toast->geometry()),
-                      "and still entirely inside the viewport");
-
-                // Non-vacuity for the loop above, now that the bottom-left
-                // Snap/Select cluster it was written against has become a
-                // rail spanning the WHOLE left edge. The rail is in every
-                // horizontal band there is, so the band solver has to raise
-                // the toast's floor past it at this width rather than
-                // happening to miss it - which is only interesting if the
-                // rail really does share the toast's rows.
-                if (ToolCluster* rail = nv->findChild<ToolCluster*>()) {
-                    const bool sharesTheBand = rail->geometry().top() <= toast->geometry().bottom() &&
-                                               rail->geometry().bottom() >= toast->geometry().top();
-                    check(sharesTheBand,
-                          QStringLiteral("the rail really is in the toast's band, so "
-                                         "stepping around it was not a no-op (rail "
-                                         "%1,%2 %3x%4)")
-                              .arg(rail->x()).arg(rail->y())
-                              .arg(rail->width()).arg(rail->height()));
-                    check(toast->geometry().left() > rail->geometry().right(),
-                          QStringLiteral("and the toast sits clear to its right "
-                                         "(toast left %1, rail right %2)")
-                              .arg(toast->geometry().left()).arg(rail->geometry().right()));
-                }
-            }
-
-            // The other half: a guide that appears UNDERNEATH a toast already
-            // up. HintBalloon::reconsider() handled that case for itself and
-            // ToastHost did not, so Show tips again under a live toast left
-            // the restored guide sitting on top of it.
+            // Where the toast stands is the page's since Phase 7b (its solver
+            // has its own tests); the balloon below still places itself.
             check(buildBody(narrow, 0.32, 0.32, 0.52, 0.52, 10.0),
                   "a body for the narrow probe, which completes its guide");
             settle(200);
             check(!guide->isVisible(), "the completed guide is out of the way");
-
-            toasts->show(QStringLiteral("This outline can't close into a flat face"),
-                         Toast::Kind::Failure, false);
-            settle(150);
-            Toast* liveToast = narrow.findChild<Toast*>();
-            check(liveToast != nullptr && liveToast->isVisible(),
-                  "a message is up with no guide beneath it");
-
-            QAction* again = action(narrow, QStringLiteral("Show tips again"));
-            check(again != nullptr, "the narrow probe has the reset action");
-            if (again && liveToast) {
-                again->trigger();
-                settle(250);
-                check(guide->isVisible(), "the guide comes back under the live toast");
-                check(!liveToast->geometry().intersects(guide->geometry()),
-                      QStringLiteral("and the toast steps aside for it rather than "
-                                     "being buried (toast %1,%2 %3x%4 - guide "
-                                     "%5,%6 %7x%8)")
-                          .arg(liveToast->x()).arg(liveToast->y())
-                          .arg(liveToast->width()).arg(liveToast->height())
-                          .arg(guide->x()).arg(guide->y())
-                          .arg(guide->width()).arg(guide->height()));
-            }
 
             // The hint balloon has the same obstacle problem as the toast and
             // used to solve it from a shorter list: it named WalkthroughPanel
@@ -15396,103 +15201,28 @@ int main(int argc, char* argv[])
                                  "(got %1x%2, floor %3)")
                       .arg(pv->width()).arg(pv->height()).arg(pv->minimumHeight()));
 
-            // Failure, not Note, purely for its longer life: the growth loop
-            // below takes over a second and a four-second message could
-            // retire mid-probe.
-            toasts->show(QStringLiteral("Graphite drawer probe"),
-                         Toast::Kind::Failure, false);
-            settle(180);
-            Toast* toast = probe.findChild<Toast*>();
-            check(toast != nullptr && toast->isVisible(),
-                  "a message is up for the obstacle probe");
-
-            if (toast) {
-                // Bodies until the drawer is tall enough to reach the
-                // toast's own band on the shortest viewport this window can
-                // actually be shrunk to. Driven off the toast's live
-                // geometry rather than a fixed drawer height, so this cannot
-                // quietly go vacuous the day either widget's size changes -
-                // exactly what happened to the fixed 240px threshold this
-                // replaced once the rail's own minimum-height floor pushed
-                // the toast further down than 240px could reach.
-                // The page reports the card's height as its list grows
-                // (migration Phase 6: the Qt drawer that grew with its rows
-                // is gone); the slot takes it and the overlay re-stacks. Grown
-                // here exactly that way, until it reaches the toast's band.
-                // Two bodies, which the balloon half below selects to raise a hint.
-                for (int i = 0; i < 2; ++i) {
-                    const double y0 = 0.10 + i * 0.065;
-                    buildBody(probe, 0.55, y0, 0.70, y0 + 0.05, 10.0);
-                    settle(60);
-                }
-                auto* itemsSlot = qobject_cast<HtmlCardSlot*>(drawer);
-                if (itemsSlot)
-                    itemsSlot->setContentHeight(toast->geometry().top() - drawer->geometry().top() + 40);
-                settle(150);
-                check(itemsSlot != nullptr && drawer->geometry().bottom() >= toast->geometry().top(),
-                      QStringLiteral("the drawer, as tall as its page says, reaches the toast's "
-                                     "band (drawer bottom %1, toast top %2)")
-                          .arg(drawer->geometry().bottom())
-                          .arg(toast->geometry().top()));
-                // The card measures the rows it actually holds. It used to
-                // report a sizeHint of 325 while sitting at its 176px
-                // empty-state floor with eight bodies listed in it, because
-                // a row is hidden until the event loop shows it and
-                // QWidgetItem::isEmpty() is isHidden() - so the layout
-                // measured the list as empty. Height and hint agreeing is
-                // the property that was actually broken.
-                // A band, not an equality, and the band is exactly the
-                // overlay's device-pixel rounding: it grows an anchored card
-                // by up to three pixels so its far edge lands on a whole
-                // device pixel. Writing this as == wholeDevicePixels(hint)
-                // looked tighter and was wrong - the card re-adjusts itself
-                // when its rows change, so at some scales it is sitting at
-                // the raw hint and at others at the rounded one, and pinning
-                // either exact value fails at the other. The property this
-                // check exists for survives both: the card measures the rows
-                // it actually holds rather than sitting at its 176px
-                // empty-state floor with eight bodies listed in it, which is
-                // a ~150px error, not a three-pixel one.
-                const int hint = static_cast<QWidget*>(drawer)->sizeHint().height();
-                check(drawer->height() >= hint &&
-                          drawer->height() <= Theme::wholeDevicePixels(hint),
-                      QStringLiteral("and the card's height is the height its own "
-                                     "contents ask for (%1 against %2)")
-                          .arg(drawer->height()).arg(hint));
-
-                // Drive the toast INTO the drawer's band. The drawer is a
-                // top-left card and the toast a bottom-centre one, so on any
-                // roomy viewport they never meet and "the toast steps around
-                // the drawer" is a check that cannot fail - the resize and
-                // growth above are what make it non-vacuous.
-                check(pv->width() == 760 && pv->height() == pv->minimumHeight(),
-                      QStringLiteral("the probe is still at the width and floor height "
-                                     "under test (got %1x%2)")
-                          .arg(pv->width()).arg(pv->height()));
-
-                const QRect drawerRect = drawer->geometry();
-                const QRect toastRect = toast->geometry();
-                check(drawerRect.top() <= toastRect.bottom() &&
-                          drawerRect.bottom() >= toastRect.top(),
-                      QStringLiteral("the drawer really does share the toast's band, "
-                                     "so stepping around it is not a no-op (viewport "
-                                     "%1x%2 - drawer %3,%4 %5x%6 - toast %7,%8 %9x%10)")
-                          .arg(pv->width()).arg(pv->height())
-                          .arg(drawerRect.x()).arg(drawerRect.y())
-                          .arg(drawerRect.width()).arg(drawerRect.height())
-                          .arg(toastRect.x()).arg(toastRect.y())
-                          .arg(toastRect.width()).arg(toastRect.height()));
-                check(!toastRect.intersects(drawerRect),
-                      "and the toast is clear of it");
-                check(toastRect.left() > drawerRect.right(),
-                      QStringLiteral("having been pushed past the drawer's right edge, "
-                                     "not merely past the rail's (toast left %1, drawer "
-                                     "right %2, rail right %3)")
-                          .arg(toastRect.left()).arg(drawerRect.right())
-                          .arg(rail->geometry().right()));
-                check(pv->rect().contains(toastRect),
-                      "and still entirely inside the viewport");
+            // Where the toast stands is the page's since Phase 7b; the drawer
+            // is grown into the bottom band here for the balloon's readings.
+            // Two bodies, which the balloon half below selects to raise a hint.
+            for (int i = 0; i < 2; ++i) {
+                const double y0 = 0.10 + i * 0.065;
+                buildBody(probe, 0.55, y0, 0.70, y0 + 0.05, 10.0);
+                settle(60);
             }
+            auto* itemsSlot = qobject_cast<HtmlCardSlot*>(drawer);
+            if (itemsSlot)
+                itemsSlot->setContentHeight(pv->height() - drawer->geometry().top() - 40);
+            settle(150);
+            check(itemsSlot != nullptr && drawer->geometry().bottom() >= pv->height() - 100,
+                  QStringLiteral("the drawer, as tall as its page says, reaches the bottom "
+                                 "band (drawer bottom %1, viewport %2)")
+                      .arg(drawer->geometry().bottom())
+                      .arg(pv->height()));
+            const int hint = static_cast<QWidget*>(drawer)->sizeHint().height();
+            check(drawer->height() >= hint && drawer->height() <= Theme::wholeDevicePixels(hint),
+                  QStringLiteral("and the card's height is the height its own "
+                                 "contents ask for (%1 against %2)")
+                      .arg(drawer->height()).arg(hint));
             // The message is left up on purpose rather than dismissed: it
             // sits in the bottom band and the balloon rides 90px above it, so
             // it is one more thing the balloon has to be clear of while the
@@ -15653,11 +15383,7 @@ int main(int argc, char* argv[])
             if (!scale.contains(w->font().pointSizeF()))
                 exempt << name + QStringLiteral(" @ %1").arg(w->font().pointSizeF());
         };
-        Toast* hiddenToast = window.findChild<Toast*>();
         ExtrudePreview* hiddenPreview = window.findChild<ExtrudePreview*>();
-        assertScale(hiddenToast, QStringLiteral("Toast"));
-        assertScale(hiddenToast ? hiddenToast->undoControl() : nullptr,
-                    QStringLiteral("UndoControl"));
         assertScale(hiddenPreview, QStringLiteral("ExtrudePreview"));
         assertScale(hiddenPreview ? hiddenPreview->field() : nullptr,
                     QStringLiteral("ExtrudePreview field"));
@@ -15949,83 +15675,6 @@ int main(int argc, char* argv[])
                 checkCardCorners(sheet, QStringLiteral("ShortcutSheet"));
             }
             sheet->hide();
-        }
-
-        // The toast: plain family border on the edges away from its own
-        // stripe, plus the stripe itself, kind-tinted, restoring the
-        // Note/Failure distinction the mockup regression flattened. Sampled
-        // at the TOP edge for the family-surface pin, not the left - the
-        // left edge carries the stripe on purpose and would read as neither
-        // a plain border() nor a coverage bug, just a different accent.
-        ToastHost* toasts = window.findChild<ToastHost*>();
-        check(toasts != nullptr, "there is a toast host for the family-surface probe");
-        if (toasts) {
-            toasts->show(QStringLiteral("Graphite family probe - note"), Toast::Kind::Note, false);
-            settle(120);
-            Toast* toastWidget = toasts->toast();
-            check(toastWidget != nullptr && toastWidget->isVisible(),
-                  "the probe Note toast is up");
-            if (toastWidget) {
-                const int m = Theme::surfaceShadowMargin();
-                const QRect body = toastWidget->rect().adjusted(m, m, -m, -m);
-                checkFamilySurface(toastWidget, QPoint(body.center().x(), body.top()),
-                                   body.adjusted(4, 4, -4, -4),
-                                   Theme::border(), QStringLiteral("Toast"), /*radius=*/8);
-                checkCardCorners(toastWidget, QStringLiteral("Toast"));
-
-                // Also saved to disk - the coordinator asked for a magnified
-                // capture of the toast alongside the chip cluster, and a
-                // toast only exists once real state (an outcome to report)
-                // puts it there, unlike the chip clusters which are always
-                // on screen. QWidget::render(), the same in-process
-                // mechanism every check in this file already uses to drive
-                // and inspect the app - never OS-level synthetic input.
-                renderExact(toastWidget).save(outDir + QStringLiteral("/toast_note.png"));
-
-                const QImage noteImg = renderExact(toastWidget);
-                const QPoint stripePoint(body.left() + 1, body.center().y());
-                const QColor noteStripe = noteImg.pixelColor(stripePoint);
-                // The WIDTH, pinned rather than assumed. The stripe went from
-                // 3px to 6px this phase, and the probe above would have read
-                // the same colour at either - it samples one pixel one column
-                // in from the edge, which is inside both. This second point at
-                // +4 is inside a 6px stripe and outside a 3px one, so a
-                // silent revert fails here instead of passing everywhere.
-                const QPoint widePoint(body.left() + 4, body.center().y());
-                const QColor noteWide = noteImg.pixelColor(widePoint);
-
-                toasts->show(QStringLiteral("Graphite family probe - failure"),
-                            Toast::Kind::Failure, false);
-                settle(120);
-                const QImage failureImg = renderExact(toastWidget);
-                failureImg.save(outDir + QStringLiteral("/toast_failure.png"));
-                const QColor failureStripe = failureImg.pixelColor(stripePoint);
-                const QColor failureWide = failureImg.pixelColor(widePoint);
-
-                check(colorDistance(noteStripe, failureStripe) > 15.0,
-                      "a Failure toast's stripe reads as a different colour "
-                      "than a Note's");
-                check(colorDistance(noteStripe, Theme::accent()) <
-                          colorDistance(noteStripe, Theme::textMuted()),
-                      "the Note toast's stripe reads closer to accent()");
-                check(colorDistance(failureStripe, Theme::danger()) <
-                          colorDistance(failureStripe, Theme::accent()),
-                      "the Failure toast's stripe reads closer to danger()");
-
-                // Four columns in is still stripe, on both kinds - which is
-                // only true of the 6px stripe. The comparison is against
-                // panel(), the colour that pixel would be if the stripe had
-                // gone back to 3.
-                check(colorDistance(noteWide, Theme::accent()) <
-                          colorDistance(noteWide, Theme::panel()),
-                      QStringLiteral("the Note stripe is still accent() 4 columns in, "
-                                     "so it is 6px wide rather than 3 (%1)")
-                          .arg(noteWide.name()));
-                check(colorDistance(failureWide, Theme::danger()) <
-                          colorDistance(failureWide, Theme::panel()),
-                      QStringLiteral("and the Failure stripe likewise (%1)")
-                          .arg(failureWide.name()));
-            }
         }
 
         // ExtrudePreview: fix round 1, Minor. Brought into the family too -
@@ -18644,7 +18293,7 @@ int main(int argc, char* argv[])
         check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
               "the furniture holds exactly that one version");
         ToastHost* toasts = probe.findChild<ToastHost*>();
-        check(toasts != nullptr && toasts->toast() != nullptr && !toasts->toast()->hasUndo(),
+        check(toasts != nullptr && !toasts->hasUndo(),
               "the save reports with no Undo - a version is file data, not an edit");
 
         // --- Compare: the splitter, a real viewer-only second view -----------
@@ -18962,7 +18611,7 @@ int main(int argc, char* argv[])
                   toasts->currentText() == QStringLiteral("Restored version \"Original\""),
               QStringLiteral("the Note toast names the restored version (\"%1\")")
                   .arg(toasts ? toasts->currentText() : QString()));
-        check(toasts != nullptr && toasts->toast() != nullptr && toasts->toast()->hasUndo(),
+        check(toasts != nullptr && toasts->hasUndo(),
               "...and offers Undo - one checkpoint, one Undo");
 
         check(trigger(probe, QStringLiteral("Undo")), "Undo's own action triggers");
@@ -19006,13 +18655,13 @@ int main(int argc, char* argv[])
         check(probe.deleteVersionByName(QStringLiteral("ToDelete")) &&
                   probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
               "deleting it by name takes it out - final");
-        check(toasts != nullptr && toasts->toast() != nullptr && !toasts->toast()->hasUndo(),
+        check(toasts != nullptr && !toasts->hasUndo(),
               "the Note toast for a version delete offers no Undo - versions carry none");
 
         // --- this probe's own toasts join the vocabulary sweep too (fix ---
         // round 1, Minor 5) - the SAME mechanism the shared `window`'s own
         // sweep uses (Toast::paintedTexts(), walked by
-        // window.findChildren<Toast*>() many thousand lines above), just
+        // window.findChildren<ToastHost*>() many thousand lines above), just
         // pointed at `probe` instead: an isolated probe's own ToastHost is a
         // SEPARATE object in a separate tree, so nothing about the shared
         // window's sweep could ever reach the "Version ... saved" /
@@ -19031,7 +18680,7 @@ int main(int argc, char* argv[])
         // exactly the string this task means to exempt one layer up.
         {
             QStringList probeToastOffenders;
-            for (Toast* toastWidget : probe.findChildren<Toast*>()) {
+            for (ToastHost* toastWidget : probe.findChildren<ToastHost*>()) {
                 for (const QString& text : toastWidget->paintedTexts()) {
                     for (const QString& word : bannedWords()) {
                         if (usesBannedWord(text, word))
@@ -19040,7 +18689,7 @@ int main(int argc, char* argv[])
                     }
                 }
             }
-            check(!probe.findChildren<Toast*>().isEmpty(),
+            check(!probe.findChildren<ToastHost*>().isEmpty(),
                   "the probe has a toast host to sweep, so this is not vacuous");
             check(probeToastOffenders.isEmpty(),
                   QStringLiteral("none of this probe's own toast text (Save/Restore/Delete "
@@ -20269,7 +19918,7 @@ int main(int argc, char* argv[])
                   pToasts->currentText() == QStringLiteral("2 bodies mirrored"),
               QStringLiteral("one Note toast names the paired count, plural written out (\"%1\")")
                   .arg(pToasts ? pToasts->currentText() : QString()));
-        check(pToasts != nullptr && pToasts->toast() != nullptr && pToasts->toast()->hasUndo(),
+        check(pToasts != nullptr && pToasts->hasUndo(),
               "...and offers Undo");
 
         trigger(probe, QStringLiteral("Undo"));
@@ -20800,7 +20449,7 @@ int main(int argc, char* argv[])
         // comes back washed out.
         const OcctViewWidget::LightRigProbe lightsBeforeEntry = rview->lightRigProbe();
 
-        Toast* toast = probe.findChild<Toast*>();
+        ToastHost* toast = probe.findChild<ToastHost*>();
         ToastHost* toastHost = probe.findChild<ToastHost*>();
         renderAction->trigger();
         settle(250);
@@ -21466,7 +21115,7 @@ int main(int argc, char* argv[])
               "this probe has a toast to sweep, so the vocabulary check below "
               "is not vacuous");
         QStringList renderToastOffenders;
-        for (Toast* widget : probe.findChildren<Toast*>()) {
+        for (ToastHost* widget : probe.findChildren<ToastHost*>()) {
             for (const QString& text : widget->paintedTexts()) {
                 for (const QString& word : bannedWords()) {
                     if (usesBannedWord(text, word))
@@ -23378,11 +23027,11 @@ int main(int argc, char* argv[])
         // toast copy is exercised only through the specific scenarios above,
         // so a targeted sweep over THIS probe's own toast history closes that
         // gap the same way the render-mode block's own toast sweep does.
-        Toast* linkToastWidget = probe.findChild<Toast*>();
+        ToastHost* linkToastWidget = probe.findChild<ToastHost*>();
         check(linkToastWidget != nullptr && !linkToastWidget->paintedTexts().isEmpty(),
               "this probe has toast history to sweep, so the check below is not vacuous");
         QStringList linkToastOffenders;
-        for (Toast* widget : probe.findChildren<Toast*>()) {
+        for (ToastHost* widget : probe.findChildren<ToastHost*>()) {
             for (const QString& text : widget->paintedTexts()) {
                 for (const QString& word : bannedWords()) {
                     if (usesBannedWord(text, word))
@@ -27172,7 +26821,7 @@ int main(int argc, char* argv[])
         {
             const QString shown = jt->currentText();
             const bool showing = jt->isShowing();
-            const bool undoable = jt->toast() && jt->toast()->hasUndo();
+            const bool undoable = jt->hasUndo();
             const int armed = jt->remainingMs();
             check(showing && shown == QStringLiteral("Added Chair") && undoable,
                   QStringLiteral("jobs: adding a piece reports a Note with Undo (\"%1\", undo %2)")
@@ -27198,9 +26847,8 @@ int main(int argc, char* argv[])
 
         // THE PILL UNDOES IT, on the scene's own stack.
         {
-            QWidget* pill = jt->undoControl();
-            check(reachable(pill), "jobs: the Note's Undo pill is reachable by a real click");
-            if (pill) clickAt(pill, QPointF(pill->width() / 2.0, pill->height() / 2.0));
+            check(jt->hasUndo() && jt->undoEnabled(), "jobs: the Note offers Undo");
+            jt->requestUndo();
             settle(250);
             const int count = static_cast<int>(sw.scene().pieces().size());
             check(count == 2 && rowIndexNamed(QStringLiteral("Chair 3")) < 0,
@@ -27218,8 +26866,7 @@ int main(int argc, char* argv[])
         // THE PILL OBEYS UNDO'S ENABLED STATE - an empty stack offers nothing.
         {
             QAction* undoAct = actionNamed(QStringLiteral("Undo"));
-            check(undoAct && undoAct->isEnabled() && jt->toast() &&
-                      jt->toast()->undoEnabled(),
+            check(undoAct && undoAct->isEnabled() && jt->undoEnabled(),
                   "jobs: with a step to take back, Undo and the pill are both live");
         }
 
@@ -27265,7 +26912,7 @@ int main(int argc, char* argv[])
                   "jobs: ...and the second click takes Chair 2 out");
             const QString shown = jt->currentText();
             check(jt->isShowing() && shown == QStringLiteral("Removed Chair 2") &&
-                      jt->toast()->hasUndo(),
+                      jt->hasUndo(),
                   QStringLiteral("jobs: removing reports a Note with Undo (\"%1\")").arg(shown));
             if (QAction* undoAct = actionNamed(QStringLiteral("Undo"))) undoAct->trigger();
             settle(250);
@@ -27281,10 +26928,9 @@ int main(int argc, char* argv[])
             settle(150);
             const QString shown = jt->currentText();
             check(jt->isShowing() && shown == QStringLiteral("Renamed to \"Armchair\"") &&
-                      jt->toast()->hasUndo(),
+                      jt->hasUndo(),
                   QStringLiteral("jobs: renaming reports a Note with Undo (\"%1\")").arg(shown));
-            if (QWidget* pill = jt->undoControl())
-                clickAt(pill, QPointF(pill->width() / 2.0, pill->height() / 2.0));
+            jt->requestUndo();
             settle(250);
             check(rowIndexNamed(QStringLiteral("Chair 3")) >= 0 &&
                       rowIndexNamed(QStringLiteral("Armchair")) < 0,
@@ -27317,10 +26963,9 @@ int main(int argc, char* argv[])
                       .arg(xAfter - xBefore, 0, 'f', 2));
             const QString moved = jt->currentText();
             check(jt->isShowing() && moved == QStringLiteral("Moved Chair") &&
-                      jt->toast()->hasUndo(),
+                      jt->hasUndo(),
                   QStringLiteral("jobs: ...and reports a Note with Undo (\"%1\")").arg(moved));
-            if (QWidget* pill = jt->undoControl())
-                clickAt(pill, QPointF(pill->width() / 2.0, pill->height() / 2.0));
+            jt->requestUndo();
             settle(250);
             check(sw.scene().piece(id) && std::fabs(pieceX(id) - xBefore) < 1.0e-6,
                   "jobs: ...and its Undo puts the piece back where it stood");
@@ -27344,7 +26989,7 @@ int main(int argc, char* argv[])
             settle(200);
             const QString turned = jt->currentText();
             check(jt->isShowing() && turned == QStringLiteral("Rotated Chair") &&
-                      jt->toast()->hasUndo(),
+                      jt->hasUndo(),
                   QStringLiteral("jobs: a finished Rotate drag reports a Note with Undo "
                                  "(\"%1\")").arg(turned));
             sw.setTool(SceneWindow::Tool::Move);
@@ -27474,7 +27119,7 @@ int main(int argc, char* argv[])
             const QString shown = jt->currentText();
             check(jt->isShowing() &&
                       shown == QStringLiteral("Picture saved as scene-jobs-picture.png") &&
-                      !jt->toast()->hasUndo(),
+                      !jt->hasUndo(),
                   QStringLiteral("jobs: ...and reports a Note naming the file, with no Undo "
                                  "(\"%1\")").arg(shown));
         }
@@ -27585,7 +27230,7 @@ int main(int argc, char* argv[])
         {
             QStringList texts = jp->paintedTexts();
             if (card) texts += card->paintedTexts();
-            if (jt->toast()) texts += jt->toast()->paintedTexts();
+            texts += jt->paintedTexts();
             texts << sw.statusLine()->state();
             if (tools)
                 for (ToolChip* c : tools->chips()) texts << c->toolTip();
@@ -29660,7 +29305,7 @@ int main(int argc, char* argv[])
 
                 ToastHost* moveToasts = probe.findChild<ToastHost*>();
                 check(moveToasts != nullptr && moveToasts->isShowing() &&
-                          moveToasts->toast() != nullptr && moveToasts->toast()->hasUndo(),
+                          moveToasts->hasUndo(),
                       "and reported it through a toast that offers Undo");
                 check(moveToasts != nullptr &&
                           moveToasts->currentText().contains(QStringLiteral("moved")),
@@ -31719,8 +31364,7 @@ int main(int argc, char* argv[])
             check(toasts != nullptr && toasts->remainingMs() > 0 && toasts->remainingMs() <= 4000,
                   QStringLiteral("placement: as a Note (%1 ms left of a Note's 4000)")
                       .arg(toasts ? toasts->remainingMs() : -1));
-            check(toasts != nullptr && toasts->undoControl() != nullptr &&
-                      toasts->undoControl()->isVisible(),
+            check(toasts != nullptr && toasts->hasUndo() && toasts->undoEnabled(),
                   "placement: offering Undo");
 
             trigger(pw, QStringLiteral("Undo"));
@@ -32034,8 +31678,8 @@ int main(int argc, char* argv[])
                 QStringList texts;
                 if (jointAction) texts << jointAction->text().remove(QLatin1Char('&'))
                                        << jointAction->toolTip();
-                if (toasts != nullptr && toasts->toast() != nullptr)
-                    texts << toasts->toast()->paintedTexts();
+                if (toasts != nullptr)
+                    texts << toasts->paintedTexts();
                 const bool sawJointWord =
                     std::any_of(texts.begin(), texts.end(), [](const QString& t) {
                         return t.contains(QStringLiteral("joint"), Qt::CaseInsensitive);
@@ -32323,8 +31967,7 @@ int main(int argc, char* argv[])
                                               QString::fromStdString(cw.document().nameOf(shelf))),
                       QStringLiteral("chip: reported by name (\"%1\")").arg(toastText()));
                 check(toasts != nullptr && toasts->remainingMs() > 0 &&
-                          toasts->remainingMs() <= 4000 && toasts->undoControl() != nullptr &&
-                          toasts->undoControl()->isVisible(),
+                          toasts->remainingMs() <= 4000 && toasts->hasUndo() && toasts->undoEnabled(),
                       "chip: as a Note offering Undo");
 
                 trigger(cw, QStringLiteral("Undo"));
@@ -33279,7 +32922,7 @@ int main(int argc, char* argv[])
             // the two clauses this task added were swept by nothing at all.
             {
                 QStringList restToastCopy;
-                for (Toast* toastWidget : rw.findChildren<Toast*>())
+                for (ToastHost* toastWidget : rw.findChildren<ToastHost*>())
                     restToastCopy += toastWidget->paintedTexts();
                 const auto sawClause = [&](const QString& fragment) {
                     return std::any_of(restToastCopy.begin(), restToastCopy.end(),
@@ -33591,7 +33234,7 @@ int main(int argc, char* argv[])
                   mw.document().shapeOf(board).IsSame(originalShape),
               "mitre: Enter on a refused angle changes nothing and leaves the gesture live");
         check(mToasts && mToasts->currentText() == MainWindow::mitreTooLongRefusalText() &&
-                  mToasts->toast() && !mToasts->toast()->hasUndo(),
+                  !mToasts->hasUndo(),
               "mitre: and reports the refusal as a Failure naming the reason");
 
         // --- Flip: four sides, left -> top -> right -> bottom -> left ---------
@@ -33798,8 +33441,7 @@ int main(int argc, char* argv[])
         check(std::fabs(committed - ghostAt30) < 1.0e-6,
               "mitre: and it is exactly the ghost the user was shown");
         check(mToasts && mToasts->currentText().startsWith(QStringLiteral("Mitred ")) &&
-                  mToasts->currentText().contains(QStringLiteral("30°")) && mToasts->toast() &&
-                  mToasts->toast()->hasUndo(),
+                  mToasts->currentText().contains(QStringLiteral("30°")) && mToasts->hasUndo(),
               QStringLiteral("mitre: a Note with Undo names it (%1)")
                   .arg(mToasts ? mToasts->currentText() : QString()));
 
@@ -33835,7 +33477,7 @@ int main(int argc, char* argv[])
                   std::fabs(committedThrough - ghostThrough30) < 1.0e-6,
               "mitre: the committed thickness-side board is the formula's volume and the ghost's");
         check(mToasts && mToasts->currentText().startsWith(QStringLiteral("Mitred ")) &&
-                  mToasts->toast() && mToasts->toast()->hasUndo(),
+                  mToasts->hasUndo(),
               "mitre: and a Note with Undo names it");
         trigger(mw, QStringLiteral("Undo"));
         waitFully(200);
@@ -34575,26 +34217,8 @@ int main(int argc, char* argv[])
         }
 
         // --- the sites, as painted -------------------------------------------
-        ToastHost* inkHost = iw.findChild<ToastHost*>();
-        Toast* inkToast = inkHost ? inkHost->toast() : nullptr;
-        check(inkHost != nullptr && inkToast != nullptr, "ink: the window has its toast host");
-        if (inkHost && inkToast) {
-            inkHost->show(QStringLiteral("Ink probe"), Toast::Kind::Note, true);
-            settle(80);
-            QWidget* pill = inkHost->undoControl();
-            check(pill != nullptr && pill->isVisible() && inkToast->undoEnabled(),
-                  "ink: a Note with a live Undo is up");
-            if (pill) {
-                const QRect pillRect = pill->geometry().translated(-inkToast->pos());
-                const QColor ink =
-                    mostChromaticInk(renderExact(inkToast), pillRect, Theme::chipHover());
-                check(contrastRatio(ink, Theme::chipHover()) >= 4.5,
-                      QStringLiteral("ink: the toast's Undo AS PAINTED reads at %1:1 on its pill "
-                                     "(%2) - it measured 1.80:1 in the accent")
-                          .arg(contrastRatio(ink, Theme::chipHover()), 0, 'f', 2)
-                          .arg(ink.name()));
-            }
-        }
+        // The toast's Undo ink is the page's to paint since Phase 7b
+        // (chrome_smoke reads it there).
 
         HintBalloon* inkBalloon = iw.findChild<HintBalloon*>();
         check(inkBalloon != nullptr && inkBalloon->isVisible(),
@@ -34691,112 +34315,6 @@ int main(int argc, char* argv[])
             check(!iw.isAskingBeforeClose(), "ink: Keep editing puts the question away");
         }
 
-        // --- a Failure is a SHAPE, not only a colour (F6) ---------------------
-        if (inkHost && inkToast) {
-            inkHost->show(QStringLiteral("Shape probe - a report"), Toast::Kind::Note, false);
-            settle(60);
-            const QImage noteShot = renderExact(inkToast);
-            const QRect mark = inkToast->glyphRect();
-            inkHost->show(QStringLiteral("Shape probe - a refusal"), Toast::Kind::Failure, false);
-            settle(60);
-            const QImage failureShot = renderExact(inkToast);
-            const auto dangerInk = [&](const QImage& shot) {
-                int count = 0;
-                for (int y = mark.top(); y <= mark.bottom(); ++y)
-                    for (int x = mark.left(); x <= mark.right(); ++x)
-                        if (colorDistance(overGround(shot.pixelColor(x, y), Theme::panel()),
-                                          Theme::danger()) < 60.0)
-                            ++count;
-                return count;
-            };
-            const int failureMark = dangerInk(failureShot);
-            const int noteMark = dangerInk(noteShot);
-            check(failureMark >= 12 && noteMark == 0,
-                  QStringLiteral("toast: a Failure paints a warning mark where a Note paints "
-                                 "nothing (%1 danger pixels against %2)")
-                      .arg(failureMark).arg(noteMark));
-            const QPoint topEdge(failureShot.width() / 2, 0);
-            const QColor failureEdge = overGround(failureShot.pixelColor(topEdge), Theme::panel());
-            const QColor noteEdge = overGround(noteShot.pixelColor(topEdge), Theme::panel());
-            check(colorDistance(failureEdge, Theme::danger()) <
-                          colorDistance(failureEdge, Theme::border()) &&
-                      colorDistance(noteEdge, Theme::border()) <
-                          colorDistance(noteEdge, Theme::danger()),
-                  QStringLiteral("toast: and its border is danger() where a Note's is border() "
-                                 "(%1 against %2)")
-                      .arg(failureEdge.name(), noteEdge.name()));
-
-            // It still sizes itself from what it paints: a sentence that fits
-            // one line beside a Note's stripe needs two beside the mark.
-            const QFontMetrics body(Theme::bodyFont());
-            const int failureColumn = Toast::textColumnWidth(Toast::Kind::Failure, false);
-            const int noteColumn = Toast::textColumnWidth(Toast::Kind::Note, false);
-            QString between = QStringLiteral("a");
-            while (body.horizontalAdvance(between) <= failureColumn)
-                between += QStringLiteral(" a");
-            check(failureColumn < noteColumn && body.horizontalAdvance(between) <= noteColumn,
-                  QStringLiteral("toast: a probe sentence fits a Note's column and not a "
-                                 "Failure's (%1 px; columns %2 and %3)")
-                      .arg(body.horizontalAdvance(between)).arg(failureColumn).arg(noteColumn));
-            inkHost->show(between, Toast::Kind::Note, false);
-            settle(60);
-            const int noteHeight = inkToast->height();
-            inkHost->show(between, Toast::Kind::Failure, false);
-            settle(60);
-            const int failureHeight = inkToast->height();
-            check(failureHeight > noteHeight,
-                  QStringLiteral("toast: so the Failure grows to hold it (%1 px against a "
-                                 "Note's %2)")
-                      .arg(failureHeight).arg(noteHeight));
-        }
-
-        // --- the countdown waits for a reader (F13) ---------------------------
-        if (inkHost && inkToast) {
-            OcctViewWidget* iv = iw.view();
-            inkHost->show(QStringLiteral("Hover probe - a refusal to read"),
-                          Toast::Kind::Failure, false);
-            settle(60);
-            moveTo(iv, QPointF(6.0, 6.0));
-            check(!inkHost->countdownPaused(), "hover: a pointer elsewhere leaves it counting");
-            moveTo(iv, QRectF(inkToast->geometry()).center());
-            check(inkHost->countdownPaused(),
-                  "hover: the pointer resting on a Failure stops its countdown");
-            const int frozen = inkHost->remainingMs();
-            waitFully(700);
-            check(inkHost->isShowing() && inkHost->remainingMs() == frozen,
-                  QStringLiteral("hover: and 700 ms later it has not moved (%1 ms, then %2)")
-                      .arg(frozen).arg(inkHost->remainingMs()));
-            moveTo(iv, QPointF(6.0, 6.0));
-            check(!inkHost->countdownPaused(), "hover: leaving starts it again");
-            waitFully(300);
-            const int resumed = inkHost->remainingMs();
-            check(resumed < frozen && resumed > frozen - 1500,
-                  QStringLiteral("hover: from where it stopped, not from the start or from "
-                                 "nothing (%1 ms after %2)")
-                      .arg(resumed).arg(frozen));
-
-            // The Undo pill is a widget of its own, and resting on it holds
-            // the message it would undo.
-            inkHost->show(QStringLiteral("Hover probe - a report with Undo"),
-                          Toast::Kind::Note, true);
-            settle(60);
-            QWidget* pill = inkHost->undoControl();
-            check(pill != nullptr && pill->isVisible(), "hover: a Note with Undo is up");
-            if (pill && pill->isVisible()) {
-                QEnterEvent enter(QPointF(4.0, 4.0), QPointF(4.0, 4.0),
-                                  pill->mapToGlobal(QPointF(4.0, 4.0)));
-                QCoreApplication::sendEvent(pill, &enter);
-                check(inkHost->countdownPaused(), "hover: resting on Undo holds the Note");
-                const int held = inkHost->remainingMs();
-                waitFully(400);
-                check(inkHost->remainingMs() == held,
-                      QStringLiteral("hover: and it is not dismissed early (%1 ms, then %2)")
-                          .arg(held).arg(inkHost->remainingMs()));
-                QEvent leave(QEvent::Leave);
-                QCoreApplication::sendEvent(pill, &leave);
-                check(!inkHost->countdownPaused(), "hover: leaving Undo lets it go on");
-            }
-        }
         iw.hide();
     }
 
@@ -34884,7 +34402,7 @@ int main(int argc, char* argv[])
             check(bw.transformBody(b3, step), "bar: the third board steps 10 mm");
             settle(150);
             const QString note = barHost ? barHost->currentText() : QString();
-            check(!note.isEmpty() && barHost->toast()->kind() == Toast::Kind::Note,
+            check(!note.isEmpty() && barHost->kind() == Toast::Kind::Note,
                   QStringLiteral("bar: a Note reports it (\"%1\")").arg(note));
             check(bar->message() != note,
                   QStringLiteral("bar: and the left channel does NOT say it again (\"%1\")")
@@ -34920,7 +34438,7 @@ int main(int argc, char* argv[])
               "bar: Intersect on two boards that never meet is refused");
         settle(150);
         const QString refusal = barHost ? barHost->currentText() : QString();
-        check(barHost && barHost->toast()->kind() == Toast::Kind::Failure && !refusal.isEmpty(),
+        check(barHost && barHost->kind() == Toast::Kind::Failure && !refusal.isEmpty(),
               QStringLiteral("bar: as a Failure toast (\"%1\")").arg(refusal));
         check(bar->message() == MainWindow::statusLineFor(refusal) &&
                   !bar->message().endsWith(QLatin1Char('.')) &&
@@ -34928,7 +34446,7 @@ int main(int argc, char* argv[])
               QStringLiteral("bar: and the left channel carries its REASON, not \"refused\" "
                              "(\"%1\")")
                   .arg(bar->message()));
-        if (barHost && barHost->toast()) barHost->toast()->hide();
+        if (barHost) barHost->dismiss();
         settle(100);
         check(!barHost->isShowing() &&
                   bar->message() == MainWindow::statusLineFor(refusal),
@@ -37152,37 +36670,27 @@ int main(int argc, char* argv[])
             settle(40);
         }
 
-        // A TOAST is its message, and is announced.
+        // A TOAST is announced by the page (its lane is aria-live, Phase 7b);
+        // what holds here is that showing one raises NO Alert.
         g_accessibleEvents.clear();
         const QAccessible::UpdateHandler previous =
             QAccessible::installUpdateHandler(&recordAccessibleEvent);
         ToastHost* toasts = aw.findChild<ToastHost*>();
-        Toast* toast = aw.findChild<Toast*>();
         const QString message = QStringLiteral("The two pieces don't meet — move them so they do");
         if (toasts) toasts->show(message, Toast::Kind::Failure, false);
         settle(120);
-        int announcements = 0, alerts = 0;
-        for (const auto& event : g_accessibleEvents) {
-            if (event.first == toast && event.second == QAccessible::Announcement) ++announcements;
+        int alerts = 0;
+        for (const auto& event : g_accessibleEvents)
             if (event.second == QAccessible::Alert) ++alerts;
-        }
-        check(toast && toast->accessibleName() == message &&
-                  toast->accessibleDescription() == QStringLiteral("Failure"),
-              QStringLiteral("names: a toast's accessible name IS its message (\"%1\")")
-                  .arg(toast ? toast->accessibleName() : QString()));
-        check(announcements >= 1,
-              QStringLiteral("names: and showing it raises an announcement for it (%1 among %2 "
-                             "events)")
-                  .arg(announcements).arg(static_cast<int>(g_accessibleEvents.size())));
+        check(toasts && toasts->currentText() == message,
+              QStringLiteral("names: the Failure is the toast's message (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
         // Qt's Windows plugin answers an Alert with a SYSTEM SOUND - every toast
         // chimed, and a full run of this suite chimed on a loop. Never again.
         check(alerts == 0,
               QStringLiteral("names: and NO Alert is raised - Windows plays a sound for one "
                              "(%1 alerts)")
                   .arg(alerts));
-        check(toast && toast->undoControl() &&
-                  toast->undoControl()->accessibleName() == toast->paintedTexts().value(0),
-              "names: and its painted Undo pill is named Undo");
 
         // A HINT is its text, and is announced as it arrives.
         g_accessibleEvents.clear();

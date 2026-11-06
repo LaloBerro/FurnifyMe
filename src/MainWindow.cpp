@@ -4,6 +4,7 @@
 #include "PanelCloseButton.h"
 #include "session/JointRows.h"
 #include "session/StatusLine.h"
+#include "session/ToastHost.h"
 // Outside the web guard: both are built into every preset, and
 // settingsSurface()/versionsSurface()/syncVersionsModel()/onSaveVersion()
 // use them in every build (Phase 3c review C1 - the vcpkg build had not
@@ -47,7 +48,6 @@
 #include "ShapeFlyout.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
-#include "Toast.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "TransformGizmo.h"
@@ -2775,7 +2775,23 @@ void MainWindow::buildOverlay()
     // its own; raise()ing on every show() keeps it above whatever cluster
     // happens to be on top. Undo, when a message offers it, replays through
     // the same onUndo() the Undo action itself uses.
-    myToasts = new ToastHost(myView, this);
+    myToasts = new ToastHost(this);
+#ifdef FURNIFYME_WEB_UI
+    // The page draws the toast (Phase 7b); this keeps its rules. Undo's state
+    // rides WITH the message: updateActions() pushes it a moment later, and a
+    // pill that arrived first read as closed until then - measured, a click
+    // inside that gap did nothing.
+    connect(myToasts, &ToastHost::shown, this,
+            [this](const QString& text, Toast::Kind kind, bool undo, int stamp) {
+                if (!htmlChromeLive()) return;
+                myHtmlChrome->setUndoEnabled(!mySketching && !myShowingInitScreen &&
+                                             !isAskingBeforeClose() && myDocument.canUndo());
+                myHtmlChrome->showToast(text,
+                                        kind == Toast::Kind::Failure ? EditorChrome::Kind::Failure
+                                                                     : EditorChrome::Kind::Note,
+                                        undo, stamp);
+            });
+#endif
     // Through the ACTION, never straight to onUndo(). The menu entry, the
     // chip and the Ctrl+Z binding all obey myUndoAction's enabled state -
     // "!mySketching && canUndo()", set in updateActions(), which CLAUDE.md
@@ -3007,7 +3023,6 @@ void MainWindow::buildOverlay()
     // reaches it too, but only by relaying through relayout()'s own laidOut()
     // emission (see the comment further up, where a second direct connection
     // to appStateChanged used to sit and double-call this).
-    connect(myOverlay, &ViewportOverlay::laidOut, myToasts, &ToastHost::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, hints, &HintBalloon::reposition);
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
@@ -11049,40 +11064,7 @@ void MainWindow::syncHtmlChrome()
 void MainWindow::onReported(const Outcome& outcome)
 {
     // The ONE renderer of everything the session reports (migration Phase 1).
-#ifdef FURNIFYME_WEB_UI
-    if (htmlChromeLive()) {
-        // The same rules ToastHost keeps, with the page drawing: a Note is
-        // DROPPED with notifications off (a Failure never is), a Note that is
-        // shown leaves the left channel to the selection, and a Failure's
-        // reason is written to the status line at once - the relay
-        // ToastHost::failureShown performs in Qt mode.
-        // Undo's state rides WITH the message: updateActions() pushes it a
-        // moment later, and a pill that arrived first read as closed until
-        // then - measured, a click inside that gap did nothing.
-        myHtmlChrome->setUndoEnabled(!mySketching && !myShowingInitScreen && !isAskingBeforeClose() &&
-                                     myDocument.canUndo());
-        switch (outcome.kind) {
-        case Outcome::Kind::Note:
-            if (!myToasts->notesEnabled()) {
-                if (outcome.writesStatus) myStatusLine->setMessage(statusLineFor(outcome.text));
-                break;
-            }
-            myHtmlChrome->showToast(outcome.text, EditorChrome::Kind::Note, outcome.offersUndo,
-                                    outcome.documentStamp);
-            if (outcome.writesStatus) showSelectionStatus();
-            break;
-        case Outcome::Kind::Failure:
-            myHtmlChrome->showToast(outcome.text, EditorChrome::Kind::Failure, outcome.offersUndo,
-                                    outcome.documentStamp);
-            myStatusLine->setMessage(statusLineFor(outcome.text));
-            break;
-        case Outcome::Kind::Status:
-            myStatusLine->setMessage(outcome.text);
-            break;
-        }
-        return;
-    }
-#endif
+    // The toast's rules are ToastHost's; the page draws what it shows.
     switch (outcome.kind) {
     case Outcome::Kind::Note:
         myToasts->show(outcome.text, Toast::Kind::Note, outcome.offersUndo, outcome.documentStamp);
@@ -11096,7 +11078,7 @@ void MainWindow::onReported(const Outcome& outcome)
         else myStatusLine->setMessage(statusLineFor(outcome.text));
         break;
     case Outcome::Kind::Failure:
-        // Its status line follows through ToastHost::failureShown, as before.
+        // Its status line follows through ToastHost::failureShown.
         myToasts->show(outcome.text, Toast::Kind::Failure, outcome.offersUndo, outcome.documentStamp);
         break;
     case Outcome::Kind::Status:

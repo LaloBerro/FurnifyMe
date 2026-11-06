@@ -28,7 +28,7 @@
 #include "ui/GestureChip.h"
 #include "ui/SettingsEdits.h"
 #include "ui/Themes.h"
-#include "ui/Toast.h"
+#include "session/ToastHost.h"
 #include "web/EditorChrome.h"
 #include "web/RenderPage.h"
 #include "ui/RenderStudio.h"

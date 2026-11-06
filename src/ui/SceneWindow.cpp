@@ -12,7 +12,6 @@
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "WindowChrome.h"
-#include "Toast.h"
 #include "UnsavedCloseCard.h"
 #include "ViewportOverlay.h"
 #include "CardSlide.h"
@@ -515,7 +514,19 @@ void SceneWindow::buildOverlay()
     // Failure toast - which cannot be silenced - rather than a status line
     // nobody reads. A status bar carried the first version of openScene()'s
     // refusal and that was the weaker surface.
-    myToasts = new ToastHost(myView, this);
+    myToasts = new ToastHost(this);
+#ifdef FURNIFYME_WEB_UI
+    // The page draws it (Phase 7b); Undo's state rides WITH the message.
+    connect(myToasts, &ToastHost::shown, this,
+            [this](const QString& text, Toast::Kind kind, bool undo, int stamp) {
+                if (!htmlChromeLive()) return;
+                myHtmlChrome->setUndoEnabled(myUndoAction && myUndoAction->isEnabled());
+                myHtmlChrome->showToast(text,
+                                        kind == Toast::Kind::Failure ? EditorChrome::Kind::Failure
+                                                                     : EditorChrome::Kind::Note,
+                                        undo, stamp);
+            });
+#endif
     // THE EDITOR'S UNDO PILL, on the scene's own stack (the 2026-10 review's
     // F10). A piece added, taken out, moved or renamed reports a Note with
     // Undo now, and the pill triggers the Edit menu's own Undo - gated on its
@@ -527,7 +538,11 @@ void SceneWindow::buildOverlay()
     // A refusal's reason stays on the left of the status bar after its toast
     // goes, the editor's own rule from the same review.
     connect(myToasts, &ToastHost::failureShown, this,
-            [this](const QString& reason) { myStatusLine->setMessage(reason); });
+            [this](const QString& reason) {
+                QString line = reason;
+                if (line.endsWith(QLatin1Char('.'))) line.chop(1);
+                myStatusLine->setMessage(line);
+            });
 
     // Not anchored by the overlay: the card is one question in the middle of
     // the viewport, not a rail or a drawer, so it is placed by the window.
@@ -1281,7 +1296,7 @@ void SceneWindow::reportNote(const QString& text, bool undo)
     // NOT ALSO ON THE LEFT - the editor's rule (the review's F9). While the
     // toast carries the report the left goes back to the selection; a toast
     // that was not shown leaves the bar as the only record of it.
-    if (htmlChromeLive() || (myToasts->isShowing() && myToasts->currentText() == text))
+    if (myToasts->isShowing() && myToasts->currentText() == text)
         myStatusLine->setMessage(selectionStatusText());
     else
         myStatusLine->setMessage(text);
@@ -1592,20 +1607,8 @@ QWidget* SceneWindow::arrangeSurface() const
 
 void SceneWindow::showToast(const QString& text, Toast::Kind kind, bool undo, int stamp)
 {
-#ifdef FURNIFYME_WEB_UI
-    if (htmlChromeLive()) {
-        // Undo's state rides WITH the message (the editor's measured rule).
-        myHtmlChrome->setUndoEnabled(myUndoAction && myUndoAction->isEnabled());
-        myHtmlChrome->showToast(text, kind == Toast::Kind::Failure ? EditorChrome::Kind::Failure : EditorChrome::Kind::Note,
-                                undo, stamp);
-        if (kind == Toast::Kind::Failure) {
-            QString line = text;
-            if (line.endsWith(QLatin1Char('.'))) line.chop(1);
-            myStatusLine->setMessage(line);
-        }
-        return;
-    }
-#endif
+    // ToastHost keeps the rules and the page draws (Phase 7b); a Failure's
+    // reason reaches the status line through failureShown.
     if (myToasts) myToasts->show(text, kind, undo, stamp);
 }
 

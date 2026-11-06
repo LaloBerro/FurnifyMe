@@ -24,7 +24,7 @@
 // would raise gizmos for operations this window does not offer.
 #include <QMainWindow>
 
-#include "Toast.h"
+#include "session/ToastHost.h"
 #include <QString>
 
 #include <map>
