@@ -151,6 +151,8 @@ public:
     void useHtmlChrome();
     class EditorChrome* htmlChrome() const { return myHtmlChrome; }
     class ShellBridge* shellBridge() const { return myShellBridge; }
+    class ScenePiecesModel* piecesModel() const { return myPiecesModel; }
+    class AddPieceModel* addPieceModel() const { return myAddPieceModel; }
     bool htmlChromeLive() const;
 
 signals:
@@ -242,6 +244,11 @@ private:
     // The pill and the arranging cluster: the Qt widget or its slot.
     QWidget* pillSurface() const;
     QWidget* arrangeSurface() const;
+    QWidget* piecesSurface() const;
+    // A row's two gestures, ONE implementation each - the Qt card and the
+    // page's card both end here (Phase 5b).
+    void selectPieceFromList(int pieceId);
+    void setPieceShown(int pieceId, bool shown);
     // The left channel's selection sentence: "Table 2 selected", or nothing.
     QString selectionStatusText() const;
 
@@ -303,6 +310,10 @@ private:
     class ActionRegistry* myActionRegistry = nullptr;
     class HtmlCardSlot* myPillSlot = nullptr;
     class HtmlCardSlot* myViewSlot = nullptr;
+    // The two cards on the page (Phase 5b).
+    class HtmlCardSlot* myPiecesSlot = nullptr;
+    class ScenePiecesModel* myPiecesModel = nullptr;
+    class AddPieceModel* myAddPieceModel = nullptr;
     QList<class QShortcut*> myMenuShortcuts;
 
     // Scene-local body ids, handed out by this window and meaning nothing

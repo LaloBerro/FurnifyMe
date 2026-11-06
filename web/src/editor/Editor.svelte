@@ -24,6 +24,9 @@
   import Menu from './shell/Menu.svelte';
   import type { ChipState, MenuApi, MenuOpen, MenuTitle, ShellApi } from './shell/api';
   import GestureChip from './chips/Chip.svelte';
+  import ScenePieces from './scene/Pieces.svelte';
+  import AddPiece from './scene/AddPiece.svelte';
+  import type { AddPieceApi, PiecesApi } from './scene/api';
   import type { ChipsApi, Face } from './chips/api';
   import { applyTokens } from '../theme';
   import { reportHitsOnChange } from '../overlay/hits';
@@ -38,6 +41,8 @@
     shell,
     menu,
     chips: chipsApi,
+    pieces,
+    addPiece,
   }: {
     chrome: ChromeApi;
     theme: ThemeApi;
@@ -48,6 +53,9 @@
     shell?: ShellApi;
     menu?: MenuApi;
     chips?: ChipsApi;
+    // The scene window's two cards (Phase 5b) - only its page carries them.
+    pieces?: PiecesApi;
+    addPiece?: AddPieceApi;
   } = $props();
 
   const kStripHeight = 24;
@@ -238,6 +246,17 @@
       <GestureChip {name} face={faces[name]} rect={cards[name]} chips={chipsApi} keyboard={keyboardFor(name)} />
     {/if}
   {/each}
+{/if}
+{#if pieces && cards.pieces?.shown}
+  <ScenePieces
+    {pieces}
+    rect={cards.pieces}
+    report={(name, height) => chrome.reportCardHeight(name, height)}
+    keyboard={keyboardFor('pieces')}
+  />
+{/if}
+{#if addPiece}
+  <AddPiece {addPiece} {host} keyboard={keyboardFor('addPiece')} />
 {/if}
 {#if menu && menuOpen.menu >= 0}
   <Menu {menu} open={menuOpen} anchor={menuAnchor} bounds={{ w: viewW, h: viewH }} />

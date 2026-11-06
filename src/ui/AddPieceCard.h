@@ -39,6 +39,8 @@ public:
     // The label on the control an EMPTY library offers, which goes back to the
     // library - where a furniture is made.
     static QString libraryButtonText();
+    // The card's question - one author, read by this card and the page's.
+    static QString titleText();
 
     // Shows the card over whatever the library currently holds. Re-read on
     // every open rather than cached at construction: a furniture made since

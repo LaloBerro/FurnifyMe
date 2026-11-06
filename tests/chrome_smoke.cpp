@@ -37,6 +37,8 @@
 #include "web/RenderPage.h"
 #include "ui/RenderStudio.h"
 #include "ui/SceneWindow.h"
+#include "ui/ScenePiecesPanel.h"
+#include "ui/AddPieceCard.h"
 #include "ui/UnsavedCloseCard.h"
 #include "ui/NameFurnitureCard.h"
 #include "ui/WindowChrome.h"
@@ -3311,6 +3313,63 @@ int main(int argc, char* argv[])
             check(scene.statusBar()->currentMessage().contains(QStringLiteral("empty")),
                   "and its reason stays on the status line after it");
             check(!scene.toasts()->isShowing(), "and the Qt toast stays down");
+
+            // --- the Pieces card and the add card (Phase 5b) ----------------------------
+            check(waitFor([&] { return js(sp, "!!document.querySelector('[data-scene=\"pieces\"]')").toBool(); }, 3000) &&
+                      !scene.piecesPanel()->isVisible(),
+                  "the page draws the Pieces card in its slot, and the Qt card steps aside");
+            check(jsString(sp, "(document.querySelector('[data-scene=\"pieces\"] .empty') || {}).textContent || ''") ==
+                      ScenePiecesPanel::emptyText(),
+                  "an empty scene's card says so in the Qt card's words");
+            js(sp, "document.querySelector('[data-scene=\"pieces\"] .add').click()");
+            check(waitFor([&] { return js(sp, "!!document.querySelector('[data-scene=\"add\"]')").toBool(); }, 3000) &&
+                      !scene.addPieceCard()->isVisible(),
+                  "its Add piece row opens the page's add card, never the Qt one");
+            check(waitFor([&] { return sceneChrome->claimsKeyboardFor(QStringLiteral("addPiece")); }, 2000),
+                  "and the add card holds the keyboard, so its Escape reaches it");
+#ifdef _WIN32
+            pump(250);
+            capture(&scene, outDir + "/scene-add-card.png");
+#endif
+            js(sp, QStringLiteral("document.querySelector('[data-entry=\"%1\"]').click()").arg(furnitureId));
+            check(waitFor([&] { return scene.scene().pieces().size() == 1; }, 5000) &&
+                      waitFor([&] { return js(sp, "document.querySelectorAll('[data-piece]').length").toInt() == 1; }, 3000),
+                  "choosing the bench puts one piece in the scene, and the card lists it");
+            check(!js(sp, "!!document.querySelector('[data-scene=\"add\"]')").toBool() &&
+                      !sceneChrome->claimsKeyboardFor(QStringLiteral("addPiece")),
+                  "the add card closes and gives the keyboard back");
+            const int pieceId = scene.scene().pieces().front().id;
+            const QString row = QStringLiteral("[data-piece=\"%1\"]").arg(pieceId);
+            js(sp, QStringLiteral("document.querySelector('%1 .eye').click()").arg(row));
+            check(waitFor([&] {
+                      const std::vector<int> bodies = scene.bodyIdsForPiece(pieceId);
+                      return !bodies.empty() && !scene.view()->isSolidVisible(bodies.front()) &&
+                             jsString(sp, QStringLiteral("document.querySelector('%1 .eye').getAttribute('aria-pressed')").arg(row)) ==
+                                 QStringLiteral("false");
+                  }, 3000),
+                  "the eye hides the piece, and the card says it is hidden");
+            js(sp, QStringLiteral("document.querySelector('%1 .eye').click()").arg(row));
+            pump(200);
+            js(sp, QStringLiteral("document.querySelector('%1 .name').dispatchEvent(new MouseEvent('dblclick', {bubbles: true, detail: 2}))").arg(row));
+            pump(200);
+            js(sp, QStringLiteral("(() => { const f = document.querySelector('%1 input'); f.value = 'Long bench'; "
+                                  "f.dispatchEvent(new Event('input', {bubbles: true})); "
+                                  "f.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()").arg(row));
+            check(waitFor([&] { return QString::fromStdString(scene.scene().pieces().front().name) == QStringLiteral("Long bench"); }, 3000),
+                  "a double-click renames the piece in place");
+#ifdef _WIN32
+            pump(250);
+            capture(&scene, outDir + "/scene-pieces.png");
+#endif
+            js(sp, QStringLiteral("document.querySelector('%1 .remove').click()").arg(row));
+            check(waitFor([&] { return jsString(sp, QStringLiteral("(document.querySelector('%1 .remove') || {}).textContent || ''").arg(row)).trimmed() ==
+                                       ScenePiecesPanel::armedRemoveText(); }, 2000) &&
+                      scene.scene().pieces().size() == 1,
+                  "the first click on Remove arms it and takes nothing out");
+            js(sp, QStringLiteral("document.querySelector('%1 .remove').click()").arg(row));
+            check(waitFor([&] { return scene.scene().pieces().empty() &&
+                                       js(sp, "document.querySelectorAll('[data-piece]').length").toInt() == 0; }, 3000),
+                  "the second takes the piece out, on the page too");
 #ifdef _WIN32
             {
                 // THE PAGE IS SEEN (T-083's rule): where the pill stands, the

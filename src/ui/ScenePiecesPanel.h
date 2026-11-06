@@ -53,6 +53,10 @@ public:
     // The line an empty card shows above its Add piece row. One author, for
     // the paint and the banned-word sweep alike.
     static QString emptyText();
+    // The card's title and its eye's tip - one author each, read by this card
+    // and by the page's (migration Phase 5b).
+    static QString titleText();
+    static QString eyeTipText();
 
     explicit ScenePiecesPanel(QWidget* parent = nullptr);
 

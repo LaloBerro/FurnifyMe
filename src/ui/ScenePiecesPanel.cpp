@@ -87,6 +87,16 @@ QString ScenePiecesPanel::armedRemoveTipText()
     return tr("Click again to take it out of the scene");
 }
 
+QString ScenePiecesPanel::titleText()
+{
+    return tr("Pieces");
+}
+
+QString ScenePiecesPanel::eyeTipText()
+{
+    return tr("Show or hide this piece");
+}
+
 QString ScenePiecesPanel::emptyText()
 {
     // The VERB is the action's own - "Add piece" on the row below this line,
@@ -111,7 +121,7 @@ ScenePiecesPanel::ScenePiecesPanel(QWidget* parent)
     myColumn->setContentsMargins(kPad, kPad, kPad, kPad);
     myColumn->setSpacing(4);
 
-    myTitle = new QLabel(tr("Pieces"), this);
+    myTitle = new QLabel(titleText(), this);
     myColumn->addWidget(myTitle);
 
     // The empty state says what the window is for rather than leaving a
@@ -285,7 +295,7 @@ void ScenePiecesPanel::rebuild()
         eye->setFocusPolicy(Qt::NoFocus);
         // The Items drawer's own eye pair - see IconSet::Glyph::Eye.
         eye->setIcon(IconSet::toggleIcon(IconSet::Glyph::Eye, IconSet::Glyph::EyeHidden));
-        eye->setToolTip(tr("Show or hide this piece"));
+        eye->setToolTip(eyeTipText());
         const int id = wanted.pieceId;
         connect(eye, &QPushButton::toggled, this,
                 [this, id](bool shown) { emit visibilityToggled(id, shown); });
@@ -387,8 +397,8 @@ QStringList ScenePiecesPanel::paintedTexts() const
     // sweeping it would fail a scene holding a furniture called "Fuse My
     // Table" - the exemption every surface that paints user text already
     // keeps, applied at the surface that knows which string is whose.
-    QStringList texts{tr("Pieces"), emptyText(),
-                      tr("Show or hide this piece"),
+    QStringList texts{titleText(), emptyText(),
+                      eyeTipText(),
                       removeTipText(),
                       armedRemoveText(),
                       armedRemoveTipText()};

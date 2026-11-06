@@ -17,6 +17,7 @@
 #include "ViewportOverlay.h"
 #include "CardSlide.h"
 #include "HtmlCardSlot.h"
+#include "web/SceneCardsBridge.h"
 #ifdef FURNIFYME_WEB_UI
 #include "session/ActionRegistry.h"
 #include "session/MenuModel.h"
@@ -231,7 +232,9 @@ void SceneWindow::buildMenus()
         if (myStudio && myStudio->isEnabled()) myStudio->setEnabled(false);
         // Re-read on every open: a furniture made since this window opened is
         // one the user expects to find in the list.
-        myAddPiece->showFor(myStore->listFurniture());
+        // The page's card while the page is live (Phase 5b), the Qt one otherwise.
+        if (htmlChromeLive() && myAddPieceModel) myAddPieceModel->showFor(myStore->listFurniture());
+        else myAddPiece->showFor(myStore->listFurniture());
         // refreshSurfaces(), NOT relayout(). The centring and the
         // after-the-layout raise both live in refreshSurfaces; calling the
         // overlay directly skipped them, so the card came up at its default
@@ -555,24 +558,12 @@ void SceneWindow::buildOverlay()
     // refreshSelection() - this sets the one source of truth rather than
     // keeping a second copy here, so a row click and a viewport click land in
     // exactly the same state.
-    connect(myPieces, &ScenePiecesPanel::selectionRequested, this, [this](int pieceId) {
-        if (!myView) return;
-        const std::vector<int> bodies = bodyIdsForPiece(pieceId);
-        // A broken piece has no bodies at all. Clearing is the honest answer:
-        // there is nothing on screen to select, and leaving the previous
-        // piece selected would make the row look like it had done something.
-        myView->setSelectedSolids(bodies);
-    });
+    connect(myPieces, &ScenePiecesPanel::selectionRequested, this, &SceneWindow::selectPieceFromList);
     connect(myPieces, &ScenePiecesPanel::removeRequested, this,
             [this](int pieceId) { removePiece(pieceId); });
     // The eye was inert too: every row had one, and toggling it changed
     // nothing on screen.
-    connect(myPieces, &ScenePiecesPanel::visibilityToggled, this,
-            [this](int pieceId, bool shown) {
-                for (int bodyId : bodyIdsForPiece(pieceId))
-                    myView->setSolidVisible(bodyId, shown);
-                refreshSurfaces();
-            });
+    connect(myPieces, &ScenePiecesPanel::visibilityToggled, this, &SceneWindow::setPieceShown);
     connect(myPieces, &ScenePiecesPanel::renameCommitted, this,
             [this](int pieceId, const QString& name) { renamePiece(pieceId, name); });
 }
@@ -1228,6 +1219,7 @@ void SceneWindow::refreshSelection()
 
     showToolGizmo();
     if (myPieces) myPieces->setSelected(piece);
+    if (myPiecesModel) myPiecesModel->setSelected(piece);
     // The left channel's first job: what is selected now.
     statusBar()->showMessage(selectionStatusText());
     refreshSurfaces();
@@ -1443,7 +1435,7 @@ void SceneWindow::refreshSurfaces()
     // - the sibling-visibility law every surface in this app follows.
     if (myStudio) myStudio->refresh();
     if (myPieces) {
-        myPieces->setVisible(!(myStudio && myStudio->isEnabled()));
+        if (QWidget* pieces = piecesSurface()) pieces->setVisible(!(myStudio && myStudio->isEnabled()));
         QVector<ScenePiecesPanel::Row> rows;
         rows.reserve(static_cast<int>(myScene.pieces().size()));
         for (const SceneModel::Piece& piece : myScene.pieces()) {
@@ -1455,6 +1447,15 @@ void SceneWindow::refreshSurfaces()
             rows.push_back(row);
         }
         myPieces->setRows(rows);
+        if (myPiecesModel) {
+            // The page's card also says whether each piece shows - the
+            // viewport's own answer, never a copy kept beside it.
+            for (ScenePiecesPanel::Row& row : rows) {
+                const std::vector<int> bodies = bodyIdsForPiece(row.pieceId);
+                row.visible = bodies.empty() || myView->isSolidVisible(bodies.front());
+            }
+            myPiecesModel->setRows(rows);
+        }
     }
     if (myAddPiece && myAddPiece->isVisible() && myView) {
         // Centred by the window, not anchored by the overlay - a question is
@@ -1544,6 +1545,29 @@ QWidget* SceneWindow::pillSurface() const
 {
     if (htmlChromeLive() && myPillSlot) return myPillSlot;
     return myAppBar;
+}
+
+QWidget* SceneWindow::piecesSurface() const
+{
+    if (htmlChromeLive() && myPiecesSlot) return myPiecesSlot;
+    return myPieces;
+}
+
+void SceneWindow::selectPieceFromList(int pieceId)
+{
+    if (!myView) return;
+    const std::vector<int> bodies = bodyIdsForPiece(pieceId);
+    // A broken piece has no bodies at all. Clearing is the honest answer:
+    // there is nothing on screen to select, and leaving the previous piece
+    // selected would make the row look like it had done something.
+    myView->setSelectedSolids(bodies);
+}
+
+void SceneWindow::setPieceShown(int pieceId, bool shown)
+{
+    if (!myView) return;
+    for (int bodyId : bodyIdsForPiece(pieceId)) myView->setSolidVisible(bodyId, shown);
+    refreshSurfaces();
 }
 
 QWidget* SceneWindow::arrangeSurface() const
@@ -1683,9 +1707,37 @@ void SceneWindow::useHtmlChrome()
         myMenuShortcuts << shortcut;
     }
 
+    // THE TWO CARDS (Phase 5b): the Pieces card in the Qt card's TopLeft
+    // place, its height the page's; the add card drawn centred by the page.
+    // Both send the Qt cards' own signals into the same handlers.
+    myPiecesSlot = new HtmlCardSlot(QStringLiteral("pieces"), myPieces->sizeHint(), myView);
+    myPiecesSlot->hide();
+    myHtmlChrome->addCard(myPiecesSlot);
+    connect(myPiecesSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+        if (myOverlay) myOverlay->relayout();
+    });
+    myPiecesModel = new ScenePiecesModel(myHtmlChrome);
+    myPiecesModel->setAddAction(myAddPieceAction);
+    connect(myPiecesModel, &ScenePiecesModel::selectionRequested, this, &SceneWindow::selectPieceFromList);
+    connect(myPiecesModel, &ScenePiecesModel::visibilityToggled, this, &SceneWindow::setPieceShown);
+    connect(myPiecesModel, &ScenePiecesModel::removeRequested, this, [this](int pieceId) { removePiece(pieceId); });
+    connect(myPiecesModel, &ScenePiecesModel::renameCommitted, this,
+            [this](int pieceId, const QString& name) { renamePiece(pieceId, name); });
+    myHtmlChrome->registerObject(QStringLiteral("pieces"), myPiecesModel);
+    myAddPieceModel = new AddPieceModel(myHtmlChrome);
+    myAddPieceModel->setLibraryAction(myCloseSceneAction);
+    connect(myAddPieceModel, &AddPieceModel::chosen, this, [this](const QString& id) { addPiece(id); });
+    myHtmlChrome->registerObject(QStringLiteral("addPiece"), myAddPieceModel);
+
     // Until the page says it is listening, and for good once it dies, the Qt
     // surfaces carry everything.
     connect(myHtmlChrome, &EditorChrome::liveChanged, this, [this](bool live) {
+        if (myOverlay && myPiecesSlot && myPieces) {
+            if (live) myOverlay->replaceWidget(myPieces, myPiecesSlot);
+            else myOverlay->replaceWidget(myPiecesSlot, myPieces);
+        }
+        // An add card the page was showing goes with the page.
+        if (!live && myAddPieceModel) myAddPieceModel->close();
         if (myOverlay && myPillSlot && myAppBar) {
             if (live) myOverlay->replaceWidget(myAppBar, myPillSlot);
             else myOverlay->replaceWidget(myPillSlot, myAppBar);

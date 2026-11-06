@@ -21,6 +21,7 @@ import type { MenuApi, ShellApi } from './shell/api';
 import { mockMenu, mockShell } from './shell/mock';
 import type { ChipsApi } from './chips/api';
 import { booleanFace, mockChips, slatsFace } from './chips/mock';
+import type { AddPieceApi, PiecesApi } from './scene/api';
 
 async function start() {
   let chrome: ChromeApi;
@@ -32,6 +33,8 @@ async function start() {
   let shell: ShellApi | undefined;
   let menu: MenuApi | undefined;
   let chips: ChipsApi | undefined;
+  let pieces: PiecesApi | undefined;
+  let addPiece: AddPieceApi | undefined;
   if (hosted()) {
     const objects = await channelObjects();
     chrome = objects.chrome as ChromeApi;
@@ -43,6 +46,8 @@ async function start() {
     shell = objects.shell as ShellApi | undefined;
     menu = objects.menu as MenuApi | undefined;
     chips = objects.chips as ChipsApi | undefined;
+    pieces = objects.pieces as PiecesApi | undefined;
+    addPiece = objects.addPiece as AddPieceApi | undefined;
   } else {
     // The dev server: a status strip and a toast to look at.
     const mock = mockChrome();
@@ -71,7 +76,7 @@ async function start() {
   }
   // The theme goes on before the first mount - see hub/main.ts.
   applyTokens(theme.tokens);
-  mount(Editor, { target: document.getElementById('app')!, props: { chrome, theme, settings, versions, joints, items, shell, menu, chips } });
+  mount(Editor, { target: document.getElementById('app')!, props: { chrome, theme, settings, versions, joints, items, shell, menu, chips, pieces, addPiece } });
 }
 
 start();

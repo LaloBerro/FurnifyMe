@@ -266,6 +266,8 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ChipFace.h
       src/web/ChipsBridge.cpp
       src/web/ChipsBridge.h
+      src/web/SceneCardsBridge.cpp
+      src/web/SceneCardsBridge.h
       src/ui/AxisGizmo.cpp
       src/ui/CardSlide.cpp
       src/ui/DimensionRenderer.cpp
@@ -421,6 +423,11 @@ if(FURNIFYME_BUILD_APP)
     add_executable(chip_face_tests tests/chip_face.cpp)
     target_link_libraries(chip_face_tests PRIVATE furnify_app)
     add_test(NAME chip_face COMMAND chip_face_tests)
+
+    # The scene window's two cards as data for the page (migration Phase 5b).
+    add_executable(scene_cards_tests tests/scene_cards.cpp)
+    target_link_libraries(scene_cards_tests PRIVATE furnify_app)
+    add_test(NAME scene_cards COMMAND scene_cards_tests)
 
     # The bundled material textures (Milestone 5): every image in
     # assets/materials ships beside the executable, where MainWindow's scan

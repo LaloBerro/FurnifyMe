@@ -37,6 +37,11 @@ QString AddPieceCard::libraryButtonText()
     return tr("Go to the library");
 }
 
+QString AddPieceCard::titleText()
+{
+    return tr("Which furniture?");
+}
+
 AddPieceCard::AddPieceCard(QWidget* parent)
     : QWidget(parent)
 {
@@ -50,7 +55,7 @@ AddPieceCard::AddPieceCard(QWidget* parent)
     myColumn->setContentsMargins(kPad, kPad, kPad, kPad);
     myColumn->setSpacing(8);
 
-    myTitle = new QLabel(tr("Which furniture?"), this);
+    myTitle = new QLabel(titleText(), this);
     myColumn->addWidget(myTitle);
 
     myEmpty = new QLabel(emptyLibraryText(), this);
@@ -185,7 +190,7 @@ QPushButton* AddPieceCard::entryButtonAt(int index) const
 
 QStringList AddPieceCard::paintedTexts() const
 {
-    return { tr("Which furniture?"), emptyLibraryText(), libraryButtonText(),
+    return { titleText(), emptyLibraryText(), libraryButtonText(),
              KeyClaim::closeHintText() };
 }
 
