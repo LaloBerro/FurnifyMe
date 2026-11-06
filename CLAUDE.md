@@ -567,6 +567,18 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   Extrude panel - a gesture card is `[data-gesture]`. The page's view rises only when
   something stands over it, or a chip moving every frame of a drag restacks the overlay
   every frame.
+- **The joint card (Phase 4c, branch `gesture-chips-4c`) closes Phase 4.** `JointChip::faceRows()`
+  builds the page's rows with `relayout()`'s own family logic, so which numbers a kind carries is
+  still decided once, in C++. The face model grew what this card needs and nothing more: a field
+  `stacked` under its label and marked `invalid` on its own, a button's `look` (`segment`,
+  `link`, `menu`) and stacked `label`, a `rule`, `user` text (the pieces' names, exempt from the
+  sweep), and a `menu` part. **The kind menu is drawn INSIDE the card**, not as a popup: the Qt
+  `JointKindMenu` never shows while the page draws the card, the open state is the chip's own
+  (`myKindMenuOpen`, no longer the menu widget's visibility), and the menu's outside-press rule
+  reads the CARD's rectangle while drawn elsewhere - a press on the page's menu reaches the app
+  filter as a press on the page's view and would otherwise close the menu before the page saw it.
+  The card stays docked in the TopRight column (not glued), so it is drawn through a camera move.
+  Its entries are registered as `kind:<n>` when the menu is first built.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a
