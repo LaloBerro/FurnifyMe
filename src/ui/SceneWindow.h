@@ -23,6 +23,8 @@
 // nothing in a scene a face or an edge could be used for, and leaving it on
 // would raise gizmos for operations this window does not offer.
 #include <QMainWindow>
+
+#include "Toast.h"
 #include <QString>
 
 #include <map>
@@ -140,6 +142,17 @@ public:
     QLabel* statusHintLabel() const { return myHintLabel; }
     ToastHost* toasts() const { return myToasts; }
 
+    // THE CHROME AS A PAGE (migration Phase 5a): the editor's own page and
+    // EditorChrome over this viewport - toast, status strip, the pill and its
+    // menus, the arranging chips and the close question - while it is live;
+    // the Qt surfaces otherwise. Called by main.cpp under the editor's rule
+    // (a web build, no --qt-chrome, the page present); gui_smoke never calls
+    // it. A no-op in a build without the web UI.
+    void useHtmlChrome();
+    class EditorChrome* htmlChrome() const { return myHtmlChrome; }
+    class ShellBridge* shellBridge() const { return myShellBridge; }
+    bool htmlChromeLive() const;
+
 signals:
     // File -> Close scene: the way back to the hub. REPORTED, never acted on -
     // this window knows nothing about the hub, exactly as SelectorWindow knows
@@ -220,6 +233,15 @@ private:
     // change to the scene, and the status bar's left channel back on the
     // selection rather than repeating it (MainWindow::reportNote()'s rule).
     void reportNote(const QString& text, bool undo);
+    // The ONE way this window shows a toast: the page's while it is live,
+    // ToastHost's otherwise. A Failure's reason also goes on the left of the
+    // status bar, where it stays after the toast (ToastHost::failureShown()).
+    void showToast(const QString& text, Toast::Kind kind, bool undo, int stamp = -1);
+    // The page's strip, obstacles and close question, from the Qt state.
+    void syncHtmlChrome();
+    // The pill and the arranging cluster: the Qt widget or its slot.
+    QWidget* pillSurface() const;
+    QWidget* arrangeSurface() const;
     // The left channel's selection sentence: "Table 2 selected", or nothing.
     QString selectionStatusText() const;
 
@@ -275,6 +297,13 @@ private:
     int myDragAxis = -1;
     AddPieceCard* myAddPiece = nullptr;
     ToastHost* myToasts = nullptr;
+    // The HTML chrome (Phase 5a) - null until useHtmlChrome().
+    class EditorChrome* myHtmlChrome = nullptr;
+    class ShellBridge* myShellBridge = nullptr;
+    class ActionRegistry* myActionRegistry = nullptr;
+    class HtmlCardSlot* myPillSlot = nullptr;
+    class HtmlCardSlot* myViewSlot = nullptr;
+    QList<class QShortcut*> myMenuShortcuts;
 
     // Scene-local body ids, handed out by this window and meaning nothing
     // outside it. A piece's bodies are NOT the furniture's own ids: two

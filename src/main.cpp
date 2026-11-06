@@ -198,6 +198,11 @@ int main(int argc, char* argv[])
     if (!QCoreApplication::arguments().contains(QStringLiteral("--qt-chrome")) &&
         WebHost::pageAvailable(QStringLiteral("render")))
         RenderPage::attach(sceneWindow.studio(), &sceneWindow);
+    // The scene window's chrome as the editor's page (migration Phase 5a),
+    // under the same rule.
+    if (!QCoreApplication::arguments().contains(QStringLiteral("--qt-chrome")) &&
+        WebHost::pageAvailable(QStringLiteral("editor")))
+        sceneWindow.useHtmlChrome();
 #endif
 
     // The whole handoff - both directions, and the selector's own close -

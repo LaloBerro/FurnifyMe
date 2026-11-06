@@ -15,6 +15,16 @@
 #include "Toast.h"
 #include "UnsavedCloseCard.h"
 #include "ViewportOverlay.h"
+#include "CardSlide.h"
+#include "HtmlCardSlot.h"
+#ifdef FURNIFYME_WEB_UI
+#include "session/ActionRegistry.h"
+#include "session/MenuModel.h"
+#include "web/EditorChrome.h"
+#include "web/ShellBridge.h"
+#include "web/WebHost.h"
+#include <QShortcut>
+#endif
 
 #include <algorithm>
 
@@ -72,9 +82,30 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
     // The custom title bar, attached AFTER the overlay so the pill and the
     // buttons it hit-tests against both exist. MainWindow's variant 2: the
     // native caption is gone and we add no strip of our own either.
-    WindowChrome::attach(this,
-                         WindowChrome::captionHitTest(this, myAppBar, myWindowButtons),
-                         myWindowButtons);
+    // In HTML-chrome mode the pill is the page's (Phase 5a, the editor's
+    // ruling R10): its ground drags the window, its titles do not, and
+    // nothing does while a menu is open.
+    {
+        auto qtHit = WindowChrome::captionHitTest(this, myAppBar, myWindowButtons);
+        WindowChrome::attach(
+            this,
+            [this, qtHit](const QPoint& p) {
+                const WindowChrome::Hit hit = qtHit(p);
+#ifdef FURNIFYME_WEB_UI
+                if (hit != WindowChrome::Hit::MaxButton && myPillSlot && myShellBridge && htmlChromeLive() &&
+                    myPillSlot->isVisible()) {
+                    const QPoint at = myView->mapFrom(this, p);
+                    if (!myPillSlot->geometry().contains(at)) return hit;
+                    if (myShellBridge->menu()->isOpen()) return WindowChrome::Hit::Client;
+                    for (const QRect& title : myShellBridge->titleRects())
+                        if (title.contains(at)) return WindowChrome::Hit::Client;
+                    return WindowChrome::Hit::Caption;
+                }
+#endif
+                return hit;
+            },
+            myWindowButtons);
+    }
 
     // WHOLE BODIES, never faces or edges. The editor's auto selection exists
     // so a click can take the face or the edge a modelling gesture needs;
@@ -221,7 +252,7 @@ void SceneWindow::buildMenus()
         // asks - see screenshotRefusal().
         const QString refusal = screenshotRefusal();
         if (!refusal.isEmpty()) {
-            if (myToasts) myToasts->show(refusal, Toast::Kind::Failure, false);
+            showToast(refusal, Toast::Kind::Failure, false);
             return;
         }
         const QString suggested =
@@ -602,7 +633,7 @@ bool SceneWindow::openScene(const QString& id)
         // at all, and the status bar was the weaker surface - the editor's own
         // openFurniture() has always used a toast here.
         if (myToasts) {
-            myToasts->show(tr("Couldn't open this scene — %1")
+            showToast(tr("Couldn't open this scene — %1")
                                .arg(error.isEmpty() ? tr("it could not be read") : error),
                            Toast::Kind::Failure, false);
         }
@@ -905,7 +936,7 @@ bool SceneWindow::addPiece(const QString& furnitureId)
             // knows the furniture; otherwise the broken row's own sentence,
             // so the toast and the row say the same thing.
             const QString reason = error.isEmpty() ? tr("it could not be read") : error;
-            myToasts->show(name.isEmpty()
+            showToast(name.isEmpty()
                                ? brokenPieceReason(error)
                                : tr("Couldn't add %1 to this scene — %2").arg(name, reason),
                            Toast::Kind::Failure, false);
@@ -1235,12 +1266,11 @@ void SceneWindow::reportNote(const QString& text, bool undo)
     // Stamped with the scene's revision when it offers Undo, so the toast
     // goes the moment the scene moves on and its pill can never pop a
     // different change from the one it names (ToastHost::documentMovedTo()).
-    myToasts->show(text, Toast::Kind::Note, undo,
-                   undo ? static_cast<int>(myScene.revision()) : -1);
+    showToast(text, Toast::Kind::Note, undo, undo ? static_cast<int>(myScene.revision()) : -1);
     // NOT ALSO ON THE LEFT - the editor's rule (the review's F9). While the
     // toast carries the report the left goes back to the selection; a toast
     // that was not shown leaves the bar as the only record of it.
-    if (myToasts->isShowing() && myToasts->currentText() == text)
+    if (htmlChromeLive() || (myToasts->isShowing() && myToasts->currentText() == text))
         statusBar()->showMessage(selectionStatusText());
     else
         statusBar()->showMessage(text);
@@ -1269,12 +1299,12 @@ bool SceneWindow::saveScreenshotTo(const QString& path)
 {
     const QString refusal = screenshotRefusal();
     if (!refusal.isEmpty()) {
-        if (myToasts) myToasts->show(refusal, Toast::Kind::Failure, false);
+        showToast(refusal, Toast::Kind::Failure, false);
         return false;
     }
     if (!myView || !myView->saveSnapshot(path)) {
         if (myToasts) {
-            myToasts->show(tr("Screenshot failed — Couldn't save the image to %1 — "
+            showToast(tr("Screenshot failed — Couldn't save the image to %1 — "
                               "Check that the folder exists and isn't read-only")
                                .arg(path),
                            Toast::Kind::Failure, false);
@@ -1331,7 +1361,7 @@ bool SceneWindow::save()
     if (myView && !(myStudio && myStudio->isEnabled())) thumb = myView->captureThumbnail();
     if (!myStore->saveScene(mySceneId, myScene, thumb)) {
         if (myToasts) {
-            myToasts->show(tr("Couldn't save %1 — Check that its folder still exists and "
+            showToast(tr("Couldn't save %1 — Check that its folder still exists and "
                               "isn't read-only")
                                .arg(mySceneName.isEmpty() ? tr("this scene") : mySceneName),
                            Toast::Kind::Failure, false);
@@ -1443,8 +1473,9 @@ void SceneWindow::refreshSurfaces()
     if (myMoveAction) myMoveAction->setChecked(myTool == Tool::Move);
     if (myRotateAction) myRotateAction->setChecked(myTool == Tool::Rotate);
     const bool renderMode = myStudio && myStudio->isEnabled();
-    // The arranging chips step out of a shot - see buildOverlay().
-    if (myArrangeTools) myArrangeTools->setVisible(!renderMode);
+    // The arranging chips step out of a shot - see buildOverlay(). Whichever
+    // of the Qt cluster and its slot is on screen (Phase 5a).
+    if (QWidget* arrange = arrangeSurface()) arrange->setVisible(!renderMode);
     // WHAT UNDO CAN DO, DECIDED HERE: the menu entries, Ctrl+Z and the toast's
     // pill all read the same answer, so the pill cannot offer a step the
     // stack does not have.
@@ -1465,6 +1496,7 @@ void SceneWindow::refreshSurfaces()
     if (myNameMark) {
         myNameMark->setState(mySceneName, isSceneDirty());
     }
+    syncHtmlChrome();
     if (myStudio && myStudio->panel()) {
         // Rebuilt from the scene on every state change, like every other
         // surface here - setShots() has its own equal-guard.
@@ -1495,4 +1527,186 @@ void SceneWindow::closeEvent(QCloseEvent* event)
     }
     emit quitRequested();
     QMainWindow::closeEvent(event);
+}
+
+// --- the chrome as a page (migration Phase 5a) ------------------------------
+
+bool SceneWindow::htmlChromeLive() const
+{
+#ifdef FURNIFYME_WEB_UI
+    return myHtmlChrome && myHtmlChrome->isLive();
+#else
+    return false;
+#endif
+}
+
+QWidget* SceneWindow::pillSurface() const
+{
+    if (htmlChromeLive() && myPillSlot) return myPillSlot;
+    return myAppBar;
+}
+
+QWidget* SceneWindow::arrangeSurface() const
+{
+    if (htmlChromeLive() && myViewSlot) return myViewSlot;
+    return myArrangeTools;
+}
+
+void SceneWindow::showToast(const QString& text, Toast::Kind kind, bool undo, int stamp)
+{
+#ifdef FURNIFYME_WEB_UI
+    if (htmlChromeLive()) {
+        // Undo's state rides WITH the message (the editor's measured rule).
+        myHtmlChrome->setUndoEnabled(myUndoAction && myUndoAction->isEnabled());
+        myHtmlChrome->showToast(text, kind == Toast::Kind::Failure ? EditorChrome::Kind::Failure : EditorChrome::Kind::Note,
+                                undo, stamp);
+        if (kind == Toast::Kind::Failure) {
+            QString line = text;
+            if (line.endsWith(QLatin1Char('.'))) line.chop(1);
+            statusBar()->showMessage(line);
+        }
+        return;
+    }
+#endif
+    if (myToasts) myToasts->show(text, kind, undo, stamp);
+}
+
+void SceneWindow::syncHtmlChrome()
+{
+#ifdef FURNIFYME_WEB_UI
+    if (!myHtmlChrome) return;
+    myHtmlChrome->bridge()->setAnimate(myView->animationsEnabled());
+    const bool live = htmlChromeLive();
+    // The page's strip stands in the Qt bar's place; the overlay's cards
+    // anchored at the bottom stand above it.
+    statusBar()->setVisible(!live);
+    if (myOverlay) myOverlay->setBottomInset(live ? 24 : 0);
+    myHtmlChrome->setStatus(statusBar()->currentMessage(), myHintLabel ? myHintLabel->text() : QString(),
+                            mySceneName, isSceneDirty(), live);
+    myHtmlChrome->setObstacles(myOverlay ? myOverlay->occupiedRects() : std::vector<QRect>());
+    myHtmlChrome->setUndoEnabled(myUndoAction && myUndoAction->isEnabled());
+    myHtmlChrome->documentMovedTo(static_cast<int>(myScene.revision()));
+    // Alt+letter answers only while the page's pill stands (the editor's R6).
+    const bool pillShown = live && myPillSlot && myPillSlot->isVisible();
+    for (QShortcut* shortcut : myMenuShortcuts) shortcut->setEnabled(pillShown);
+    // The close question, drawn by the page while the Qt card asks it.
+    QVariantMap words;
+    if (myCloseCard && myCloseCard->isAsking() && myCloseCard->drawnElsewhere()) {
+        words = myCloseCard->words();
+        if (myWindowButtons && myWindowButtons->isVisible()) {
+            const QRect r(myWindowButtons->mapTo(myView, QPoint(0, 0)), myWindowButtons->size());
+            words.insert(QStringLiteral("keepClear"), QVariantMap{{QStringLiteral("x"), r.x()},
+                                                                  {QStringLiteral("y"), r.y()},
+                                                                  {QStringLiteral("w"), r.width()},
+                                                                  {QStringLiteral("h"), r.height()}});
+        }
+    }
+    if (live) myHtmlChrome->setQuestion(!words.isEmpty(), words);
+    if (!words.isEmpty()) {
+        myHtmlChrome->view()->raise();
+        if (myWindowButtons) myWindowButtons->raise();
+    }
+#endif
+}
+
+void SceneWindow::useHtmlChrome()
+{
+#ifdef FURNIFYME_WEB_UI
+    if (myHtmlChrome || !myView) return;
+    myActionRegistry = new ActionRegistry(this);
+    myActionRegistry->adoptChildren(this);
+    myHtmlChrome = new EditorChrome(myView, this);
+
+    // The page's Undo pill: through the action, and only for the change it
+    // names (the editor's review I1).
+    connect(myHtmlChrome, &EditorChrome::undoRequested, this, [this](int stamp) {
+        if (stamp >= 0 && stamp != static_cast<int>(myScene.revision())) return;
+        if (myUndoAction && myUndoAction->isEnabled()) myUndoAction->trigger();
+    });
+    // The close question's answers, through the Qt card's own answer().
+    connect(myHtmlChrome, &EditorChrome::questionAnswered, this, [this](const QString& which) {
+        if (!myCloseCard || !myCloseCard->isAsking()) return;
+        if (which == QLatin1String("save")) myCloseCard->answer(UnsavedCloseCard::Answer::Save);
+        else if (which == QLatin1String("discard")) myCloseCard->answer(UnsavedCloseCard::Answer::Discard);
+        else if (which == QLatin1String("keep")) myCloseCard->answer(UnsavedCloseCard::Answer::Keep);
+    });
+    if (myCloseCard) connect(myCloseCard, &UnsavedCloseCard::questionChanged, this, &SceneWindow::syncHtmlChrome);
+
+    // THE PILL AND THE ARRANGING CHIPS (the editor's Phase 3i): slots take
+    // the Qt surfaces' places while the page is live.
+    myPillSlot = new HtmlCardSlot(QStringLiteral("pill"), myAppBar->sizeHint(), myView);
+    myPillSlot->hide();
+    myHtmlChrome->addCard(myPillSlot);
+    myViewSlot = new HtmlCardSlot(QStringLiteral("view"), myArrangeTools->sizeHint(), myView);
+    myViewSlot->hide();
+    myHtmlChrome->addCard(myViewSlot);
+    std::vector<ShellBridge::Chip> view = {
+        ShellBridge::Chip{myMoveAction, IconSet::Glyph::Move, QStringLiteral("move")},
+        ShellBridge::Chip{myRotateAction, IconSet::Glyph::Rotate, QStringLiteral("rotate")},
+        ShellBridge::Chip{myRenderModeAction, IconSet::Glyph::Render, QStringLiteral("render")}};
+    // The PILL's menu bar: the window's own was reparented into the AppBar, and
+    // asking QMainWindow::menuBar() again quietly makes a new, empty one.
+    myShellBridge = new ShellBridge(myActionRegistry, {}, std::move(view), myAppBar->menus(), this, myHtmlChrome);
+    myHtmlChrome->registerObject(QStringLiteral("shell"), myShellBridge);
+    myHtmlChrome->registerObject(QStringLiteral("menu"), myShellBridge->menu());
+    // Every menu shortcut fires while the HTML pill shows (the editor's R5).
+    myPillSlot->addActions(myShellBridge->menuActions());
+    connect(myShellBridge, &ShellBridge::pillReported, this, [this](int w, int h) {
+        if (myPillSlot) myPillSlot->setContentSize(QSize(w, h));
+    });
+    for (HtmlCardSlot* slot : {myPillSlot, myViewSlot}) {
+        connect(slot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+            if (myOverlay) myOverlay->relayout();
+            syncViewportMinimumWidth();
+        });
+    }
+    connect(myPillSlot, &HtmlCardSlot::placed, this, &SceneWindow::syncHtmlChrome);
+    // An open menu owns the pointer and the keys (the editor's R7).
+    connect(myShellBridge->menu(), &MenuModel::openChanged, this, [this](bool open) {
+        if (myHtmlChrome) myHtmlChrome->setMenuOpen(open);
+    });
+    // Alt+letter opens that menu, as the Qt menu bar's mnemonics do (R6).
+    const QVariantList titles = myShellBridge->menu()->titles();
+    for (int i = 0; i < titles.size(); ++i) {
+        const QString title = titles.at(i).toMap().value(QStringLiteral("title")).toString();
+        const int at = titles.at(i).toMap().value(QStringLiteral("mnemonicAt")).toInt();
+        if (at < 0 || at >= title.size()) continue;
+        const QChar letter = title.at(at).toUpper();
+        if (letter < QLatin1Char('A') || letter > QLatin1Char('Z')) continue;
+        const int key = Qt::Key_A + (letter.unicode() - u'A');
+        auto* shortcut = new QShortcut(QKeySequence(QKeyCombination(Qt::AltModifier, Qt::Key(key))), this);
+        shortcut->setContext(Qt::WindowShortcut);
+        shortcut->setEnabled(false);
+        connect(shortcut, &QShortcut::activated, this, [this, i] {
+            if (myShellBridge && htmlChromeLive()) myShellBridge->menu()->openMenu(i, true);
+        });
+        myMenuShortcuts << shortcut;
+    }
+
+    // Until the page says it is listening, and for good once it dies, the Qt
+    // surfaces carry everything.
+    connect(myHtmlChrome, &EditorChrome::liveChanged, this, [this](bool live) {
+        if (myOverlay && myPillSlot && myAppBar) {
+            if (live) myOverlay->replaceWidget(myAppBar, myPillSlot);
+            else myOverlay->replaceWidget(myPillSlot, myAppBar);
+            if (myStudio && myStudio->barSlide()) {
+                if (live) myStudio->barSlide()->retarget(myPillSlot, false);
+                else myStudio->barSlide()->retarget(myAppBar, true);
+            } else {
+                (live ? static_cast<QWidget*>(myPillSlot) : myAppBar)->show();
+            }
+        }
+        if (myOverlay && myViewSlot && myArrangeTools) {
+            if (live) myOverlay->replaceWidget(myArrangeTools, myViewSlot);
+            else myOverlay->replaceWidget(myViewSlot, myArrangeTools);
+        }
+        if (!live && myShellBridge) myShellBridge->menu()->close();
+        if (myCloseCard) myCloseCard->setDrawnElsewhere(live);
+        refreshSurfaces();
+        if (myOverlay) myOverlay->relayout();
+    });
+    connect(statusBar(), &QStatusBar::messageChanged, this, &SceneWindow::syncHtmlChrome);
+    myHtmlChrome->start();
+    refreshSurfaces();
+#endif
 }

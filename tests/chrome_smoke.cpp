@@ -68,6 +68,8 @@
 #include <QJsonObject>
 #include <QColorDialog>
 #include <QKeyEvent>
+#include <QLabel>
+#include <QMenuBar>
 #include <QLineEdit>
 #include <QRegularExpression>
 #include <QSettings>
@@ -3248,6 +3250,100 @@ int main(int argc, char* argv[])
 #endif
             sceneRender->trigger();
             pump(300);
+        }
+        scene.hide();
+        pump(200);
+    }
+
+    // --- the scene window's chrome as the editor's page (Phase 5a) -------------------
+    {
+        SceneWindow scene(&window.furnitureStore());
+        scene.setAttribute(Qt::WA_ShowWithoutActivating);
+        scene.resize(1200, 800);
+        scene.useHtmlChrome();
+        scene.show();
+        scene.view()->setAnimationsEnabled(false);
+        EditorChrome* sceneChrome = scene.htmlChrome();
+        check(sceneChrome && waitFor([&] { return sceneChrome->isLive(); }, 20000),
+              "the scene window's chrome page loads and says it is listening");
+        if (sceneChrome && sceneChrome->isLive()) {
+            QWebEngineView* sp = sceneChrome->view();
+            pump(400);
+            check(!scene.statusBar()->isVisible() &&
+                      waitFor([&] { return jsString(sp, "(document.querySelector('.strip .left') || {}).textContent || ''") ==
+                                           scene.statusBar()->currentMessage(); }, 3000),
+                  "the Qt status bar is hidden, and the page's strip says what it said - \"" +
+                      scene.statusBar()->currentMessage() + "\"");
+            check(jsString(sp, "(document.querySelector('.strip .right') || {}).textContent || ''") ==
+                      scene.statusHintLabel()->text(),
+                  "and its right channel is the scene's next step");
+            check(waitFor([&] { return js(sp, "!!document.querySelector('[data-pill]')").toBool(); }, 3000) &&
+                      !scene.findChild<AppBar*>()->isVisible(),
+                  "the page draws the pill, and the Qt pill steps aside");
+            check(waitFor([&] { return js(sp, "document.querySelectorAll('[data-chip]').length").toInt() == 3; }, 3000) &&
+                      !scene.arrangeTools()->isVisible(),
+                  "the page draws Move, Rotate and Render mode, and the Qt cluster steps aside");
+            QAction* rotate = actionNamed(&scene, QStringLiteral("Rotate"));
+            QAction* move = actionNamed(&scene, QStringLiteral("Move"));
+            const QString rotateId = rotate ? ActionRegistry::idFor(rotate->text()) : QString();
+            js(sp, QStringLiteral("document.querySelector('[data-chip=\"%1\"]').click()").arg(rotateId));
+            check(rotate && waitFor([&] { return rotate->isChecked(); }, 2000), "the page's Rotate chip picks Rotate");
+            if (move) move->trigger();
+            pump(150);
+            // The menus: the scene's own, opened on the page.
+            {
+                const int titles = js(sp, "document.querySelectorAll('[data-pill] [data-title]').length").toInt();
+                const int menus = int(scene.findChild<AppBar*>()->menus()->actions().size());
+                check(menus > 0 && titles == menus,
+                      QStringLiteral("the page's pill carries the scene's own %1 menus (%2 titles)").arg(menus).arg(titles));
+            }
+            scene.shellBridge()->menu()->openMenu(0, false);
+            check(waitFor([&] { return js(sp, "!!document.querySelector('.menu')").toBool(); }, 3000) &&
+                      sceneChrome->menuOpen(),
+                  "a menu opens on the page over the scene, and owns the pointer");
+            scene.shellBridge()->menu()->close();
+            pump(200);
+            // A Failure, drawn by the page: an empty scene refuses a picture.
+            QAction* shot = actionNamed(&scene, QStringLiteral("Save Screenshot"));
+            if (shot) shot->trigger();
+            check(shot && waitFor([&] { return toastText(sp).contains(QStringLiteral("empty")); }, 3000),
+                  "an empty scene's screenshot refusal is a Failure on the page - " + toastText(sp));
+            check(scene.statusBar()->currentMessage().contains(QStringLiteral("empty")),
+                  "and its reason stays on the status line after it");
+            check(!scene.toasts()->isShowing(), "and the Qt toast stays down");
+#ifdef _WIN32
+            {
+                // THE PAGE IS SEEN (T-083's rule): where the pill stands, the
+                // window composited with the page differs from it without.
+                pump(300);
+                const QImage withPage = captureImage(&scene);
+                withPage.save(outDir + "/scene-chrome.png");
+                sp->hide();
+                pump(300);
+                const QImage without = captureImage(&scene);
+                sp->show();
+                pump(300);
+                const double dpr = scene.devicePixelRatioF();
+                QWidget* pill = scene.findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_pill"));
+                const QRect logical = pill ? QRect(scene.view()->mapTo(&scene, pill->pos()), pill->size()) : QRect();
+                const QRect r(qRound(logical.x() * dpr), qRound(logical.y() * dpr), qRound(logical.width() * dpr),
+                              qRound(logical.height() * dpr));
+                int moved = 0, all = 0;
+                for (int y = r.top(); y <= r.bottom(); ++y)
+                    for (int x = r.left(); x <= r.right(); ++x) {
+                        if (!withPage.rect().contains(x, y) || !without.rect().contains(x, y)) continue;
+                        const QColor p1 = withPage.pixelColor(x, y), p2 = without.pixelColor(x, y);
+                        ++all;
+                        if (std::abs(p1.red() - p2.red()) + std::abs(p1.green() - p2.green()) +
+                                std::abs(p1.blue() - p2.blue()) > 9)
+                            ++moved;
+                    }
+                const double share = all ? double(moved) / all : 0.0;
+                check(share > 0.05, QStringLiteral("the composited scene window SHOWS the page's pill (%1% of its pixels "
+                                                   "change when the page is hidden)")
+                                        .arg(share * 100, 0, 'f', 1));
+            }
+#endif
         }
         scene.hide();
         pump(200);
