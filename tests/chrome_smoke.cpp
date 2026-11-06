@@ -50,6 +50,9 @@
 #include "session/MenuModel.h"
 #include "ui/AppBar.h"
 #include "ui/HtmlCardSlot.h"
+#include "ui/BooleanTool.h"
+#include "ui/SlatsTool.h"
+#include "ui/ChipFace.h"
 
 #include <QAction>
 #include <QApplication>
@@ -77,6 +80,9 @@
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <TopoDS.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 
 #include <cstdio>
 #include <functional>
@@ -2086,6 +2092,268 @@ int main(int argc, char* argv[])
                 chrome->bridge()->setAnimate(false);
                 pump(100);
             }
+        }
+    }
+
+    // --- the gesture chips (Phase 4a) ----------------------------------------------------
+    {
+        check(window.openFurniture(furnitureId), "chips: the bench opens again");
+        pump(300);
+        // Where the page drew a chip, in the viewport's coordinates (the page
+        // stands at the viewport's origin), and whether it is drawn at all.
+        const auto pageChip = [&](const QString& name) {
+            return js(page, QStringLiteral(
+                "(() => { const c = document.querySelector('[data-chip=\"%1\"]'); if (!c) return null; "
+                "return {x: c.offsetLeft, y: c.offsetTop, w: c.offsetWidth, h: c.offsetHeight, "
+                "shown: c.style.visibility !== 'hidden'}; })()").arg(name)).toMap();
+        };
+        const auto drawn = [&](const QString& name) { return pageChip(name).value(QStringLiteral("shown")).toBool(); };
+        const auto standsOn = [&](const QString& name, const QWidget* qt) {
+            const QVariantMap r = pageChip(name);
+            const QRect g = qt->geometry();
+            return std::abs(r.value("x").toInt() - g.x()) <= 1 && std::abs(r.value("y").toInt() - g.y()) <= 1 &&
+                   std::abs(r.value("w").toInt() - g.width()) <= 1 && std::abs(r.value("h").toInt() - g.height()) <= 1;
+        };
+        const auto key = [&](QWidget* target, int k) {
+            QKeyEvent over(QEvent::ShortcutOverride, k, Qt::NoModifier);
+            over.ignore();
+            QCoreApplication::sendEvent(target, &over);
+            QKeyEvent press(QEvent::KeyPress, k, Qt::NoModifier);
+            QCoreApplication::sendEvent(target, &press);
+            pump(150);
+        };
+
+        // --- Boolean ----------------------------------------------------------------
+        BooleanTool* booleanTool = window.booleanTool();
+        QAction* subtract = actionNamed(&window, QStringLiteral("Subtract"));
+        const auto& solids = window.document().solids();
+        check(booleanTool && subtract && solids.size() >= 2, "chips: the editor has its boolean chip and Subtract");
+        if (booleanTool && subtract && solids.size() >= 2) {
+            const int first = solids[0].id;
+            const int second = solids[1].id;
+            window.view()->setSelectedSolids({first, second});
+            pump(150);
+            subtract->trigger();
+            check(window.booleanActive(), "Subtract begins the boolean gesture");
+            check(waitFor([&] { return drawn(QStringLiteral("boolean")); }, 3000),
+                  "the page draws the boolean chip once it stands at the size the page measured (R4)");
+            check(booleanTool->isVisible() && booleanTool->face()->drawnElsewhere() &&
+                      booleanTool->keepToolBox()->isHidden(),
+                  "the Qt chip stands, drawn elsewhere, its own checkbox hidden");
+            check(standsOn(QStringLiteral("boolean"), booleanTool),
+                  QStringLiteral("and the page's card stands exactly where the Qt chip does (%1,%2 %3x%4)")
+                      .arg(booleanTool->x()).arg(booleanTool->y()).arg(booleanTool->width()).arg(booleanTool->height()));
+            check(std::abs(booleanTool->x() + booleanTool->width() / 2 - window.view()->width() / 2) <= 2,
+                  "at the bottom centre, placed by the Qt chip's own code with the page's width (R2)");
+            check(jsString(page, "document.querySelector('[data-chip=\"boolean\"] .text.title').textContent") ==
+                      window.booleanOperationName(),
+                  "the chip names the operation - " + window.booleanOperationName());
+            // The page reports its hit rectangles a frame after it draws.
+            // And nothing of Qt's stands over it - a hint balloon did, until
+            // the page's view rose with the chip.
+            QWidget* under = nullptr;
+            const auto onPage = [&] { return under && (under == page || page->isAncestorOf(under)); };
+            waitFor([&] {
+                under = window.view()->childAt(booleanTool->geometry().center());
+                return onPage();
+            }, 2000);
+            check(onPage(), QStringLiteral("a press on the chip reaches the page - not the Qt chip, a Qt card or the "
+                                           "viewport (%1)").arg(under ? under->metaObject()->className() : "nothing"));
+#ifdef _WIN32
+            {
+                // THE CHIP IS SEEN (T-083's rule): the window composited with
+                // the page, then with its view hidden, must differ where the
+                // chip stands - a DOM that says "drawn" is not a chip on screen.
+                pump(300);
+                const QImage withPage = captureImage(&window);
+                withPage.save(outDir + "/chip-boolean.png");
+                page->hide();
+                pump(300);
+                const QImage without = captureImage(&window);
+                page->show();
+                pump(300);
+                const double dpr = window.devicePixelRatioF();
+                const QRect logical(window.view()->mapTo(&window, booleanTool->pos()), booleanTool->size());
+                const QRect r(qRound(logical.x() * dpr), qRound(logical.y() * dpr), qRound(logical.width() * dpr),
+                              qRound(logical.height() * dpr));
+                int moved = 0, all = 0;
+                for (int y = r.top(); y <= r.bottom(); ++y)
+                    for (int x = r.left(); x <= r.right(); ++x) {
+                        if (!withPage.rect().contains(x, y) || !without.rect().contains(x, y)) continue;
+                        const QColor p1 = withPage.pixelColor(x, y), p2 = without.pixelColor(x, y);
+                        ++all;
+                        if (std::abs(p1.red() - p2.red()) + std::abs(p1.green() - p2.green()) +
+                                std::abs(p1.blue() - p2.blue()) > 9)
+                            ++moved;
+                    }
+                const double share = all ? double(moved) / all : 0.0;
+                check(share > 0.05, QStringLiteral("the composited window SHOWS the boolean chip (%1% of its pixels "
+                                                   "change when the page is hidden)")
+                                        .arg(share * 100, 0, 'f', 1));
+            }
+#endif
+            const bool keepBefore = window.booleanKeepTool();
+            js(page, "document.querySelector('[data-chip=\"boolean\"] [data-part=\"keep\"]').click()");
+            check(waitFor([&] { return window.booleanKeepTool() != keepBefore; }, 2000),
+                  "the page's switch turns the gesture's own Keep the other bodies");
+            check(waitFor([&] {
+                      return jsString(page, "document.querySelector('[data-chip=\"boolean\"] [data-part=\"keep\"]')"
+                                            ".getAttribute('aria-pressed')") ==
+                             (window.booleanKeepTool() ? QStringLiteral("true") : QStringLiteral("false"));
+                  }, 2000),
+                  "and the switch on the page follows it back");
+            js(page, "document.querySelector('[data-chip=\"boolean\"] [data-part=\"keep\"]').click()");
+            waitFor([&] { return window.booleanKeepTool() == keepBefore; }, 2000);
+            // Escape with the keyboard on the viewport: the Qt chip's claim.
+            window.view()->setFocus();
+            key(window.view(), Qt::Key_Escape);
+            check(!window.booleanActive() && waitFor([&] { return pageChip(QStringLiteral("boolean")).isEmpty(); }, 2000),
+                  "Escape on the viewport cancels, and the page's chip goes with the Qt one");
+            const int revision = window.document().revision();
+            window.view()->setSelectedSolids({first, second});
+            pump(150);
+            subtract->trigger();
+            waitFor([&] { return drawn(QStringLiteral("boolean")); }, 3000);
+            window.view()->setFocus();
+            key(window.view(), Qt::Key_Return);
+            check(!window.booleanActive() && window.document().revision() != revision,
+                  "Enter on the viewport applies it");
+            if (QAction* undo = actionNamed(&window, QStringLiteral("Undo"))) undo->trigger();
+            pump(300);
+        }
+
+        // --- Slats ------------------------------------------------------------------
+        SlatsTool* slatsTool = window.findChild<SlatsTool*>();
+        QAction* slatsAction = actionNamed(&window, QStringLiteral("Slats..."));
+        check(slatsTool && slatsAction, "chips: the editor has its slats chip and Slats...");
+        // A 600 x 300 face of the slab, picked the way a hand picks it.
+        const auto pickTop = [&] {
+            const int slab = window.document().solids().front().id;
+            const TopoDS_Shape body = window.document().shapeOf(slab);
+            window.view()->clearSelection();
+            pump(100);
+            for (TopExp_Explorer e(body, TopAbs_FACE); e.More(); e.Next()) {
+                const TopoDS_Face face = TopoDS::Face(e.Current());
+                if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane) continue;
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(face, props);
+                if (props.Mass() < 100000.0) continue;
+                QPoint at;
+                if (!window.view()->projectToScreen(props.CentreOfMass(), at)) continue;
+                const QPointF p(at);
+                const QPointF g = window.view()->mapToGlobal(p);
+                QMouseEvent move(QEvent::MouseMove, p, g, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &move);
+                pump(60);
+                QMouseEvent down(QEvent::MouseButtonPress, p, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &down);
+                QMouseEvent up(QEvent::MouseButtonRelease, p, g, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &up);
+                pump(120);
+                if (!window.view()->selectedFace().IsNull() && window.canBeginSlats()) return true;
+            }
+            return false;
+        };
+        const auto pageField = [&](const char* id) {
+            return jsString(page, QStringLiteral("(document.querySelector('[data-chip=\"slats\"] input[data-field=\"%1\"]')"
+                                                 " || {}).value || ''").arg(QLatin1String(id)));
+        };
+        if (slatsTool && slatsAction && pickTop()) {
+            slatsAction->trigger();
+            check(window.slatsActive(), "Slats... begins on the slab's face");
+            check(waitFor([&] { return drawn(QStringLiteral("slats")); }, 3000), "the page draws the slats chip");
+            check(standsOn(QStringLiteral("slats"), slatsTool) && slatsTool->widthField()->isHidden() &&
+                      slatsTool->flipButton()->isHidden(),
+                  "where the Qt chip stands, its own fields and Flip hidden");
+            check(pageField("width") == slatsTool->widthField()->text() && pageField("gap") == slatsTool->gapField()->text() &&
+                      pageField("depth") == slatsTool->depthField()->text(),
+                  "its fields are seeded with the Qt fields' numbers - " + pageField("width") + ", " + pageField("gap") +
+                      ", " + pageField("depth"));
+            check(waitFor([&] { return chrome->claimsKeyboardFor(QStringLiteral("slats")); }, 2000) &&
+                      jsString(page, "document.activeElement && document.activeElement.dataset.field") == QStringLiteral("width"),
+                  "Width is focused and holds the keyboard for the slats chip (R5)");
+            const auto countShown = [&] {
+                return jsString(page, "(document.querySelector('[data-chip=\"slats\"] .text.muted') || {}).textContent || ''");
+            };
+            js(page, "(() => { const f = document.querySelector('[data-chip=\"slats\"] input[data-field=\"width\"]'); "
+                     "f.value = '30'; f.dispatchEvent(new Event('input', {bubbles: true})); })()");
+            check(waitFor([&] { return slatsTool->widthField()->text() == QStringLiteral("30"); }, 2000),
+                  "typing 30 on the page reaches the Qt field");
+            const QString expected = slatsTool->count() == 1 ? QStringLiteral("1 slat")
+                                                              : QStringLiteral("%1 slats").arg(slatsTool->count());
+            check(slatsTool->count() > 0 && waitFor([&] { return countShown() == expected; }, 2000),
+                  "and the live count on the page is the Qt chip's - " + countShown());
+#ifdef _WIN32
+            capture(&window, outDir + "/chip-slats.png");
+#endif
+            // A page that cannot draw it: the Qt chip draws itself again,
+            // holding what was typed (Review Focus 3).
+            slatsTool->face()->setDrawnElsewhere(false);
+            pump(100);
+            check(slatsTool->widthField()->isVisible() && slatsTool->widthField()->text() == QStringLiteral("30"),
+                  "drawn here again, the Qt chip shows its own fields holding what the page typed");
+            slatsTool->face()->setDrawnElsewhere(true);
+            pump(100);
+            check(slatsTool->widthField()->isHidden(), "and hides them once the page draws it again");
+            waitFor([&] { return drawn(QStringLiteral("slats")); }, 3000);
+            // R3: a real Enter, typed straight after a digit, aimed at the
+            // page's field - it passes the Qt chip's claim (the field holds
+            // the keyboard for this chip) and the page answers it WITH 35.
+            const size_t before = window.document().solids().size();
+            js(page, "(() => { const f = document.querySelector('[data-chip=\"slats\"] input[data-field=\"width\"]'); "
+                     "f.dispatchEvent(new MouseEvent('mousedown', {bubbles: true})); f.focus(); "
+                     "f.value = '35'; f.dispatchEvent(new Event('input', {bubbles: true})); })()");
+            QWidget* proxy = page->focusProxy() ? page->focusProxy() : page;
+            QKeyEvent enterOver(QEvent::ShortcutOverride, Qt::Key_Return, Qt::NoModifier);
+            enterOver.ignore();
+            QCoreApplication::sendEvent(proxy, &enterOver);
+            std::printf("[info] before the Qt Enter: page holds slats keys %d, key is the page's %d, drawn elsewhere %d, "
+                        "proxy %s inside the page %d\n",
+                        int(chrome->claimsKeyboardFor(QStringLiteral("slats"))),
+                        int(slatsTool->face()->keyBelongsToPage(proxy)), int(slatsTool->face()->drawnElsewhere()),
+                        proxy->metaObject()->className(), int(proxy == page || page->isAncestorOf(proxy)));
+            QKeyEvent enterPress(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier, QString(QChar(13)));
+            QCoreApplication::sendEvent(proxy, &enterPress);
+            check(window.slatsActive(), "a Qt Enter aimed at the page's field is not the Qt chip's to apply (R3)");
+            QKeyEvent enterRelease(QEvent::KeyRelease, Qt::Key_Return, Qt::NoModifier, QString(QChar(13)));
+            QCoreApplication::sendEvent(proxy, &enterRelease);
+            // A key sent from here never reaches Chromium's DOM in a window
+            // the OS has not activated (no block in this suite delivers one),
+            // so the page's half - its keydown, typed straight after a digit
+            // in the same turn - is dispatched in the page.
+            js(page, "(() => { const f = document.querySelector('[data-chip=\"slats\"] input[data-field=\"width\"]'); "
+                     "f.value = '35'; f.dispatchEvent(new Event('input', {bubbles: true})); "
+                     "f.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()");
+            check(waitFor([&] { return !window.slatsActive(); }, 3000), "the page answers that Enter and applies the slats");
+            bool thirtyFive = false;
+            for (size_t i = before; i < window.document().solids().size(); ++i) {
+                const ModelingOps::MeasuredBox box = ModelingOps::measuredBox(std::vector<TopoDS_Shape>{window.document().solids()[i].shape});
+                for (double extent : {box.width, box.depth, box.height})
+                    if (std::abs(extent - 35.0) < 0.01) thirtyFive = true;
+            }
+            check(window.document().solids().size() > before && thirtyFive,
+                  QStringLiteral("and lays slats 35 wide - the width the page held at Enter (%1 new bodies)")
+                      .arg(window.document().solids().size() - before));
+            check(waitFor([&] { return !chrome->claimsKeyboardFor(QStringLiteral("slats")) && !chrome->holdsKeyboard(); }, 2000),
+                  "the gesture ending gives the keyboard back (Review Focus 2)");
+            if (QAction* undo = actionNamed(&window, QStringLiteral("Undo"))) undo->trigger();
+            pump(300);
+            // A second gesture re-seeds, and Escape on the page cancels it.
+            if (pickTop()) {
+                slatsAction->trigger();
+                waitFor([&] { return drawn(QStringLiteral("slats")); }, 3000);
+                check(waitFor([&] { return pageField("width") == slatsTool->widthField()->text(); }, 2000),
+                      "a second gesture seeds the page's Width afresh - " + pageField("width") + " (Review Focus 5)");
+                js(page, "document.querySelector('[data-chip=\"slats\"] input[data-field=\"gap\"]').dispatchEvent("
+                         "new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+                check(waitFor([&] { return !window.slatsActive(); }, 2000) &&
+                          window.document().solids().size() == before,
+                      "Escape on the page cancels it, laying nothing");
+            } else {
+                check(false, "the slab's face could be picked a second time");
+            }
+        } else if (slatsTool && slatsAction) {
+            check(false, "the slab's top face could be picked for slats");
         }
     }
 

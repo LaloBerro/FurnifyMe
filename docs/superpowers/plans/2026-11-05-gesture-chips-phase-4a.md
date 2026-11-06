@@ -70,3 +70,19 @@ spike's gate 4 (glued chips fade while the camera moves - 4b's concern).
 5. Two gestures in a row re-seed the field (R5).
 
 ## Ledger
+
+- Task 1: complete (7e4701a) - chip_face_tests 39/39, red on stubs first (30 failing).
+- Tasks 2-4: complete (bde81e7) - EditorChrome::addChip, Boolean and Slats faces, Chip.svelte; vitest 246/246.
+- Task 5: Ruling: a key sent from the harness never reaches Chromium's DOM in a window the OS has not
+  activated (no block in chrome_smoke delivers one) - the Qt half of R3 (the claim stands aside) is
+  pinned with a real QKeyEvent at the page's proxy, the page half with a keydown dispatched in the page.
+  Cost if wrong: a real Enter could be swallowed between Qt and Chromium unseen; the Qt half is proven.
+- Task 5: Ruling: the page's view rises whenever a shown chip moves or shows (a hint balloon covered the
+  Boolean chip) - the toast's precedent. Cost if wrong: a Qt card raised later in the same turn covers a
+  chip until the chip next moves.
+- Task 5: found and fixed by the live run, each with a test that failed first: the one-row face copied
+  instead of nested (chrome_smoke "the chip names the operation"); focus on a hidden input
+  ("focuses Width only once the card is drawn", vitest); no re-report after the Qt chip drew itself
+  ("reports its size again", vitest); the chip font token without a fallback (seen in the capture).
+- Gate: both presets build; ctest 25/25 in both; vitest 248/248; chrome_smoke 404/404.
+- Gate: gui_smoke 6453 checks + 1 skip, twice, floor 6454 unchanged (the Qt path does not move).

@@ -65,6 +65,15 @@ describe('a gesture chip', () => {
     expect([card('boolean')!.style.width, card('boolean')!.style.height]).toEqual([`${kW + 2}px`, `${kH + 1}px`]);
   });
 
+  it('reports its size again whenever the rectangle stops carrying it', async () => {
+    const { chrome, chips } = await mount({ boolean: booleanFace() }, { boolean: { w: kW, h: kH } });
+    // The Qt chip drew itself for a while and came back at its own size: the
+    // page's measurement did not change, and must be sent again all the same.
+    await moveCard(chrome, 'boolean', { w: 200, h: 40 });
+    expect(chips.calls.filter((c) => c.op === 'reportSize').length).toBe(2);
+    expect(card('boolean')!.style.visibility).toBe('hidden');
+  });
+
   it('draws nothing while its Qt chip is hidden', async () => {
     const { chrome } = await mount({ boolean: booleanFace() }, { boolean: { w: kW, h: kH } });
     expect(card('boolean')).not.toBeNull();
@@ -108,6 +117,16 @@ describe('the slats chip', () => {
     const labels = [...card('slats')!.querySelectorAll('label .label')].map((n) => n.textContent);
     expect(labels).toEqual(['Width', 'Gap', 'Depth']);
     expect(fieldNamed('width').title).toBe('How wide each slat is, in mm');
+  });
+
+  it('focuses Width only once the card is drawn - a hidden input takes no focus', async () => {
+    const { chrome } = await mount({ slats: slatsFace(1, '40') }, { slats: { w: 200, h: 40 } });
+    await tick();
+    expect(card('slats')!.style.visibility).toBe('hidden');
+    expect(document.activeElement).not.toBe(fieldNamed('width'));
+    await moveCard(chrome, 'slats', { w: kW, h: kH });
+    await tick();
+    expect(document.activeElement).toBe(fieldNamed('width'));
   });
 
   it('mirrors each edit into the Qt field', async () => {

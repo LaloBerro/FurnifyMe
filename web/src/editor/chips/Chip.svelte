@@ -59,22 +59,31 @@
     if (seed !== seededWith) {
       seededWith = seed;
       values = Object.fromEntries(list.map((f) => [f.id, f.value]));
-      const target = face.focus;
-      if (target)
-        tick().then(() => {
-          const input = inputs[target];
-          if (!input) return;
-          // Claimed outright: a focus() in a page whose window is not active
-          // fires no focus event (the name question's finding).
-          claim();
-          input.focus();
-          input.select();
-        });
+      pendingFocus = face.focus;
       return;
     }
     const next = untrack(() => ({ ...values }));
     for (const f of list) if (f.id !== focused) next[f.id] = f.value;
     values = next;
+  });
+
+  // The field a new gesture types in, focused once the card is DRAWN - an
+  // input under visibility: hidden cannot take focus (R4 holds the card
+  // hidden until its rectangle carries its size).
+  let pendingFocus = $state('');
+  $effect(() => {
+    if (!settled || !pendingFocus) return;
+    const target = pendingFocus;
+    pendingFocus = '';
+    tick().then(() => {
+      const input = inputs[target];
+      if (!input) return;
+      // Claimed outright: a focus() in a page whose window is not active
+      // fires no focus event (the name question's finding).
+      claim();
+      input.focus();
+      input.select();
+    });
   });
 
   function claim() {
@@ -113,19 +122,31 @@
     chips.press(name, part.id);
   }
 
+  // Reported when the measurement changes - and again whenever the rectangle
+  // C++ hands back stops carrying it (a Qt chip that drew itself for a while
+  // comes back at its own size, with the page's measurement unchanged).
+  let lastSize = '';
+  let lastRect = '';
+  $effect(() => {
+    const { w, h } = measured;
+    if (w <= 0 || h <= 0) return;
+    const size = `${w}x${h}`;
+    const at = `${rect.w}x${rect.h}`;
+    const stale = !settled && at !== lastRect;
+    if (size === lastSize && !stale) return;
+    lastSize = size;
+    lastRect = at;
+    chips.reportSize(name, w, h);
+  });
+
   onMount(() => {
-    let last = '';
     const measure = () => {
       if (!content) return;
       // Layout offsets, never a transformed box.
       const w = Math.ceil(content.offsetWidth);
       const h = Math.ceil(content.offsetHeight);
       if (w <= 0 || h <= 0) return;
-      measured = { w, h };
-      const size = `${w}x${h}`;
-      if (size === last) return;
-      last = size;
-      chips.reportSize(name, w, h);
+      if (w !== measured.w || h !== measured.h) measured = { w, h };
     };
     const observer = new ResizeObserver(measure);
     if (content) observer.observe(content);
@@ -208,7 +229,6 @@
     background: var(--card-fill, var(--panel));
     box-shadow: var(--card-shadow, none);
     color: var(--text);
-    font-family: var(--font-family, inherit);
     font-size: var(--font-label);
     overflow: hidden;
   }

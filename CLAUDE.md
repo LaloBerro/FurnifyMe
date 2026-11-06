@@ -108,7 +108,8 @@ its stretch. (`ctest` is **14/14** as of 2026-10-07 - the scene model, booleans 
 total above was not re-measured with them. `ctest` is **15/15** as of 2026-10-08 with
 `headless_item_order`, the Items drawer's stored order, at 57 checks on its own. `ctest` is **24/24** as of 2026-11-05, in both presets: the HTML
 migration's model tests (hub, versions, joints, items, menu) and their session and
-settings suites joined it.)
+settings suites joined it. **25/25** the same day with `chip_face`, the gesture chips' face and
+bridge, Phase 4a.)
 
 Verified by driving the running app and reading the screenshots:
 viewport renders with grid, triedron and lighting; sketch mode draws a live yellow polyline
@@ -516,6 +517,43 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   Out, staying Qt: the axis gizmo, the window buttons, the Add-shape flyout (placed beside the chip
   rectangle the page reports) and the render Back chip. Found on the way and filed, not fixed:
   T-083, a driver crash on a theme switch during a SECOND render-mode session.
+- **The gesture chips (Phase 4a, branch `gesture-chips-4a`): the Qt chip IS the chip; the page
+  draws its face.** Boolean and Slats first - the two at the viewport's bottom centre - over
+  machinery 4b (Extrude, Pull, Fillet/Chamfer, Move, Mitre, Re-measure) and 4c (the joint card)
+  reuse. `ui/ChipFace` (both presets, `chip_face_tests` offscreen) describes a chip as ROWS OF
+  PARTS read off its REAL controls - words in a tone, fields, buttons, toggles - and every request
+  from the page lands IN those controls (a field's `setText()`, a button's `click()`), so the chip's
+  own signals run exactly as for a Qt click. `web/ChipsBridge` (`chips`) carries the faces WITH
+  `facesChanged` and the page's edits, presses, commits and sizes back; one `Chip.svelte` draws any
+  face. The Qt chip keeps its place, its Enter/Escape claim, its preview and its commit; drawn
+  elsewhere it paints nothing, hides its controls, lets the pointer through, and takes the size the
+  page measured, so its own placement code runs unchanged - `EditorChrome::addChip()` reports its
+  rectangle in the `cards` map under the face's name. Five rules this slice paid for:
+  - **Keys (R3): a key aimed at the page passes the Qt claim only while a field of THAT chip holds
+    the keyboard** (`ChipFace::keyBelongsToPage()`, `EditorChrome::claimsKeyboardFor()`), and the
+    page answers Enter WITH its values (`chips.commit(name, values)` writes them into the fields,
+    then commits) - the name question's rule: a mirrored edit can lag one message behind the Enter
+    that follows it. Enter with the keyboard anywhere else is the Qt claim's, committing what the
+    mirrored fields hold. A key sent from the harness never reaches Chromium's DOM in a window the
+    OS has not activated, so chrome_smoke pins the Qt half (the claim stands aside) and dispatches
+    the page's keydown in the page.
+  - **No jump (R4): the card is drawn only once the rectangle it is told carries the size it
+    measured** (whole-device-pixel rounding allowed), and it reports that size AGAIN whenever the
+    rectangle stops carrying it - a Qt chip that drew itself for a while comes back at its own
+    size with the page's measurement unchanged, and a report sent only on change left the card
+    hidden for good.
+  - **Focus waits for the card to be drawn (R5).** A field is seeded when the face's `seed` moves (a
+    new gesture) and focused once the card is visible: an input under `visibility: hidden` takes no
+    focus, and the first build focused it there, so Enter reached nothing. A value coming back from
+    C++ never retypes the field being typed in.
+  - **`QVariantList{QVariantList{...}}` with ONE element is a COPY, not a list holding it** (CWG
+    1467): the Boolean chip's one-row face reached the page as a flat list of parts and drew an
+    empty 28 x 100 card. Append the row as a `QVariant`.
+  - **A chip stands over every other overlay child**: the page's view rises whenever a shown chip
+    moves or shows (`syncCards()`), as the Qt chip raised itself - a hint balloon stood over the
+    Boolean chip until it did. Only the drawn rectangles are painted, so nothing else is covered.
+    chrome_smoke LOOKS: the window composited with the page and with its view hidden must differ
+    where the chip stands (T-083's rule), because the DOM said "drawn" while nothing was on screen.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a
@@ -654,6 +692,8 @@ Source files under `src/`, plus `tests/`:
 | `session/JointsModel.{h,cpp}` | the Joints drawer's model for the HTML card - rows broken first, open rows by joint id, hooks; Core + OCCT, tested by `joints_model_tests` |
 | `session/ItemsKeys.{h,cpp}` | the Items list's ONE key table (ruling D19): read by `ItemsPanel`, the shortcut sheet, `ItemsModel` and the chrome's list hold |
 | `session/ItemsModel.{h,cpp}` | the Items drawer's model for the HTML card - visible rows, folds, filter, marks, reveal, the row menu, key commands, a drag's dry run; writes nothing, every change through hooks; tested by `items_model_tests` |
+| `ui/ChipFace.{h,cpp}` | a gesture chip's face for the page - rows of parts read off its real controls; edits land in those controls; drawn elsewhere, sized by the page; tested by `chip_face_tests` |
+| `web/ChipsBridge.{h,cpp}` | the page's `chips` object: every chip's face by name, and the page's edits, presses, commits and sizes back into them (both presets) |
 | `session/MenuModel.{h,cpp}` | the menu bar for the page - a tree of QActions, open levels, QMenu's keyboard rules, a trigger that closes first and runs on the next turn; tested by `menu_model_tests` |
 | `session/VersionsModel.{h,cpp}` | the Versions drawer's model for the HTML card - list, thumbnail URLs, default name, words, gates; the four requests through hooks; Core + Gui, tested by `versions_model_tests` |
 | `session/HubModel.{h,cpp}` | the library hub's logic for the HTML hub - lists, dates, create/rename/delete and their sentences; Core + Gui, tested by `hub_model_tests` |

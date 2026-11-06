@@ -248,10 +248,12 @@ void EditorChrome::syncCards()
 {
     QVariantMap map;
     QStringList gone;
+    bool chipShown = false;
     for (const QPointer<ChipFace>& face : myChips) {
         if (!face || !face->chip()) continue;
         QVariantMap card = rectMap(face->chip()->geometry());
         const bool shown = face->chip()->isVisible();
+        chipShown = chipShown || (shown && face->drawnElsewhere());
         card.insert(QStringLiteral("shown"), shown);
         card.insert(QStringLiteral("chip"), true);
         if (myCardShown.value(face->name()) && !shown) gone << face->name();
@@ -279,6 +281,11 @@ void EditorChrome::syncCards()
     bool held = false;
     for (const QString& name : gone) held = myListHolds.remove(name) || held;
     if (held && myListHolds.isEmpty() && !myHoldsKeyboard) giveFocusBack();
+    // A gesture chip stands over every other overlay child, as the Qt chip
+    // raised itself (Phase 4a): the page's view goes up whenever one shows
+    // or moves. Only its drawn rectangles are painted, so nothing else is
+    // covered.
+    if (chipShown) myHost->view()->raise();
     myBridge->setCardMap(map);
 }
 

@@ -68,9 +68,14 @@ BooleanTool::BooleanTool(MainWindow* window, OcctViewWidget* view)
     myFace->addButton(QStringLiteral("keep"), keep);
     myFace->setActions([this] { commit(); }, [this] { cancel(); });
     myFace->setDescriber([this] {
-        return QVariantList{QVariantList{ChipFace::text(myTitle, QStringLiteral("title")),
-                                         myFace->button(QStringLiteral("keep")),
-                                         ChipFace::text(myHint, QStringLiteral("hint"))}};
+        // One row, appended as a list: QVariantList{QVariantList{...}} with a
+        // single element is a COPY of the inner list, not a list holding it.
+        const QVariantList row{ChipFace::text(myTitle, QStringLiteral("title")),
+                               myFace->button(QStringLiteral("keep")),
+                               ChipFace::text(myHint, QStringLiteral("hint"))};
+        QVariantList rows;
+        rows.append(QVariant(row));
+        return rows;
     });
     connect(myFace, &ChipFace::drawnChanged, this, [this] {
         layoutCard();
