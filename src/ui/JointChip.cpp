@@ -1,5 +1,7 @@
 #include "JointChip.h"
 
+#include "ChipFace.h"
+
 #include "GestureChip.h"
 #include "KeyClaim.h"
 #include "JointsPanel.h"
@@ -223,6 +225,7 @@ public:
             myLines.push_back(std::move(line));
         };
 
+        myNote = contactError;
         if (!contactError.isEmpty()) {
             addLine(contactError, Theme::badgeFont(), kMenuPad, content);
             y += kMenuReasonHeight + kMenuRowGap;
@@ -261,6 +264,9 @@ public:
         }
         return nullptr;
     }
+
+    // The one sentence a contact that cannot be measured is refused with.
+    QString note() const { return myNote; }
 
     QString reasonFor(Joinery::Kind kind) const
     {
@@ -310,6 +316,7 @@ private:
     std::vector<KindEntry*> myEntries;
     std::vector<Line> myLines;
     std::vector<std::pair<Joinery::Kind, QString>> myReasons;
+    QString myNote;
 };
 
 // --- the chip ---------------------------------------------------------------
@@ -394,6 +401,36 @@ JointChip::JointChip(MainWindow* window, OcctViewWidget* view)
             syncToggleTexts();
         });
     }
+
+    // The chrome page's face of this card (Phase 4c): every control above is
+    // registered by id, and faceRows() lays them out with relayout()'s own
+    // family logic. Not glued: the card is docked in the TopRight column.
+    myChipFace = new ChipFace(QStringLiteral("joint"), this);
+    myChipFace->addButton(QStringLiteral("kind"), myKindButton);
+    myChipFace->addButton(QStringLiteral("more"), myMoreButton);
+    static const char* const slotIds[kSlotCount] = {"count", "size", "inset", "depthA", "depthB",
+                                                    "width", "stop", "thickness", "length"};
+    for (int i = 0; i < kSlotCount; ++i)
+        myChipFace->addField(QString::fromLatin1(slotIds[i]), myFields[static_cast<std::size_t>(i)]);
+    myChipFace->addButton(QStringLiteral("stopped"), myStoppedButton);
+    myChipFace->addButton(QStringLiteral("haunched"), myHaunchedButton);
+    myChipFace->addButton(QStringLiteral("host0"), myHostButtons[0]);
+    myChipFace->addButton(QStringLiteral("host1"), myHostButtons[1]);
+    myChipFace->addButton(QStringLiteral("drilled0"), myDrilledFromButtons[0]);
+    myChipFace->addButton(QStringLiteral("drilled1"), myDrilledFromButtons[1]);
+    myChipFace->setActions([this] { commit(); }, [this] { cancel(); });
+    myChipFace->setDescriber([this] { return faceRows(); });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this] {
+        if (myJointId > 0) relayout();
+        if (myKindMenuOpen && myKindMenu) {
+            myKindMenu->setVisible(!myChipFace->drawnElsewhere());
+            placeKindMenu();
+        }
+        update();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, [this] {
+        if (myJointId > 0) relayout();
+    });
 
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &JointChip::applyTheme);
@@ -541,7 +578,7 @@ void JointChip::setMoreOpen(bool open)
 
 bool JointChip::kindMenuOpen() const
 {
-    return myKindMenu && myKindMenu->isVisible();
+    return myKindMenuOpen && myKindMenu;
 }
 
 QWidget* JointChip::kindMenu() const
@@ -558,14 +595,27 @@ void JointChip::openKindMenu()
     Joinery::ContactResult contact;
     myWindow->jointContact(myJointId, contact);
     myKindMenu->rebuild(myJoint.kind, contact);
+    // Its entries reach the page by id, once, as the menu is first built.
+    for (const auto& group : kindGroups())
+        for (const Joinery::Kind kind : group.second)
+            myChipFace->addButton(QStringLiteral("kind:%1").arg(static_cast<int>(kind)),
+                                  myKindMenu->entryFor(kind));
+    myKindMenuOpen = true;
     placeKindMenu();
-    myKindMenu->show();
-    myKindMenu->raise();
+    // Drawn by the page, the menu is the page's too (inside the card).
+    if (!myChipFace->drawnElsewhere()) {
+        myKindMenu->show();
+        myKindMenu->raise();
+    }
+    myChipFace->notify();
 }
 
 void JointChip::closeKindMenu()
 {
+    const bool was = myKindMenuOpen;
+    myKindMenuOpen = false;
     if (myKindMenu) myKindMenu->hide();
+    if (was && myChipFace) myChipFace->notify();
 }
 
 void JointChip::placeKindMenu()
@@ -804,6 +854,8 @@ QString JointChip::seedSignature(const DocumentModel::Joint& joint) const
 void JointChip::reseed(const DocumentModel::Joint& joint)
 {
     myJoint = joint;
+    // The joint's own numbers again: the page re-seeds every field (R5).
+    if (myChipFace) myChipFace->reseed();
     for (int i = 0; i < kSlotCount; ++i) {
         QLineEdit* edit = myFields[static_cast<std::size_t>(i)];
         if (!edit) continue;
@@ -921,6 +973,125 @@ void JointChip::end()
     myJointId = 0;
     mySeed.clear();
     hide();
+}
+
+QVariantMap JointChip::faceField(Slot slot, const QString& label, const QString& name) const
+{
+    static const char* const slotIds[kSlotCount] = {"count", "size", "inset", "depthA", "depthB",
+                                                    "width", "stop", "thickness", "length"};
+    QVariantMap part = myChipFace->field(QString::fromLatin1(slotIds[static_cast<int>(slot)]), label, name);
+    part.insert(QStringLiteral("stacked"), true);
+    part.insert(QStringLiteral("invalid"), myInvalid[static_cast<std::size_t>(slot)]);
+    return part;
+}
+
+QVariantList JointChip::faceRows() const
+{
+    QVariantList rows;
+    if (myJointId <= 0) return rows;
+    // Appended as QVariants: a QVariantList{QVariantList{...}} of one element
+    // is a copy, not a list holding it (Phase 4a's finding).
+    const auto row = [&rows](const QVariantList& parts) { rows.append(QVariant(parts)); };
+    const auto segment = [this](const QString& id, const QString& label) {
+        QVariantMap part = myChipFace->button(id);
+        part.insert(QStringLiteral("look"), QStringLiteral("segment"));
+        if (!label.isEmpty()) part.insert(QStringLiteral("label"), label);
+        return part;
+    };
+    const auto userText = [](const QString& text) {
+        QVariantMap part = ChipFace::text(text, QStringLiteral("muted"));
+        part.insert(QStringLiteral("user"), true);
+        return part;
+    };
+
+    const Joinery::Family family = Joinery::familyOf(myJoint.kind);
+    const bool lap = myJoint.kind == Joinery::Kind::HalfLap;
+    const bool pocket = myJoint.kind == Joinery::Kind::PocketScrew;
+    const bool hostChoice = family == Joinery::Family::Housing ||
+                            (family == Joinery::Family::Interlock && !lap);
+
+    // The kind line: the kind button, and the two pieces (the user's names).
+    QVariantMap kind = myChipFace->button(QStringLiteral("kind"));
+    kind.insert(QStringLiteral("text"), kindButtonText());
+    kind.insert(QStringLiteral("look"), QStringLiteral("menu"));
+    row({kind, userText(myNameA + QStringLiteral(" ↔ ") + myNameB)});
+
+    // The kind menu, open: inside the card, under the kind line.
+    if (kindMenuOpen()) {
+        QVariantList groups;
+        for (const auto& group : kindGroups()) {
+            QVariantList entries;
+            for (const Joinery::Kind k : group.second) {
+                QVariantMap entry = myChipFace->button(QStringLiteral("kind:%1").arg(static_cast<int>(k)));
+                if (entry.isEmpty()) continue;
+                entry.insert(QStringLiteral("checked"), k == myJoint.kind);
+                entry.insert(QStringLiteral("reason"), kindMenuReason(k));
+                entries.append(entry);
+            }
+            groups.append(QVariantMap{{QStringLiteral("title"), group.first},
+                                      {QStringLiteral("entries"), entries}});
+        }
+        row({QVariantMap{{QStringLiteral("kind"), QStringLiteral("menu")},
+                         {QStringLiteral("id"), QStringLiteral("kinds")},
+                         {QStringLiteral("note"), myKindMenu ? myKindMenu->note() : QString()},
+                         {QStringLiteral("groups"), groups}}});
+    }
+
+    const auto pairLabel = [&](const QString& word, bool withNames) {
+        QVariantList parts{ChipFace::text(word, QStringLiteral("muted"))};
+        if (withNames) parts.append(userText(QStringLiteral("· %1, %2").arg(myNameA, myNameB)));
+        row(parts);
+    };
+    const auto depthPair = [&] {
+        pairLabel(slotLabel(Slot::DepthA), /*withNames=*/true);
+        row({faceField(Slot::DepthA, QString(), slotLabel(Slot::DepthA) + QStringLiteral(" — ") + myNameA),
+             faceField(Slot::DepthB, QString(), slotLabel(Slot::DepthB) + QStringLiteral(" — ") + myNameB)});
+    };
+
+    // The main number, the one the family is defined by.
+    if (lap) {
+        depthPair();
+    } else {
+        const Slot main = familySlots().front();
+        row({faceField(main, slotLabel(main))});
+    }
+
+    // More, and what it opens.
+    if (hasMore()) {
+        QVariantMap more = myChipFace->button(QStringLiteral("more"));
+        more.insert(QStringLiteral("text"), myMoreOpen ? tr("Fewer ▴") : tr("More ▾"));
+        more.insert(QStringLiteral("look"), QStringLiteral("link"));
+        row({more});
+        if (myMoreOpen) {
+            row({QVariantMap{{QStringLiteral("kind"), QStringLiteral("rule")}}});
+            if (family == Joinery::Family::Fasteners) {
+                row({faceField(Slot::Size, slotLabel(Slot::Size)), faceField(Slot::Inset, slotLabel(Slot::Inset))});
+                depthPair();
+                if (pocket) {
+                    pairLabel(tr("Drilled from"), /*withNames=*/false);
+                    row({segment(QStringLiteral("drilled0"), QString()),
+                         segment(QStringLiteral("drilled1"), QString())});
+                }
+            } else if (family == Joinery::Family::Housing) {
+                row({faceField(Slot::Width, slotLabel(Slot::Width)), segment(QStringLiteral("stopped"), tr("Stopped"))});
+                row({faceField(Slot::Stop, slotLabel(Slot::Stop))});
+            } else {
+                row({faceField(Slot::Thickness, slotLabel(Slot::Thickness)),
+                     segment(QStringLiteral("haunched"), tr("Haunched"))});
+            }
+            if (hostChoice) {
+                pairLabel(tr("Cut into"), /*withNames=*/false);
+                QVariantMap a = segment(QStringLiteral("host0"), QString());
+                QVariantMap b = segment(QStringLiteral("host1"), QString());
+                a.insert(QStringLiteral("user"), true);
+                b.insert(QStringLiteral("user"), true);
+                row({a, b});
+            }
+        }
+    }
+
+    row({ChipFace::text(hintText(), QStringLiteral("hint"))});
+    return rows;
 }
 
 void JointChip::relayout()
@@ -1089,8 +1260,16 @@ void JointChip::relayout()
     // Through Theme::wholeDevicePixels(), not straight to setFixedSize() - a
     // fractional device row over the GL surface is a row this card's own
     // painter cannot reach. Re-measured here, so More opening and closing each
-    // land on a whole size of their own.
-    setFixedSize(Theme::wholeDevicePixels(QSize(content + kPad * 2, y)));
+    // land on a whole size of their own. Drawn by the page, the card is the
+    // size the page measured and none of its own controls show (Phase 4c).
+    if (myChipFace && myChipFace->drawnElsewhere()) {
+        for (QWidget* child : findChildren<QWidget*>(Qt::FindDirectChildrenOnly)) child->hide();
+        if (myChipFace->faceSize().isValid())
+            setFixedSize(Theme::wholeDevicePixels(myChipFace->faceSize()));
+    } else {
+        setFixedSize(Theme::wholeDevicePixels(QSize(content + kPad * 2, y)));
+    }
+    if (myChipFace) myChipFace->notify();
     // A card that changed height has to be placed again: it is anchored in
     // the TopRight column, and everything below it in that column stacks off
     // its bottom edge.
@@ -1283,6 +1462,7 @@ void JointChip::replace()
 
 void JointChip::paintEvent(QPaintEvent*)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     GestureChip::paintFrame(painter, this, false);
@@ -1363,7 +1543,12 @@ bool JointChip::eventFilter(QObject* watched, QEvent* event)
             // window's event, so an identity test would read the menu's own
             // rows as outside and swallow them - ShapeFlyout paid for that one.
             const QPoint global = static_cast<QMouseEvent*>(event)->globalPosition().toPoint();
-            if (!myKindMenu->rect().contains(myKindMenu->mapFromGlobal(global))) {
+            // Drawn by the page, the menu stands INSIDE the card the page draws
+            // where this widget stands - so inside is this widget's rectangle.
+            const bool inside = myChipFace && myChipFace->drawnElsewhere()
+                                    ? rect().contains(mapFromGlobal(global))
+                                    : myKindMenu->rect().contains(myKindMenu->mapFromGlobal(global));
+            if (!inside) {
                 closeKindMenu();
                 mySwallowNextRelease = true;
                 return true;
@@ -1383,6 +1568,9 @@ bool JointChip::eventFilter(QObject* watched, QEvent* event)
             }
         }
     }
+
+    // A key aimed at the page's own field is the page's (Phase 4a, R3).
+    if (myChipFace && myChipFace->keyBelongsToPage(watched)) return QWidget::eventFilter(watched, event);
 
     // A text field that is not ours keeps its own Enter and Escape: an inline
     // rename in a drawer must still commit with Enter while this card is up.

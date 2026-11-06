@@ -53,6 +53,7 @@
 #include <array>
 #include <vector>
 
+class ChipFace;
 class JointKindMenu;
 class MainWindow;
 class OcctViewWidget;
@@ -91,6 +92,8 @@ public:
     void replace();
 
     int jointId() const { return myJointId; }
+    // What the chrome page draws in this card's place (migration Phase 4c).
+    ChipFace* face() const { return myChipFace; }
 
     // The main field - the first of a half-lap's pair.
     QLineEdit* field() const;
@@ -188,6 +191,9 @@ private:
     // which calls replace(), which calls reposition() - one more hop and that
     // is a loop.
     void replaceInOverlay();
+    // The rows the page draws, built with relayout()'s own family logic.
+    QVariantList faceRows() const;
+    QVariantMap faceField(Slot slot, const QString& label, const QString& name = QString()) const;
     void onKindPicked(Joinery::Kind kind);
     void onFieldEdited(Slot slot);
     QString seedSignature(const DocumentModel::Joint& joint) const;
@@ -234,4 +240,8 @@ private:
 
     std::vector<PaintedText> myTexts;
     QPointer<JointKindMenu> myKindMenu;   // sibling in the viewport, not a child
+    // Whether the kind menu is open - its own state, because drawn by the page
+    // the Qt menu never shows (Phase 4c).
+    bool myKindMenuOpen = false;
+    ChipFace* myChipFace = nullptr;
 };

@@ -174,9 +174,33 @@
       <div class="row">
         {#each row as part, p (p)}
           {#if part.kind === 'text'}
-            <span class="text {part.tone}">{part.text}</span>
+            <span class="text {part.tone}" data-user={part.user ? '' : undefined}>{part.text}</span>
+          {:else if part.kind === 'rule'}
+            <hr class="rule" />
+          {:else if part.kind === 'menu'}
+            <div class="menu-list" role="menu">
+              {#if part.note}<p class="note">{part.note}</p>{/if}
+              {#each part.groups as group (group.title)}
+                <div class="group-title">{group.title}</div>
+                {#each group.entries as entry (entry.id)}
+                  <button
+                    type="button"
+                    use:noFocus
+                    class="entry"
+                    role="menuitemradio"
+                    data-part={entry.id}
+                    disabled={!entry.enabled}
+                    aria-checked={entry.checked ? 'true' : 'false'}
+                    onclick={() => press(entry)}
+                  >
+                    <span>{entry.text}</span>{#if entry.checked}<span class="tick">✓</span>{/if}
+                  </button>
+                  {#if entry.reason}<p class="reason">{entry.reason}</p>{/if}
+                {/each}
+              {/each}
+            </div>
           {:else if part.kind === 'field'}
-            <label class="field">
+            <label class="field" class:stacked={part.stacked}>
               {#if part.label}<span class="label">{part.label}</span>{/if}
               <input
                 type="text"
@@ -186,7 +210,7 @@
                 spellcheck="false"
                 autocomplete="off"
                 disabled={!part.enabled}
-                class:invalid={face.invalid}
+                class:invalid={face.invalid || part.invalid}
                 value={values[part.id] ?? part.value}
                 bind:this={inputs[part.id]}
                 oninput={(e) => onInput(part.id, e)}
@@ -202,11 +226,27 @@
                 }}
               />
             </label>
+          {:else if part.look === 'segment'}
+            <div class="cell">
+              {#if part.label}<span class="label">{part.label}</span>{/if}
+              <button
+                type="button"
+                use:noFocus
+                class="segment"
+                class:on={part.checked}
+                data-part={part.id}
+                data-user={part.user ? '' : undefined}
+                title={part.tip}
+                disabled={!part.enabled}
+                aria-pressed={part.checked ? 'true' : 'false'}
+                onclick={() => press(part)}>{part.text}</button
+              >
+            </div>
           {:else}
             <button
               type="button"
               use:noFocus
-              class={part.kind}
+              class="{part.kind} {part.look ?? ''}"
               data-part={part.id}
               title={part.tip}
               disabled={!part.enabled}
@@ -298,6 +338,90 @@
   }
   .text.hint:only-child {
     margin-left: 0;
+  }
+  /* The joint card (Phase 4c): a label over its field or segment, the two
+     sharing a row's width; a divider; a link; and its kind menu. */
+  .field.stacked,
+  .cell {
+    flex: 1 1 0;
+    min-width: 96px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+  }
+  .cell {
+    display: flex;
+  }
+  .field.stacked .label,
+  .cell .label {
+    color: var(--text-muted);
+    font-size: var(--font-badge);
+  }
+  .field.stacked input {
+    width: 100%;
+    text-align: right;
+  }
+  button.segment {
+    justify-content: center;
+    width: 100%;
+  }
+  button.segment.on {
+    border-color: var(--accent);
+    background: var(--chip-active);
+  }
+  button.link {
+    height: auto;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--accent-text);
+    font-size: var(--font-badge);
+  }
+  button.link:hover:not(:disabled) {
+    background: transparent;
+    text-decoration: underline;
+  }
+  hr.rule {
+    flex: 1;
+    margin: 0;
+    border: none;
+    border-top: 1px solid var(--border);
+  }
+  .menu-list {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-small, 6px);
+    background: var(--panel);
+  }
+  .menu-list .group-title {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: var(--font-badge);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .menu-list .entry {
+    justify-content: space-between;
+    border-color: transparent;
+    background: transparent;
+  }
+  .menu-list .entry[aria-checked="true"] {
+    background: var(--chip-active);
+  }
+  .menu-list .entry .tick {
+    color: var(--accent-text);
+  }
+  .menu-list .reason,
+  .menu-list .note {
+    margin: 0 0 2px 10px;
+    color: var(--text-muted);
+    font-size: var(--font-badge);
+    white-space: normal;
+    max-width: 320px;
   }
   /* A value on a row of its own is the card's live figure (Move's "120 mm"),
      in body type where the Qt chip paints it. */

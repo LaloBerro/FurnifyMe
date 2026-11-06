@@ -57,6 +57,7 @@
 #include "ui/PullArrow.h"
 #include "ui/MitreTool.h"
 #include "ui/ReMeasureTool.h"
+#include "ui/JointChip.h"
 
 #include <QAction>
 #include <QApplication>
@@ -2419,7 +2420,7 @@ int main(int argc, char* argv[])
             }
             names.sort();
             check(names.join(QLatin1Char(',')) ==
-                      QStringLiteral("bevel,boolean,extrude,mitre,move,pull,remeasure,slats") &&
+                      QStringLiteral("bevel,boolean,extrude,joint,mitre,move,pull,remeasure,slats") &&
                       glued == 5 && allDrawnElsewhere,
                   "every gesture chip is drawn by the page, and the five that follow the model are glued - " +
                       names.join(QStringLiteral(", ")));
@@ -2579,6 +2580,73 @@ int main(int argc, char* argv[])
             typeAndEnter(QStringLiteral("remeasure"), QStringLiteral("size"), QStringLiteral("250"));
             check(waitFor([&] { return window.document().revision() != revision && !window.reMeasureActive(); }, 3000),
                   "Enter on the page retypes the size");
+            if (undo) undo->trigger();
+            pump(250);
+        }
+
+        // --- the joint card (Phase 4c): docked, not glued ---------------------------
+        JointChip* jointChip = window.findChild<JointChip*>();
+        check(jointChip && window.openFurniture(shelfUnitId), "chips: the shelf unit opens, and the editor has its joint card");
+        pump(300);
+        if (jointChip && !window.document().joints().empty()) {
+            const int jointId = window.document().joints().front().id;
+            const auto jointKind = [&] {
+                for (const DocumentModel::Joint& j : window.document().joints())
+                    if (j.id == jointId) return j.kind;
+                return Joinery::Kind::Dowel;
+            };
+            const auto jointCount = [&] {
+                for (const DocumentModel::Joint& j : window.document().joints())
+                    if (j.id == jointId) return j.params.count;
+                return -1;
+            };
+            window.setSelectedJoint(jointId);
+            pump(200);
+            check(window.jointChipJointId() == jointId && jointChip->isVisible() &&
+                      waitFor([&] { return drawn(QStringLiteral("joint")); }, 3000),
+                  "selecting a joint opens its card, and the page draws it");
+            check(waitFor([&] { return standsOn(QStringLiteral("joint"), jointChip); }, 2000) &&
+                      jointChip->kindButton()->isHidden() && jointChip->field()->isHidden(),
+                  "where the Qt card stands in the TopRight column, its own controls hidden");
+            check(chipField(QStringLiteral("joint"), QStringLiteral("count")) ==
+                      jointChip->fieldFor(JointChip::Slot::Count)->text(),
+                  "its count is the card's own - " + chipField(QStringLiteral("joint"), QStringLiteral("count")));
+            check(jsString(page, "(document.querySelector('[data-gesture=\"joint\"] [data-part=\"kind\"]') || {}).textContent || ''")
+                          .trimmed() == jointChip->kindButton()->text(),
+                  "its kind button reads " + jointChip->kindButton()->text());
+
+            js(page, "document.querySelector('[data-gesture=\"joint\"] [data-part=\"more\"]').click()");
+            check(waitFor([&] { return jointChip->moreOpen() && !chipField(QStringLiteral("joint"), QStringLiteral("size")).isEmpty(); }, 3000),
+                  "More opens the rest of its numbers, on the page too");
+            check(waitFor([&] { return standsOn(QStringLiteral("joint"), jointChip); }, 2000),
+                  "and the taller card still stands where the Qt card does");
+#ifdef _WIN32
+            pump(200);
+            capture(&window, outDir + "/chip-joint-more.png");
+#endif
+            js(page, "document.querySelector('[data-gesture=\"joint\"] [data-part=\"kind\"]').click()");
+            check(waitFor([&] { return jointChip->kindMenuOpen() &&
+                                       js(page, "document.querySelectorAll('[data-gesture=\"joint\"] .menu-list .entry').length").toInt() == 10; }, 3000) &&
+                      jointChip->kindMenu()->isHidden(),
+                  "the kind button opens the menu inside the page's card, all ten kinds, the Qt menu never shown");
+#ifdef _WIN32
+            pump(200);
+            capture(&window, outDir + "/chip-joint-menu.png");
+#endif
+            js(page, QStringLiteral("document.querySelector('[data-gesture=\"joint\"] [data-part=\"kind:%1\"]').click()")
+                         .arg(static_cast<int>(Joinery::Kind::Screw)));
+            check(waitFor([&] { return jointKind() == Joinery::Kind::Screw && !jointChip->kindMenuOpen(); }, 3000),
+                  "picking Screw on the page switches the joint, and the menu closes");
+            typeAndEnter(QStringLiteral("joint"), QStringLiteral("count"), QStringLiteral("3"));
+            check(waitFor([&] { return jointCount() == 3; }, 3000), "Enter on the page sets the count it held - 3");
+            check(waitFor([&] { return chipField(QStringLiteral("joint"), QStringLiteral("count")) == QStringLiteral("3"); }, 2000),
+                  "and the page's field reads the joint's new count");
+            js(page, "document.querySelector('[data-gesture=\"joint\"] input[data-field=\"count\"]').dispatchEvent("
+                     "new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+            check(waitFor([&] { return !jointChip->isVisible() && pageChip(QStringLiteral("joint")).isEmpty(); }, 3000),
+                  "Escape with nothing typed closes the card, on the page too");
+            if (undo) undo->trigger();
+            pump(150);
             if (undo) undo->trigger();
             pump(250);
         }

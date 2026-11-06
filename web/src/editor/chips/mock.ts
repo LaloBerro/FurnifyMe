@@ -72,3 +72,50 @@ export function slatsFace(seed = 1, width = '40', reason = ''): Face {
   if (reason) rows.push([{ kind: 'text', text: reason, tone: 'danger' }]);
   return { rows, invalid: reason !== '', seed, focus: 'width' };
 }
+
+export function jointFace(menuOpen = false, moreOpen = true): Face {
+  const rows: Face['rows'] = [
+    [
+      { kind: 'button', id: 'kind', text: 'Dowel ▾', tip: 'Switch this joint to another kind', enabled: true, checked: false, look: 'menu' },
+      { kind: 'text', text: 'Side ↔ Shelf', tone: 'muted', user: true },
+    ],
+  ];
+  if (menuOpen)
+    rows.push([
+      {
+        kind: 'menu',
+        id: 'kinds',
+        note: '',
+        groups: [
+          {
+            title: 'Fasteners',
+            entries: [
+              { kind: 'button', id: 'kind:0', text: 'Dowel', tip: '', enabled: true, checked: true, reason: '' },
+              { kind: 'button', id: 'kind:4', text: 'Screw', tip: '', enabled: true, checked: false, reason: '' },
+            ],
+          },
+          {
+            title: 'Interlocks',
+            entries: [
+              { kind: 'button', id: 'kind:9', text: 'Half-lap', tip: '', enabled: false, checked: false, reason: 'The pieces only touch at an end' },
+            ],
+          },
+        ],
+      },
+    ]);
+  rows.push([{ kind: 'field', id: 'count', label: 'Count', value: '2', tip: '', enabled: true, stacked: true, invalid: false }]);
+  rows.push([{ kind: 'button', id: 'more', text: moreOpen ? 'Fewer ▴' : 'More ▾', tip: '', enabled: true, checked: false, look: 'link' }]);
+  if (moreOpen) {
+    rows.push([{ kind: 'rule' }]);
+    rows.push([
+      { kind: 'field', id: 'size', label: 'Size (mm)', value: '8', tip: '', enabled: true, stacked: true, invalid: true },
+      { kind: 'button', id: 'stopped', text: 'Off', tip: '', enabled: true, checked: false, look: 'segment', label: 'Stopped' },
+    ]);
+    rows.push([
+      { kind: 'button', id: 'host0', text: 'Side', tip: '', enabled: true, checked: true, look: 'segment', user: true },
+      { kind: 'button', id: 'host1', text: 'Shelf', tip: '', enabled: true, checked: false, look: 'segment', user: true },
+    ]);
+  }
+  rows.push([{ kind: 'text', text: 'Enter applies — Esc cancels', tone: 'hint' }]);
+  return { rows, invalid: false, seed: 1, focus: '' };
+}

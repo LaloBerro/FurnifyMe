@@ -11,6 +11,7 @@ export interface TextPart {
   kind: 'text';
   text: string;
   tone: Tone;
+  user?: boolean; // the user's own words (a piece's name) - not this app's copy
 }
 
 export interface FieldPart {
@@ -21,6 +22,8 @@ export interface FieldPart {
   value: string;
   tip: string;
   enabled: boolean;
+  stacked?: boolean; // the label above the field, the field the cell's width (the joint card)
+  invalid?: boolean; // this field alone does not read (the joint card marks fields one by one)
 }
 
 export interface ButtonPart {
@@ -30,9 +33,28 @@ export interface ButtonPart {
   tip: string;
   enabled: boolean;
   checked: boolean;
+  // How it is drawn (Phase 4c): a segment (pressed while checked, the cell's
+  // width, an optional label above it), a link, or a menu button.
+  look?: 'segment' | 'link' | 'menu';
+  label?: string;
+  user?: boolean;
+  reason?: string; // a menu entry the joint's contact refuses, and why
 }
 
-export type Part = TextPart | FieldPart | ButtonPart;
+export interface RulePart {
+  kind: 'rule';
+}
+
+// A menu drawn inside its card (the joint card's kinds, Phase 4c): groups of
+// entries, the current one checked, a refused one disabled with its reason.
+export interface MenuPart {
+  kind: 'menu';
+  id: string;
+  note: string;
+  groups: { title: string; entries: ButtonPart[] }[];
+}
+
+export type Part = TextPart | FieldPart | ButtonPart | RulePart | MenuPart;
 
 export interface Face {
   rows: Part[][];

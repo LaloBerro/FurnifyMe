@@ -10,7 +10,7 @@ import { tick } from 'svelte';
 import Editor from '../src/editor/Editor.svelte';
 import { mockChrome } from '../src/editor/mock';
 import { mockTheme } from '../src/hub/mock';
-import { booleanFace, extrudeFace, mockChips, slatsFace } from '../src/editor/chips/mock';
+import { booleanFace, extrudeFace, jointFace, mockChips, slatsFace } from '../src/editor/chips/mock';
 import type { Face } from '../src/editor/chips/api';
 
 // jsdom lays nothing out: a chip's content measures 300 x 56 here.
@@ -220,5 +220,45 @@ describe('the slats chip', () => {
     await fireEvent.focus(fieldNamed('gap'));
     await moveCard(chrome, 'slats', { w: kW, h: kH, shown: false });
     expect(chrome.calls.filter((c) => c.method === 'releaseKeyboardFor').map((c) => c.args[0])).toEqual(['slats', 'slats']);
+  });
+});
+
+describe('the joint card', () => {
+  it('stacks each label over its field, marks a field invalid on its own, and draws a divider', async () => {
+    await mount({ joint: jointFace(false, true) }, { joint: { w: kW, h: kH } });
+    const count = fieldNamed('count');
+    expect(count.closest('.field')!.classList.contains('stacked')).toBe(true);
+    expect(count.closest('.field')!.querySelector('.label')!.textContent).toBe('Count');
+    expect(count.classList.contains('invalid')).toBe(false);
+    expect(fieldNamed('size').classList.contains('invalid')).toBe(true);
+    expect(card('joint')!.querySelectorAll('hr.rule').length).toBe(1);
+  });
+
+  it('draws segments pressed by their state, a label over a toggle, and the More line as a link', async () => {
+    const { chips } = await mount({ joint: jointFace(false, true) }, { joint: { w: kW, h: kH } });
+    const host0 = q('[data-part="host0"]')!;
+    expect(host0.classList.contains('segment')).toBe(true);
+    expect(host0.getAttribute('aria-pressed')).toBe('true');
+    expect(q('[data-part="host1"]')!.getAttribute('aria-pressed')).toBe('false');
+    expect(q('[data-part="stopped"]')!.closest('.cell')!.querySelector('.label')!.textContent).toBe('Stopped');
+    expect(q('[data-part="more"]')!.classList.contains('link')).toBe(true);
+    expect(q('[data-part="more"]')!.textContent!.trim()).toBe('Fewer ▴');
+    await fireEvent.click(host0);
+    await fireEvent.click(q('[data-part="more"]')!);
+    expect(chips.calls.filter((c) => c.op === 'press').map((c) => c.args[0])).toEqual(['host0', 'more']);
+  });
+
+  it('opens its kind menu inside the card: groups, the current kind ticked, a refused kind greyed with its reason', async () => {
+    const { chips } = await mount({ joint: jointFace(true, false) }, { joint: { w: kW, h: kH } });
+    const menu = q('[data-gesture="joint"] .menu-list')!;
+    expect([...menu.querySelectorAll('.group-title')].map((n) => n.textContent)).toEqual(['Fasteners', 'Interlocks']);
+    const dowel = q('[data-part="kind:0"]') as HTMLButtonElement;
+    expect(dowel.getAttribute('aria-checked')).toBe('true');
+    const lap = q('[data-part="kind:9"]') as HTMLButtonElement;
+    expect(lap.disabled).toBe(true);
+    expect(menu.querySelector('.reason')!.textContent).toBe('The pieces only touch at an end');
+    await fireEvent.click(q('[data-part="kind:4"]')!);
+    await fireEvent.click(lap);
+    expect(chips.calls.filter((c) => c.op === 'press').map((c) => c.args[0])).toEqual(['kind:4']);
   });
 });
