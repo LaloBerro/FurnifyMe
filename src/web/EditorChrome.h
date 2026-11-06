@@ -41,6 +41,7 @@ class ChromeBridge : public QObject
     Q_PROPERTY(QVariantMap status READ status NOTIFY statusChanged)
     Q_PROPERTY(QVariantMap cards READ cards NOTIFY cardsChanged)
     Q_PROPERTY(QVariantMap question READ question NOTIFY questionChanged)
+    Q_PROPERTY(QVariantMap sheet READ sheet NOTIFY sheetChanged)
     // Whether the page may animate (the viewport's switch: the suites turn it
     // off). The rail and the pill fly in and out on the page's own clock while
     // it does (Phase 3i, ruling R8).
@@ -55,6 +56,10 @@ public:
     // discard, keep, keepKey}. Also sent WITH questionChanged, which a page
     // must not wait a batch for.
     QVariantMap question() const { return myQuestion; }
+    // The shortcut sheet (Phase 7a): ShortcutSheet::words() plus its card's
+    // rectangle in viewport pixels {x, y}; {shown: false} while it is down.
+    QVariantMap sheet() const { return mySheet; }
+    void setSheetMap(const QVariantMap& map);
     bool animate() const { return myAnimate; }
     void setAnimate(bool on);
     void setQuestionMap(const QVariantMap& map);
@@ -78,6 +83,7 @@ signals:
     void statusChanged();
     void cardsChanged();
     void questionChanged(const QVariantMap& question);
+    void sheetChanged(const QVariantMap& sheet);
     void animateChanged();
     // Observed on the C++ side
     void questionAnswered(const QString& which);
@@ -135,6 +141,7 @@ public:
 
 private:
     QVariantMap myQuestion;
+    QVariantMap mySheet{{QStringLiteral("shown"), false}};
     bool myAnimate = true;
     bool myUndoEnabled = true;
     QVariantList myObstacles;
@@ -190,6 +197,9 @@ public:
     // card, so its wash takes every press (Phase 3f, ruling R2). One at a
     // time: MainWindow::syncHtmlQuestion() picks which (Phase 3g, R2).
     void setQuestion(bool asking, const QVariantMap& words);
+    // The shortcut sheet, drawn by the page under the Qt sheet (Phase 7a):
+    // the view rises while it shows.
+    void setSheet(const QVariantMap& words);
     // A menu stands open (Phase 3i, ruling R7): the mask takes the whole
     // viewport at once and the view is raised, so a press anywhere reaches
     // the page's outside layer, which closes the menu and swallows it.

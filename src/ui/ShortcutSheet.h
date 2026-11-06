@@ -9,6 +9,7 @@
 //
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 #include <QWidget>
 
 #include <functional>
@@ -52,6 +53,21 @@ public:
     // that only the sweep sees.
     QStringList paintedTexts() const;
 
+    // DRAWN ELSEWHERE (migration Phase 7a): the chrome page draws the card
+    // while it is live, under this widget, which keeps its place, its Escape
+    // and its click-outside rule and paints nothing. words() is what the page
+    // draws - the title, each group at the place showSheet() stood it, its
+    // rows - in this widget's own coordinates.
+    void setDrawnElsewhere(bool elsewhere);
+    bool drawnElsewhere() const { return myDrawnElsewhere; }
+    QVariantMap words() const;
+
+signals:
+    // Shown or hidden: the page's card follows.
+    void sheetChanged();
+
+public:
+
 protected:
     bool event(QEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -89,4 +105,5 @@ private:
     // behind an apparently-modal sheet; its release has to go the same way,
     // or the viewport picks on the release instead.
     bool mySwallowRelease = false;
+    bool myDrawnElsewhere = false;
 };

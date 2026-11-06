@@ -48,6 +48,13 @@ void ChromeBridge::setQuestionMap(const QVariantMap& map)
     emit questionChanged(map);
 }
 
+void ChromeBridge::setSheetMap(const QVariantMap& map)
+{
+    if (mySheet == map) return;
+    mySheet = map;
+    emit sheetChanged(map);
+}
+
 bool ChromeBridge::asks(const QString& kind) const
 {
     if (!myQuestion.value(QStringLiteral("asking")).toBool()) return false;
@@ -498,6 +505,12 @@ void EditorChrome::setQuestion(bool asking, const QVariantMap& words)
         claimKeyboard(QStringLiteral("question"));
     }
     if (asking) myHost->view()->raise();
+}
+
+void EditorChrome::setSheet(const QVariantMap& words)
+{
+    myBridge->setSheetMap(words);
+    if (words.value(QStringLiteral("shown")).toBool()) myHost->view()->raise();
 }
 
 void EditorChrome::setMenuOpen(bool open)

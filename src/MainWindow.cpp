@@ -4121,6 +4121,22 @@ void MainWindow::syncHtmlQuestion()
 #endif
 }
 
+void MainWindow::syncHtmlSheet()
+{
+#ifdef FURNIFYME_WEB_UI
+    if (!myHtmlChrome || !myHtmlChrome->isLive() || !myShortcutSheet) return;
+    QVariantMap words = myShortcutSheet->drawnElsewhere() ? myShortcutSheet->words()
+                                                          : QVariantMap{{QStringLiteral("shown"), false}};
+    if (words.value(QStringLiteral("shown")).toBool()) {
+        const int margin = Theme::surfaceShadowMargin();
+        const QPoint at = myView->mapFrom(this, myShortcutSheet->pos() + QPoint(margin, margin));
+        words.insert(QStringLiteral("x"), at.x());
+        words.insert(QStringLiteral("y"), at.y());
+    }
+    myHtmlChrome->setSheet(words);
+#endif
+}
+
 void MainWindow::onHtmlQuestionChanged()
 {
 #ifdef FURNIFYME_WEB_UI
@@ -10446,6 +10462,9 @@ void MainWindow::useHtmlChrome()
         connect(myCloseCard, &UnsavedCloseCard::questionChanged, this, &MainWindow::onHtmlQuestionChanged);
     // Every step is a message (no relayout per body); the card ending puts the
     // Qt cards back over the page, as a question ending does.
+    // The shortcut sheet (Phase 7a): drawn by the page, under the Qt sheet,
+    // at the Qt sheet's own rectangle mapped into the viewport.
+    if (myShortcutSheet) connect(myShortcutSheet, &ShortcutSheet::sheetChanged, this, &MainWindow::syncHtmlSheet);
     if (myLoadingCard)
         connect(myLoadingCard, &LoadingCard::stateChanged, this, [this] {
             syncHtmlQuestion();
@@ -10532,6 +10551,8 @@ void MainWindow::useHtmlChrome()
         if (!live && myItemsModel) myItemsModel->cancelDrag();
         if (myCloseCard) myCloseCard->setDrawnElsewhere(live);
         if (myLoadingCard) myLoadingCard->setDrawnElsewhere(live);
+        if (myShortcutSheet) myShortcutSheet->setDrawnElsewhere(live);
+        syncHtmlSheet();
         // The name question the same way (Phase 3g); keys aimed at the page's
         // view go through the card's claim to the page's field.
         if (myNameCard) myNameCard->setDrawnElsewhere(live, live ? myHtmlChrome->view() : nullptr);

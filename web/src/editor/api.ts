@@ -1,4 +1,5 @@
 import type { QuestionState } from './Question.svelte';
+import type { SheetState } from './Sheet.svelte';
 // What the editor's chrome page talks to: EditorChrome's `chrome` object on
 // the web channel (ThemeBridge as `theme` beside it). A mock with the same
 // shape serves the tests and the dev server (mock.ts).
@@ -72,6 +73,9 @@ export interface ChromeApi {
   // change - a property's NOTIFY would arrive a batch late.
   question?: QuestionState;
   questionChanged?: Signal<[QuestionState]>;
+  // The shortcut sheet (Phase 7a), carried WITH each change the same way.
+  sheet?: SheetState;
+  sheetChanged?: Signal<[SheetState]>;
   // "save", "discard" or "keep" - answered through the Qt card's own answer().
   answerQuestion?(which: 'save' | 'discard' | 'keep'): void;
   // The name question (Phase 3g, kind "name"): "create" carries the name the

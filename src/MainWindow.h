@@ -2017,6 +2017,7 @@ private:
     // card going away can wipe the other's question, in whatever order their
     // signals arrive. A no-op unless the page is live.
     void syncHtmlQuestion();
+    void syncHtmlSheet();
     // syncHtmlQuestion(), then the raise - or, once nothing stands, the
     // relayout that puts the Qt cards back over the page.
     void onHtmlQuestionChanged();

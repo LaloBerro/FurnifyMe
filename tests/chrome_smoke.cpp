@@ -34,6 +34,7 @@
 #include "ui/RenderStudio.h"
 #include "ui/SceneWindow.h"
 #include "ui/LoadingCard.h"
+#include "ui/ShortcutSheet.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include "ui/ScenePiecesPanel.h"
@@ -2687,6 +2688,66 @@ int main(int argc, char* argv[])
         pump(300);
     }
 
+    // --- the shortcut sheet, drawn by the page under the Qt sheet (Phase 7a) ---------
+    {
+        auto* qtSheet = window.findChild<ShortcutSheet*>();
+        QAction* sheetAction = actionNamed(&window, QStringLiteral("Keyboard Shortcuts"));
+        check(qtSheet && sheetAction && qtSheet->drawnElsewhere(), "the Qt shortcut sheet is drawn by the page while it is live");
+        if (qtSheet && sheetAction) {
+            sheetAction->trigger();
+            check(waitFor([&] { return js(page, "!!document.querySelector('.sheet')").toBool(); }, 3000) && qtSheet->isVisible(),
+                  "Keyboard Shortcuts opens the sheet, and the page draws it");
+            const int pageRows = js(page, "document.querySelectorAll('.sheet .row').length").toInt();
+            check(pageRows == qtSheet->rowCount() && pageRows > 20,
+                  QStringLiteral("every row the Qt sheet generated is on the page (%1 of %2)").arg(pageRows).arg(qtSheet->rowCount()));
+            const QRect drawn(js(page, "Math.round(document.querySelector('.sheet').getBoundingClientRect().left)").toInt(),
+                              js(page, "Math.round(document.querySelector('.sheet').getBoundingClientRect().top)").toInt(),
+                              js(page, "Math.round(document.querySelector('.sheet').getBoundingClientRect().width)").toInt(),
+                              js(page, "Math.round(document.querySelector('.sheet').getBoundingClientRect().height)").toInt());
+            const QRect qtRect(window.view()->mapFrom(&window, qtSheet->pos()), qtSheet->size());
+            check(std::abs(drawn.x() - qtRect.x()) <= 1 && std::abs(drawn.y() - qtRect.y()) <= 1 &&
+                      std::abs(drawn.width() - qtRect.width()) <= 1 && std::abs(drawn.height() - qtRect.height()) <= 1,
+                  QStringLiteral("the card stands exactly where the Qt sheet does (%1,%2 %3x%4 against %5,%6 %7x%8)")
+                      .arg(drawn.x()).arg(drawn.y()).arg(drawn.width()).arg(drawn.height())
+                      .arg(qtRect.x()).arg(qtRect.y()).arg(qtRect.width()).arg(qtRect.height()));
+#ifdef _WIN32
+            {
+                pump(300);
+                const QImage withPage = captureImage(&window);
+                withPage.save(outDir + "/shortcut-sheet.png");
+                page->hide();
+                pump(300);
+                const QImage without = captureImage(&window);
+                page->show();
+                pump(300);
+                const double dpr = window.devicePixelRatioF();
+                const QRect logical(window.view()->mapTo(&window, qtRect.topLeft()), qtRect.size());
+                const QRect r(qRound(logical.x() * dpr), qRound(logical.y() * dpr), qRound(logical.width() * dpr),
+                              qRound(logical.height() * dpr));
+                int moved = 0, all = 0;
+                for (int y = r.top(); y <= r.bottom(); y += 2)
+                    for (int x = r.left(); x <= r.right(); x += 2) {
+                        if (!withPage.rect().contains(x, y) || !without.rect().contains(x, y)) continue;
+                        const QColor p1 = withPage.pixelColor(x, y), p2 = without.pixelColor(x, y);
+                        ++all;
+                        if (std::abs(p1.red() - p2.red()) + std::abs(p1.green() - p2.green()) +
+                                std::abs(p1.blue() - p2.blue()) > 9)
+                            ++moved;
+                    }
+                const double share = all ? double(moved) / all : 0.0;
+                check(share > 0.30, QStringLiteral("the composited window SHOWS the sheet (%1% of its pixels change "
+                                                   "when the page is hidden)").arg(share * 100, 0, 'f', 1));
+            }
+#endif
+            // Escape is the Qt sheet's, and the page's card goes with it.
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(qtSheet, &esc);
+            check(!qtSheet->isVisible() &&
+                      waitFor([&] { return !js(page, "!!document.querySelector('.sheet')").toBool(); }, 3000),
+                  "Escape closes it, on the page too");
+        }
+    }
+
     // --- the loading card, drawn by the page mid-load (Phase 7a) ---------------------
     {
         // A furniture heavy enough to take several steps: one step per body.
@@ -2710,9 +2771,14 @@ int main(int argc, char* argv[])
                 // The page catches up to the step the Qt card is on - a message
                 // per step, so a page that cannot keep up stays behind for good.
                 drawn = waitFor([&] {
-                    title = jsString(page, "(document.querySelector('.loading-card .title') || {}).textContent || ''");
-                    step = jsString(page, "(document.querySelector('.loading-card .step') || {}).textContent || ''");
-                    return step == card->stepText();
+                    // One read, so the two halves come from one frame of the page.
+                    const QStringList both =
+                        jsString(page, "[(document.querySelector('.loading-card .title') || {}).textContent || '', "
+                                       "(document.querySelector('.loading-card .step') || {}).textContent || ''].join('|')")
+                            .split(QLatin1Char('|'));
+                    title = both.value(0);
+                    step = both.value(1);
+                    return step == card->stepText() && !title.isEmpty();
                 }, 3000);
 #ifdef _WIN32
                 pump(250);

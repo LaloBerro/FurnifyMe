@@ -12,6 +12,7 @@
   import Question, { type QuestionState } from './Question.svelte';
   import NameQuestion from './NameQuestion.svelte';
   import Loading from './Loading.svelte';
+  import Sheet, { type SheetState } from './Sheet.svelte';
   import Settings from './settings/Settings.svelte';
   import type { CardRect, SettingsApi } from './settings/api';
   import Versions from './versions/Versions.svelte';
@@ -73,6 +74,7 @@
   // The close question (Phase 3f) or the name question (Phase 3g), one at a
   // time: while one stands everything else here is inert and under its wash.
   let question: QuestionState = $state({ asking: false });
+  let sheet: SheetState = $state({ shown: false });
   // File -> Save version... asked for a pending version (Phase 3c, ruling
   // R4). Kept here, where something is always listening, until the card takes
   // it - the request can arrive before the card has mounted.
@@ -124,6 +126,8 @@
     chrome.cardsChanged?.connect(readCards);
     question = { ...(chrome.question ?? { asking: false }) };
     chrome.questionChanged?.connect((q) => (question = { ...q }));
+    sheet = { ...(chrome.sheet ?? { shown: false }) };
+    chrome.sheetChanged?.connect((next) => (sheet = { ...next }));
     chrome.toast.connect((text, kind, offersUndo, stamp, px = -1, py = -1, undoOpen) => {
       pointer = px >= 0 && py >= 0 ? { x: px, y: py } : null;
       if (undoOpen !== undefined) undoEnabled = undoOpen;
@@ -265,6 +269,9 @@
 </div>
 {#if status.shown}
   <StatusStrip {status} />
+{/if}
+{#if sheet.shown}
+  <Sheet {sheet} />
 {/if}
 {#if question.asking && question.kind === 'name'}
   <NameQuestion

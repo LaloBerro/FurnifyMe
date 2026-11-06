@@ -1,4 +1,5 @@
 import type { QuestionState } from './Question.svelte';
+import type { SheetState } from './Sheet.svelte';
 import type { ChromeApi, StatusState, ToastKind } from './api';
 import type { Rect } from './solver';
 import { MockSignal } from '../hub/mock';
@@ -14,6 +15,7 @@ export function mockChrome() {
     statusChanged: MockSignal;
     cardsChanged: MockSignal;
     questionChanged: MockSignal<[QuestionState]>;
+    sheetChanged: MockSignal<[SheetState]>;
   } = {
     calls,
     toast: new MockSignal<[string, ToastKind, boolean, number, number?, number?, boolean?]>(),
@@ -28,6 +30,8 @@ export function mockChrome() {
     cardsChanged: new MockSignal(),
     question: { asking: false } as QuestionState,
     questionChanged: new MockSignal<[QuestionState]>(),
+    sheet: { shown: false } as SheetState,
+    sheetChanged: new MockSignal<[SheetState]>(),
     answerQuestion: (which) => calls.push({ method: 'answerQuestion', args: [which] }),
     answerNameQuestion: (which, name) => calls.push({ method: 'answerNameQuestion', args: [which, name] }),
     nameQuestionEdited: (name) => calls.push({ method: 'nameQuestionEdited', args: [name] }),

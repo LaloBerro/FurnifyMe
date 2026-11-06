@@ -219,6 +219,41 @@ void ShortcutSheet::showSheet()
     // the press goes straight to the viewport, never through this widget or
     // its parent.
     QCoreApplication::instance()->installEventFilter(this);
+    emit sheetChanged();
+}
+
+void ShortcutSheet::setDrawnElsewhere(bool elsewhere)
+{
+    if (myDrawnElsewhere == elsewhere) return;
+    myDrawnElsewhere = elsewhere;
+    update();
+}
+
+QVariantMap ShortcutSheet::words() const
+{
+    if (!isVisible()) return {{QStringLiteral("shown"), false}};
+    QVariantList groups;
+    for (std::size_t g = 0; g < myGroups.size(); ++g) {
+        QVariantList rows;
+        for (const Row& row : myGroups[g].rows)
+            rows.push_back(QVariantMap{{QStringLiteral("label"), row.label}, {QStringLiteral("keys"), row.keys}});
+        const QPoint at = g < myPlaces.size() ? myPlaces[g] : QPoint();
+        groups.push_back(QVariantMap{{QStringLiteral("title"), myGroups[g].title},
+                                     {QStringLiteral("x"), at.x()},
+                                     {QStringLiteral("y"), at.y()},
+                                     {QStringLiteral("rows"), rows}});
+    }
+    const int margin = Theme::surfaceShadowMargin();
+    return {{QStringLiteral("shown"), true},
+            {QStringLiteral("title"), tr("Keyboard shortcuts")},
+            {QStringLiteral("width"), width() - margin * 2},
+            {QStringLiteral("height"), height() - margin * 2},
+            {QStringLiteral("padding"), kPadding},
+            {QStringLiteral("titleHeight"), kTitleHeight},
+            {QStringLiteral("groupHeight"), kGroupHeight},
+            {QStringLiteral("rowHeight"), kRowHeight},
+            {QStringLiteral("columnWidth"), myColumnWidth},
+            {QStringLiteral("groups"), groups}};
 }
 
 bool ShortcutSheet::event(QEvent* event)
@@ -245,6 +280,7 @@ bool ShortcutSheet::eventFilter(QObject* watched, QEvent* event)
 {
     if (watched == parentWidget() && event->type() == QEvent::Resize && isVisible()) {
         recentre();
+        emit sheetChanged();
     }
 
     auto* widget = qobject_cast<QWidget*>(watched);
@@ -287,6 +323,7 @@ bool ShortcutSheet::eventFilter(QObject* watched, QEvent* event)
 
 void ShortcutSheet::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myDrawnElsewhere) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
@@ -354,4 +391,5 @@ void ShortcutSheet::hideEvent(QHideEvent* event)
     // something behind it in the same gesture. eventFilter() takes the filter
     // down once it has swallowed that release.
     if (!mySwallowRelease) QCoreApplication::instance()->removeEventFilter(this);
+    emit sheetChanged();
 }
