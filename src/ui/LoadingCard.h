@@ -23,6 +23,7 @@
 // a state no gesture expects.
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 #include <QWidget>
 
 class QHideEvent;
@@ -53,6 +54,22 @@ public:
 
     QString titleText() const { return myTitle; }
     QString stepText() const { return myStep; }
+
+    // DRAWN ELSEWHERE (migration Phase 7a): the chrome page draws the card
+    // while it is live. This widget still covers the viewport and swallows
+    // every mouse event - that half is its job either way - but paints
+    // nothing, and says what the page should draw (words()) on every change,
+    // BEFORE it pumps, so the page's frame for this step is the one the pump
+    // puts on screen.
+    void setDrawnElsewhere(bool elsewhere);
+    bool drawnElsewhere() const { return myDrawnElsewhere; }
+    // {kind: "loading", title, step, done, total}; empty while not busy.
+    QVariantMap words() const;
+
+signals:
+    void stateChanged();
+
+public:
     // This app's own copy on the card, for gui_smoke's banned-word sweep. The
     // furniture's NAME is the user's word and is not here.
     QStringList paintedTexts() const;
@@ -75,4 +92,5 @@ private:
     QString myStep;
     int myDone = 0;
     int myTotal = 0;
+    bool myDrawnElsewhere = false;
 };

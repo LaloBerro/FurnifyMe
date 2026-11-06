@@ -33,6 +33,9 @@
 #include "web/RenderPage.h"
 #include "ui/RenderStudio.h"
 #include "ui/SceneWindow.h"
+#include "ui/LoadingCard.h"
+
+#include <BRepPrimAPI_MakeBox.hxx>
 #include "ui/ScenePiecesPanel.h"
 #include "ui/AddPieceCard.h"
 #include "ui/UnsavedCloseCard.h"
@@ -2680,6 +2683,78 @@ int main(int argc, char* argv[])
               "Ctrl+D on a mirrored folder reads each copy, then its own twin - " + read.join(QStringLiteral(", ")));
         check(seq.size() == 4 && doc.nameOf(seq[0]).empty() == false,
               "four rows in the copy (two copies, two twins)");
+        window.openFurniture(furnitureId);
+        pump(300);
+    }
+
+    // --- the loading card, drawn by the page mid-load (Phase 7a) ---------------------
+    {
+        // A furniture heavy enough to take several steps: one step per body.
+        DocumentModel heavy;
+        for (int i = 0; i < 12; ++i)
+            heavy.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(i * 120.0, 0.0, 0.0), 100.0, 80.0, 60.0).Shape());
+        const QString heavyId = window.furnitureStore().createFurniture(QStringLiteral("Heavy dresser"));
+        check(!heavyId.isEmpty() && window.furnitureStore().saveFurniture(heavyId, heavy, QImage()),
+              "a twelve-body furniture to open");
+        auto* card = window.findChild<LoadingCard*>();
+        check(card && card->drawnElsewhere(), "the Qt loading card is drawn by the page while it is live");
+        bool sawMid = false, drawn = false;
+        QString title, step;
+        double share = -1.0;
+        QMetaObject::Connection watch;
+        if (card)
+            watch = QObject::connect(card, &LoadingCard::stateChanged, [&] {
+                if (sawMid || !card->isBusy() || card->words().value(QStringLiteral("done")).toInt() < 3) return;
+                sawMid = true;
+                // Mid-load: the page has this step, and it is on screen.
+                // The page catches up to the step the Qt card is on - a message
+                // per step, so a page that cannot keep up stays behind for good.
+                drawn = waitFor([&] {
+                    title = jsString(page, "(document.querySelector('.loading-card .title') || {}).textContent || ''");
+                    step = jsString(page, "(document.querySelector('.loading-card .step') || {}).textContent || ''");
+                    return step == card->stepText();
+                }, 3000);
+#ifdef _WIN32
+                pump(250);
+                const QImage withPage = captureImage(&window);
+                withPage.save(outDir + "/loading-card.png");
+                page->hide();
+                pump(250);
+                const QImage without = captureImage(&window);
+                page->show();
+                pump(250);
+                const QRect view(window.view()->mapTo(&window, QPoint(0, 0)), window.view()->size());
+                const double dpr = window.devicePixelRatioF();
+                const QRect r(qRound(view.x() * dpr), qRound(view.y() * dpr), qRound(view.width() * dpr),
+                              qRound(view.height() * dpr));
+                int moved = 0, all = 0;
+                for (int y = r.top(); y <= r.bottom(); y += 2)
+                    for (int x = r.left(); x <= r.right(); x += 2) {
+                        if (!withPage.rect().contains(x, y) || !without.rect().contains(x, y)) continue;
+                        const QColor p1 = withPage.pixelColor(x, y), p2 = without.pixelColor(x, y);
+                        ++all;
+                        if (std::abs(p1.red() - p2.red()) + std::abs(p1.green() - p2.green()) +
+                                std::abs(p1.blue() - p2.blue()) > 9)
+                            ++moved;
+                    }
+                share = all ? double(moved) / all : 0.0;
+#endif
+            });
+        check(window.openFurniture(heavyId), "the heavy furniture opens");
+        QObject::disconnect(watch);
+        check(sawMid && drawn && title == QStringLiteral("Heavy dresser") && !step.isEmpty(),
+              QStringLiteral("mid-load the page draws the card - its name and the step the load is on (\"%1\", \"%2\")").arg(title, step));
+#ifdef _WIN32
+        check(share > 0.30, QStringLiteral("and the composited window SHOWS it: the wash and the card change %1% of "
+                                           "the viewport when the page is hidden")
+                                .arg(share * 100, 0, 'f', 1));
+#endif
+        check(waitFor([&] { return !js(page, "!!document.querySelector('.loading-card')").toBool(); }, 3000),
+              "and when the load ends the card goes");
+        check(waitFor([&] { return !chrome->hitRegion().contains(window.view()->rect().center()); }, 3000),
+              QStringLiteral("and the page gives the viewport back - its middle takes no press (region %1)")
+                  .arg(QString::number(chrome->hitRegion().boundingRect().width()) + QLatin1Char('x') +
+                       QString::number(chrome->hitRegion().boundingRect().height())));
         window.openFurniture(furnitureId);
         pump(300);
     }

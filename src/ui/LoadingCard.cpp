@@ -53,6 +53,7 @@ void LoadingCard::begin(const QString& title, const QString& step)
     replace();
     show();
     raise();
+    emit stateChanged();
     // Painted before the caller starts blocking: the whole point of this card
     // is to be on screen for the seconds that follow, and nothing after this
     // call returns to the event loop on its own.
@@ -64,6 +65,7 @@ void LoadingCard::setTotal(int total)
     myTotal = std::max(0, total);
     myDone = 0;
     update();
+    emit stateChanged();
     pump();
 }
 
@@ -73,6 +75,7 @@ void LoadingCard::step(const QString& stepText)
     ++myDone;
     if (!stepText.isEmpty()) myStep = stepText;
     update();
+    emit stateChanged();
     pump();
 }
 
@@ -81,6 +84,24 @@ void LoadingCard::end()
     myDone = 0;
     myTotal = 0;
     hide();
+    emit stateChanged();
+}
+
+void LoadingCard::setDrawnElsewhere(bool elsewhere)
+{
+    if (myDrawnElsewhere == elsewhere) return;
+    myDrawnElsewhere = elsewhere;
+    update();
+}
+
+QVariantMap LoadingCard::words() const
+{
+    if (isHidden()) return {};
+    return {{QStringLiteral("kind"), QStringLiteral("loading")},
+            {QStringLiteral("title"), myTitle},
+            {QStringLiteral("step"), myStep},
+            {QStringLiteral("done"), myDone},
+            {QStringLiteral("total"), myTotal}};
 }
 
 void LoadingCard::pump()
@@ -128,6 +149,7 @@ QStringList LoadingCard::paintedTexts() const
 
 void LoadingCard::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myDrawnElsewhere) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 

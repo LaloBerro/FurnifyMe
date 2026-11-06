@@ -3,7 +3,7 @@
   // card; a map with no kind is this one too) or "name" (NameQuestion).
   export interface QuestionState {
     asking: boolean;
-    kind?: 'close' | 'name';
+    kind?: 'close' | 'name' | 'loading';
     title?: string;
     body?: string;
     save?: string;
@@ -22,6 +22,10 @@
     createKey?: string;
     cancel?: string;
     cancelKey?: string;
+    // The loading card's own (LoadingCard::words(), Phase 7a).
+    step?: string;
+    done?: number;
+    total?: number;
   }
 </script>
 

@@ -11,6 +11,7 @@
   import StatusStrip from './StatusStrip.svelte';
   import Question, { type QuestionState } from './Question.svelte';
   import NameQuestion from './NameQuestion.svelte';
+  import Loading from './Loading.svelte';
   import Settings from './settings/Settings.svelte';
   import type { CardRect, SettingsApi } from './settings/api';
   import Versions from './versions/Versions.svelte';
@@ -274,6 +275,8 @@
     oncancel={() => chrome.answerNameQuestion?.('cancel', '')}
     onedit={(name) => chrome.nameQuestionEdited?.(name)}
   />
+{:else if question.asking && question.kind === 'loading'}
+  <Loading {question} {host} />
 {:else if question.asking}
   <Question {question} {host} onanswer={(which) => chrome.answerQuestion?.(which)} />
 {/if}

@@ -4112,6 +4112,10 @@ void MainWindow::syncHtmlQuestion()
     QVariantMap words;
     if (myCloseCard && myCloseCard->isAsking() && myCloseCard->drawnElsewhere()) words = myCloseCard->words();
     else if (myNameCard && myNameCard->isAsking() && myNameCard->drawnElsewhere()) words = myNameCard->words();
+    // The loading card (Phase 7a) on the same channel: one card over the whole
+    // viewport at a time, the mask the viewport's while it stands.
+    else if (myLoadingCard && myLoadingCard->isBusy() && myLoadingCard->drawnElsewhere())
+        words = myLoadingCard->words();
     const bool asking = !words.isEmpty();
     myHtmlChrome->setQuestion(asking, asking ? withKeepClear(words) : QVariantMap());
 #endif
@@ -10440,6 +10444,13 @@ void MainWindow::useHtmlChrome()
     });
     if (myCloseCard)
         connect(myCloseCard, &UnsavedCloseCard::questionChanged, this, &MainWindow::onHtmlQuestionChanged);
+    // Every step is a message (no relayout per body); the card ending puts the
+    // Qt cards back over the page, as a question ending does.
+    if (myLoadingCard)
+        connect(myLoadingCard, &LoadingCard::stateChanged, this, [this] {
+            syncHtmlQuestion();
+            if (!myLoadingCard->isBusy() && myOverlay) myOverlay->relayout();
+        });
     // The name question (Phase 3g): the page answers with the name its field
     // holds, and mirrors every edit into the Qt card's own field.
     if (myNameCard) {
@@ -10520,6 +10531,7 @@ void MainWindow::useHtmlChrome()
         // A drag or a rename in the page's drawer ends with the page.
         if (!live && myItemsModel) myItemsModel->cancelDrag();
         if (myCloseCard) myCloseCard->setDrawnElsewhere(live);
+        if (myLoadingCard) myLoadingCard->setDrawnElsewhere(live);
         // The name question the same way (Phase 3g); keys aimed at the page's
         // view go through the card's claim to the page's field.
         if (myNameCard) myNameCard->setDrawnElsewhere(live, live ? myHtmlChrome->view() : nullptr);
