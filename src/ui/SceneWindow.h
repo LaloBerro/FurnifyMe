@@ -41,9 +41,7 @@ class FurnitureStore;
 class OcctViewWidget;
 class QLabel;
 class RenderStudio;
-class FurnitureNameMark;
 class ScenePiecesPanel;
-class StatusMessageLine;
 class ToastHost;
 class ToolCluster;
 class UnsavedCloseCard;
@@ -135,11 +133,11 @@ public:
 
     OcctViewWidget* view() const { return myView; }
     RenderStudio* studio() const { return myStudio; }
+    class StatusLine* statusLine() const { return myStatusLine; }
     ScenePiecesPanel* piecesPanel() const { return myPieces; }
     AddPieceCard* addPieceCard() const { return myAddPiece; }
     ToolCluster* arrangeTools() const { return myArrangeTools; }
     QAction* addPieceAction() const { return myAddPieceAction; }
-    QLabel* statusHintLabel() const { return myHintLabel; }
     ToastHost* toasts() const { return myToasts; }
 
     // THE CHROME AS A PAGE (migration Phase 5a): the editor's own page and
@@ -275,8 +273,6 @@ private:
     // Move, Rotate and Render mode as icon-only chips - see buildOverlay().
     ToolCluster* myArrangeTools = nullptr;
     // The status bar's two channels - see buildOverlay().
-    StatusMessageLine* myMessageLine = nullptr;
-    QLabel* myHintLabel = nullptr;
     QAction* mySnapAction = nullptr;
     QAction* myMoveAction = nullptr;
     QAction* myRotateAction = nullptr;
@@ -284,7 +280,6 @@ private:
     QAction* myFitAllAction = nullptr;
     QAction* mySaveAction = nullptr;
     UnsavedCloseCard* myCloseCard = nullptr;
-    FurnitureNameMark* myNameMark = nullptr;
     // The revision last written to disk. Compared against the live one, so
     // "dirty" cannot drift out of step with what actually changed.
     std::size_t mySavedRevision = 0;
@@ -316,6 +311,8 @@ private:
     class HtmlCardSlot* myBackSlot = nullptr;
     // The window buttons drawn by the page (Phase 7a) - the editor's.
     class HtmlCardSlot* myButtonsSlot = nullptr;
+    // The bottom strip's state (Phase 7b) - the editor's model.
+    class StatusLine* myStatusLine = nullptr;
     class HubWindowControls* myWindowControls = nullptr;
     // The two cards on the page (Phase 5b).
     class HtmlCardSlot* myPiecesSlot = nullptr;

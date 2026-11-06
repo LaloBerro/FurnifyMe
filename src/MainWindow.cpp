@@ -3,6 +3,7 @@
 #include "web/HubWindow.h"
 #include "PanelCloseButton.h"
 #include "session/JointRows.h"
+#include "session/StatusLine.h"
 // Outside the web guard: both are built into every preset, and
 // settingsSurface()/versionsSurface()/syncVersionsModel()/onSaveVersion()
 // use them in every build (Phase 3c review C1 - the vcpkg build had not
@@ -675,6 +676,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     , myStore(resolveLibraryRoot(libraryRoot))
     , myPersistProgress(persistProgress)
 {
+    // The bottom strip's state (Phase 7b), before anything can write to it.
+    myStatusLine = new StatusLine(this);
     // Every outcome the session reports lands in onReported(), and only there.
     // FIRST, before anything in this constructor can report: a status line
     // written before the connection existed would simply be lost. Direct, so
@@ -1136,9 +1139,6 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // terms - View -> Show bottom bar's checked state IS the answer,
         // never a one-shot hide()/show() called from the toggle handler
         // alone.
-        if (myBottomBarAction)
-            statusBar()->setVisible(myBottomBarAction->isChecked() && !hiddenForRenderMode &&
-                                    !htmlChromeLive());   // the page's strip draws it instead
         syncHtmlChromeInset();
         // The rail and the axis gizmo card have no action of their own to be
         // derived FROM - they are always on outside render mode - so this is
@@ -1336,40 +1336,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
 
     updateActions();
 
-    // Theme.cpp's stylesheet reaches the status bar's own internal message
-    // label through the QStatusBar/QStatusBar QLabel selectors (it is
-    // created privately by showMessage() and this code never gets a pointer
-    // to it) - this sets the same size directly, so a plain QStatusBar with
-    // no matching stylesheet rule would still be correct.
-    statusBar()->setFont(Theme::labelFont());
-
-    // THE LEFT CHANNEL, ELIDED - see StatusMessageLine. Added FIRST, and with
-    // a stretch, so it owns the strip up to the name mark: Qt's own message
-    // paint is left a zero-width rectangle and this paints the same
-    // currentMessage() elided to what fits, never reaching the name.
-    myMessageLine = new StatusMessageLine(statusBar());
-    statusBar()->addPermanentWidget(myMessageLine, 1);
-
-    // The furniture's name, and a caution dot beside it while there are
-    // unsaved changes (improvements item 3) - left of the state label, so the
-    // question closing asks is never a surprise. Pushed from appStateChanged
-    // below; it stores nothing of its own.
-    myNameMark = new FurnitureNameMark(this);
-    statusBar()->addPermanentWidget(myNameMark);
+    // The bottom strip's state (Phase 7b) - the page's strip draws it; no
+    // QStatusBar and no widgets beside it any more. The name and its dot are
+    // pushed from appStateChanged, derived, never stored.
     connect(this, &MainWindow::appStateChanged, this, [this] {
-        if (!myNameMark) return;
         const bool open = !myShowingInitScreen && !myFurnitureId.isEmpty();
-        myNameMark->setState(open ? myFurnitureName : QString(), isFurnitureDirty());
-        myNameMark->setVisible(open);
+        myStatusLine->setName(open ? myFurnitureName : QString(), open && isFurnitureDirty());
     });
-    // Permanent widget so it survives transient showMessage() calls. ONE JOB
-    // PER CHANNEL (the 2026-10 review's F9): the left says what is selected
-    // and what just happened, the right says what mode you are in and what
-    // to do next - and never how many things are selected, which is the
-    // left's. They used to both say "2 bodies selected", and with a group
-    // selected they once said two different counts side by side.
-    myStateLabel = new QLabel(this);
-    statusBar()->addPermanentWidget(myStateLabel);
     updateStateLabel();
     syncChromeHeights();
 
@@ -2832,7 +2805,7 @@ void MainWindow::buildOverlay()
     // change or the next outcome replaces it - refreshSelectionSizes() never
     // will, since it only rewrites the sentence it painted itself.
     connect(myToasts, &ToastHost::failureShown, this, [this](const QString& reason) {
-        statusBar()->showMessage(statusLineFor(reason));
+        myStatusLine->setMessage(statusLineFor(reason));
     });
     // The Appearance card's two file outcomes. The card owns a look, not the
     // way this app reports things, so it announces and the copy lives here
@@ -3805,11 +3778,6 @@ void MainWindow::onThemeChanged()
     // an edited palette reaches the title bar too.
     setWindowIcon(IconSet::appIcon());
 
-    // The status bar's font is SET, not inherited: Theme.cpp's stylesheet
-    // reaches QStatusBar's own internal message label through a selector, and
-    // this covers a plain QStatusBar with no matching rule. An explicitly set
-    // font does not follow QApplication::setFont, so it has to be put back.
-    statusBar()->setFont(Theme::labelFont());
     // The font just changed, so both chrome strips just changed height - and
     // that is exactly what moves the viewport's edges onto a fractional device
     // row. See syncChromeHeights().
@@ -3896,11 +3864,6 @@ void MainWindow::syncChromeHeights()
     // The constraint is lifted before the hint is read, so this is
     // idempotent whatever the strip's sizeHint() does with its own fixed
     // size: re-running it can never ratchet the strip taller.
-    if (QWidget* strip = statusBar()) {
-        strip->setMinimumHeight(0);
-        strip->setMaximumHeight(QWIDGETSIZE_MAX);
-        strip->setFixedHeight(Theme::wholeDevicePixels(strip->sizeHint().height()));
-    }
 }
 
 QString MainWindow::saveDialogPath(const QString& key, const QString& suggestedName,
@@ -5330,7 +5293,7 @@ QString MainWindow::snapTooltipText() const
 
 void MainWindow::updateStateLabel()
 {
-    if (!myStateLabel) return;
+    if (!myStatusLine) return;
 
     // A LIVE DRAG IN THE ITEMS DRAWER owns the right channel while it lasts
     // (F9: mode and next step), in the same words its Note will use.
@@ -5497,18 +5460,8 @@ void MainWindow::updateStateLabel()
 
 void MainWindow::showStateLine(const QString& state)
 {
-    myStateLabel->setToolTip(state);
-    // Elided against a cap derived from the WINDOW, never against the label's
-    // own width: the label is sized from its sizeHint, which is sized from
-    // its text, so eliding to its current width would shrink it a little
-    // further on every update until nothing was left.
-    //
-    // Half the window, because the bar carries two other things - the last
-    // outcome on the left and the furniture's name in the middle - and this
-    // hint is the one that grows without bound.
-    const int room = std::max(160, width() / 2);
-    myStateLabel->setMaximumWidth(room);
-    myStateLabel->setText(myStateLabel->fontMetrics().elidedText(state, Qt::ElideRight, room));
+    // Whole: the strip elides it for itself, the full sentence its tooltip.
+    myStatusLine->setState(state);
     // Every route that writes the state line reaches the page - not only the
     // ones that also emit appStateChanged (review I4).
     syncHtmlChrome();
@@ -8692,7 +8645,7 @@ void MainWindow::onPickRefusalWithdrawn()
     // anything else may have written the bar since, and this window has no
     // business erasing a message it did not put there.
     if (myPaintedPickRefusal.isEmpty()) return;
-    if (statusBar()->currentMessage() == myPaintedPickRefusal) statusBar()->clearMessage();
+    if (myStatusLine->message() == myPaintedPickRefusal) myStatusLine->clearMessage();
     myPaintedPickRefusal.clear();
 }
 
@@ -10431,7 +10384,7 @@ void MainWindow::onSelectionChanged()
 void MainWindow::showSelectionStatus()
 {
     myLastSelectionStatus = selectionStatusText();
-    statusBar()->showMessage(myLastSelectionStatus);
+    myStatusLine->setMessage(myLastSelectionStatus);
 }
 
 std::vector<SettingsEdits::Row> MainWindow::settingsRows() const
@@ -10732,7 +10685,7 @@ void MainWindow::useHtmlChrome()
     };
     itemHooks.withdrawRefusal = [this] {
         if (myPaintedMoveRefusal.isEmpty()) return;
-        const bool showing = statusBar()->currentMessage() == myPaintedMoveRefusal;
+        const bool showing = myStatusLine->message() == myPaintedMoveRefusal;
         myPaintedMoveRefusal.clear();
         if (showing) showSelectionStatus();
     };
@@ -10873,7 +10826,7 @@ void MainWindow::useHtmlChrome()
     }
     myHtmlChrome->registerObject(QStringLiteral("chips"), myChipsBridge);
     myHtmlChrome->start();
-    connect(statusBar(), &QStatusBar::messageChanged, this, &MainWindow::syncHtmlChrome);
+    connect(myStatusLine, &StatusLine::changed, this, &MainWindow::syncHtmlChrome);
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::syncHtmlChrome);
     updateActions();
     syncHtmlChrome();
@@ -11082,10 +11035,8 @@ void MainWindow::syncHtmlChrome()
     // TOOLTIP is its whole sentence (its text is elided to the Qt bar's room;
     // the strip elides for itself).
     const bool shown = myBottomBarAction && myBottomBarAction->isChecked() && !myRenderModeOn;
-    myHtmlChrome->setStatus(statusBar()->currentMessage(),
-                            myStateLabel ? myStateLabel->toolTip() : QString(),
-                            myNameMark ? myNameMark->name() : QString(),
-                            myNameMark && myNameMark->showsUnsavedDot(), shown);
+    myHtmlChrome->setStatus(myStatusLine->message(),
+                            myStatusLine->state(), myStatusLine->name(), myStatusLine->unsaved(), shown);
     // What the toast must stand clear of: every card the overlay anchored,
     // and the hint balloon, which places itself.
     std::vector<QRect> obstacles = myOverlay ? myOverlay->occupiedRects() : std::vector<QRect>();
@@ -11113,7 +11064,7 @@ void MainWindow::onReported(const Outcome& outcome)
         switch (outcome.kind) {
         case Outcome::Kind::Note:
             if (!myToasts->notesEnabled()) {
-                if (outcome.writesStatus) statusBar()->showMessage(statusLineFor(outcome.text));
+                if (outcome.writesStatus) myStatusLine->setMessage(statusLineFor(outcome.text));
                 break;
             }
             myHtmlChrome->showToast(outcome.text, EditorChrome::Kind::Note, outcome.offersUndo,
@@ -11123,10 +11074,10 @@ void MainWindow::onReported(const Outcome& outcome)
         case Outcome::Kind::Failure:
             myHtmlChrome->showToast(outcome.text, EditorChrome::Kind::Failure, outcome.offersUndo,
                                     outcome.documentStamp);
-            statusBar()->showMessage(statusLineFor(outcome.text));
+            myStatusLine->setMessage(statusLineFor(outcome.text));
             break;
         case Outcome::Kind::Status:
-            statusBar()->showMessage(outcome.text);
+            myStatusLine->setMessage(outcome.text);
             break;
         }
         return;
@@ -11142,14 +11093,14 @@ void MainWindow::onReported(const Outcome& outcome)
         // notifications off the toast was dropped, and the bar is then the quiet
         // record of what happened - the only place it is written at all.
         if (myToasts->isShowing() && myToasts->currentText() == outcome.text) showSelectionStatus();
-        else statusBar()->showMessage(statusLineFor(outcome.text));
+        else myStatusLine->setMessage(statusLineFor(outcome.text));
         break;
     case Outcome::Kind::Failure:
         // Its status line follows through ToastHost::failureShown, as before.
         myToasts->show(outcome.text, Toast::Kind::Failure, outcome.offersUndo, outcome.documentStamp);
         break;
     case Outcome::Kind::Status:
-        statusBar()->showMessage(outcome.text);
+        myStatusLine->setMessage(outcome.text);
         break;
     }
 }
@@ -11267,8 +11218,8 @@ void MainWindow::refreshSelectionSizes()
     // switch changes the numbers in it without changing the selection - but
     // only while the bar is still showing the sentence THIS window put there.
     // A refusal or a report written since is somebody else's, and stands.
-    if (statusBar() && !myLastSelectionStatus.isEmpty() &&
-        statusBar()->currentMessage() == myLastSelectionStatus) {
+    if (myStatusLine && !myLastSelectionStatus.isEmpty() &&
+        myStatusLine->message() == myLastSelectionStatus) {
         const QString now = selectionStatusText();
         if (now != myLastSelectionStatus) {
             myLastSelectionStatus = now;

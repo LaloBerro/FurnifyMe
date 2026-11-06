@@ -188,6 +188,7 @@ if(FURNIFYME_BUILD_APP)
       src/session/ItemMoveText.cpp
       src/session/ItemMoveText.h
       src/session/ItemsKeys.cpp
+      src/session/StatusLine.cpp
       src/session/ItemsKeys.h
       src/session/ItemsModel.cpp
       src/session/ItemsModel.h

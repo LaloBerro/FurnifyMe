@@ -48,6 +48,7 @@
 #include "session/ItemsModel.h"
 #include "session/JointRows.h"
 #include "session/JointsModel.h"
+#include "session/StatusLine.h"
 #include "Joinery.h"
 #include "JointChip.h"
 #include "MainWindow.h"
@@ -1560,14 +1561,7 @@ ToolChip* fitAllChip(MainWindow& window)     { return viewControlChip(window, 2)
 // The persistent right-hand readout - a permanent widget on the status bar,
 // which MainWindow keeps no accessor for, so it is found the same way the
 // vocabulary sweep finds it.
-QString stateLabelText(MainWindow& window)
-{
-    QString text;
-    for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
-        if (!label->text().isEmpty()) text = label->text();
-    }
-    return text;
-}
+QString stateLabelText(MainWindow& window) { return window.statusLine()->state(); }
 
 bool trigger(MainWindow& window, const QString& label)
 {
@@ -4388,18 +4382,17 @@ int main(int argc, char* argv[])
         settle(400);
         check(!ask.isShowingInitScreen(), "the ask probe has a furniture open");
         UnsavedCloseCard* card = ask.closeQuestion();
-        FurnitureNameMark* nameMark = ask.furnitureNameMark();
+        StatusLine* nameMark = ask.statusLine();   // the name and its dot (Phase 7b)
         OcctViewWidget* askView = ask.view();
         check(card != nullptr && nameMark != nullptr,
-              "the window carries the unsaved-changes question and the name mark");
+              "the window carries the unsaved-changes question and the status line's name");
         if (!card || !nameMark) return 1;
         check(card->parentWidget() == askView,
               "the question is a card parented to the viewport, like every other overlay card");
 
         // --- 1. nothing unsaved: the X quits straight away, no question ------
         check(!ask.isFurnitureDirty(), "a fresh furniture has nothing unsaved");
-        check(!nameMark->showsUnsavedDot() && nameMark->isVisible() &&
-                  nameMark->name() == ask.currentFurnitureName(),
+        check(!nameMark->unsaved() && nameMark->name() == ask.currentFurnitureName(),
               QStringLiteral("the status bar names the open furniture with no dot (\"%1\")")
                   .arg(nameMark->name()));
         ask.close();
@@ -4424,26 +4417,8 @@ int main(int argc, char* argv[])
               "an unsaved move - the furniture is dirty");
         settle(100);
 
-        // --- 9. the dot, derived and actually painted -------------------------
-        check(nameMark->showsUnsavedDot() && nameMark->isVisible(),
-              "the name mark shows the unsaved dot while the furniture is dirty");
-        {
-            const QImage markShot = nameMark->grab().toImage();
-            const double dpr = markShot.devicePixelRatio();
-            const QRect dot = nameMark->dotRect();
-            QColor centre;
-            if (!dot.isNull()) {
-                const QPoint at(qRound(dot.center().x() * dpr), qRound(dot.center().y() * dpr));
-                if (markShot.valid(at)) centre = markShot.pixelColor(at);
-            }
-            const QColor caution = Theme::caution();
-            check(centre.isValid() && std::abs(centre.red() - caution.red()) <= 8 &&
-                      std::abs(centre.green() - caution.green()) <= 8 &&
-                      std::abs(centre.blue() - caution.blue()) <= 8,
-                  QStringLiteral("...painted in the caution token at its own centre (%1 against "
-                                 "%2)").arg(centre.isValid() ? centre.name() : QStringLiteral("none"),
-                                            caution.name()));
-        }
+        // --- 9. the dot, derived (the page's strip paints it) -------------------
+        check(nameMark->unsaved(), "the status line carries the unsaved dot while the furniture is dirty");
 
         // --- 2. dirty: the X asks ----------------------------------------------
         askView->setSelectedSolids({askBody});
@@ -4496,7 +4471,7 @@ int main(int argc, char* argv[])
         check(topToBottom, "the three answers stack top to bottom: save, discard, keep");
         {
             QStringList offenders;
-            for (const QString& text : card->paintedTexts() + nameMark->paintedTexts())
+            for (const QString& text : card->paintedTexts())
                 for (const QString& word : bannedWords())
                     if (usesBannedWord(text, word)) offenders << text + QStringLiteral(": ") + word;
             for (const QString& text : card->paintedUserTexts())
@@ -4585,7 +4560,7 @@ int main(int argc, char* argv[])
                   "...with the move on disk");
         }
         settle(100);
-        check(!nameMark->showsUnsavedDot(), "and the dot is gone once the save landed");
+        check(!nameMark->unsaved(), "and the dot is gone once the save landed");
 
         // --- 5. Close without saving -------------------------------------------
         check(ask.transformBody(askBody, askMove) && ask.isFurnitureDirty(),
@@ -6887,9 +6862,9 @@ int main(int argc, char* argv[])
         check(!status.contains(QStringLiteral("volume")) &&
               !status.contains(QStringLiteral("mm3")),
               "the report no longer mentions volume");
-        check(window.statusBar()->currentMessage() != status,
+        check(window.statusLine()->message() != status,
               QStringLiteral("and the status bar does not say it a second time (\"%1\")")
-                  .arg(window.statusBar()->currentMessage()));
+                  .arg(window.statusLine()->message()));
     }
 
     const double volumeA = ModelingOps::volume(window.document().solids().front().shape);
@@ -8805,9 +8780,9 @@ int main(int argc, char* argv[])
                     QStringLiteral("Cursor at %1, %2")
                         .arg(QString::fromStdString(Measure::formatLength(cursor.X())),
                              QString::fromStdString(Measure::formatLength(cursor.Y())));
-                check(window.statusBar()->currentMessage() == inPlane,
+                check(window.statusLine()->message() == inPlane,
                       QStringLiteral("the readout is the locked plane's own coordinates "
-                                     "(\"%1\")").arg(window.statusBar()->currentMessage()));
+                                     "(\"%1\")").arg(window.statusLine()->message()));
                 check(inPlane != inWorld,
                       QStringLiteral("and on this face the two really do differ, so that "
                                      "check is not vacuous (plane \"%1\", world \"%2\")")
@@ -9699,10 +9674,7 @@ int main(int argc, char* argv[])
                 // answer agree. "Face ready" alone could not say which.
                 const QString expectedName =
                     QString::fromStdString(window.document().outlineNameOf(outlineId));
-                QString stateText;
-                for (QLabel* label : window.findChildren<QLabel*>())
-                    if (label->text().contains(QStringLiteral("press E to extrude")))
-                        stateText = label->text();
+                const QString stateText = window.statusLine()->state();
                 check(!expectedName.isEmpty() && stateText.contains(expectedName),
                       QStringLiteral("and the state label names the outline that was "
                                      "clicked (\"%1\", expected \"%2\")")
@@ -11769,10 +11741,10 @@ int main(int argc, char* argv[])
             // HOW MANY is the left channel's since the 2026-10 review's F9 -
             // the state label is the mode and the next step only, so the
             // count is said once, with the plural written out.
-            check(window.statusBar()->currentMessage() == QStringLiteral("2 edges selected"),
+            check(window.statusLine()->message() == QStringLiteral("2 edges selected"),
                   QStringLiteral("and the status bar's left channel says how many, with the "
                                  "plural written out (\"%1\")")
-                      .arg(window.statusBar()->currentMessage()));
+                      .arg(window.statusLine()->message()));
             check(stateLabelText(window).endsWith(
                       QStringLiteral("Drag in for a Fillet, out for a Chamfer, or type a size")) &&
                       !stateLabelText(window).contains(QStringLiteral("2 edges")),
@@ -12603,7 +12575,7 @@ int main(int argc, char* argv[])
             window.document().solids().empty() ? 0 : window.document().solids().front().id;
         view->setSelectedSolids({probeId});
         settle(150);
-        const QString beforeStatus = window.statusBar()->currentMessage();
+        const QString beforeStatus = window.statusLine()->message();
         check(beforeStatus.contains(QStringLiteral("mm")),
               QStringLiteral("the status bar reads the selection in millimetres (\"%1\")")
                   .arg(beforeStatus));
@@ -12624,20 +12596,20 @@ int main(int argc, char* argv[])
             cm->trigger();
             settle(200);
             check(cm->isChecked() && !mm->isChecked(), "Centimetres takes over");
-            check(window.statusBar()->currentMessage().contains(QStringLiteral("cm")),
+            check(window.statusLine()->message().contains(QStringLiteral("cm")),
                   QStringLiteral("the status bar follows the unit (\"%1\")")
-                      .arg(window.statusBar()->currentMessage()));
+                      .arg(window.statusLine()->message()));
             mm->trigger();
             settle(200);
             check(mm->isChecked() && !cm->isChecked(), "and Millimetres takes it back");
-            check(window.statusBar()->currentMessage().contains(QStringLiteral("mm")),
+            check(window.statusLine()->message().contains(QStringLiteral("mm")),
                   "and so does the status bar");
         }
 
         if (cm) {
             cm->trigger();
             settle(150);
-            const QString afterStatus = window.statusBar()->currentMessage();
+            const QString afterStatus = window.statusLine()->message();
             check(afterStatus.contains(QStringLiteral("cm")),
                   QStringLiteral("the status bar follows the unit (\"%1\")").arg(afterStatus));
             check(!afterStatus.contains(QStringLiteral("mm")),
@@ -12680,7 +12652,7 @@ int main(int argc, char* argv[])
             // restored unit through.
             view->setSelectedSolids({probeId});
             settle(150);
-            check(window.statusBar()->currentMessage().contains(QStringLiteral("mm")),
+            check(window.statusLine()->message().contains(QStringLiteral("mm")),
                   "switching back restores millimetres on the status bar");
         }
 
@@ -12742,7 +12714,7 @@ int main(int argc, char* argv[])
             // move is what proves it formats in the new unit as well.
             moveTo(view, QPointF(432, 300));
             settle(100);
-            const QString status = window.statusBar()->currentMessage();
+            const QString status = window.statusLine()->message();
             check(status.contains(QStringLiteral("cm")) &&
                       !status.contains(QStringLiteral("mm")),
                   QStringLiteral("and so does the status bar (\"%1\")").arg(status));
@@ -14555,10 +14527,7 @@ int main(int argc, char* argv[])
 
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.
-        QString stateText;
-        for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
-            if (!label->text().isEmpty()) stateText = label->text();
-        }
+        const QString stateText = window.statusLine()->state();
         check(!stateText.contains(QStringLiteral("solid"), Qt::CaseInsensitive),
               QStringLiteral("the state label says body, not solid (\"%1\")").arg(stateText));
         check(!stateText.contains(QStringLiteral("(s)")),
@@ -17039,15 +17008,13 @@ int main(int argc, char* argv[])
                               view->autoPickRefusalText().isEmpty(),
                           "a successful Shift+double-click leaves no refusal standing on "
                           "the viewport");
-                    check(secondOwner == 0 || window.statusBar() == nullptr ||
-                              !window.statusBar()->currentMessage().contains(
+                    check(secondOwner == 0 ||
+                              !window.statusLine()->message().contains(
                                   QStringLiteral("Shift adds")),
                           QStringLiteral("...and none in the status bar either, which is "
                                          "the half a cleared member cannot answer for "
                                          "(\"%1\")")
-                              .arg(window.statusBar()
-                                       ? window.statusBar()->currentMessage()
-                                       : QString()));
+                              .arg(window.statusLine()->message()));
 
                     // --- the kind lock refuses the mixture -----------------
                     //
@@ -17064,8 +17031,7 @@ int main(int argc, char* argv[])
                     const QString refusal = view->autoPickRefusalText();
                     check(!refusal.isEmpty() && refusal.contains(QStringLiteral("bodies")),
                           QStringLiteral("and records why (\"%1\")").arg(refusal));
-                    check(window.statusBar() != nullptr &&
-                              window.statusBar()->currentMessage() == refusal,
+                    check(window.statusLine()->message() == refusal,
                           "which the status bar is showing - quiet is not silent");
 
                     view->setSelectedSolids({});
@@ -17559,13 +17525,11 @@ int main(int argc, char* argv[])
         if (bottomBar) {
             check(bottomBar->isCheckable() && bottomBar->isChecked(),
                   "it is checkable and the app ships with the bar on");
-            check(window.statusBar()->isVisible(), "and the bar itself is shown");
 
             const int floorBefore = window.view()->minimumHeight();
 
             bottomBar->setChecked(false);
             settle(150);
-            check(!window.statusBar()->isVisible(), "unticking it hides statusBar()");
             check(window.view()->minimumHeight() == floorBefore,
                   QStringLiteral("the viewport's minimum-height floor is untouched (%1 -> %2)")
                       .arg(floorBefore).arg(window.view()->minimumHeight()));
@@ -17610,7 +17574,6 @@ int main(int argc, char* argv[])
 
             bottomBar->setChecked(true);
             settle(150);
-            check(window.statusBar()->isVisible(), "ticking it again shows the bar");
             check(window.view()->minimumHeight() == floorBefore,
                   "and the floor is still exactly what it was before either toggle");
         }
@@ -17674,9 +17637,6 @@ int main(int argc, char* argv[])
             QAction* returnedBottomBar = action(returning, QStringLiteral("Show bottom bar"));
             check(returnedBottomBar != nullptr && !returnedBottomBar->isChecked(),
                   "a returning window comes back with the bottom bar off");
-            check(!returning.statusBar()->isVisible(),
-                  "and the bar itself is actually hidden, not just the tick coming back - "
-                  "the failure a checked-state-only assertion misses");
             returning.close();
             settle(120);
         }
@@ -27219,7 +27179,7 @@ int main(int argc, char* argv[])
                       .arg(shown).arg(undoable ? 1 : 0));
             check(armed > 0 && armed <= 4000,
                   QStringLiteral("jobs: ...a Note, not a Failure (%1 ms armed)").arg(armed));
-            const QString left = sw.statusBar()->currentMessage();
+            const QString left = sw.statusLine()->message();
             check(left != shown,
                   QStringLiteral("jobs: ...and the status bar does not echo the live Note "
                                  "(\"%1\")").arg(left));
@@ -27460,8 +27420,7 @@ int main(int argc, char* argv[])
             check(!tools->isVisible(),
                   "jobs: ...and the arranging chips step out of the shot with the rest of the "
                   "chrome");
-            const QString renderHint = sw.statusHintLabel() ? sw.statusHintLabel()->text()
-                                                            : QString();
+            const QString renderHint = sw.statusLine()->state();
             check(renderHint.startsWith(QStringLiteral("Frame the picture")),
                   QStringLiteral("jobs: the status hint in render mode says what to do there "
                                  "(\"%1\")").arg(renderHint));
@@ -27473,9 +27432,9 @@ int main(int argc, char* argv[])
 
         // --- the next-step hint, in the status bar's right channel ----------
         {
-            QLabel* hint = sw.statusHintLabel();
-            check(hint && hint->isVisible(), "jobs: the status bar carries a next-step hint");
-            const QString none = hint ? hint->text() : QString();
+            StatusLine* hint = sw.statusLine();
+            check(!hint->state().isEmpty(), "jobs: the status bar carries a next-step hint");
+            const QString none = hint->state();
             check(none.startsWith(QStringLiteral("Select a piece — then Move it (G) or Rotate "
                                                  "it (R)")) &&
                       !none.endsWith(QLatin1Char('.')),
@@ -27485,17 +27444,17 @@ int main(int argc, char* argv[])
             const std::vector<int> chairBodies = sw.bodyIdsForPiece(id);
             if (!chairBodies.empty()) jv->setSelectedSolids({chairBodies.front()});
             settle(150);
-            const QString moving = hint ? hint->text() : QString();
+            const QString moving = hint ? hint->state() : QString();
             check(moving.startsWith(QStringLiteral("Drag an arrow")),
                   QStringLiteral("jobs: ...with a piece selected under Move, says how to move it "
                                  "(\"%1\")").arg(moving));
-            const QString left = sw.statusBar()->currentMessage();
+            const QString left = sw.statusLine()->message();
             check(left == QStringLiteral("Chair selected"),
                   QStringLiteral("jobs: ...while the left says what is selected (\"%1\")")
                       .arg(left));
             if (rotateAct) rotateAct->trigger();
             settle(150);
-            const QString turning = hint ? hint->text() : QString();
+            const QString turning = hint ? hint->state() : QString();
             check(turning.startsWith(QStringLiteral("Drag a ring")),
                   QStringLiteral("jobs: ...and under Rotate, how to turn it (\"%1\")")
                       .arg(turning));
@@ -27627,7 +27586,7 @@ int main(int argc, char* argv[])
             QStringList texts = jp->paintedTexts();
             if (card) texts += card->paintedTexts();
             if (jt->toast()) texts += jt->toast()->paintedTexts();
-            if (sw.statusHintLabel()) texts << sw.statusHintLabel()->text();
+            texts << sw.statusLine()->state();
             if (tools)
                 for (ToolChip* c : tools->chips()) texts << c->toolTip();
             QStringList flagged;
@@ -34046,7 +34005,7 @@ int main(int argc, char* argv[])
                 .arg(QString::fromStdString(l[0]), QString::fromStdString(l[1]),
                      QString::fromStdString(l[2]));
         };
-        const auto status = [&]() { return mw.statusBar()->currentMessage(); };
+        const auto status = [&]() { return mw.statusLine()->message(); };
         const auto frame = [&](const gp_Pnt& target, double distance) {
             CameraState look;
             look.target = target;
@@ -34878,7 +34837,7 @@ int main(int argc, char* argv[])
         const int b1 = barSolids.size() == 3 ? barSolids[0].id : 0;
         const int b2 = barSolids.size() == 3 ? barSolids[1].id : 0;
         const int b3 = barSolids.size() == 3 ? barSolids[2].id : 0;
-        QStatusBar* bar = bw.statusBar();
+        StatusLine* bar = bw.statusLine();
         ToastHost* barHost = bw.findChild<ToastHost*>();
         check(barHost != nullptr, "bar: the window has its toast host");
         const QRegularExpression counted(
@@ -34888,7 +34847,7 @@ int main(int argc, char* argv[])
         bw.view()->setSelectedSolids({b1, b2});
         settle(150);
         {
-            const QString left = bar->currentMessage();
+            const QString left = bar->message();
             const QString right = stateLabelText(bw);
             check(left.startsWith(QStringLiteral("2 bodies selected — overall ")),
                   QStringLiteral("bar: the left channel names the selection and its size "
@@ -34905,10 +34864,10 @@ int main(int argc, char* argv[])
         bw.view()->setSelectedSolids({b1});
         settle(150);
         check(!counted.match(stateLabelText(bw)).hasMatch() &&
-                  bar->currentMessage().startsWith(QStringLiteral("1 body selected — ")),
+                  bar->message().startsWith(QStringLiteral("1 body selected — ")),
               QStringLiteral("bar: one body - the count on the left only (left \"%1\", "
                              "right \"%2\")")
-                  .arg(bar->currentMessage(), stateLabelText(bw)));
+                  .arg(bar->message(), stateLabelText(bw)));
         bw.view()->clearSelection();
         settle(150);
         check(!stateLabelText(bw).contains(QRegularExpression(QStringLiteral("\\d+ bod"))),
@@ -34927,12 +34886,12 @@ int main(int argc, char* argv[])
             const QString note = barHost ? barHost->currentText() : QString();
             check(!note.isEmpty() && barHost->toast()->kind() == Toast::Kind::Note,
                   QStringLiteral("bar: a Note reports it (\"%1\")").arg(note));
-            check(bar->currentMessage() != note,
+            check(bar->message() != note,
                   QStringLiteral("bar: and the left channel does NOT say it again (\"%1\")")
-                      .arg(bar->currentMessage()));
-            check(bar->currentMessage() == bw.selectionStatusText(),
+                      .arg(bar->message()));
+            check(bar->message() == bw.selectionStatusText(),
                   QStringLiteral("bar: it is the selection's sentence instead (\"%1\")")
-                      .arg(bar->currentMessage()));
+                      .arg(bar->message()));
         }
         // With notifications off there is no toast, and the bar is the one
         // quiet record of what happened.
@@ -34945,11 +34904,11 @@ int main(int argc, char* argv[])
             check(bw.transformBody(b3, step), "bar: the third board steps again, notes off");
             settle(150);
             const QString name = QString::fromStdString(bw.document().nameOf(b3));
-            check(bar->currentMessage().contains(name) &&
-                      bar->currentMessage() != bw.selectionStatusText(),
+            check(bar->message().contains(name) &&
+                      bar->message() != bw.selectionStatusText(),
                   QStringLiteral("bar: with notifications off the report is written on the "
                                  "left, its only record (\"%1\")")
-                      .arg(bar->currentMessage()));
+                      .arg(bar->message()));
         }
         if (notes && !notes->isChecked()) notes->trigger();
         settle(100);
@@ -34963,127 +34922,37 @@ int main(int argc, char* argv[])
         const QString refusal = barHost ? barHost->currentText() : QString();
         check(barHost && barHost->toast()->kind() == Toast::Kind::Failure && !refusal.isEmpty(),
               QStringLiteral("bar: as a Failure toast (\"%1\")").arg(refusal));
-        check(bar->currentMessage() == MainWindow::statusLineFor(refusal) &&
-                  !bar->currentMessage().endsWith(QLatin1Char('.')) &&
-                  bar->currentMessage().contains(QStringLiteral("overlap")),
+        check(bar->message() == MainWindow::statusLineFor(refusal) &&
+                  !bar->message().endsWith(QLatin1Char('.')) &&
+                  bar->message().contains(QStringLiteral("overlap")),
               QStringLiteral("bar: and the left channel carries its REASON, not \"refused\" "
                              "(\"%1\")")
-                  .arg(bar->currentMessage()));
+                  .arg(bar->message()));
         if (barHost && barHost->toast()) barHost->toast()->hide();
         settle(100);
         check(!barHost->isShowing() &&
-                  bar->currentMessage() == MainWindow::statusLineFor(refusal),
+                  bar->message() == MainWindow::statusLineFor(refusal),
               "bar: the toast gone, the reason is still there to read");
         QAction* cmAction = action(bw, QStringLiteral("Centimetres"));
         QAction* mmAction = action(bw, QStringLiteral("Millimetres"));
         if (cmAction) cmAction->trigger();
         settle(150);
-        check(bar->currentMessage() == MainWindow::statusLineFor(refusal),
+        check(bar->message() == MainWindow::statusLineFor(refusal),
               QStringLiteral("bar: a unit switch refreshes the sizes but leaves the reason "
                              "alone (\"%1\")")
-                  .arg(bar->currentMessage()));
+                  .arg(bar->message()));
         if (mmAction) mmAction->trigger();
         settle(150);
         bw.cancelBoolean();
         settle(100);
         bw.view()->setSelectedSolids({b3});
         settle(150);
-        check(bar->currentMessage() == bw.selectionStatusText() &&
-                  bar->currentMessage().startsWith(QStringLiteral("1 body selected")),
+        check(bar->message() == bw.selectionStatusText() &&
+                  bar->message().startsWith(QStringLiteral("1 body selected")),
               QStringLiteral("bar: and the next selection replaces it (\"%1\")")
-                  .arg(bar->currentMessage()));
+                  .arg(bar->message()));
 
-        // --- the left channel is elided, never cut into the name (F20) --------
-        StatusMessageLine* line = bw.statusMessageLine();
-        FurnitureNameMark* nameMark = bw.furnitureNameMark();
-        check(line != nullptr && nameMark != nullptr && nameMark->isVisible(),
-              "bar: the left line and the name mark are both there");
-        bw.view()->setSelectedSolids({b1, b2});
-        settle(150);
-        check(line && !line->isElided() && line->toolTip().isEmpty(),
-              QStringLiteral("bar: at 1100 px the sentence fits whole, with no tooltip (\"%1\")")
-                  .arg(line ? line->shownText() : QString()));
-        // AT THE WINDOW'S OWN FLOOR, with the longest sentence the bar carries.
-        // This was a 540 px window and the two-body sentence; since the
-        // 2026-10 review's F21 the editor cannot be made narrower than its
-        // menu pill and window buttons need (about 610 px here), where the
-        // two-body sentence fits whole. A refusal's reason is the sentence a
-        // narrow window actually has to elide, and the bar keeps it after the
-        // toast goes - so that is the one driven here.
-        bw.resize(320, 800);
-        waitFully(250);
-        settle(150);
-        check(!bw.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Common)),
-              "bar: at the floor, the Intersect is refused again so its reason is in the bar");
-        settle(150);
-        if (barHost && barHost->toast()) barHost->toast()->hide();
-        settle(100);
-        if (line && nameMark) {
-            const QString whole = bar->currentMessage();
-            check(line->fullText() == whole && whole == MainWindow::statusLineFor(refusal) &&
-                      !whole.contains(QChar(0x2026)),
-                  QStringLiteral("bar: the bar's message is still the whole sentence (\"%1\")")
-                      .arg(whole));
-            check(line->isElided() && line->shownText().endsWith(QChar(0x2026)) &&
-                      line->toolTip() == whole,
-                  QStringLiteral("bar: at the window's floor (%1 px) the left channel elides with "
-                                 "an ellipsis, the whole sentence in its tooltip (\"%2\")")
-                      .arg(bw.width()).arg(line->shownText()));
-            check(line->geometry().right() < nameMark->geometry().left() &&
-                      line->x() + line->paintedRight() <= nameMark->x(),
-                  QStringLiteral("bar: and stops short of the name mark (text ends at %1, the "
-                                 "name starts at %2)")
-                      .arg(line->x() + line->paintedRight()).arg(nameMark->x()));
-            // In PIXELS, because Qt still owns a paint of its own for this
-            // message: between where the elided text ends and where the name
-            // begins there must be nothing but the bar's ground - EXCEPT the
-            // status bar's own item frames, the thin rules QStatusBar draws two
-            // pixels outside each permanent widget (CLAUDE.md's "a thin rule now
-            // stands between the left channel and the name"). They are the
-            // bar's design, not a leak of its message, and at 540 px they only
-            // fell outside this window by the luck of where the ellipsis
-            // landed; at the floor width the text ends a few pixels sooner and
-            // the rule is inside it. Excluded by POSITION, one device column
-            // each, so a leaked glyph anywhere else still counts.
-            const QImage shot = bar->grab().toImage();
-            const double dpr = shot.devicePixelRatio();
-            const double frameAfterLine = line->geometry().right() + 2.0;
-            const double frameBeforeName = nameMark->x() - 2.0;
-            int stray = 0;
-            int inked = 0;
-            QSet<int> strayColumns;
-            const int textTop = static_cast<int>(line->y() * dpr);
-            const int textBottom = static_cast<int>((line->y() + line->height()) * dpr) - 1;
-            for (int y = std::max(0, textTop); y <= std::min(shot.height() - 1, textBottom); ++y) {
-                for (int x = 0; x < shot.width(); ++x) {
-                    const double logicalX = x / dpr;
-                    const bool ink = colorDistance(shot.pixelColor(x, y), Theme::chrome()) > 40.0;
-                    if (!ink) continue;
-                    const bool itemFrame = std::fabs(logicalX - frameAfterLine) < 1.0 ||
-                                           std::fabs(logicalX - frameBeforeName) < 1.0;
-                    if (logicalX >= line->x() + line->paintedRight() + 2 &&
-                        logicalX < nameMark->x() - 1 && !itemFrame) {
-                        ++stray;
-                        strayColumns.insert(x);
-                    }
-                    else if (logicalX >= line->x() && logicalX < line->x() + line->paintedRight())
-                        ++inked;
-                }
-            }
-            check(inked > 0 && stray == 0,
-                  QStringLiteral("bar: the elided text is painted (%1 ink pixels) and nothing "
-                                 "but the bar's own item rules reaches toward the name (%2 stray "
-                                 "in %3 device columns; text ends %4, rules at %5 and %6)")
-                      .arg(inked).arg(stray).arg(strayColumns.size())
-                      .arg(line->x() + line->paintedRight()).arg(frameAfterLine)
-                      .arg(frameBeforeName));
-            shot.save(outDir + QStringLiteral("/status_narrow.png"));
-        }
-        bw.cancelBoolean();
-        settle(100);
-        bw.resize(1100, 800);
-        waitFully(250);
-        settle(150);
+        // (The left channel's eliding is the page strip's since Phase 7b.)
         bw.hide();
     }
 
@@ -36530,9 +36399,9 @@ int main(int argc, char* argv[])
             settle(200);
             check(!mw.reMeasureActive(),
                   "re-measure: right-clicking a GROUP's number opens nothing");
-            check(mw.statusBar()->currentMessage() == MainWindow::reMeasureGroupRefusalText(),
+            check(mw.statusLine()->message() == MainWindow::reMeasureGroupRefusalText(),
                   QStringLiteral("re-measure: it says to select one body instead (\"%1\")")
-                      .arg(mw.statusBar()->currentMessage()));
+                      .arg(mw.statusLine()->message()));
             check(mw.document().revision() == revisionBefore &&
                       std::fabs(sizeOf(b1, 0) - widthBefore) < 0.01,
                   "re-measure: and nothing changed");
@@ -37314,16 +37183,6 @@ int main(int argc, char* argv[])
         check(toast && toast->undoControl() &&
                   toast->undoControl()->accessibleName() == toast->paintedTexts().value(0),
               "names: and its painted Undo pill is named Undo");
-
-        // THE STATUS LINE carries the whole sentence, never the elided cut.
-        StatusMessageLine* line = aw.statusMessageLine();
-        const QString sentence = QStringLiteral("Nothing selected — click a body, a face or an edge");
-        aw.statusBar()->showMessage(sentence);
-        settle(60);
-        check(line && line->accessibleName() == sentence,
-              QStringLiteral("names: the status line's accessible name is its whole sentence "
-                             "(\"%1\")")
-                  .arg(line ? line->accessibleName() : QString()));
 
         // A HINT is its text, and is announced as it arrives.
         g_accessibleEvents.clear();

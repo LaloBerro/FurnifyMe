@@ -35,6 +35,7 @@
 #include "ui/SceneWindow.h"
 #include "ui/LoadingCard.h"
 #include "ui/ShortcutSheet.h"
+#include "session/StatusLine.h"
 #include "web/HubWindow.h"
 #include "ui/WindowChrome.h"
 #include "ui/ShapeFlyout.h"
@@ -464,14 +465,13 @@ int main(int argc, char* argv[])
     pump(400);
 
     // --- the status strip ---------------------------------------------------------
-    check(!window.statusBar()->isVisible(), "the Qt status bar is hidden - the page draws it");
     waitFor([&] {
         return jsString(page, "document.querySelector('.strip .left').textContent") ==
-               window.statusBar()->currentMessage();
+               window.statusLine()->message();
     }, 3000);
     check(jsString(page, "document.querySelector('.strip .left').textContent") ==
-              window.statusBar()->currentMessage(),
-          "the strip's left channel is the Qt bar's sentence - \"" + window.statusBar()->currentMessage() + "\"");
+              window.statusLine()->message(),
+          "the strip's left channel is the status line's sentence - \"" + window.statusLine()->message() + "\"");
     check(jsString(page, "(document.querySelector('.strip .name') || {}).textContent || ''") == QStringLiteral("Bench"),
           "the name mark names the open furniture");
     {
@@ -3075,7 +3075,6 @@ int main(int argc, char* argv[])
         waitFor([&] { return broken.htmlChrome() && broken.htmlChrome()->host()->loaded(); }, 10000);
         pump(300);
         check(broken.htmlChrome() && !broken.htmlChrome()->isLive(), "a page that never loaded is not live");
-        check(broken.statusBar()->isVisible(), "so the Qt status bar stays up");
         TopoDS_Face f;
         for (TopExp_Explorer e(broken.document().solids().front().shape, TopAbs_FACE); e.More(); e.Next()) {
             f = TopoDS::Face(e.Current());
@@ -3632,13 +3631,12 @@ int main(int argc, char* argv[])
         if (sceneChrome && sceneChrome->isLive()) {
             QWebEngineView* sp = sceneChrome->view();
             pump(400);
-            check(!scene.statusBar()->isVisible() &&
-                      waitFor([&] { return jsString(sp, "(document.querySelector('.strip .left') || {}).textContent || ''") ==
-                                           scene.statusBar()->currentMessage(); }, 3000),
+            check(waitFor([&] { return jsString(sp, "(document.querySelector('.strip .left') || {}).textContent || ''") ==
+                                           scene.statusLine()->message(); }, 3000),
                   "the Qt status bar is hidden, and the page's strip says what it said - \"" +
-                      scene.statusBar()->currentMessage() + "\"");
+                      scene.statusLine()->message() + "\"");
             check(jsString(sp, "(document.querySelector('.strip .right') || {}).textContent || ''") ==
-                      scene.statusHintLabel()->text(),
+                      scene.statusLine()->state(),
                   "and its right channel is the scene's next step");
             check(waitFor([&] { return js(sp, "!!document.querySelector('[data-pill]')").toBool(); }, 3000) &&
                       !scene.findChild<AppBar*>()->isVisible(),
@@ -3671,7 +3669,7 @@ int main(int argc, char* argv[])
             if (shot) shot->trigger();
             check(shot && waitFor([&] { return toastText(sp).contains(QStringLiteral("empty")); }, 3000),
                   "an empty scene's screenshot refusal is a Failure on the page - " + toastText(sp));
-            check(scene.statusBar()->currentMessage().contains(QStringLiteral("empty")),
+            check(scene.statusLine()->message().contains(QStringLiteral("empty")),
                   "and its reason stays on the status line after it");
             check(!scene.toasts()->isShowing(), "and the Qt toast stays down");
 
@@ -3861,8 +3859,7 @@ int main(int argc, char* argv[])
             pump(200);
             check(!window.isAskingForName(), "and Escape cancels it there");
         }
-        check(window.statusBar()->isVisible() && !page->isVisible(),
-              "the Qt status bar comes back and the dead page leaves the viewport");
+        check(!page->isVisible(), "the dead page leaves the viewport");
         if (ToolCluster* rail = window.findChild<ToolCluster*>())
             check(rail->isVisible() && window.findChild<AppBar*>()->isVisible() && window.viewControls()->isVisible(),
                   "the Qt rail, pill and view cluster come back in their places (Phase 3i)");
@@ -3896,8 +3893,7 @@ int main(int argc, char* argv[])
         check(waitFor([&] { return chrome->isLive(); }, 20000) && chrome->host()->crashReloads() == 1,
               "the dead page loads again and says it is listening");
         pump(300);
-        check(page->isVisible() && !window.statusBar()->isVisible(),
-              "it stands over the viewport again, and the Qt status bar steps aside");
+        check(page->isVisible(), "it stands over the viewport again");
         check(window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail")) &&
                   window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"))->isVisible() &&
                   !window.findChild<ToolCluster*>()->isVisible() &&

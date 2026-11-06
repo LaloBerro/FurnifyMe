@@ -19,6 +19,7 @@
 #include "HtmlCardSlot.h"
 #include "web/SceneCardsBridge.h"
 #include "web/HubWindow.h"
+#include "session/StatusLine.h"
 #ifdef FURNIFYME_WEB_UI
 #include "session/ActionRegistry.h"
 #include "session/MenuModel.h"
@@ -74,6 +75,8 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
     : QMainWindow(parent), myStore(store)
 {
     setWindowTitle(tr("FurnifyMe — Scene"));
+    // The bottom strip's state (Phase 7b), before anything can write to it.
+    myStatusLine = new StatusLine(this);
 
     myView = new OcctViewWidget(this);
     setCentralWidget(myView);
@@ -497,7 +500,7 @@ void SceneWindow::buildOverlay()
         if (index < 0 || index >= static_cast<int>(shots.size())) return;
         const DocumentModel::Shot shot = shots[static_cast<std::size_t>(index)];
         applyShot(shot);
-        statusBar()->showMessage(
+        myStatusLine->setMessage(
             tr("%1 — camera, frame, lens and light").arg(QString::fromStdString(shot.name)));
     });
     connect(myStudio, &RenderStudio::shotRemoved, this, [this](int index) {
@@ -505,7 +508,7 @@ void SceneWindow::buildOverlay()
         if (index < 0 || index >= static_cast<int>(shots.size())) return;
         const QString name = QString::fromStdString(shots[static_cast<std::size_t>(index)].name);
         if (removeShotFromScene(static_cast<std::size_t>(index)))
-            statusBar()->showMessage(tr("%1 forgotten").arg(name));
+            myStatusLine->setMessage(tr("%1 forgotten").arg(name));
     });
 
     // A REFUSAL HAS TO REPORT, and in this app a refusal reports through a
@@ -524,7 +527,7 @@ void SceneWindow::buildOverlay()
     // A refusal's reason stays on the left of the status bar after its toast
     // goes, the editor's own rule from the same review.
     connect(myToasts, &ToastHost::failureShown, this,
-            [this](const QString& reason) { statusBar()->showMessage(reason); });
+            [this](const QString& reason) { myStatusLine->setMessage(reason); });
 
     // Not anchored by the overlay: the card is one question in the middle of
     // the viewport, not a rail or a drawer, so it is placed by the window.
@@ -566,13 +569,8 @@ void SceneWindow::buildOverlay()
     // runs into the scene's name - says what is selected and what just
     // happened; the right says what to do next (the review's F16: the window
     // had no hint at all). Same widgets, same order as MainWindow's bar.
-    statusBar()->setFont(Theme::labelFont());
-    myMessageLine = new StatusMessageLine(statusBar());
-    statusBar()->addPermanentWidget(myMessageLine, 1);
-    myNameMark = new FurnitureNameMark(statusBar());
-    statusBar()->addPermanentWidget(myNameMark);
-    myHintLabel = new QLabel(statusBar());
-    statusBar()->addPermanentWidget(myHintLabel);
+    // Held as state since Phase 7b (session/StatusLine); the page's strip
+    // draws it.
 
     // Clicking a row selects that piece. The selection itself still lives in
     // the viewport and mySelectedPiece is still DERIVED from it through
@@ -1242,7 +1240,7 @@ void SceneWindow::refreshSelection()
     if (myPieces) myPieces->setSelected(piece);
     if (myPiecesModel) myPiecesModel->setSelected(piece);
     // The left channel's first job: what is selected now.
-    statusBar()->showMessage(selectionStatusText());
+    myStatusLine->setMessage(selectionStatusText());
     refreshSurfaces();
 }
 
@@ -1284,9 +1282,9 @@ void SceneWindow::reportNote(const QString& text, bool undo)
     // toast carries the report the left goes back to the selection; a toast
     // that was not shown leaves the bar as the only record of it.
     if (htmlChromeLive() || (myToasts->isShowing() && myToasts->currentText() == text))
-        statusBar()->showMessage(selectionStatusText());
+        myStatusLine->setMessage(selectionStatusText());
     else
-        statusBar()->showMessage(text);
+        myStatusLine->setMessage(text);
 }
 
 QString SceneWindow::screenshotRefusal() const
@@ -1509,14 +1507,9 @@ void SceneWindow::refreshSurfaces()
         // change, anything that moves the scene takes it away.
         myToasts->documentMovedTo(static_cast<int>(myScene.revision()));
     }
-    if (myHintLabel) {
-        myHintLabel->setFont(Theme::labelFont());
-        myHintLabel->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
-                                       .arg(Theme::textMuted().name()));
-        myHintLabel->setText(statusHintText());
-    }
-    if (myNameMark) {
-        myNameMark->setState(mySceneName, isSceneDirty());
+    if (myStatusLine) {
+        myStatusLine->setState(statusHintText());
+        myStatusLine->setName(mySceneName, isSceneDirty());
     }
     syncHtmlChrome();
     if (myStudio && myStudio->panel()) {
@@ -1608,7 +1601,7 @@ void SceneWindow::showToast(const QString& text, Toast::Kind kind, bool undo, in
         if (kind == Toast::Kind::Failure) {
             QString line = text;
             if (line.endsWith(QLatin1Char('.'))) line.chop(1);
-            statusBar()->showMessage(line);
+            myStatusLine->setMessage(line);
         }
         return;
     }
@@ -1624,10 +1617,9 @@ void SceneWindow::syncHtmlChrome()
     const bool live = htmlChromeLive();
     // The page's strip stands in the Qt bar's place; the overlay's cards
     // anchored at the bottom stand above it.
-    statusBar()->setVisible(!live);
     if (myOverlay) myOverlay->setBottomInset(live ? 24 : 0);
-    myHtmlChrome->setStatus(statusBar()->currentMessage(), myHintLabel ? myHintLabel->text() : QString(),
-                            mySceneName, isSceneDirty(), live);
+    myHtmlChrome->setStatus(myStatusLine->message(), myStatusLine->state(), myStatusLine->name(),
+                            myStatusLine->unsaved(), live);
     myHtmlChrome->setObstacles(myOverlay ? myOverlay->occupiedRects() : std::vector<QRect>());
     myHtmlChrome->setUndoEnabled(myUndoAction && myUndoAction->isEnabled());
     myHtmlChrome->documentMovedTo(static_cast<int>(myScene.revision()));
@@ -1815,7 +1807,7 @@ void SceneWindow::useHtmlChrome()
         refreshSurfaces();
         if (myOverlay) myOverlay->relayout();
     });
-    connect(statusBar(), &QStatusBar::messageChanged, this, &SceneWindow::syncHtmlChrome);
+    connect(myStatusLine, &StatusLine::changed, this, &SceneWindow::syncHtmlChrome);
     myHtmlChrome->start();
     refreshSurfaces();
 #endif

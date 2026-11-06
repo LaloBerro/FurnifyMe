@@ -1025,6 +1025,9 @@ public:
     class ToolChip* renderExitChip() const { return myRenderExitChip; }
     // The page's window buttons' controls (Phase 7a); null until the chrome.
     class HubWindowControls* windowControls() const { return myWindowControls; }
+    // The bottom strip's state (Phase 7b): the left sentence, the right state
+    // line, the furniture's name and its unsaved dot.
+    class StatusLine* statusLine() const { return myStatusLine; }
     class WindowButtons* windowButtons() const { return myWindowButtons; }
     // The frame overlay, for the suite: what it is drawing is the same rect
     // the export reproduces, so a check can compare the two.
@@ -1118,10 +1121,6 @@ public:
     // this is the ONE place a selection is counted - the state label beside
     // it is the mode and the next step only.
     QString selectionStatusText() const;
-    // The status bar's left channel, elided - see StatusMessageLine. Its
-    // fullText() is statusBar()->currentMessage(); its shownText() is what
-    // fits on screen.
-    class StatusMessageLine* statusMessageLine() const { return myMessageLine; }
     // A toast's sentence as a status line: the trailing period dropped.
     static QString statusLineFor(const QString& sentence);
     QString currentFurnitureId() const { return myFurnitureId; }
@@ -1160,7 +1159,6 @@ public:
     // hidden flag, like isAskingBeforeClose().
     bool isAskingForName() const;
     class NameFurnitureCard* nameQuestion() const { return myNameCard; }
-    class FurnitureNameMark* furnitureNameMark() const { return myNameMark; }
     // File -> Autosave (Milestone 5, item 10): a submenu of five exclusive
     // modes, replacing the old single checkable entry. "Off" and "After
     // every change" carry the old boolean's two states forward exactly -
@@ -2068,8 +2066,6 @@ private:
     void onNewFurniture();
     void askNewFurnitureName();
     void createAndOpenFurniture(const QString& name);
-    class FurnitureNameMark* myNameMark = nullptr;
-    class StatusMessageLine* myMessageLine = nullptr;
     CloseRoute myCloseRoute = CloseRoute::Library;
     // The revision "Close without saving" threw away, or -1. Both autosave
     // paths (the debounce's flushAutosave() and the timed tick) refuse to
@@ -2378,7 +2374,6 @@ private:
     // render mode: closing the window must stay reachable in every mode.
     class WindowButtons* myWindowButtons = nullptr;
     class ViewportOverlay* myOverlay = nullptr;
-    class QLabel* myStateLabel = nullptr;
     // The kind-lock refusal sentence THIS window last put in the status bar,
     // or empty. Kept only so the withdrawal can be surgical - see
     // onPickRefusalWithdrawn(). Never a second source of truth for the
@@ -2440,6 +2435,7 @@ private:
     // buttons' TopRight place, and the hub's own controls object (minimize,
     // maximize, close, the maximize button's rectangle for snap layouts).
     class HtmlCardSlot* myButtonsSlot = nullptr;
+    class StatusLine* myStatusLine = nullptr;
     class HubWindowControls* myWindowControls = nullptr;
     class HtmlCardSlot* myPillSlot = nullptr;
     class ShellBridge* myShellBridge = nullptr;
