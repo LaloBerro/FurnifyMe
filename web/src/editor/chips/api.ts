@@ -16,7 +16,8 @@ export interface TextPart {
 export interface FieldPart {
   kind: 'field';
   id: string;
-  label: string;
+  label: string; // shown before the field; '' shows none
+  name?: string; // what a screen reader calls it (the label by default)
   value: string;
   tip: string;
   enabled: boolean;

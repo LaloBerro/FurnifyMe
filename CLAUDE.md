@@ -554,6 +554,19 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
     Boolean chip until it did. Only the drawn rectangles are painted, so nothing else is covered.
     chrome_smoke LOOKS: the window composited with the page and with its view hidden must differ
     where the chip stands (T-083's rule), because the DOM said "drawn" while nothing was on screen.
+- **Extrude and the glued chips (Phase 4b, branch `gesture-chips-4b`)** - Pull,
+  Fillet/Chamfer, Move, Mitre and Re-measure - on 4a's machinery, one list
+  (`MainWindow::chipFaces()`). **A glued chip leaves the page while the camera moves**
+  (`ChipFace::setGlued()`): `EditorChrome` marks it `moving` from the first `cameraChanged`
+  until 150 ms after the last and the page neither draws it nor takes a press on it - drawn
+  through an orbit it trails the model a frame and moves the mask every frame (the spike's
+  gate 4). A drag is not camera motion: Move's chip stays up through the drag it reports.
+  Two names collided and each cost a red run: three chips already had a `myFace` (the picked
+  `TopoDS_Face`), so the member is `myChipFace`; and the rail's buttons wear
+  `data-chip="<action id>"`, so the rail's Extrude button answered a query meant for the
+  Extrude panel - a gesture card is `[data-gesture]`. The page's view rises only when
+  something stands over it, or a chip moving every frame of a drag restacks the overlay
+  every frame.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a

@@ -24,6 +24,7 @@
 class MainWindow;
 class OcctViewWidget;
 class QHideEvent;
+class ChipFace;
 class QLineEdit;
 class QMoveEvent;
 class QResizeEvent;
@@ -153,6 +154,8 @@ public:
     // complete QLineEdit, and this header only forward-declares it (the same
     // reason ExtrudePreview::field() is out of line).
     QLineEdit* field() const;
+    // What the chrome page draws in this chip's place (migration Phase 4b).
+    ChipFace* face() const { return myChipFace; }
 
     // Every string this chip paints, for gui_smoke's banned-word sweep.
     QStringList paintedTexts() const;
@@ -216,4 +219,5 @@ private:
     bool myInvalid = false;
     double myDistance = 0.0;
     QPointer<QLineEdit> myField;   // sibling, not a child - see the class comment
+    ChipFace* myChipFace = nullptr;
 };

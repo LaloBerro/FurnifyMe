@@ -30,6 +30,7 @@
 #include <QStringList>
 #include <QWidget>
 
+class ChipFace;
 class MainWindow;
 class OcctViewWidget;
 class QHideEvent;
@@ -68,6 +69,8 @@ public:
     // forward-declares it (the same reason Toast.h keeps its own sibling
     // control behind a QWidget* rather than its concrete UndoControl type).
     QLineEdit* field() const;
+    // What the chrome page draws in this panel's place (migration Phase 4b).
+    ChipFace* face() const { return myChipFace; }
 
     // Every string this panel paints, for gui_smoke's banned-word sweep -
     // the same reason WalkthroughPanel, HintBalloon and Toast each expose
@@ -139,4 +142,5 @@ private:
     bool myInvalid = false;
     double myHeight = 10.0;   // last successfully previewed height
     QPointer<QLineEdit> myField;   // sibling, not a child - see class comment
+    ChipFace* myChipFace = nullptr;
 };

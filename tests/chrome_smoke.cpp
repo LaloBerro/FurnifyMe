@@ -53,6 +53,10 @@
 #include "ui/BooleanTool.h"
 #include "ui/SlatsTool.h"
 #include "ui/ChipFace.h"
+#include "ui/ExtrudePreview.h"
+#include "ui/PullArrow.h"
+#include "ui/MitreTool.h"
+#include "ui/ReMeasureTool.h"
 
 #include <QAction>
 #include <QApplication>
@@ -2103,7 +2107,7 @@ int main(int argc, char* argv[])
         // stands at the viewport's origin), and whether it is drawn at all.
         const auto pageChip = [&](const QString& name) {
             return js(page, QStringLiteral(
-                "(() => { const c = document.querySelector('[data-chip=\"%1\"]'); if (!c) return null; "
+                "(() => { const c = document.querySelector('[data-gesture=\"%1\"]'); if (!c) return null; "
                 "return {x: c.offsetLeft, y: c.offsetTop, w: c.offsetWidth, h: c.offsetHeight, "
                 "shown: c.style.visibility !== 'hidden'}; })()").arg(name)).toMap();
         };
@@ -2145,7 +2149,7 @@ int main(int argc, char* argv[])
                       .arg(booleanTool->x()).arg(booleanTool->y()).arg(booleanTool->width()).arg(booleanTool->height()));
             check(std::abs(booleanTool->x() + booleanTool->width() / 2 - window.view()->width() / 2) <= 2,
                   "at the bottom centre, placed by the Qt chip's own code with the page's width (R2)");
-            check(jsString(page, "document.querySelector('[data-chip=\"boolean\"] .text.title').textContent") ==
+            check(jsString(page, "document.querySelector('[data-gesture=\"boolean\"] .text.title').textContent") ==
                       window.booleanOperationName(),
                   "the chip names the operation - " + window.booleanOperationName());
             // The page reports its hit rectangles a frame after it draws.
@@ -2193,16 +2197,16 @@ int main(int argc, char* argv[])
             }
 #endif
             const bool keepBefore = window.booleanKeepTool();
-            js(page, "document.querySelector('[data-chip=\"boolean\"] [data-part=\"keep\"]').click()");
+            js(page, "document.querySelector('[data-gesture=\"boolean\"] [data-part=\"keep\"]').click()");
             check(waitFor([&] { return window.booleanKeepTool() != keepBefore; }, 2000),
                   "the page's switch turns the gesture's own Keep the other bodies");
             check(waitFor([&] {
-                      return jsString(page, "document.querySelector('[data-chip=\"boolean\"] [data-part=\"keep\"]')"
+                      return jsString(page, "document.querySelector('[data-gesture=\"boolean\"] [data-part=\"keep\"]')"
                                             ".getAttribute('aria-pressed')") ==
                              (window.booleanKeepTool() ? QStringLiteral("true") : QStringLiteral("false"));
                   }, 2000),
                   "and the switch on the page follows it back");
-            js(page, "document.querySelector('[data-chip=\"boolean\"] [data-part=\"keep\"]').click()");
+            js(page, "document.querySelector('[data-gesture=\"boolean\"] [data-part=\"keep\"]').click()");
             waitFor([&] { return window.booleanKeepTool() == keepBefore; }, 2000);
             // Escape with the keyboard on the viewport: the Qt chip's claim.
             window.view()->setFocus();
@@ -2255,7 +2259,7 @@ int main(int argc, char* argv[])
             return false;
         };
         const auto pageField = [&](const char* id) {
-            return jsString(page, QStringLiteral("(document.querySelector('[data-chip=\"slats\"] input[data-field=\"%1\"]')"
+            return jsString(page, QStringLiteral("(document.querySelector('[data-gesture=\"slats\"] input[data-field=\"%1\"]')"
                                                  " || {}).value || ''").arg(QLatin1String(id)));
         };
         if (slatsTool && slatsAction && pickTop()) {
@@ -2273,9 +2277,9 @@ int main(int argc, char* argv[])
                       jsString(page, "document.activeElement && document.activeElement.dataset.field") == QStringLiteral("width"),
                   "Width is focused and holds the keyboard for the slats chip (R5)");
             const auto countShown = [&] {
-                return jsString(page, "(document.querySelector('[data-chip=\"slats\"] .text.muted') || {}).textContent || ''");
+                return jsString(page, "(document.querySelector('[data-gesture=\"slats\"] .text.muted') || {}).textContent || ''");
             };
-            js(page, "(() => { const f = document.querySelector('[data-chip=\"slats\"] input[data-field=\"width\"]'); "
+            js(page, "(() => { const f = document.querySelector('[data-gesture=\"slats\"] input[data-field=\"width\"]'); "
                      "f.value = '30'; f.dispatchEvent(new Event('input', {bubbles: true})); })()");
             check(waitFor([&] { return slatsTool->widthField()->text() == QStringLiteral("30"); }, 2000),
                   "typing 30 on the page reaches the Qt field");
@@ -2300,7 +2304,7 @@ int main(int argc, char* argv[])
             // page's field - it passes the Qt chip's claim (the field holds
             // the keyboard for this chip) and the page answers it WITH 35.
             const size_t before = window.document().solids().size();
-            js(page, "(() => { const f = document.querySelector('[data-chip=\"slats\"] input[data-field=\"width\"]'); "
+            js(page, "(() => { const f = document.querySelector('[data-gesture=\"slats\"] input[data-field=\"width\"]'); "
                      "f.dispatchEvent(new MouseEvent('mousedown', {bubbles: true})); f.focus(); "
                      "f.value = '35'; f.dispatchEvent(new Event('input', {bubbles: true})); })()");
             QWidget* proxy = page->focusProxy() ? page->focusProxy() : page;
@@ -2321,7 +2325,7 @@ int main(int argc, char* argv[])
             // the OS has not activated (no block in this suite delivers one),
             // so the page's half - its keydown, typed straight after a digit
             // in the same turn - is dispatched in the page.
-            js(page, "(() => { const f = document.querySelector('[data-chip=\"slats\"] input[data-field=\"width\"]'); "
+            js(page, "(() => { const f = document.querySelector('[data-gesture=\"slats\"] input[data-field=\"width\"]'); "
                      "f.value = '35'; f.dispatchEvent(new Event('input', {bubbles: true})); "
                      "f.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()");
             check(waitFor([&] { return !window.slatsActive(); }, 3000), "the page answers that Enter and applies the slats");
@@ -2344,7 +2348,7 @@ int main(int argc, char* argv[])
                 waitFor([&] { return drawn(QStringLiteral("slats")); }, 3000);
                 check(waitFor([&] { return pageField("width") == slatsTool->widthField()->text(); }, 2000),
                       "a second gesture seeds the page's Width afresh - " + pageField("width") + " (Review Focus 5)");
-                js(page, "document.querySelector('[data-chip=\"slats\"] input[data-field=\"gap\"]').dispatchEvent("
+                js(page, "document.querySelector('[data-gesture=\"slats\"] input[data-field=\"gap\"]').dispatchEvent("
                          "new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
                 check(waitFor([&] { return !window.slatsActive(); }, 2000) &&
                           window.document().solids().size() == before,
@@ -2355,7 +2359,231 @@ int main(int argc, char* argv[])
         } else if (slatsTool && slatsAction) {
             check(false, "the slab's top face could be picked for slats");
         }
+
+        // --- Phase 4b: Extrude and the glued chips ------------------------------------
+        // A face of a body whose area lies in [minArea, maxArea], picked the
+        // way a hand picks it; `ok` says whether the pick is the one wanted.
+        const auto pickFaceWhere = [&](double minArea, double maxArea, const std::function<bool()>& ok) {
+            window.view()->clearSelection();
+            pump(100);
+            for (const auto& solid : window.document().solids()) {
+                for (TopExp_Explorer e(solid.shape, TopAbs_FACE); e.More(); e.Next()) {
+                    const TopoDS_Face face = TopoDS::Face(e.Current());
+                    if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane) continue;
+                    GProp_GProps props;
+                    BRepGProp::SurfaceProperties(face, props);
+                    if (props.Mass() < minArea || props.Mass() > maxArea) continue;
+                    QPoint at;
+                    if (!window.view()->projectToScreen(props.CentreOfMass(), at)) continue;
+                    if (!window.view()->rect().adjusted(60, 60, -60, -60).contains(at)) continue;
+                    const QPointF p(at);
+                    const QPointF g = window.view()->mapToGlobal(p);
+                    QMouseEvent move(QEvent::MouseMove, p, g, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(window.view(), &move);
+                    pump(60);
+                    QMouseEvent down(QEvent::MouseButtonPress, p, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(window.view(), &down);
+                    QMouseEvent up(QEvent::MouseButtonRelease, p, g, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(window.view(), &up);
+                    pump(120);
+                    if (!window.view()->selectedFace().IsNull() && ok()) return true;
+                }
+            }
+            return false;
+        };
+        const auto chipField = [&](const QString& chip, const QString& id) {
+            return jsString(page, QStringLiteral("(document.querySelector('[data-gesture=\"%1\"] input[data-field=\"%2\"]')"
+                                                 " || {}).value || ''").arg(chip, id));
+        };
+        // Types into a chip's field on the page and presses Enter there, in one
+        // turn (the page's half of R3).
+        const auto typeAndEnter = [&](const QString& chip, const QString& id, const QString& text) {
+            js(page, QStringLiteral("(() => { const f = document.querySelector('[data-gesture=\"%1\"] input[data-field=\"%2\"]'); "
+                                    "f.dispatchEvent(new MouseEvent('mousedown', {bubbles: true})); f.focus(); "
+                                    "f.value = '%3'; f.dispatchEvent(new Event('input', {bubbles: true})); "
+                                    "f.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()")
+                         .arg(chip, id, text));
+        };
+        QAction* undo = actionNamed(&window, QStringLiteral("Undo"));
+
+        // Every 4b chip is handed to the page, and the five glued ones are glued.
+        {
+            const std::vector<ChipFace*> faces = window.chipFaces();
+            QStringList names;
+            int glued = 0;
+            bool allDrawnElsewhere = true;
+            for (ChipFace* f : faces) {
+                names << f->name();
+                glued += f->glued() ? 1 : 0;
+                allDrawnElsewhere = allDrawnElsewhere && f->drawnElsewhere();
+            }
+            names.sort();
+            check(names.join(QLatin1Char(',')) ==
+                      QStringLiteral("bevel,boolean,extrude,mitre,move,pull,remeasure,slats") &&
+                      glued == 5 && allDrawnElsewhere,
+                  "every gesture chip is drawn by the page, and the five that follow the model are glued - " +
+                      names.join(QStringLiteral(", ")));
+        }
+
+        // --- Extrude ----------------------------------------------------------------
+        ExtrudePreview* extrude = window.findChild<ExtrudePreview*>();
+        QAction* startSketch = actionNamed(&window, QStringLiteral("Start Sketch"));
+        QAction* finishSketch = actionNamed(&window, QStringLiteral("Finish Sketch"));
+        QAction* extrudeAction = actionNamed(&window, QStringLiteral("Extrude..."));
+        check(extrude && startSketch && finishSketch && extrudeAction, "chips: the editor has its extrude panel");
+        if (extrude && startSketch && finishSketch && extrudeAction) {
+            window.view()->clearSelection();
+            startSketch->trigger();
+            pump(100);
+            const double w = window.view()->width(), h = window.view()->height();
+            for (const QPointF& f : {QPointF(0.62, 0.62), QPointF(0.72, 0.62), QPointF(0.72, 0.72), QPointF(0.62, 0.72)}) {
+                const QPointF p(f.x() * w, f.y() * h);
+                const QPointF g = window.view()->mapToGlobal(p);
+                QMouseEvent move(QEvent::MouseMove, p, g, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &move);
+                QMouseEvent down(QEvent::MouseButtonPress, p, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &down);
+                QMouseEvent up(QEvent::MouseButtonRelease, p, g, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &up);
+                pump(80);
+            }
+            finishSketch->trigger();
+            pump(150);
+            check(window.hasPendingFace(), "a closed outline waits to be extruded");
+            const size_t before = window.document().solids().size();
+            extrudeAction->trigger();
+            check(extrude->isVisible() && waitFor([&] { return drawn(QStringLiteral("extrude")); }, 3000),
+                  "Extrude... opens its panel, and the page draws it");
+            check(waitFor([&] { return standsOn(QStringLiteral("extrude"), extrude); }, 2000) && extrude->field()->isHidden(),
+                  "where the Qt panel stands, its own field hidden");
+            check(chipField(QStringLiteral("extrude"), QStringLiteral("height")) == extrude->field()->text() &&
+                      waitFor([&] { return chrome->claimsKeyboardFor(QStringLiteral("extrude")); }, 2000),
+                  "its height is seeded with the panel's own " + extrude->field()->text() +
+                      ", focused and holding the keyboard (R5)");
+            check(std::abs(extrude->x() + extrude->width() / 2 - window.view()->width() / 2) <= 2,
+                  "top centre, placed by the panel's own code with the page's width");
+#ifdef _WIN32
+            pump(200);
+            capture(&window, outDir + "/chip-extrude.png");
+#endif
+            typeAndEnter(QStringLiteral("extrude"), QStringLiteral("height"), QStringLiteral("25"));
+            check(waitFor([&] { return window.document().solids().size() == before + 1; }, 3000),
+                  "Enter on the page extrudes the outline into a body");
+            if (window.document().solids().size() == before + 1) {
+                const ModelingOps::MeasuredBox box =
+                    ModelingOps::measuredBox(std::vector<TopoDS_Shape>{window.document().solids().back().shape});
+                check(std::abs(box.height - 25.0) < 0.01,
+                      QStringLiteral("25 tall - the height the page held at Enter (%1)").arg(box.height));
+            }
+            check(waitFor([&] { return !chrome->claimsKeyboardFor(QStringLiteral("extrude")); }, 2000),
+                  "and the panel going gives the keyboard back");
+            if (undo) undo->trigger();   // the body
+            pump(150);
+            if (undo) undo->trigger();   // the outline
+            pump(250);
+        }
+
+        // --- Pull: a glued chip, and the camera moving ---------------------------
+        PullArrow* pull = window.findChild<PullArrow*>();
+        check(pull != nullptr, "chips: the editor has its pull arrow");
+        if (pull && pickFaceWhere(100000.0, 1.0e9, [&] { return pull->isVisible(); })) {
+            check(waitFor([&] { return drawn(QStringLiteral("pull")); }, 3000) && standsOn(QStringLiteral("pull"), pull) &&
+                      pull->field()->isHidden(),
+                  "a picked face raises the pull arrow, and the page draws its chip where the Qt chip stands");
+            // An orbit: the chip leaves the page while the camera moves, and
+            // comes back beside the arrow once it holds still.
+            const QPointF c(window.view()->width() / 2.0, window.view()->height() / 2.0);
+            const auto rmb = [&](QEvent::Type type, const QPointF& p, Qt::MouseButtons buttons) {
+                QMouseEvent e(type, p, window.view()->mapToGlobal(p), Qt::RightButton, buttons, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &e);
+            };
+            rmb(QEvent::MouseButtonPress, c, Qt::RightButton);
+            bool hiddenMidOrbit = false;
+            bool movingInMap = false;
+            for (int step = 1; step <= 12; ++step) {
+                QMouseEvent move(QEvent::MouseMove, c + QPointF(step * 6.0, 0), window.view()->mapToGlobal(c + QPointF(step * 6.0, 0)),
+                                 Qt::NoButton, Qt::RightButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(window.view(), &move);
+                pump(40);
+                movingInMap = movingInMap ||
+                              chrome->bridge()->cards().value(QStringLiteral("pull")).toMap().value(QStringLiteral("moving")).toBool();
+                hiddenMidOrbit = hiddenMidOrbit || !drawn(QStringLiteral("pull"));
+            }
+            rmb(QEvent::MouseButtonRelease, c + QPointF(72, 0), Qt::NoButton);
+            check(movingInMap && hiddenMidOrbit,
+                  "while the camera orbits, the glued chip is marked moving and the page does not draw it (gate 4)");
+            check(waitFor([&] { return drawn(QStringLiteral("pull")) && standsOn(QStringLiteral("pull"), pull); }, 3000),
+                  "once the camera holds still it is drawn again, beside the arrow's new place");
+#ifdef _WIN32
+            pump(200);
+            capture(&window, outDir + "/chip-pull.png");
+#endif
+            const int revision = window.document().revision();
+            typeAndEnter(QStringLiteral("pull"), QStringLiteral("distance"), QStringLiteral("20"));
+            check(waitFor([&] { return window.document().revision() != revision; }, 3000),
+                  "Enter on the page pulls the face by what its field held");
+            if (undo) undo->trigger();
+            pump(250);
+        } else if (pull) {
+            check(false, "a large face could be picked to raise the pull arrow");
+        }
+
+        // --- Mitre: a field, Flip and a glued card ----------------------------------
+        MitreTool* mitre = window.findChild<MitreTool*>();
+        QAction* mitreAction = actionNamed(&window, QStringLiteral("Mitre end"));
+        check(mitre && mitreAction, "chips: the editor has its mitre chip");
+        if (mitre && mitreAction &&
+            pickFaceWhere(1000.0, 10000.0, [&] { return mitreAction->isEnabled(); })) {
+            mitreAction->trigger();
+            check(window.mitreEndActive() && waitFor([&] { return drawn(QStringLiteral("mitre")); }, 3000) &&
+                      standsOn(QStringLiteral("mitre"), mitre) && mitre->field()->isHidden() && mitre->flipButton()->isHidden(),
+                  "Mitre end opens its chip on the page, where the Qt chip stands, its field and Flip hidden");
+            check(chipField(QStringLiteral("mitre"), QStringLiteral("angle")) == mitre->field()->text() &&
+                      waitFor([&] { return chrome->claimsKeyboardFor(QStringLiteral("mitre")); }, 2000),
+                  "its angle is seeded with " + mitre->field()->text() + " and holds the keyboard");
+            int flips = 0;
+            const QMetaObject::Connection counted =
+                QObject::connect(mitre->flipButton(), &QPushButton::clicked, [&] { ++flips; });
+            js(page, "document.querySelector('[data-gesture=\"mitre\"] [data-part=\"flip\"]').click()");
+            check(waitFor([&] { return flips == 1; }, 2000), "the page's Flip clicks the Qt chip's own Flip");
+            QObject::disconnect(counted);
+#ifdef _WIN32
+            pump(200);
+            capture(&window, outDir + "/chip-mitre.png");
+#endif
+            js(page, "document.querySelector('[data-gesture=\"mitre\"] input[data-field=\"angle\"]').dispatchEvent("
+                     "new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+            check(waitFor([&] { return !window.mitreEndActive(); }, 2000), "Escape on the page cancels the mitre");
+        } else if (mitre && mitreAction) {
+            check(false, "a board end could be picked for a mitre");
+        }
+
+        // --- Re-measure ---------------------------------------------------------------
+        ReMeasureTool* remeasure = window.findChild<ReMeasureTool*>();
+        check(remeasure != nullptr, "chips: the editor has its re-measure chip");
+        if (remeasure) {
+            const int body = window.document().solids().front().id;
+            window.view()->setSelectedSolids({body});
+            pump(200);
+            const bool began = window.beginReMeasure(0);
+            check(began && waitFor([&] { return drawn(QStringLiteral("remeasure")); }, 3000) &&
+                      standsOn(QStringLiteral("remeasure"), remeasure) && remeasure->field()->isHidden(),
+                  "re-measuring a size opens its chip on the page, where the Qt chip stands");
+            check(chipField(QStringLiteral("remeasure"), QStringLiteral("size")) == remeasure->field()->text(),
+                  "seeded with the size it retypes - " + remeasure->field()->text());
+#ifdef _WIN32
+            pump(200);
+            capture(&window, outDir + "/chip-remeasure.png");
+#endif
+            const int revision = window.document().revision();
+            typeAndEnter(QStringLiteral("remeasure"), QStringLiteral("size"), QStringLiteral("250"));
+            check(waitFor([&] { return window.document().revision() != revision && !window.reMeasureActive(); }, 3000),
+                  "Enter on the page retypes the size");
+            if (undo) undo->trigger();
+            pump(250);
+        }
     }
+
 
     // --- Ctrl+D on a folder with mirroring on (T-064) ---------------------------------
     {

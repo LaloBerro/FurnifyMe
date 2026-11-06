@@ -1,5 +1,7 @@
 #include "PullArrow.h"
 
+#include "ChipFace.h"
+
 #include "MainWindow.h"
 #include "Measure.h"
 #include "ModelingOps.h"
@@ -284,6 +286,25 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
 
     myField = new QLineEdit(view);
     myField->setAttribute(Qt::WA_NoMousePropagation);
+
+    // The chrome page's face of this chip (Phase 4b): the label, the distance
+    // and the keys. Glued: it stands beside the arrow's head.
+    myChipFace = new ChipFace(QStringLiteral("pull"), this);
+    myChipFace->setGlued(true);
+    myChipFace->addField(QStringLiteral("distance"), myField);
+    myChipFace->setActions([this] { commit(); }, [this] { cancel(); });
+    myChipFace->setDescriber([this] {
+        return QVariantList{QVariantList{ChipFace::text(labelText(), QStringLiteral("label"))},
+                            QVariantList{myChipFace->field(QStringLiteral("distance"), QString(), labelText())},
+                            QVariantList{ChipFace::text(hintText(), QStringLiteral("hint"))}};
+    });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this] {
+        applySize();
+        syncFieldGeometry();
+        reposition();
+        update();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, &PullArrow::applySize);
     // An explicitly set font does not follow QApplication::setFont, so the
     // Theme broadcast has to put it back - see ExtrudePreview's constructor
     // for the full reason.
@@ -394,6 +415,8 @@ void PullArrow::begin(const TopoDS_Face& face, int bodyId)
         myField->blockSignals(false);
     }
     markInvalid(false);
+    // A new gesture: the page seeds its field again (R5).
+    if (myChipFace) myChipFace->reseed();
 
     reposition();
     show();
@@ -449,6 +472,9 @@ void PullArrow::onReleased(bool dragged)
 
 void PullArrow::updatePreview()
 {
+    // Whatever this changes - the value, the reason, the mark - reaches the
+    // page once the turn settles (Phase 4b).
+    if (myChipFace) myChipFace->notify();
     if (!myField || !myView || !myWindow || myFace.IsNull()) return;
 
     // Through Measure::parseLength, never QString::toDouble: the chip's label
@@ -568,8 +594,15 @@ void PullArrow::applySize()
     const QSize wanted = Theme::wholeDevicePixels(
         QSize(content + kPad * 2 + margin * 2,
               kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight + margin * 2));
-    if (wanted == size()) return;
-    setFixedSize(wanted);
+    if (myChipFace) myChipFace->notify();
+    QSize target = wanted;
+    // Drawn by the page, the card is the size the page measured (Phase 4a, R2).
+    if (myChipFace && myChipFace->drawnElsewhere()) {
+        if (!myChipFace->faceSize().isValid()) return;
+        target = Theme::wholeDevicePixels(myChipFace->faceSize());
+    }
+    if (target == size()) return;
+    setFixedSize(target);
     if (isVisible()) reposition();
 }
 
@@ -595,7 +628,7 @@ void PullArrow::syncFieldGeometry()
     // ExtrudePreview::syncFieldGeometry() and Toast::syncUndoGeometry().
     myField->setGeometry(fieldRect().translated(pos()));
     // DERIVED, not left to a hide event that may never arrive.
-    myField->setVisible(isVisible());
+    myField->setVisible(isVisible() && (!myChipFace || myChipFace->controlsShown()));
     myField->raise();
 }
 
@@ -638,6 +671,7 @@ void PullArrow::replace()
 void PullArrow::markInvalid(bool invalid)
 {
     myInvalid = invalid;
+    if (myChipFace) myChipFace->setInvalid(invalid);
     if (!myField) return;
     const QColor border = invalid ? Theme::danger() : Theme::accent();
     // border-radius: 0, for the reason spelled out on
@@ -658,6 +692,7 @@ QStringList PullArrow::paintedTexts() const
 
 void PullArrow::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     const QRect body = GestureChip::paintFrame(painter, this, myInvalid);
@@ -703,6 +738,8 @@ bool PullArrow::eventFilter(QObject* watched, QEvent* event)
     // chips share, in its ONE implementation now (KeyClaim.h; the branch
     // review retired the four hand-kept copies). What the keys DO stays
     // here: Enter commits, Escape cancels.
+    // A key aimed at the page's own field is the page's (Phase 4a, R3).
+    if (myChipFace && myChipFace->keyBelongsToPage(watched)) return QWidget::eventFilter(watched, event);
     int key = 0;
     if (KeyClaim::claim(this, watched, event, /*wantEnter=*/true,
                         /*exemptLineEdits=*/false, &key)) {

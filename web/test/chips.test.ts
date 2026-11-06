@@ -10,7 +10,7 @@ import { tick } from 'svelte';
 import Editor from '../src/editor/Editor.svelte';
 import { mockChrome } from '../src/editor/mock';
 import { mockTheme } from '../src/hub/mock';
-import { booleanFace, mockChips, slatsFace } from '../src/editor/chips/mock';
+import { booleanFace, extrudeFace, mockChips, slatsFace } from '../src/editor/chips/mock';
 import type { Face } from '../src/editor/chips/api';
 
 // jsdom lays nothing out: a chip's content measures 300 x 56 here.
@@ -29,8 +29,8 @@ beforeAll(() => {
 afterEach(() => cleanup());
 
 const q = (sel: string) => document.querySelector(sel) as HTMLElement | null;
-const card = (name: string) => q(`[data-chip="${name}"]`);
-const fieldNamed = (id: string) => q(`[data-chip] input[data-field="${id}"]`) as HTMLInputElement;
+const card = (name: string) => q(`[data-gesture="${name}"]`);
+const fieldNamed = (id: string) => q(`[data-gesture] input[data-field="${id}"]`) as HTMLInputElement;
 
 async function mount(faces: Record<string, Face>, rects: Record<string, { w: number; h: number }>) {
   const chrome = mockChrome();
@@ -44,8 +44,15 @@ async function mount(faces: Record<string, Face>, rects: Record<string, { w: num
   return { chrome, chips };
 }
 
-async function moveCard(chrome: ReturnType<typeof mockChrome>, name: string, r: { w: number; h: number; shown?: boolean }) {
-  chrome.cards = { ...chrome.cards, [name]: { x: 120, y: 410, w: r.w, h: r.h, shown: r.shown ?? true, chip: true } };
+async function moveCard(
+  chrome: ReturnType<typeof mockChrome>,
+  name: string,
+  r: { w: number; h: number; shown?: boolean; moving?: boolean },
+) {
+  chrome.cards = {
+    ...chrome.cards,
+    [name]: { x: 120, y: 410, w: r.w, h: r.h, shown: r.shown ?? true, chip: true, moving: r.moving ?? false },
+  };
   chrome.cardsChanged.emit();
   await tick();
   await tick();
@@ -72,6 +79,16 @@ describe('a gesture chip', () => {
     await moveCard(chrome, 'boolean', { w: 200, h: 40 });
     expect(chips.calls.filter((c) => c.op === 'reportSize').length).toBe(2);
     expect(card('boolean')!.style.visibility).toBe('hidden');
+  });
+
+  it('is not drawn while the camera moves, and takes no press (a glued chip, Phase 4b)', async () => {
+    const { chrome } = await mount({ boolean: booleanFace() }, { boolean: { w: kW, h: kH } });
+    await moveCard(chrome, 'boolean', { w: kW, h: kH, moving: true });
+    expect(card('boolean')!.style.visibility).toBe('hidden');
+    expect(card('boolean')!.hasAttribute('data-hit')).toBe(false);
+    await moveCard(chrome, 'boolean', { w: kW, h: kH, moving: false });
+    expect(card('boolean')!.style.visibility).toBe('');
+    expect(card('boolean')!.hasAttribute('data-hit')).toBe(true);
   });
 
   it('draws nothing while its Qt chip is hidden', async () => {
@@ -103,6 +120,19 @@ describe('a gesture chip', () => {
     chips.push({ boolean: booleanFace(true) });
     await tick();
     expect(q('[data-part="keep"]')!.getAttribute('aria-pressed')).toBe('true');
+  });
+});
+
+describe('the extrude chip', () => {
+  it('draws its label row, a field named for it with no label of its own, and the keys', async () => {
+    await mount({ extrude: extrudeFace(1, '10') }, { extrude: { w: kW, h: kH } });
+    await tick();
+    const texts = [...card('extrude')!.querySelectorAll('.text')].map((n) => n.textContent);
+    expect(texts).toEqual(['Extrude height (mm)', 'Enter applies — Esc cancels']);
+    expect(card('extrude')!.querySelectorAll('label .label').length).toBe(0);
+    expect(fieldNamed('height').getAttribute('aria-label')).toBe('Extrude height (mm)');
+    expect(fieldNamed('height').value).toBe('10');
+    expect(document.activeElement).toBe(fieldNamed('height'));
   });
 });
 

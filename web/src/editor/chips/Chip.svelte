@@ -41,6 +41,9 @@
       rect.h >= measured.h &&
       rect.h - measured.h <= kRounding,
   );
+  // On screen: at its own size, and not a glued chip mid camera move (Phase
+  // 4b) - one that trails the model a frame and moves the mask every frame.
+  const drawn = $derived(settled && !rect.moving);
 
   // What each field holds on the page, by id.
   let values: Record<string, string> = $state({});
@@ -72,7 +75,7 @@
   // hidden until its rectangle carries its size).
   let pendingFocus = $state('');
   $effect(() => {
-    if (!settled || !pendingFocus) return;
+    if (!drawn || !pendingFocus) return;
     const target = pendingFocus;
     pendingFocus = '';
     tick().then(() => {
@@ -158,13 +161,13 @@
 <div
   class="chip-card"
   class:invalid={face.invalid}
-  data-chip={name}
-  data-hit={settled ? '' : undefined}
+  data-gesture={name}
+  data-hit={drawn ? '' : undefined}
   style:left="{rect.x}px"
   style:top="{rect.y}px"
   style:width="{rect.w}px"
   style:height="{rect.h}px"
-  style:visibility={settled ? undefined : 'hidden'}
+  style:visibility={drawn ? undefined : 'hidden'}
 >
   <div class="chip-content" bind:this={content}>
     {#each face.rows as row, r (r)}
@@ -174,12 +177,12 @@
             <span class="text {part.tone}">{part.text}</span>
           {:else if part.kind === 'field'}
             <label class="field">
-              <span class="label">{part.label}</span>
+              {#if part.label}<span class="label">{part.label}</span>{/if}
               <input
                 type="text"
                 data-field={part.id}
                 title={part.tip}
-                aria-label={part.label}
+                aria-label={part.name || part.label}
                 spellcheck="false"
                 autocomplete="off"
                 disabled={!part.enabled}
@@ -269,8 +272,11 @@
     color: var(--text-muted);
     font-size: var(--font-badge);
   }
+  /* A value beside its label (Fillet/Chamfer's "R 20 mm"): at the row's far
+     end, in the accent's text ink, as the Qt chip paints it. */
   .text.value {
-    font-size: var(--font-body);
+    margin-left: auto;
+    color: var(--accent-text);
   }
   .text.danger {
     color: var(--danger-text);
@@ -280,6 +286,24 @@
     display: flex;
     align-items: center;
     gap: 4px;
+  }
+  /* A field alone in its row is the card's one number (Extrude, Pull): it
+     takes the row's width, as the Qt chips' fields span their card. */
+  .field:only-child {
+    flex: 1;
+  }
+  .field:only-child input {
+    width: 100%;
+    min-width: 180px;
+  }
+  .text.hint:only-child {
+    margin-left: 0;
+  }
+  /* A value on a row of its own is the card's live figure (Move's "120 mm"),
+     in body type where the Qt chip paints it. */
+  .text.value:only-child {
+    margin-left: 0;
+    font-size: var(--font-body);
   }
   input {
     box-sizing: border-box;

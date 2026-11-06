@@ -1,5 +1,7 @@
 #include "TransformGizmo.h"
 
+#include "ChipFace.h"
+
 #include "MainWindow.h"
 #include "Measure.h"
 #include "ModelingOps.h"
@@ -442,6 +444,28 @@ MoveTool::MoveTool(MainWindow* window, OcctViewWidget* view)
     setAttribute(Qt::WA_TransparentForMouseEvents);
     // See Theme::makeSurfaceTransparent()'s own comment.
     Theme::makeSurfaceTransparent(this);
+
+    // The chrome page's face of this chip (Phase 4b): the tool and axis, the
+    // live value and its one key. Nothing to type, so no field and no Enter.
+    // Glued beside the dragged arm - it hides while the CAMERA moves, never
+    // while the drag does, which is the whole reason it is up.
+    myChipFace = new ChipFace(QStringLiteral("move"), this);
+    myChipFace->setGlued(true);
+    myChipFace->setActions([] {}, [this] { cancel(); });
+    myChipFace->setDescriber([this] {
+        return QVariantList{QVariantList{ChipFace::text(labelText(), QStringLiteral("label"))},
+                            QVariantList{ChipFace::text(valueText(), QStringLiteral("value"))},
+                            QVariantList{ChipFace::text(hintText(), QStringLiteral("hint"))}};
+    });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this] {
+        applySize();
+        reposition();
+        update();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, [this] {
+        applySize();
+        reposition();
+    });
     applySize();
     hide();
 
@@ -723,6 +747,8 @@ bool MoveTool::dragTransform(gp_Trsf& out) const
 
 void MoveTool::updatePreview()
 {
+    // The value moved: the page's face follows once the turn settles.
+    if (myChipFace) myChipFace->notify();
     if (!myWindow || !myView || myBodyId <= 0 || myAxis < 0) return;
 
     // The SAME transform the commit will take, from the one derivation
@@ -890,6 +916,12 @@ void MoveTool::applySize()
          bodyMetrics.horizontalAdvance(
              QString::fromStdString(Measure::formatLength(-1234.5)))});
     const int cardWidth = std::max(kMinWidth, textWidth + kPad * 2);
+    if (myChipFace) myChipFace->notify();
+    // Drawn by the page, the card is the size the page measured (Phase 4a, R2).
+    if (myChipFace && myChipFace->drawnElsewhere()) {
+        if (myChipFace->faceSize().isValid()) setFixedSize(Theme::wholeDevicePixels(myChipFace->faceSize()));
+        return;
+    }
     setFixedSize(Theme::wholeDevicePixels(
         QSize(cardWidth + margin * 2,
               kPad * 2 + kLabelHeight + kValueHeight + kHintGap + kHintHeight + margin * 2)));
@@ -897,6 +929,7 @@ void MoveTool::applySize()
 
 void MoveTool::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     const QRect body = GestureChip::paintFrame(painter, this);

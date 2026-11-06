@@ -1,5 +1,7 @@
 #include "MitreTool.h"
 
+#include "ChipFace.h"
+
 #include "GestureChip.h"
 #include "KeyClaim.h"
 #include "MainWindow.h"
@@ -59,6 +61,29 @@ MitreTool::MitreTool(MainWindow* window, OcctViewWidget* view)
     // exactly as it was, caret and all.
     myFlipButton->setFocusPolicy(Qt::NoFocus);
     connect(myFlipButton, &QPushButton::clicked, this, [this] { flip(); });
+
+    // The chrome page's face of this chip (Phase 4b): the angle, Flip, the
+    // keys and the reason. Glued beside the dial.
+    myChipFace = new ChipFace(QStringLiteral("mitre"), this);
+    myChipFace->setGlued(true);
+    myChipFace->addField(QStringLiteral("angle"), myField);
+    myChipFace->addButton(QStringLiteral("flip"), myFlipButton);
+    myChipFace->setActions([this] { commit(); }, [this] { cancel(); });
+    myChipFace->setDescriber([this] {
+        const QVariantList row{myChipFace->field(QStringLiteral("angle"), labelText()),
+                               myChipFace->button(QStringLiteral("flip")),
+                               ChipFace::text(hintText(), QStringLiteral("hint"))};
+        QVariantList rows;
+        rows.append(QVariant(row));
+        if (!myReason.isEmpty()) rows.append(QVariant(QVariantList{ChipFace::text(myReason, QStringLiteral("danger"))}));
+        return rows;
+    });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this] {
+        applySize();
+        syncControls();
+        update();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, &MitreTool::applySize);
 
     applyControlStyles();
     applySize();
@@ -141,6 +166,8 @@ void MitreTool::begin()
         myField->blockSignals(false);
     }
     applySideTooltips();
+    // A new gesture: the page seeds the angle and focuses it (R5).
+    if (myChipFace) myChipFace->reseed(QStringLiteral("angle"));
     updatePreview();
 
     applySize();
@@ -206,6 +233,9 @@ void MitreTool::pushDial()
 
 void MitreTool::updatePreview()
 {
+    // Whatever this changes - the value, the reason, the mark - reaches the
+    // page once the turn settles (Phase 4b).
+    if (myChipFace) myChipFace->notify();
     if (!myActive || !myWindow || !myView || !myField) return;
 
     double typed = 0.0;
@@ -379,7 +409,16 @@ void MitreTool::applySize()
         w = std::max(w, QFontMetrics(Theme::badgeFont()).horizontalAdvance(myReason) + kPad * 2);
         h += kReasonGap + kReasonHeight;
     }
-    const QSize size = Theme::wholeDevicePixels(QSize(w, h));
+    if (myChipFace) myChipFace->notify();
+    QSize size = Theme::wholeDevicePixels(QSize(w, h));
+    // Drawn by the page, the card is the size the page measured (Phase 4a, R2).
+    if (myChipFace && myChipFace->drawnElsewhere()) {
+        if (!myChipFace->faceSize().isValid()) {
+            syncControls();
+            return;
+        }
+        size = Theme::wholeDevicePixels(myChipFace->faceSize());
+    }
     if (size != this->size()) {
         setFixedSize(size);
         reposition();
@@ -406,6 +445,7 @@ void MitreTool::applyControlStyles()
 void MitreTool::markInvalid(bool invalid)
 {
     myInvalid = invalid;
+    if (myChipFace) myChipFace->setInvalid(invalid);
     if (!myField) return;
     const QColor border = invalid ? Theme::danger() : Theme::accent();
     myField->setStyleSheet(QStringLiteral("QLineEdit { background-color: %1; color: %2; "
@@ -418,15 +458,17 @@ void MitreTool::syncControls()
 {
     // Sibling geometry is this card's local rects, translated by pos() - the
     // ExtrudePreview idiom - and visibility is DERIVED from the card's own.
+    // Drawn by the page, the page's controls are the ones on screen.
+    const bool shown = isVisible() && (!myChipFace || myChipFace->controlsShown());
     if (myField) {
         myField->setGeometry(fieldRect().translated(pos()));
-        myField->setVisible(isVisible());
-        if (isVisible()) myField->raise();
+        myField->setVisible(shown);
+        if (shown) myField->raise();
     }
     if (myFlipButton) {
         myFlipButton->setGeometry(flipRect().translated(pos()));
-        myFlipButton->setVisible(isVisible());
-        if (isVisible()) myFlipButton->raise();
+        myFlipButton->setVisible(shown);
+        if (shown) myFlipButton->raise();
     }
 }
 
@@ -465,6 +507,7 @@ void MitreTool::replace()
 
 void MitreTool::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     GestureChip::paintFrame(painter, this, myInvalid);
@@ -517,6 +560,8 @@ bool MitreTool::eventFilter(QObject* watched, QEvent* event)
     // whatever holds focus - the one KeyClaim implementation every gesture
     // chip shares. Not exempting line edits: Enter IN the angle field is
     // exactly what the claim routes to commit().
+    // A key aimed at the page's own field is the page's (Phase 4a, R3).
+    if (myChipFace && myChipFace->keyBelongsToPage(watched)) return QWidget::eventFilter(watched, event);
     int key = 0;
     if (KeyClaim::claim(this, watched, event, /*wantEnter=*/true,
                         /*exemptLineEdits=*/false, &key)) {

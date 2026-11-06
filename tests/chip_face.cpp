@@ -85,6 +85,10 @@ int main(int argc, char* argv[])
               w.value(QStringLiteral("label")).toString() == QLatin1String("Width") &&
               w.value(QStringLiteral("tip")).toString().startsWith(QLatin1String("How wide")),
           "a field part carries the Qt field's value, its label and its tooltip");
+    check(w.value(QStringLiteral("name")).toString() == QLatin1String("Width") &&
+              face.field(QStringLiteral("width"), QString(), QStringLiteral("Extrude height (mm)"))
+                      .value(QStringLiteral("name")) == QStringLiteral("Extrude height (mm)"),
+          "a field is named by its label, or by the name given for one that shows none");
     const QVariantMap fl = partNamed(f, QStringLiteral("flip"));
     check(fl.value(QStringLiteral("kind")).toString() == QLatin1String("button") &&
               fl.value(QStringLiteral("text")).toString() == QLatin1String("Flip") &&

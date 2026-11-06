@@ -114,4 +114,6 @@ export interface CardRect {
   shown?: boolean;
   // A gesture chip's own Qt widget, not a slot (Phase 4a, ruling R2).
   chip?: boolean;
+  // A glued chip while the camera moves (Phase 4b): not drawn, no press.
+  moving?: boolean;
 }

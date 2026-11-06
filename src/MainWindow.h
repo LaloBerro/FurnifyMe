@@ -95,6 +95,9 @@ public:
     // (Phase 3i); null until useHtmlChrome().
     class ShellBridge* shellBridge() const { return myShellBridge; }
     class ChipsBridge* chipsBridge() const { return myChipsBridge; }
+    // Every gesture chip's face the chrome page draws (Phases 4a, 4b), in one
+    // list so a chip added later is wired and handed over in one place.
+    std::vector<class ChipFace*> chipFaces() const;
     // Not = default (M1): a drawer drag still live when the window dies is
     // ended HERE, while the document and every member it reads are alive.
     // Left to member order, ~QWidget's own hide would reach

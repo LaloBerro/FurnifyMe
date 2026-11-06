@@ -9,6 +9,7 @@
 #include "WebHost.h"
 
 #include <QApplication>
+#include <QTimer>
 #include <QEvent>
 #include <QFocusEvent>
 #include <QKeyEvent>
@@ -176,6 +177,22 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     myHost->registerObject(QStringLiteral("chrome"), myBridge);
     myHost->registerObject(QStringLiteral("theme"), myTheme);
 
+    // A glued chip leaves the page while the camera moves and comes back
+    // once it has held still this long (Phase 4b, ruling R1).
+    myCameraSettle = new QTimer(this);
+    myCameraSettle->setSingleShot(true);
+    myCameraSettle->setInterval(150);
+    connect(myCameraSettle, &QTimer::timeout, this, [this] {
+        myCameraMoving = false;
+        syncCards();
+    });
+    connect(viewport, &OcctViewWidget::cameraChanged, this, [this] {
+        myCameraSettle->start();
+        if (myCameraMoving) return;
+        myCameraMoving = true;
+        syncCards();
+    });
+
     // Until the page says otherwise, nothing of it takes the pointer.
     applyMask();
     connect(myBridge, &ChromeBridge::hitRectsChanged, this, &EditorChrome::applyMask);
@@ -253,9 +270,11 @@ void EditorChrome::syncCards()
         if (!face || !face->chip()) continue;
         QVariantMap card = rectMap(face->chip()->geometry());
         const bool shown = face->chip()->isVisible();
-        chipShown = chipShown || (shown && face->drawnElsewhere());
+        const bool moving = face->glued() && myCameraMoving;
+        chipShown = chipShown || (shown && face->drawnElsewhere() && !moving);
         card.insert(QStringLiteral("shown"), shown);
         card.insert(QStringLiteral("chip"), true);
+        card.insert(QStringLiteral("moving"), moving);
         if (myCardShown.value(face->name()) && !shown) gone << face->name();
         myCardShown.insert(face->name(), shown);
         map.insert(face->name(), card);
@@ -285,7 +304,11 @@ void EditorChrome::syncCards()
     // raised itself (Phase 4a): the page's view goes up whenever one shows
     // or moves. Only its drawn rectangles are painted, so nothing else is
     // covered.
-    if (chipShown) myHost->view()->raise();
+    if (chipShown) {
+        QWidget* view = myHost->view();
+        const QObjectList& siblings = view->parentWidget()->children();
+        if (siblings.isEmpty() || siblings.last() != view) view->raise();
+    }
     myBridge->setCardMap(map);
 }
 

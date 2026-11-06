@@ -236,6 +236,10 @@ private:
     // viewport at once, without waiting for the page to draw and report.
     bool myAsking = false;
     bool myMenuOpen = false;
+    // The camera moved within the last kCameraSettleMs (Phase 4b): a glued
+    // chip is not drawn until it holds still.
+    bool myCameraMoving = false;
+    class QTimer* myCameraSettle = nullptr;
     bool myHoldsKeyboard = false;
     // How many of the page's fields hold the keyboard. Moving from field A
     // to field B arrives as B's claim THEN A's release (the browser's

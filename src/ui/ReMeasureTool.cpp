@@ -1,5 +1,7 @@
 #include "ReMeasureTool.h"
 
+#include "ChipFace.h"
+
 #include "GestureChip.h"
 #include "KeyClaim.h"
 #include "MainWindow.h"
@@ -46,6 +48,27 @@ ReMeasureTool::ReMeasureTool(MainWindow* window, OcctViewWidget* view)
     myField = new QLineEdit(view);
     myField->setAttribute(Qt::WA_NoMousePropagation);
     connect(myField, &QLineEdit::textChanged, this, [this](const QString&) { updatePreview(); });
+
+    // The chrome page's face of this chip (Phase 4b): the size's name and
+    // field, the keys and the reason. Glued beside the number it retypes.
+    myChipFace = new ChipFace(QStringLiteral("remeasure"), this);
+    myChipFace->setGlued(true);
+    myChipFace->addField(QStringLiteral("size"), myField);
+    myChipFace->setActions([this] { commit(); }, [this] { cancel(); });
+    myChipFace->setDescriber([this] {
+        const QVariantList row{myChipFace->field(QStringLiteral("size"), labelText()),
+                               ChipFace::text(hintText(), QStringLiteral("hint"))};
+        QVariantList rows;
+        rows.append(QVariant(row));
+        if (!myReason.isEmpty()) rows.append(QVariant(QVariantList{ChipFace::text(myReason, QStringLiteral("danger"))}));
+        return rows;
+    });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this] {
+        applySize();
+        syncControls();
+        update();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, &ReMeasureTool::applySize);
 
     applyControlStyles();
     applySize();
@@ -123,6 +146,8 @@ void ReMeasureTool::begin()
                                      KeyClaim::hintText()));
     }
 
+    // A new gesture: the page seeds the size and focuses it (R5).
+    if (myChipFace) myChipFace->reseed(QStringLiteral("size"));
     applySize();
     show();
     raise();
@@ -171,6 +196,9 @@ void ReMeasureTool::anchorChanged()
 
 void ReMeasureTool::updatePreview()
 {
+    // Whatever this changes - the value, the reason, the mark - reaches the
+    // page once the turn settles (Phase 4b).
+    if (myChipFace) myChipFace->notify();
     if (!myActive || !myWindow || !myView || !myField) return;
 
     double typed = 0.0;
@@ -306,7 +334,16 @@ void ReMeasureTool::applySize()
         w = std::max(w, QFontMetrics(Theme::badgeFont()).horizontalAdvance(myReason) + kPad * 2);
         h += kReasonGap + kReasonHeight;
     }
-    const QSize wanted = Theme::wholeDevicePixels(QSize(w, h));
+    if (myChipFace) myChipFace->notify();
+    QSize wanted = Theme::wholeDevicePixels(QSize(w, h));
+    // Drawn by the page, the card is the size the page measured (Phase 4a, R2).
+    if (myChipFace && myChipFace->drawnElsewhere()) {
+        if (!myChipFace->faceSize().isValid()) {
+            syncControls();
+            return;
+        }
+        wanted = Theme::wholeDevicePixels(myChipFace->faceSize());
+    }
     if (wanted != QWidget::size()) {
         setFixedSize(wanted);
         reposition();
@@ -323,6 +360,7 @@ void ReMeasureTool::applyControlStyles()
 void ReMeasureTool::markInvalid(bool invalid)
 {
     myInvalid = invalid;
+    if (myChipFace) myChipFace->setInvalid(invalid);
     if (!myField) return;
     const QColor border = invalid ? Theme::danger() : Theme::accent();
     myField->setStyleSheet(QStringLiteral("QLineEdit { background-color: %1; color: %2; "
@@ -337,8 +375,10 @@ void ReMeasureTool::syncControls()
     // ExtrudePreview idiom - and visibility is DERIVED from the card's own.
     if (!myField) return;
     myField->setGeometry(fieldRect().translated(pos()));
-    myField->setVisible(isVisible());
-    if (isVisible()) myField->raise();
+    // Drawn by the page, the page's field is the one on screen.
+    const bool shown = isVisible() && (!myChipFace || myChipFace->controlsShown());
+    myField->setVisible(shown);
+    if (shown) myField->raise();
 }
 
 void ReMeasureTool::reposition()
@@ -369,6 +409,7 @@ void ReMeasureTool::replace()
 
 void ReMeasureTool::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     GestureChip::paintFrame(painter, this, myInvalid);
@@ -420,6 +461,8 @@ bool ReMeasureTool::eventFilter(QObject* watched, QEvent* event)
     // whatever holds focus - the one KeyClaim implementation every gesture
     // chip shares. Not exempting line edits: Enter IN the size field is
     // exactly what the claim routes to commit().
+    // A key aimed at the page's own field is the page's (Phase 4a, R3).
+    if (myChipFace && myChipFace->keyBelongsToPage(watched)) return QWidget::eventFilter(watched, event);
     int key = 0;
     if (KeyClaim::claim(this, watched, event, /*wantEnter=*/true,
                         /*exemptLineEdits=*/false, &key)) {

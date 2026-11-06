@@ -1,5 +1,7 @@
 #include "ExtrudePreview.h"
 
+#include "ChipFace.h"
+
 #include "MainWindow.h"
 #include "Measure.h"
 #include "ModelingOps.h"
@@ -58,6 +60,25 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // the viewport behind this field and trigger a real pick underneath the
     // panel.
     myField->setAttribute(Qt::WA_NoMousePropagation);
+
+    // The chrome page's face of this panel (Phase 4b): the label, the height
+    // field and the keys, in the rows it paints them in.
+    myChipFace = new ChipFace(QStringLiteral("extrude"), this);
+    myChipFace->addField(QStringLiteral("height"), myField);
+    myChipFace->setActions([this] { commit(); }, [this] { cancel(); });
+    myChipFace->setDescriber([this] {
+        return QVariantList{QVariantList{ChipFace::text(labelText(), QStringLiteral("label"))},
+                            QVariantList{myChipFace->field(QStringLiteral("height"), QString(), labelText())},
+                            QVariantList{ChipFace::text(hintText(), QStringLiteral("hint"))}};
+    });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this] {
+        applyTheme();
+        replace();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, [this] {
+        applyTheme();
+        replace();
+    });
     // The height the user types is body text, same as everything else they
     // read - set explicitly rather than left to inherit, since it is the one
     // widget on this panel the user actually types into. An explicit font
@@ -136,6 +157,8 @@ void ExtrudePreview::begin(const TopoDS_Face& face)
         myField->setFocus(Qt::OtherFocusReason);
         myField->selectAll();
     }
+    // A new gesture: the page seeds its field and focuses it (R5).
+    if (myChipFace) myChipFace->reseed(QStringLiteral("height"));
     updatePreview();
 }
 
@@ -321,7 +344,8 @@ void ExtrudePreview::syncFieldGeometry()
     myField->setGeometry(fieldRect().translated(pos()));
     // Visibility is DERIVED here, not left to a hide event that may never
     // arrive - see WalkthroughPanel::syncSkipGeometry() for why that matters.
-    myField->setVisible(isVisible());
+    // Drawn by the page, the page's field is the one on screen.
+    myField->setVisible(isVisible() && (!myChipFace || myChipFace->controlsShown()));
     myField->raise();
 }
 
@@ -389,6 +413,7 @@ void ExtrudePreview::commit()
 void ExtrudePreview::markInvalid(bool invalid)
 {
     myInvalid = invalid;
+    if (myChipFace) myChipFace->setInvalid(invalid);
     if (!myField) return;
     const QColor border = invalid ? Theme::danger() : Theme::accent();
     // border-radius: 0, not 4. This field is a SIBLING parented straight to
@@ -432,11 +457,16 @@ void ExtrudePreview::applyTheme()
     // Through Theme::wholeDevicePixels(), the same as PullArrow and the
     // round/flatten chip - see Theme.h. This card is anchored rather than
     // tracking a projected point, so its position half is the overlay's
-    // business, but its size is its own.
-    setFixedSize(Theme::wholeDevicePixels(
-        QSize(std::max(kWidth, content + kPad * 2) + margin * 2,
-              kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
-                  margin * 2)));
+    // business, but its size is its own - or, drawn by the page, the size
+    // the page measured (Phase 4a's ruling R2).
+    if (myChipFace && myChipFace->drawnElsewhere() && myChipFace->faceSize().isValid())
+        setFixedSize(Theme::wholeDevicePixels(myChipFace->faceSize()));
+    else if (!myChipFace || !myChipFace->drawnElsewhere())
+        setFixedSize(Theme::wholeDevicePixels(
+            QSize(std::max(kWidth, content + kPad * 2) + margin * 2,
+                  kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
+                      margin * 2)));
+    if (myChipFace) myChipFace->notify();
 
     if (myField) myField->setFont(Theme::bodyFont());
     // The field is a sibling positioned against this card's rectangle, which
@@ -452,6 +482,7 @@ QStringList ExtrudePreview::paintedTexts() const
 
 void ExtrudePreview::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
@@ -525,6 +556,8 @@ bool ExtrudePreview::eventFilter(QObject* watched, QEvent* event)
     // chips share, in its ONE implementation now (KeyClaim.h; the branch
     // review retired the four hand-kept copies). What the keys DO stays
     // here: Enter commits, Escape cancels.
+    // A key aimed at the page's own field is the page's (Phase 4a, R3).
+    if (myChipFace && myChipFace->keyBelongsToPage(watched)) return QWidget::eventFilter(watched, event);
     int key = 0;
     if (KeyClaim::claim(this, watched, event, /*wantEnter=*/true,
                         /*exemptLineEdits=*/false, &key)) {

@@ -22,6 +22,7 @@
 class MainWindow;
 class OcctViewWidget;
 class QHideEvent;
+class ChipFace;
 class QLineEdit;
 class QMoveEvent;
 class QPushButton;
@@ -77,6 +78,8 @@ public:
     void replace();
 
     QLineEdit* field() const;
+    // What the chrome page draws in this chip's place (migration Phase 4b).
+    ChipFace* face() const { return myChipFace; }
     QPushButton* flipButton() const;
 
     // Every string this chip paints, for gui_smoke's banned-word sweep - read
@@ -162,4 +165,5 @@ private:
 
     QPointer<QLineEdit> myField;       // siblings, not children - see the class comment
     QPointer<QPushButton> myFlipButton;
+    ChipFace* myChipFace = nullptr;
 };

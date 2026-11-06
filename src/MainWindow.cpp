@@ -10517,6 +10517,22 @@ std::vector<SettingsEdits::Row> MainWindow::settingsRows() const
     return rows;
 }
 
+std::vector<ChipFace*> MainWindow::chipFaces() const
+{
+    std::vector<ChipFace*> faces;
+    for (ChipFace* face : {myExtrudePreview ? myExtrudePreview->face() : nullptr,
+                           myPullArrow ? myPullArrow->face() : nullptr,
+                           myBevelArrow ? myBevelArrow->face() : nullptr,
+                           myMitreTool ? myMitreTool->face() : nullptr,
+                           myReMeasureTool ? myReMeasureTool->face() : nullptr,
+                           myMoveTool ? myMoveTool->face() : nullptr,
+                           myBooleanTool ? myBooleanTool->face() : nullptr,
+                           mySlatsTool ? mySlatsTool->face() : nullptr}) {
+        if (face) faces.push_back(face);
+    }
+    return faces;
+}
+
 void MainWindow::useHtmlChrome()
 {
 #ifdef FURNIFYME_WEB_UI
@@ -10637,10 +10653,7 @@ void MainWindow::useHtmlChrome()
         // The gesture chips (Phase 4a): drawn by the page while it can, by
         // themselves again the moment it cannot - mid-gesture too, with what
         // the page's fields had mirrored into theirs.
-        for (ChipFace* face : {myBooleanTool ? myBooleanTool->face() : nullptr,
-                               mySlatsTool ? mySlatsTool->face() : nullptr}) {
-            if (face) face->setDrawnElsewhere(live);
-        }
+        for (ChipFace* face : chipFaces()) face->setDrawnElsewhere(live);
         syncHtmlQuestion();
         raiseQuestions();
         updateActions();
@@ -10888,9 +10901,7 @@ void MainWindow::useHtmlChrome()
     // face while it is live (ruling R2). A key aimed at the page passes the
     // chip's claim only while a field of THAT chip holds the keyboard (R3).
     myChipsBridge = new ChipsBridge(myHtmlChrome);
-    for (ChipFace* face : {myBooleanTool ? myBooleanTool->face() : nullptr,
-                           mySlatsTool ? mySlatsTool->face() : nullptr}) {
-        if (!face) continue;
+    for (ChipFace* face : chipFaces()) {
         myChipsBridge->add(face);
         myHtmlChrome->addChip(face);
         const QString name = face->name();

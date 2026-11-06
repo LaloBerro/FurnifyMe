@@ -20,6 +20,7 @@
 class MainWindow;
 class OcctViewWidget;
 class QHideEvent;
+class ChipFace;
 class QLineEdit;
 class QMoveEvent;
 class QResizeEvent;
@@ -78,6 +79,8 @@ public:
     void replace();
 
     QLineEdit* field() const;
+    // What the chrome page draws in this chip's place (migration Phase 4b).
+    ChipFace* face() const { return myChipFace; }
 
     // Every string this chip paints, for gui_smoke's banned-word sweep - read
     // from the same functions paintEvent() draws through.
@@ -154,4 +157,5 @@ private:
     int myPreviewAnchor = -1;
 
     QPointer<QLineEdit> myField;   // a sibling, not a child - see the class comment
+    ChipFace* myChipFace = nullptr;
 };

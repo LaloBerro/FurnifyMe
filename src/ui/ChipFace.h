@@ -57,7 +57,10 @@ public:
     // "muted" or "danger". field(): a registered field with its label.
     // button(): a registered button; a checkable one is a "toggle".
     static QVariantMap text(const QString& text, const QString& tone = QStringLiteral("label"));
-    QVariantMap field(const QString& id, const QString& label) const;
+    // `name` is what a screen reader calls the field when it shows no label
+    // of its own (Extrude's sits under the card's label row); it defaults to
+    // the label.
+    QVariantMap field(const QString& id, const QString& label, const QString& name = QString()) const;
     QVariantMap button(const QString& id) const;
 
     // {rows, invalid, seed, focus}.
@@ -93,6 +96,13 @@ public:
     // field of THIS chip on the page holds the keyboard. While both hold, a
     // key aimed at the page passes the chip's claim to the page's field.
     void setPageKeys(QWidget* view, std::function<bool()> holds);
+
+    // A chip that stands beside a point on the model (Phase 4b: Pull,
+    // Fillet/Chamfer, Move, Mitre, Re-measure). The page does not draw it
+    // while the camera moves - it would trail the model by a frame and its
+    // rectangle would move the view's mask every frame (the spike's gate 4).
+    void setGlued(bool glued) { myGlued = glued; }
+    bool glued() const { return myGlued; }
     bool keyBelongsToPage(QObject* watched) const;
 
 signals:
@@ -115,6 +125,7 @@ private:
     bool myDrawnElsewhere = false;
     bool myWasMouseTransparent = false;
     QSize myFaceSize;
+    bool myGlued = false;
     QPointer<QWidget> myPageView;
     std::function<bool()> myPageHolds;
 };

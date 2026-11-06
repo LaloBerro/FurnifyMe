@@ -43,6 +43,19 @@ export function booleanFace(keep = false): Face {
   };
 }
 
+export function extrudeFace(seed = 1, height = '10'): Face {
+  return {
+    rows: [
+      [{ kind: 'text', text: 'Extrude height (mm)', tone: 'label' }],
+      [{ kind: 'field', id: 'height', label: '', name: 'Extrude height (mm)', value: height, tip: '', enabled: true }],
+      [{ kind: 'text', text: 'Enter applies — Esc cancels', tone: 'hint' }],
+    ],
+    invalid: false,
+    seed,
+    focus: 'height',
+  };
+}
+
 export function slatsFace(seed = 1, width = '40', reason = ''): Face {
   const rows: Face['rows'] = [
     [

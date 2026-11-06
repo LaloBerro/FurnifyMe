@@ -14,6 +14,7 @@
 
 #include <vector>
 
+class ChipFace;
 class MainWindow;
 class OcctViewWidget;
 class QHideEvent;
@@ -349,6 +350,9 @@ public:
     // Every string this chip paints, for gui_smoke's banned-word sweep.
     QStringList paintedTexts() const;
 
+    // What the chrome page draws in this chip's place (migration Phase 4b).
+    ChipFace* face() const { return myChipFace; }
+
     // The body the gizmo is standing on, or 0.
     int bodyId() const { return myBodyId; }
     // EVERY body this gizmo is standing on. One drag moves, turns or scales
@@ -410,6 +414,7 @@ private:
 
     MainWindow* myWindow = nullptr;
     OcctViewWidget* myView = nullptr;
+    ChipFace* myChipFace = nullptr;
 
     // The body the gizmo stands on, re-derived from the live predicate on
     // every refresh() rather than trusted across a rebuild.

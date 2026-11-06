@@ -43,13 +43,14 @@ QVariantMap ChipFace::text(const QString& text, const QString& tone)
             {QStringLiteral("tone"), tone}};
 }
 
-QVariantMap ChipFace::field(const QString& id, const QString& label) const
+QVariantMap ChipFace::field(const QString& id, const QString& label, const QString& name) const
 {
     const QLineEdit* field = myFields.value(id);
     if (!field) return {};
     return {{QStringLiteral("kind"), QStringLiteral("field")},
             {QStringLiteral("id"), id},
             {QStringLiteral("label"), label},
+            {QStringLiteral("name"), name.isEmpty() ? label : name},
             {QStringLiteral("value"), field->text()},
             {QStringLiteral("tip"), field->toolTip()},
             {QStringLiteral("enabled"), field->isEnabled()}};

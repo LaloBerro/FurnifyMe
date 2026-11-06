@@ -1,5 +1,7 @@
 #include "BevelArrow.h"
 
+#include "ChipFace.h"
+
 #include "MainWindow.h"
 #include "Measure.h"
 #include "ModelingOps.h"
@@ -67,6 +69,28 @@ BevelArrow::BevelArrow(MainWindow* window, OcctViewWidget* view)
 
     myField = new QLineEdit(view);
     myField->setAttribute(Qt::WA_NoMousePropagation);
+
+    // The chrome page's face of this chip (Phase 4b): the kind and its value
+    // on one row, the size, and the two hint lines. Glued beside the arrow.
+    myChipFace = new ChipFace(QStringLiteral("bevel"), this);
+    myChipFace->setGlued(true);
+    myChipFace->addField(QStringLiteral("size"), myField);
+    myChipFace->setActions([this] { commit(); }, [this] { cancel(); });
+    myChipFace->setDescriber([this] {
+        return QVariantList{QVariantList{ChipFace::text(kindText(), QStringLiteral("label")),
+                                         ChipFace::text(valueText(), QStringLiteral("value"))},
+                            QVariantList{myChipFace->field(QStringLiteral("size"), QString(), kindText())},
+                            QVariantList{ChipFace::text(hintText(0), QStringLiteral("hint"))},
+                            QVariantList{ChipFace::text(hintText(1), QStringLiteral("hint"))}};
+    });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this] {
+        applyTheme();
+        reposition();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, [this] {
+        applyTheme();
+        reposition();
+    });
     // Both this card's SIZE (measured with the fonts it paints with) and the
     // field's explicit font move when the type scale does, and neither can be
     // re-derived inside paintEvent() - so both are set through applyTheme(),
@@ -136,6 +160,10 @@ void BevelArrow::applyTheme()
     // along its bottom edge. paintSurface() cannot reach outside the clip
     // and the viewport cannot paint underneath a child, so the size is
     // where this is fixed. See Theme.h.
+    // Drawn by the page, the card is the size the page measured (Phase 4a, R2).
+    if (myChipFace && myChipFace->drawnElsewhere()) {
+        if (myChipFace->faceSize().isValid()) setFixedSize(Theme::wholeDevicePixels(myChipFace->faceSize()));
+    } else
     setFixedSize(Theme::wholeDevicePixels(
         QSize(std::max(kMinWidth, content + kPad * 2) + margin * 2,
               kPad * 2 + kLabelHeight + kFieldHeight + kHintGap +
@@ -236,6 +264,8 @@ void BevelArrow::begin(const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge&
     }
     syncFieldTooltip();
     markInvalid(false);
+    // A new gesture: the page seeds its field again (R5).
+    if (myChipFace) myChipFace->reseed();
 
     reposition();
     show();
@@ -312,6 +342,9 @@ void BevelArrow::onReleased(bool dragged)
 
 void BevelArrow::updatePreview()
 {
+    // Whatever this changes - the value, the reason, the mark - reaches the
+    // page once the turn settles (Phase 4b).
+    if (myChipFace) myChipFace->notify();
     if (!myField || !myView || !myWindow || myEdge.IsNull() || myEdges.empty()) return;
 
     // Through Measure::parseLength, never QString::toDouble: the chip's value
@@ -495,7 +528,7 @@ void BevelArrow::syncFieldGeometry()
     // coordinates - needs translating by pos().
     myField->setGeometry(fieldRect().translated(pos()));
     // DERIVED, not left to a hide event that may never arrive.
-    myField->setVisible(isVisible());
+    myField->setVisible(isVisible() && (!myChipFace || myChipFace->controlsShown()));
     myField->raise();
 }
 
@@ -550,6 +583,7 @@ void BevelArrow::replace()
 void BevelArrow::markInvalid(bool invalid)
 {
     myInvalid = invalid;
+    if (myChipFace) myChipFace->setInvalid(invalid);
     if (!myField) return;
     const QColor border = invalid ? Theme::danger() : Theme::accent();
     // border-radius: 0, for the reason spelled out on
@@ -570,6 +604,7 @@ QStringList BevelArrow::paintedTexts() const
 
 void BevelArrow::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     const QRect body = GestureChip::paintFrame(painter, this, myInvalid);
@@ -628,6 +663,8 @@ bool BevelArrow::eventFilter(QObject* watched, QEvent* event)
     // chips share, in its ONE implementation now (KeyClaim.h; the branch
     // review retired the four hand-kept copies). What the keys DO stays
     // here: Enter commits, Escape cancels.
+    // A key aimed at the page's own field is the page's (Phase 4a, R3).
+    if (myChipFace && myChipFace->keyBelongsToPage(watched)) return QWidget::eventFilter(watched, event);
     int key = 0;
     if (KeyClaim::claim(this, watched, event, /*wantEnter=*/true,
                         /*exemptLineEdits=*/false, &key)) {
