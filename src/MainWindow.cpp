@@ -2376,6 +2376,14 @@ void MainWindow::buildOverlay()
     myItemsSlot = new HtmlCardSlot(QStringLiteral("items"), QSize(DrawerWidths::items(), 176), myView);
     myItemsSlot->hide();
     myOverlay->addWidget(myItemsSlot, ViewportOverlay::Anchor::TopLeft);
+    // Its height is the page's (the list grows) and its width the type
+    // scale's; the overlay re-stacks around both.
+    connect(myItemsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+        if (myOverlay) myOverlay->relayout();
+    });
+    connect(Theme::notifier(), &Theme::Notifier::changed, myItemsSlot, [this] {
+        myItemsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::items()));
+    });
 
     // A theme's decoration over the viewport (themes part 2): Ultraviolet's
     // crosshairs at every card's corners and its grid readout beside the
@@ -2409,6 +2417,14 @@ void MainWindow::buildOverlay()
     myVersionsSlot = new HtmlCardSlot(QStringLiteral("versions"), QSize(DrawerWidths::versions(), 160), myView);
     myVersionsSlot->hide();
     myOverlay->addWidget(myVersionsSlot, ViewportOverlay::Anchor::TopLeft);
+    // Its height is the page's (the list grows) and its width the type
+    // scale's; the overlay re-stacks around both.
+    connect(myVersionsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+        if (myOverlay) myOverlay->relayout();
+    });
+    connect(Theme::notifier(), &Theme::Notifier::changed, myVersionsSlot, [this] {
+        myVersionsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::versions()));
+    });
 
     // The joints drawer, same anchor, added after Versions so it stacks below
     // Items and Versions. Hidden BEFORE addWidget() for the same reason: its
@@ -2417,6 +2433,14 @@ void MainWindow::buildOverlay()
     myJointsSlot = new HtmlCardSlot(QStringLiteral("joints"), QSize(DrawerWidths::joints(), 60), myView);
     myJointsSlot->hide();
     myOverlay->addWidget(myJointsSlot, ViewportOverlay::Anchor::TopLeft);
+    // Its height is the page's (the list grows) and its width the type
+    // scale's; the overlay re-stacks around both.
+    connect(myJointsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
+        if (myOverlay) myOverlay->relayout();
+    });
+    connect(Theme::notifier(), &Theme::Notifier::changed, myJointsSlot, [this] {
+        myJointsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::joints()));
+    });
 
     // The way back out of render mode, added LAST in the TopLeft column so
     // the three drawers above keep their order and this takes the corner
@@ -10525,13 +10549,6 @@ void MainWindow::useHtmlChrome()
     // difference - its height is the page's, because the list grows.
     if (myVersionsSlot) {
         myHtmlChrome->addCard(myVersionsSlot);
-        connect(myVersionsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
-            if (myOverlay) myOverlay->relayout();
-        });
-        // The width follows the type scale, as the Qt drawer's does.
-        connect(Theme::notifier(), &Theme::Notifier::changed, myVersionsSlot, [this] {
-            myVersionsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::versions()));
-        });
     }
     VersionsModel::Hooks hooks;
     hooks.save = [this](const QString& name) { return saveVersion(name); };
@@ -10551,12 +10568,6 @@ void MainWindow::useHtmlChrome()
     // Qt drawer does.
     if (myJointsSlot) {
         myHtmlChrome->addCard(myJointsSlot);
-        connect(myJointsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
-            if (myOverlay) myOverlay->relayout();
-        });
-        connect(Theme::notifier(), &Theme::Notifier::changed, myJointsSlot, [this] {
-            myJointsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::joints()));
-        });
     }
     JointsModel::Hooks jointHooks;
     jointHooks.select = [this](int id) { setSelectedJoint(id); };
@@ -10576,12 +10587,6 @@ void MainWindow::useHtmlChrome()
     // and reports the same way.
     if (myItemsSlot) {
         myHtmlChrome->addCard(myItemsSlot);
-        connect(myItemsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
-            if (myOverlay) myOverlay->relayout();
-        });
-        connect(Theme::notifier(), &Theme::Notifier::changed, myItemsSlot, [this] {
-            myItemsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::items()));
-        });
     }
     ItemsModel::Hooks itemHooks;
     itemHooks.select = [this](const std::vector<int>& ids) { myView->setSelectedSolids(ids); };

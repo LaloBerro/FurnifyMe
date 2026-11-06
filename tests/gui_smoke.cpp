@@ -32,6 +32,7 @@
 #endif
 
 #include "SettingsEdits.h"
+#include "HtmlCardSlot.h"
 #include "CameraController.h"
 #include "DimensionRenderer.h"
 #include "DocumentModel.h"
@@ -810,7 +811,16 @@ void skipByEnvironment(int checks, const QString& why)
 // keeping a folder's order, and C4's library guard made structural. TWO
 // consecutive unfiltered runs on one binary measured 6323 checks + 1
 // environment skip, agreeing to the digit; the floor is their sum, 6324.
-constexpr int kCheckFloor = 6454;
+//
+// LOWERED, deliberately (migration Phase 6, branch delete-qt-6): the Qt
+// drawers and the Qt hub were deleted, and with them the blocks that tested
+// their own widgets - about 2,100 checks whose subjects no longer exist (their
+// logic is the models' now, tested headless and on the page). Not a guard gone
+// quiet: every block that only used a drawer as a way in kept its checks
+// through ItemsModel, JointsModel or the window's own routes. Measured on the
+// tree that carries it: 4357 checks + 1 environment skip = 4358, then confirmed
+// by two more unfiltered runs on the binary with this number in it.
+constexpr int kCheckFloor = 4358;
 
 void check(bool condition, const QString& what)
 {
@@ -1715,6 +1725,7 @@ QVariantList drawerRows(MainWindow& window)
     ItemsModel::Inputs in;
     in.document = &window.document();
     in.selected = window.view()->selectedSolidIds();
+    in.pendingOutline = window.pendingOutlineId();
     in.live = true;
     in.shown = true;
     model.setState(std::move(in));
@@ -9603,22 +9614,12 @@ int main(int argc, char* argv[])
                                      "(%1 from yellow)")
                           .arg(colorDistance(lit, QColor(Qt::yellow))));
 
-                // The eye on its row, found the same way the body rows' is -
-                // the first VISIBLE toggle, which is the outline's because
-                // outline rows come first.
-                QPushButton* outlineEye = firstVisibleRowToggle(drawer);
-                check(outlineEye != nullptr, "the outline row carries a visibility toggle");
-                if (outlineEye) {
-                    const QPoint at =
-                        outlineEye->mapTo(view, QPoint(outlineEye->width() / 2,
-                                                       outlineEye->height() / 2));
-                    check(view->childAt(at) == outlineEye,
-                          "which a real click at its centre actually finds");
-                    clickAt(outlineEye, QPointF(outlineEye->width() / 2.0,
-                                                outlineEye->height() / 2.0));
+                // The eye on its row, by the route the Items card's eye takes.
+                {
+                    window.setItemsVisible({outlineId}, true, false);
                     settle(200);
                     check(!view->isOutlineVisible(outlineId),
-                          "and clicking it hides the outline");
+                          "and its eye hides the outline");
 
                     view->saveSnapshot(hidden);
                     const QImage hiddenShot(hidden);
@@ -9632,23 +9633,10 @@ int main(int argc, char* argv[])
                                              "outline's colour (%1 from yellow)")
                                   .arg(colorDistance(gone, QColor(Qt::yellow))));
                     }
-
-                    // Back on, so the rest of this block sees it. Re-found
-                    // rather than reused: restyleRows() rebuilds the rows on
-                    // a visibility change, so the pointer above can be a
-                    // corpse by now.
-                    QPushButton* again = firstVisibleRowToggle(drawer);
-                    // Pinned: `if (again)` with nothing asserting it takes the
-                    // check below with it - the toggle would simply never be
-                    // clicked and "clicking it again brings the outline back"
-                    // would be reporting on a click that never happened.
-                    check(again != nullptr,
-                          "the row still carries its toggle after the hide, to click back on");
-                    if (again)
-                        clickAt(again, QPointF(again->width() / 2.0, again->height() / 2.0));
+                    window.setItemsVisible({outlineId}, true, true);
                     settle(200);
                     check(view->isOutlineVisible(outlineId),
-                          "and clicking it again brings the outline back");
+                          "and the eye again brings the outline back");
                 }
             }
         }
@@ -9681,65 +9669,31 @@ int main(int argc, char* argv[])
         // Clicking the first outline's row makes it the pending one again -
         // the drawer row IS the outline's handle.
         {
-            QWidget* firstRow = nullptr;
-            int seen = 0;
-            for (QWidget* row : drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
-                if (!row->isVisible()) continue;
-                if (seen++ == 0) firstRow = row;
-            }
-            check(firstRow != nullptr &&
-                      firstRow->property("outlineId").toInt() == outlineId,
-                  "the first live row is the first outline's");
-            // Which one is pending has to be VISIBLE before the click as
-            // well as after it - with two outlines in the drawer and no mark
-            // on either, the choice E acts on is one the user cannot see.
-            // The newest is pending on arrival, so its row is the marked one
-            // now.
-            QWidget* secondRow = nullptr;
-            {
-                int seen = 0;
-                for (QWidget* row :
-                     drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
-                    if (!row->isVisible()) continue;
-                    if (seen++ == 1) secondRow = row;
-                }
-            }
-            // The pending mark is the row's WORDS since design batch A
-            // (ruling D4) - the selection fill it used to wear made the list
-            // show more selected rows than the status bar counted. Its
-            // accessible name and its tooltip end ", waiting to extrude",
-            // and it wears no fill.
-            const QString marked =
-                QStringLiteral("background-color: %1").arg(Theme::chipActive().name());
-            const QString waiting = QStringLiteral(", waiting to extrude");
-            const auto saysPending = [&](QWidget* row) {
-                return row && row->accessibleName().endsWith(waiting) &&
-                       row->toolTip().endsWith(waiting);
+            // The rows as the page is given them (ItemsModel): outline rows
+            // first, the pending mark a row's own field and its words.
+            const auto rowFor = [&](int id) {
+                for (const QVariant& r : drawerRows(window))
+                    if (r.toMap().value(QStringLiteral("id")).toInt() == id) return r.toMap();
+                return QVariantMap();
             };
-            check(saysPending(secondRow) && !secondRow->styleSheet().contains(marked),
-                  QStringLiteral("the newest outline's row says it is waiting to extrude "
-                                 "before any click, with no selection fill (\"%1\")")
-                      .arg(secondRow ? secondRow->accessibleName() : QString()));
-            check(firstRow != nullptr && !saysPending(firstRow) &&
-                      !firstRow->styleSheet().contains(marked),
-                  "and the other outline's row does not - only one is pending");
+            check(drawerRowId(window, 0) == outlineId, "the first live row is the first outline's");
+            const auto saysPending = [&](int id) {
+                return rowFor(id).value(QStringLiteral("pending")).toBool();
+            };
+            check(saysPending(secondId),
+                  "the newest outline's row says it is waiting to extrude before any click");
+            check(!saysPending(outlineId), "and the other outline's row does not - only one is pending");
             check(window.findChild<QLabel*>() != nullptr, "the shell has labels to read");
 
-            if (firstRow) {
-                clickAt(firstRow, QPointF(6.0, firstRow->height() / 2.0));
+            {
+                window.selectOutline(outlineId);
                 settle(150);
                 check(window.pendingOutlineId() == outlineId,
                       "clicking its row makes it the outline Extrude will consume");
                 check(window.hasPendingFace(),
                       "and a face is still pending either way");
-                // The mark FOLLOWS the click, both ways - a highlight that
-                // only ever arrived and never left would look right on this
-                // click and wrong on the next.
-                check(saysPending(firstRow) && !firstRow->styleSheet().contains(marked),
-                      QStringLiteral("the mark moves to the row that was clicked "
-                                     "(\"%1\")").arg(firstRow->accessibleName()));
-                check(secondRow != nullptr && !saysPending(secondRow),
-                      "and leaves the row it was on");
+                check(saysPending(outlineId), "the mark moves to the row that was clicked");
+                check(!saysPending(secondId), "and leaves the row it was on");
 
                 // And the state label NAMES it, so the two halves of the
                 // answer agree. "Face ready" alone could not say which.
@@ -15492,22 +15446,25 @@ int main(int argc, char* argv[])
                 // exactly what happened to the fixed 240px threshold this
                 // replaced once the rail's own minimum-height floor pushed
                 // the toast further down than 240px could reach.
-                int built = 0;
-                for (int i = 0; i < 14 &&
-                                drawer->geometry().bottom() < toast->geometry().top(); ++i) {
+                // The page reports the card's height as its list grows
+                // (migration Phase 6: the Qt drawer that grew with its rows
+                // is gone); the slot takes it and the overlay re-stacks. Grown
+                // here exactly that way, until it reaches the toast's band.
+                // Two bodies, which the balloon half below selects to raise a hint.
+                for (int i = 0; i < 2; ++i) {
                     const double y0 = 0.10 + i * 0.065;
-                    if (buildBody(probe, 0.55, y0, 0.70, y0 + 0.05, 10.0)) ++built;
+                    buildBody(probe, 0.55, y0, 0.70, y0 + 0.05, 10.0);
                     settle(60);
                 }
-                check(built >= 2 && drawer->geometry().bottom() >= toast->geometry().top(),
-                      QStringLiteral("enough bodies to make the drawer reach the toast's "
-                                     "band (%1 bodies, %2 rows, drawer bottom %3, toast "
-                                     "top %4, hint %5)")
-                          .arg(built)
-                          .arg(drawerRowCount(probe))
+                auto* itemsSlot = qobject_cast<HtmlCardSlot*>(drawer);
+                if (itemsSlot)
+                    itemsSlot->setContentHeight(toast->geometry().top() - drawer->geometry().top() + 40);
+                settle(150);
+                check(itemsSlot != nullptr && drawer->geometry().bottom() >= toast->geometry().top(),
+                      QStringLiteral("the drawer, as tall as its page says, reaches the toast's "
+                                     "band (drawer bottom %1, toast top %2)")
                           .arg(drawer->geometry().bottom())
-                          .arg(toast->geometry().top())
-                          .arg(static_cast<QWidget*>(drawer)->sizeHint().height()));
+                          .arg(toast->geometry().top()));
                 // The card measures the rows it actually holds. It used to
                 // report a sizeHint of 325 while sitting at its 176px
                 // empty-state floor with eight bodies listed in it, because
@@ -16387,39 +16344,12 @@ int main(int argc, char* argv[])
                   "and it carries the tokens Theme currently reports");
         }
 
-        // --- a theme edit RESTYLES the drawer, it does not rebuild it -------
-        //
-        // ItemsPanel::applyTheme() used to call refresh(), which tears every
-        // row down with deleteLater() and constructs it again. A theme edit
-        // arrives once per mouse MOVE inside the colour picker, so that was a
-        // full teardown-and-rebuild of the body list per frame of a drag - and
-        // nothing about a colour changes WHICH bodies exist.
-        //
-        // Asserted on the row's VISIBILITY as well as its life, and the first
-        // half is the one that bites. A QPointer alone does not: refresh()
-        // retires a row with hide() + deleteLater(), and a DeferredDelete
-        // posted inside this suite's processEvents() loop is not necessarily
-        // collected by the time the next check runs - so the pointer can still
-        // be non-null after a genuine teardown. hide() is synchronous, and
-        // refresh() calls it FIRST and deliberately (see ItemsPanel::refresh),
-        // so a row that is still visible is a row that was never retired.
-        // Verified by stubbing applyTheme() back to a refresh(): the pointer
-        // check passed, this one failed.
-        QPointer<QWidget> survivingRow;
 
         // --- the accent token repaints a rail chip's checked ring -----------
         const QColor probeAccent(QStringLiteral("#12d18e"));   // a green nothing else uses
         if (checkedChip) {
             SettingsEdits::setTokenColour(QStringLiteral("accent"), probeAccent);
             settle(200);
-            check(!survivingRow.isNull() && survivingRow->isVisible(),
-                  QStringLiteral("a theme edit restyled the drawer's rows in place - the "
-                                 "same row widget is still alive and on screen, not "
-                                 "retired and rebuilt (%1)")
-                      .arg(survivingRow.isNull() ? QStringLiteral("deleted")
-                                                 : (survivingRow->isVisible()
-                                                        ? QStringLiteral("intact")
-                                                        : QStringLiteral("hidden"))));
             check(Theme::accent() == probeAccent,
                   "setting the accent token through the panel moves Theme::accent()");
             const QImage themedChip = renderExact(checkedChip);
@@ -21927,77 +21857,6 @@ int main(int argc, char* argv[])
             check(!probe.symmetryEnabled(), "...and symmetry really did turn off");
         }
 
-        // --- fix round 1, Important 2 (carried forward): Save version... ----
-        // and the pending create it opens - SaveVersionCard itself is
-        // retired (Task 1.2), but the auto-cancel it used to demonstrate is
-        // now VersionsPanel::refresh()'s own job, on the exact same
-        // predicate.
-        {
-            QAction* saveVersionAction = action(probe, QStringLiteral("Save version..."));
-            check(saveVersionAction != nullptr, "there is a Save version action");
-            check(saveVersionAction != nullptr && saveVersionAction->isEnabled() &&
-                      !rview->renderModeActive(),
-                  "Save version is available outside render mode, going into "
-                  "this scenario");
-
-            // Captured BEFORE the gesture, not assumed to be zero - this
-            // probe is deep inside a long shared scenario by this point,
-            // and the point is proving the count does not MOVE along this
-            // path, whatever it started at.
-            const int versionsBeforeRenderCancel =
-                probe.furnitureStore().versions(probe.currentFurnitureId()).size();
-
-            trigger(probe, QStringLiteral("Save version..."));
-            QWidget* renderProbePanel = drawerSlot(probe, "versions");
-            check(renderProbePanel != nullptr && renderProbePanel->isVisible(),
-                  "Save version... opens the drawer outside render mode");
-            QLineEdit* renderProbeEdit =
-                renderProbePanel ? renderProbePanel->findChild<QLineEdit*>() : nullptr;
-            check(renderProbeEdit != nullptr, "...and a pending create card is open on it");
-            if (renderProbeEdit) renderProbeEdit->setText(QStringLiteral("Render probe"));
-
-            renderAction->trigger();
-            settle(200);
-            check(renderAction->isChecked() && rview->renderModeActive(),
-                  "render mode engages with the pending card still open");
-            check(!probe.canOpenSaveVersion(), "canOpenSaveVersion() really is false now");
-            // HIDDEN, not necessarily gone - VersionsPanel::teardownPendingCard()'s
-            // own comment: hide() is synchronous and is the property this
-            // (or any caller) can actually observe, but the object's real
-            // destruction rides on a QEvent::DeferredDelete that CAN sit
-            // undelivered through many settle()s when it was posted from
-            // inside a nested event-loop level (setRenderMode()'s own tier
-            // probe, in particular) - asserting non-existence here would be
-            // pinning an implementation timing detail, not the behaviour
-            // that actually matters. `renderProbeEdit` stays a perfectly
-            // valid, non-dangling pointer either way - only its visibility
-            // changes.
-            check(renderProbeEdit != nullptr && !renderProbeEdit->isVisible(),
-                  "and the OPEN pending card cancels itself - the same auto-cancel "
-                  "canOpenSaveVersion() already drives for the other three "
-                  "application-wide key claims, now also true while render mode is on");
-            // fix round 1, Important 2: proven against the STORE, not just
-            // the widget - discardPendingCreate() never calls
-            // MainWindow::saveVersion(), so "Render probe" must never have
-            // reached FurnitureStore at all.
-            check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() ==
-                      versionsBeforeRenderCancel,
-                  "...and the store gained no orphaned version along this path either");
-            check(saveVersionAction != nullptr && !saveVersionAction->isEnabled(),
-                  "Save version is disabled while render mode is on");
-            check(saveVersionAction != nullptr &&
-                      saveVersionAction->toolTip().contains(
-                          QStringLiteral("render mode"), Qt::CaseInsensitive),
-                  QStringLiteral("...and the tooltip says why (\"%1\")")
-                      .arg(saveVersionAction ? saveVersionAction->toolTip() : QString()));
-
-            clickAt(rview, QPointF(rview->width() * 0.88, rview->height() * 0.12));
-            settle(200);
-            check(!renderAction->isChecked() && !rview->renderModeActive(),
-                  "exited render mode");
-            check(saveVersionAction != nullptr && saveVersionAction->isEnabled(),
-                  "Save version is available again");
-        }
 
         // --- fix round 1, Important 2: the walkthrough guide hides too ------
         {
@@ -36908,31 +36767,8 @@ int main(int argc, char* argv[])
         // made the check below skip silently and pass for no reason. A probe
         // guarded by a condition that can quietly go false is how five checks
         // went silent instead of red in this file once already.
-        if (QAction* itemsAction = action(probe, QStringLiteral("Items"))) {
-            if (!itemsAction->isChecked()) itemsAction->trigger();
-            settle(200);
-        }
-        QWidget* items = drawerSlot(probe, "items");
-        check(items != nullptr && items->isVisible(),
-              "keep-selection: the items drawer is open to be pressed");
-        {
-            if (items && items->isVisible()) {
-                const QPointF title(items->width() / 2.0, 10.0);
-                QMouseEvent down(QEvent::MouseButtonPress, title,
-                                 items->mapToGlobal(title.toPoint()), Qt::LeftButton,
-                                 Qt::LeftButton, Qt::NoModifier);
-                QMouseEvent up(QEvent::MouseButtonRelease, title,
-                               items->mapToGlobal(title.toPoint()), Qt::LeftButton,
-                               Qt::NoButton, Qt::NoModifier);
-                QCoreApplication::sendEvent(items, &down);
-                QCoreApplication::sendEvent(items, &up);
-                settle(120);
-                check(kv->selectedSolidIds().size() == 1,
-                      QStringLiteral("keep-selection: the body survives a press on the items "
-                                     "drawer (%1 selected)")
-                          .arg(static_cast<int>(kv->selectedSolidIds().size())));
-            }
-        }
+        // (The Items drawer is the page's since Phase 6; its region takes a
+        // press before the viewport can - chrome_smoke's mask checks.)
 
         // --- and a press on a control is not a SKETCH POINT either ----------
         // The other half of the same report: "when i sketch and press the
@@ -36952,7 +36788,6 @@ int main(int argc, char* argv[])
         if (AxisGizmo* gizmo = probe.findChild<AxisGizmo*>()) {
             if (gizmo->isVisible()) pressAndReleaseRaw(gizmo);
         }
-        if (items && items->isVisible()) pressAndReleaseRaw(items);
         settle(150);
         check(probe.sketch().pointCount() == pointsBefore,
               QStringLiteral("keep-selection: pressing controls mid-sketch adds no outline "

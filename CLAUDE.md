@@ -192,7 +192,7 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 6324, measured twice on the tree that carries it.** Two consecutive
+**`kCheckFloor` is 4358 since Phase 6 (see the history below); the paragraph that follows is the 6324 step's.** Two consecutive
 unfiltered runs measured **6323 checks + 1 environment skip**, agreeing to the digit, against
 one binary. The one environment skip is the RayTracing floor-blend
 measurement, which does not apply when PathTracing is the session's tier. The floor is the
@@ -208,7 +208,11 @@ after the items-drawer branch (T-063), and **6324** after that branch's final-re
 (RF1-RF5, M1-M6), and **6449** on the `themes` branch (6448 checks + 1 skip, twice; the
 +78 are the six new theme strings through the banned-word sweep, 13 times each), and
 **6454** on the `items-followups` branch (6453 checks + 1 skip, twice: the five checks of the
-new `the-shortcut-sheet-fits-its-window` block, T-064). The floor
+new `the-shortcut-sheet-fits-its-window` block, T-064), and then **4358**, LOWERED on
+purpose by migration Phase 6 (`delete-qt-6`): the Qt drawers and the Qt hub were deleted
+and their own blocks went with them, about 2,100 checks whose subjects no longer exist.
+Measured (4357 + 1) and then confirmed by two unfiltered runs on the binary carrying it.
+The floor
 has never been computed from a predicted delta at any of those steps, which is the whole
 point of the paragraph below.
 
