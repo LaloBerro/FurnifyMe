@@ -243,6 +243,19 @@
               />
               <span class="readout">{part.valueText}</span>
             </label>
+          {:else if part.look === 'tile'}
+            <button
+              type="button"
+              use:noFocus
+              class="tile"
+              data-part={part.id}
+              title={part.tip}
+              disabled={!part.enabled}
+              onclick={() => press(part)}
+            >
+              <span class="tile-glyph" style={part.glyph ? `-webkit-mask-image: url(${part.glyph}); mask-image: url(${part.glyph});` : ''}></span>
+              <span class="tile-name">{part.text}</span>
+            </button>
           {:else if part.kind === 'button' && part.swatch}
             <button
               type="button"
@@ -318,6 +331,44 @@
   }
   .end {
     margin-left: auto;
+  }
+  /* The Add-shape flyout's tile: glyph over name, the Qt tile's 64 x 56. */
+  .tile {
+    width: 64px;
+    height: 56px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 0 4px;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    cursor: pointer;
+  }
+  .tile:hover {
+    background: var(--chip-hover);
+    color: var(--text);
+  }
+  .tile:hover .tile-glyph {
+    background: var(--accent);
+  }
+  .tile:active {
+    background: var(--chip-active);
+  }
+  .tile-glyph {
+    width: 22px;
+    height: 22px;
+    background: currentColor;
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+  }
+  .tile-name {
+    font-size: var(--font-badge);
   }
   .swatch {
     width: 56px;

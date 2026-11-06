@@ -112,3 +112,38 @@ describe('the material card', () => {
     expect(bannedWordsIn(texts)).toEqual([]);
   });
 });
+
+const shapesFace: Face = {
+  rows: [
+    [{ kind: 'text', text: 'Add a shape', tone: 'label' }],
+    ['Box', 'Cylinder', 'Sphere'].map((name, i) => ({
+      kind: 'button' as const,
+      id: `shape${i}`,
+      text: name,
+      tip: '',
+      enabled: true,
+      checked: false,
+      look: 'tile' as const,
+      glyph: 'data:image/png;base64,AAAA',
+    })),
+  ],
+  invalid: false,
+  seed: 1,
+  focus: '',
+};
+
+describe('the Add-shape flyout', () => {
+  it('draws each shape as a tile, its glyph a mask over its name, and a press is the tile click', async () => {
+    const chrome = mockChrome();
+    const chips = mockChips({ shapes: shapesFace });
+    chrome.cards = { shapes: { x: 80, y: 120, w: kW, h: kH, shown: true, chip: true } };
+    render(Editor, { props: { chrome, theme: mockTheme(), chips } });
+    await tick();
+    await tick();
+    const tiles = [...document.querySelectorAll('[data-gesture="shapes"] .tile')] as HTMLElement[];
+    expect(tiles.map((t) => t.querySelector('.tile-name')!.textContent)).toEqual(['Box', 'Cylinder', 'Sphere']);
+    expect((tiles[0].querySelector('.tile-glyph') as HTMLElement).getAttribute('style')).toContain('data:image/png;base64,AAAA');
+    await fireEvent.click(tiles[1]);
+    expect(chips.calls.filter((c) => c.op === 'press').map((c) => c.args[0])).toEqual(['shape1']);
+  });
+});

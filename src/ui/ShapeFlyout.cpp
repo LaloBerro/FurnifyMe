@@ -1,5 +1,6 @@
 #include "ShapeFlyout.h"
 
+#include "ChipFace.h"
 #include "IconSet.h"
 #include "Theme.h"
 
@@ -122,6 +123,43 @@ ShapeFlyout::ShapeFlyout(QWidget* parent) : QWidget(parent)
     }
     outer->addLayout(grid);
 
+    // The chrome page's face (Phase 7a).
+    myChipFace = new ChipFace(QStringLiteral("shapes"), this);
+    myChipFace->addHidden(myCaption);
+    for (std::size_t i = 0; i < myTiles.size(); ++i) {
+        myChipFace->addButton(QStringLiteral("shape%1").arg(i), static_cast<QAbstractButton*>(myTiles[i]));
+        myGlyphs.push_back(kShapes[i].glyph);
+    }
+    myChipFace->setActions(nullptr, [this] { closeFlyout(); });
+    myChipFace->setDescriber([this] {
+        QVariantList rows;
+        rows.append(QVariant(QVariantList{ChipFace::text(myCaption ? myCaption->text() : QString(), QStringLiteral("label"))}));
+        QVariantList row;
+        for (std::size_t i = 0; i < myTiles.size(); ++i) {
+            QVariantMap tile = myChipFace->button(QStringLiteral("shape%1").arg(i));
+            tile.insert(QStringLiteral("look"), QStringLiteral("tile"));
+            tile.insert(QStringLiteral("glyph"), IconSet::glyphMaskUrl(myGlyphs[i], 22));
+            row.append(tile);
+            if (row.size() == 3 || i + 1 == myTiles.size()) {
+                rows.append(QVariant(row));
+                row.clear();
+            }
+        }
+        return rows;
+    });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this](bool drawn) {
+        if (!drawn) {
+            if (myCaption) myCaption->show();
+            for (QWidget* tile : myTiles) tile->show();
+            setFixedSize(Theme::wholeDevicePixels(sizeHint()));
+        }
+        update();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, [this] {
+        if (myChipFace->drawnElsewhere() && myChipFace->faceSize().isValid())
+            setFixedSize(Theme::wholeDevicePixels(myChipFace->faceSize()));
+    });
+
     setFixedSize(Theme::wholeDevicePixels(sizeHint()));
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &ShapeFlyout::applyTheme);
@@ -163,6 +201,7 @@ QStringList ShapeFlyout::paintedTexts() const
 
 void ShapeFlyout::paintEvent(QPaintEvent*)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     Theme::paintSurface(painter, rect(), kRadius);

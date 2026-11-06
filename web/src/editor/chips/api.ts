@@ -35,12 +35,13 @@ export interface ButtonPart {
   checked: boolean;
   // How it is drawn (Phase 4c): a segment (pressed while checked, the cell's
   // width, an optional label above it), a link, or a menu button.
-  look?: 'segment' | 'link' | 'menu';
+  look?: 'segment' | 'link' | 'menu' | 'tile';
   label?: string;
   user?: boolean;
   reason?: string; // a menu entry the joint's contact refuses, and why
   swatch?: string; // a colour button (the material card): drawn as that colour, no text
   align?: 'end'; // stands at the row's far end (the material card's Done)
+  glyph?: string; // a 'tile' look's IconSet glyph, an alpha-mask data URL (the Add-shape flyout)
 }
 
 // A slider (Phase 7a, the material card): the page's range input lands in the

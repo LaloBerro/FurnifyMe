@@ -14,10 +14,13 @@
 // not enough - the viewport picks on the RELEASE, so the filter stays
 // installed one event longer than the flyout is visible, specifically to
 // swallow it.
+#include "IconSet.h"
 #include "ModelingOps.h"
 
 #include <QStringList>
 #include <QWidget>
+
+class ChipFace;
 
 class ShapeFlyout : public QWidget {
     Q_OBJECT
@@ -35,6 +38,10 @@ public:
 
     // Every string this flyout paints - the banned-word sweep's food.
     QStringList paintedTexts() const;
+    // The chrome page's face of the flyout (migration Phase 7a): the caption
+    // and the tiles three to a row, each with its glyph; a press on the page's
+    // tile is the tile's own click.
+    ChipFace* face() const { return myChipFace; }
 
 signals:
     void shapePicked(ModelingOps::PrimitiveKind kind);
@@ -53,4 +60,6 @@ private:
     // ShortcutSheet's one-event-longer rule: true from the outside press
     // that closed the flyout until its release has been swallowed too.
     bool mySwallowNextRelease = false;
+    ChipFace* myChipFace = nullptr;
+    std::vector<IconSet::Glyph> myGlyphs;   // index == PrimitiveKind order
 };

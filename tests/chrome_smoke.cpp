@@ -35,6 +35,7 @@
 #include "ui/SceneWindow.h"
 #include "ui/LoadingCard.h"
 #include "ui/ShortcutSheet.h"
+#include "ui/ShapeFlyout.h"
 #include "ui/MaterialCard.h"
 #include "ui/HintBalloon.h"
 #include "ui/WalkthroughPanel.h"
@@ -2424,7 +2425,7 @@ int main(int argc, char* argv[])
             }
             names.sort();
             check(names.join(QLatin1Char(',')) ==
-                      QStringLiteral("bevel,boolean,extrude,joint,material,mitre,move,pull,remeasure,slats") &&
+                      QStringLiteral("bevel,boolean,extrude,joint,material,mitre,move,pull,remeasure,shapes,slats") &&
                       glued == 5 && allDrawnElsewhere,
                   "every gesture chip is drawn by the page, and the five that follow the model are glued - " +
                       names.join(QStringLiteral(", ")));
@@ -2754,6 +2755,38 @@ int main(int argc, char* argv[])
         }
         fresh.close();
         pump(200);
+    }
+
+    // --- the Add-shape flyout, its tiles drawn by the page (Phase 7a) -----------------
+    {
+        QAction* addShape = actionNamed(&window, QStringLiteral("Add shape"));
+        ShapeFlyout* flyout = window.shapeFlyout();
+        check(addShape && flyout && flyout->face() && flyout->face()->drawnElsewhere(),
+              "shapes: the flyout is drawn by the page while it is live");
+        if (addShape && flyout && addShape->isEnabled()) {
+            const std::size_t before = window.document().count();
+            addShape->trigger();
+            const int pageTiles = waitFor([&] { return js(page, "document.querySelectorAll('[data-gesture=\"shapes\"] .tile').length").toInt() > 0; }, 3000)
+                                      ? js(page, "document.querySelectorAll('[data-gesture=\"shapes\"] .tile').length").toInt()
+                                      : 0;
+            check(flyout->isVisible() && pageTiles >= 3,
+                  QStringLiteral("shapes: Add shape opens it, and the page draws its %1 tiles").arg(pageTiles));
+            check(js(page, "[...document.querySelectorAll('[data-gesture=\"shapes\"] .tile-glyph')].every(g => (g.getAttribute('style') || '').includes('data:image/png'))").toBool(),
+                  "shapes: each tile wears its glyph");
+#ifdef _WIN32
+            pump(250);
+            capture(&window, outDir + "/shape-flyout.png");
+#endif
+            js(page, "document.querySelector('[data-gesture=\"shapes\"] .tile').click()");
+            const bool added = waitFor([&] { return window.document().count() == before + 1; }, 3000);
+            check(added && waitFor([&] { return !flyout->isVisible(); }, 2000),
+                  QStringLiteral("shapes: a tile on the page adds its shape and closes the flyout (%1 -> %2 bodies)")
+                      .arg(before).arg(window.document().count()));
+            if (added) {
+                if (QAction* undo = actionNamed(&window, QStringLiteral("Undo"))) undo->trigger();
+                pump(300);
+            }
+        }
     }
 
     // --- the material card, a chip face with sliders (Phase 7a) ----------------------
