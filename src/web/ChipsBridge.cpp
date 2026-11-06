@@ -32,6 +32,11 @@ void ChipsBridge::press(const QString& chip, const QString& id)
     if (ChipFace* face = faceNamed(chip)) face->press(id);
 }
 
+void ChipsBridge::slide(const QString& chip, const QString& id, int value)
+{
+    if (ChipFace* face = faceNamed(chip)) face->slide(id, value);
+}
+
 void ChipsBridge::commit(const QString& chip, const QVariantMap& values)
 {
     if (ChipFace* face = faceNamed(chip)) face->commit(values);

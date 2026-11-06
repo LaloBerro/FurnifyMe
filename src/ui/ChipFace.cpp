@@ -2,6 +2,7 @@
 
 #include <QAbstractButton>
 #include <QLineEdit>
+#include <QSlider>
 #include <QTimer>
 
 ChipFace::ChipFace(const QString& name, QWidget* chip)
@@ -54,6 +55,42 @@ QVariantMap ChipFace::field(const QString& id, const QString& label, const QStri
             {QStringLiteral("value"), field->text()},
             {QStringLiteral("tip"), field->toolTip()},
             {QStringLiteral("enabled"), field->isEnabled()}};
+}
+
+void ChipFace::addSlider(const QString& id, QSlider* slider)
+{
+    if (!slider) return;
+    mySliders.insert(id, slider);
+    connect(slider, &QSlider::valueChanged, this, &ChipFace::notify);
+}
+
+void ChipFace::addHidden(QWidget* widget)
+{
+    if (widget) myHidden.append(widget);
+}
+
+QVariantMap ChipFace::slider(const QString& id, const QString& label, const QString& valueText) const
+{
+    const QSlider* bar = mySliders.value(id);
+    if (!bar) return {};
+    return {{QStringLiteral("kind"), QStringLiteral("slider")},
+            {QStringLiteral("id"), id},
+            {QStringLiteral("label"), label},
+            {QStringLiteral("valueText"), valueText},
+            {QStringLiteral("value"), bar->value()},
+            {QStringLiteral("min"), bar->minimum()},
+            {QStringLiteral("max"), bar->maximum()},
+            {QStringLiteral("tip"), bar->toolTip()},
+            {QStringLiteral("enabled"), bar->isEnabled()}};
+}
+
+bool ChipFace::slide(const QString& id, int value)
+{
+    if (!myChip || myChip->isHidden()) return false;
+    QSlider* bar = mySliders.value(id);
+    if (!bar || !bar->isEnabled()) return false;
+    bar->setValue(value);
+    return true;
 }
 
 QVariantMap ChipFace::button(const QString& id) const
@@ -154,6 +191,10 @@ void ChipFace::setDrawnElsewhere(bool drawnElsewhere)
             if (field) field->hide();
         for (const QPointer<QAbstractButton>& button : std::as_const(myButtons))
             if (button) button->hide();
+        for (const QPointer<QSlider>& bar : std::as_const(mySliders))
+            if (bar) bar->hide();
+        for (const QPointer<QWidget>& widget : std::as_const(myHidden))
+            if (widget) widget->hide();
     } else {
         myChip->setAttribute(Qt::WA_TransparentForMouseEvents, myWasMouseTransparent);
         // A button that is the chip's own child shows with it again; a sibling

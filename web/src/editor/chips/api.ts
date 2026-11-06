@@ -39,6 +39,22 @@ export interface ButtonPart {
   label?: string;
   user?: boolean;
   reason?: string; // a menu entry the joint's contact refuses, and why
+  swatch?: string; // a colour button (the material card): drawn as that colour, no text
+  align?: 'end'; // stands at the row's far end (the material card's Done)
+}
+
+// A slider (Phase 7a, the material card): the page's range input lands in the
+// QSlider through chips.slide(), so the slider's own logic runs.
+export interface SliderPart {
+  kind: 'slider';
+  id: string;
+  label: string; // '' shows none
+  valueText: string; // the Qt card's readout ("100%", "300 mm")
+  value: number;
+  min: number;
+  max: number;
+  tip: string;
+  enabled: boolean;
 }
 
 export interface RulePart {
@@ -54,7 +70,7 @@ export interface MenuPart {
   groups: { title: string; entries: ButtonPart[] }[];
 }
 
-export type Part = TextPart | FieldPart | ButtonPart | RulePart | MenuPart;
+export type Part = TextPart | FieldPart | ButtonPart | RulePart | MenuPart | SliderPart;
 
 export interface Face {
   rows: Part[][];
@@ -72,6 +88,7 @@ export interface ChipsApi {
   facesChanged: Signal<[Record<string, Face>]>;
   edit(chip: string, id: string, text: string): void;
   press(chip: string, id: string): void;
+  slide(chip: string, id: string, value: number): void;
   // Enter on the page: what its fields hold rides with it (ruling R3).
   commit(chip: string, values: Record<string, string>): void;
   cancel(chip: string): void;

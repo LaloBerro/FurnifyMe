@@ -33,6 +33,7 @@
 
 class QAbstractButton;
 class QLineEdit;
+class QSlider;
 
 class ChipFace : public QObject
 {
@@ -48,6 +49,13 @@ public:
     // announced (notify()).
     void addField(const QString& id, QLineEdit* field);
     void addButton(const QString& id, QAbstractButton* button);
+    // A slider (Phase 7a, the material card): the page's range input lands in
+    // it through slide(), so the slider's own valueChanged runs as for a drag.
+    void addSlider(const QString& id, QSlider* slider);
+    // A widget the chip paints with besides its controls (a label): hidden
+    // while the page draws the chip. Showing it again is the chip's own call
+    // (drawnChanged), since only the chip knows which of its rows are offered.
+    void addHidden(QWidget* widget);
     // Rows of parts, in order, read fresh on every face().
     void setDescriber(std::function<QVariantList()> rows);
     // Enter's and Escape's routes - the chip's own commit() and cancel().
@@ -62,6 +70,8 @@ public:
     // the label.
     QVariantMap field(const QString& id, const QString& label, const QString& name = QString()) const;
     QVariantMap button(const QString& id) const;
+    // {kind: "slider", id, label, valueText, value, min, max, tip, enabled}.
+    QVariantMap slider(const QString& id, const QString& label, const QString& valueText) const;
 
     // {rows, invalid, seed, focus}.
     QVariantMap face() const;
@@ -78,6 +88,7 @@ public:
     // not of the right kind; edit/press/commit write through the controls.
     bool edit(const QString& id, const QString& text);
     bool press(const QString& id);
+    bool slide(const QString& id, int value);
     bool commit(const QVariantMap& values);
     bool cancel();
 
@@ -115,6 +126,8 @@ private:
     QPointer<QWidget> myChip;
     QHash<QString, QPointer<QLineEdit>> myFields;
     QHash<QString, QPointer<QAbstractButton>> myButtons;
+    QHash<QString, QPointer<QSlider>> mySliders;
+    QList<QPointer<QWidget>> myHidden;
     std::function<QVariantList()> myDescriber;
     std::function<void()> myCommit;
     std::function<void()> myCancel;

@@ -10462,7 +10462,8 @@ std::vector<ChipFace*> MainWindow::chipFaces() const
                            myMoveTool ? myMoveTool->face() : nullptr,
                            myJointChip ? myJointChip->face() : nullptr,
                            myBooleanTool ? myBooleanTool->face() : nullptr,
-                           mySlatsTool ? mySlatsTool->face() : nullptr}) {
+                           mySlatsTool ? mySlatsTool->face() : nullptr,
+                           myMaterialCard ? myMaterialCard->face() : nullptr}) {
         if (face) faces.push_back(face);
     }
     return faces;

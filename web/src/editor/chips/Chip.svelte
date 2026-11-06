@@ -226,6 +226,35 @@
                 }}
               />
             </label>
+          {:else if part.kind === 'slider'}
+            <label class="slider" title={part.tip}>
+              {#if part.label}<span class="label">{part.label}</span>{/if}
+              <input
+                type="range"
+                use:noFocus
+                data-part={part.id}
+                min={part.min}
+                max={part.max}
+                step="1"
+                value={part.value}
+                disabled={!part.enabled}
+                aria-label={part.label || part.tip}
+                oninput={(e) => chips.slide(name, part.id, Number((e.currentTarget as HTMLInputElement).value))}
+              />
+              <span class="readout">{part.valueText}</span>
+            </label>
+          {:else if part.kind === 'button' && part.swatch}
+            <button
+              type="button"
+              use:noFocus
+              class="swatch"
+              data-part={part.id}
+              title={part.tip}
+              aria-label={part.tip}
+              disabled={!part.enabled}
+              style:background={part.swatch}
+              onclick={() => press(part)}
+            ></button>
           {:else if part.look === 'segment'}
             <div class="cell">
               {#if part.label}<span class="label">{part.label}</span>{/if}
@@ -247,6 +276,7 @@
               type="button"
               use:noFocus
               class="{part.kind} {part.look ?? ''}"
+              class:end={part.align === 'end'}
               data-part={part.id}
               title={part.tip}
               disabled={!part.enabled}
@@ -264,6 +294,40 @@
 </div>
 
 <style>
+  .slider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+  }
+  .slider .label {
+    width: 74px;
+    flex: none;
+  }
+  .slider input {
+    flex: 1;
+    min-width: 40px;
+    accent-color: var(--accent);
+  }
+  .slider .readout {
+    width: 58px;
+    flex: none;
+    text-align: right;
+    color: var(--text-muted);
+  }
+  .end {
+    margin-left: auto;
+  }
+  .swatch {
+    width: 56px;
+    height: 26px;
+    flex: none;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
   .chip-card {
     position: fixed;
     box-sizing: border-box;

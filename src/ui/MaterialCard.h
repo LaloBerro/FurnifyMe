@@ -32,6 +32,7 @@
 
 #include <vector>
 
+class ChipFace;
 class QAbstractButton;
 class QHideEvent;
 class QLabel;
@@ -100,6 +101,10 @@ public:
     void replace();
 
     QStringList paintedTexts() const;
+    // The chrome page's face of this card (migration Phase 7a): ChipFace's
+    // rows - the name, the swatch and brightness, one slider per dial - read
+    // off this card's own controls; the page's edits land in them.
+    ChipFace* face() const { return myChipFace; }
 
 signals:
     // Live, on every move of any slider and every colour picked: the render
@@ -154,5 +159,9 @@ private:
     // does not report it straight back out as a user edit - RenderSettingsPanel's
     // mySyncing, the same problem one card over.
     bool mySeeding = false;
+    ChipFace* myChipFace = nullptr;
+    // Which rows show: every control is hidden while the page draws the card,
+    // and Metal only on a material that is not a wood.
+    void syncRowVisibility();
     bool myClaimInstalled = false;
 };

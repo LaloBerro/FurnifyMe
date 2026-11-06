@@ -35,6 +35,7 @@
 #include "ui/SceneWindow.h"
 #include "ui/LoadingCard.h"
 #include "ui/ShortcutSheet.h"
+#include "ui/MaterialCard.h"
 #include "ui/HintBalloon.h"
 #include "ui/WalkthroughPanel.h"
 
@@ -2423,7 +2424,7 @@ int main(int argc, char* argv[])
             }
             names.sort();
             check(names.join(QLatin1Char(',')) ==
-                      QStringLiteral("bevel,boolean,extrude,joint,mitre,move,pull,remeasure,slats") &&
+                      QStringLiteral("bevel,boolean,extrude,joint,material,mitre,move,pull,remeasure,slats") &&
                       glued == 5 && allDrawnElsewhere,
                   "every gesture chip is drawn by the page, and the five that follow the model are glued - " +
                       names.join(QStringLiteral(", ")));
@@ -2753,6 +2754,53 @@ int main(int argc, char* argv[])
         }
         fresh.close();
         pump(200);
+    }
+
+    // --- the material card, a chip face with sliders (Phase 7a) ----------------------
+    {
+        QAction* renderAction = actionNamed(&window, QStringLiteral("Render mode"));
+        MaterialCard* mcard = window.materialCard();
+        check(renderAction && mcard && mcard->face() && mcard->face()->drawnElsewhere(),
+              "material: the card is drawn by the page while it is live");
+        if (renderAction && mcard) {
+            if (!renderAction->isChecked()) renderAction->trigger();
+            pump(600);
+            MaterialCard::Look look;
+            look.surface = 0.45;
+            // The live wood: the card closes itself on any other material.
+            auto* renderPanel = window.findChild<RenderSettingsPanel*>();
+            const QString liveWood = renderPanel ? renderPanel->woodSelection() : QString();
+            check(!liveWood.isEmpty(), "material: a wood is live - " + liveWood);
+            mcard->open(liveWood, look, /*wood=*/true);
+            check(waitFor([&] { return js(page, "!!document.querySelector('[data-gesture=\"material\"] input[data-part=\"surface\"]')").toBool(); }, 3000),
+                  "material: the page draws the card with its sliders");
+            check(js(page, "document.querySelector('[data-gesture=\"material\"] input[data-part=\"metal\"]') === null").toBool(),
+                  "material: a wood is offered no Metal, on the page as in the Qt card");
+            // A drag on the page lands in the Qt card's own slider, whose own
+            // logic writes the look.
+            js(page, "(() => { const r = document.querySelector('[data-gesture=\"material\"] input[data-part=\"surface\"]'); "
+                     "r.value = '80'; r.dispatchEvent(new Event('input', {bubbles: true})); })()");
+            check(waitFor([&] { return std::abs(mcard->look().surface - 0.80) < 1e-9; }, 3000),
+                  QStringLiteral("material: the page's Surface slider moves the card's look (%1)").arg(mcard->look().surface));
+            QString readouts;
+            // Waited for FIRST: the message must read what the wait saw, and a
+            // check()'s arguments are evaluated in no fixed order.
+            const bool readoutFollows = waitFor([&] {
+                readouts = jsString(page, "[...document.querySelectorAll('[data-gesture=\"material\"] .readout')].map(n => n.textContent).join('|')");
+                return readouts.split(QLatin1Char('|')).contains(QStringLiteral("80"));
+            }, 3000);
+            check(readoutFollows, "material: and the readout the page shows follows it - " + readouts);
+#ifdef _WIN32
+            pump(300);
+            capture(&window, outDir + "/material-card.png");
+#endif
+            js(page, "document.querySelector('[data-gesture=\"material\"] [data-part=\"done\"]').click()");
+            check(waitFor([&] { return !mcard->isOpen(); }, 3000) &&
+                      waitFor([&] { return !js(page, "!!document.querySelector('[data-gesture=\"material\"]')").toBool(); }, 3000),
+                  "material: the page's Done closes it");
+            if (renderAction->isChecked()) renderAction->trigger();
+            pump(400);
+        }
     }
 
     // --- the shortcut sheet, drawn by the page under the Qt sheet (Phase 7a) ---------

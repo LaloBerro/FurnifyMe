@@ -30,6 +30,8 @@ signals:
 public slots:
     void edit(const QString& chip, const QString& id, const QString& text);
     void press(const QString& chip, const QString& id);
+    // A slider part dragged on the page (Phase 7a): lands in the QSlider.
+    void slide(const QString& chip, const QString& id, int value);
     // Enter on the page: the values its fields hold ride WITH it (ruling R3).
     void commit(const QString& chip, const QVariantMap& values);
     void cancel(const QString& chip);

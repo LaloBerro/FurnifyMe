@@ -1,5 +1,6 @@
 #include "MaterialCard.h"
 
+#include "ChipFace.h"
 #include "Theme.h"
 #include "ViewportOverlay.h"
 
@@ -132,6 +133,49 @@ MaterialCard::MaterialCard(QWidget* viewport)
     connect(done, &QPushButton::clicked, this, [this] { close(); });
     myDone = done;
 
+    // The chrome page's face (Phase 7a): read off these very controls, so a
+    // page edit runs the slider's own valueChanged above.
+    myChipFace = new ChipFace(QStringLiteral("material"), this);
+    myChipFace->addButton(QStringLiteral("swatch"), swatch);
+    myChipFace->addButton(QStringLiteral("done"), done);
+    myChipFace->addSlider(QStringLiteral("brightness"), slider);
+    myChipFace->addHidden(value);
+    const std::pair<const char*, Dial*> dials[] = {
+        {"surface", &mySurface}, {"metal", &myMetal}, {"grainSize", &myGrainSize}, {"grainAngle", &myGrainAngle}};
+    for (const auto& [id, dial] : dials) {
+        myChipFace->addSlider(QString::fromLatin1(id), dial->slider);
+        myChipFace->addHidden(dial->name);
+        myChipFace->addHidden(dial->value);
+    }
+    myChipFace->setActions(nullptr, [this] { close(); });
+    myChipFace->setDescriber([this] {
+        QVariantList rows;
+        rows.append(QVariant(QVariantList{ChipFace::text(myMaterial, QStringLiteral("title"))}));
+        QVariantMap swatchPart = myChipFace->button(QStringLiteral("swatch"));
+        swatchPart.insert(QStringLiteral("swatch"), myLook.colour.name());
+        rows.append(QVariant(QVariantList{
+            swatchPart, myChipFace->slider(QStringLiteral("brightness"), QString(), myValue ? myValue->text() : QString())}));
+        const std::pair<const char*, Dial*> all[] = {
+            {"surface", &mySurface}, {"metal", &myMetal}, {"grainSize", &myGrainSize}, {"grainAngle", &myGrainAngle}};
+        const std::vector<Dial*> offered = offeredDials();
+        for (const auto& [id, dial] : all) {
+            if (std::find(offered.begin(), offered.end(), dial) == offered.end()) continue;
+            rows.append(QVariant(QVariantList{myChipFace->slider(QString::fromLatin1(id),
+                                                                 dial->name ? dial->name->text() : QString(),
+                                                                 dial->value ? dial->value->text() : QString())}));
+        }
+        QVariantMap donePart = myChipFace->button(QStringLiteral("done"));
+        donePart.insert(QStringLiteral("align"), QStringLiteral("end"));   // the Qt card's right edge
+        rows.append(QVariant(QVariantList{donePart}));
+        return rows;
+    });
+    connect(myChipFace, &ChipFace::drawnChanged, this, [this] {
+        syncRowVisibility();
+        replace();
+        update();
+    });
+    connect(myChipFace, &ChipFace::faceSizeChanged, this, [this] { replace(); });
+
     applyStyles();
     syncReadouts();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
@@ -147,12 +191,7 @@ void MaterialCard::open(const QString& material, const Look& look, bool wood)
     myMaterial = material;
     myLook = look;
     myWood = wood;
-    // Hidden or shown BEFORE replace() below measures the card, so its height
-    // follows the rows it actually holds.
-    for (QWidget* part : {static_cast<QWidget*>(myMetal.name), static_cast<QWidget*>(myMetal.slider),
-                          static_cast<QWidget*>(myMetal.value)}) {
-        if (part) part->setVisible(!wood);
-    }
+    syncRowVisibility();
     if (!myLook.colour.isValid()) myLook.colour = Theme::Fixed::materialLookStart();
     myLook.brightness = std::clamp(myLook.brightness, kBrightMin / 100.0, kBrightMax / 100.0);
     myLook.surface = std::clamp(myLook.surface, 0.0, 1.0);
@@ -183,6 +222,25 @@ void MaterialCard::open(const QString& material, const Look& look, bool wood)
     show();
     raise();
     update();
+    if (myChipFace) {
+        myChipFace->reseed();
+        myChipFace->notify();
+    }
+}
+
+void MaterialCard::syncRowVisibility()
+{
+    const bool drawn = myChipFace && myChipFace->drawnElsewhere();
+    for (QWidget* part : {static_cast<QWidget*>(mySwatch), static_cast<QWidget*>(mySlider),
+                          static_cast<QWidget*>(myValue), static_cast<QWidget*>(myDone)})
+        if (part) part->setVisible(!drawn);
+    const std::vector<Dial*> offered = offeredDials();
+    for (Dial* dial : {&mySurface, &myMetal, &myGrainSize, &myGrainAngle}) {
+        const bool shows = !drawn && std::find(offered.begin(), offered.end(), dial) != offered.end();
+        for (QWidget* part : {static_cast<QWidget*>(dial->name), static_cast<QWidget*>(dial->slider),
+                              static_cast<QWidget*>(dial->value)})
+            if (part) part->setVisible(shows);
+    }
 }
 
 void MaterialCard::setLook(const Look& look)
@@ -274,6 +332,7 @@ void MaterialCard::pickColour()
         myLook.colour = colour;
         applyStyles();
         emitChange();
+        if (myChipFace) myChipFace->notify();
     });
     picker->show();
 }
@@ -292,7 +351,12 @@ void MaterialCard::replace()
     const int dials = static_cast<int>(offeredDials().size());
     const int height = kPad * 2 + title.height() + kGap + kRowHeight + kGap +
                        dials * (kRowHeight + kDialGap) + kGap + kRowHeight;
-    setFixedSize(Theme::wholeDevicePixels(QSize(kCardWidth, height)));
+    // Drawn by the page, the card is the size the page measured (Phase 4's
+    // ruling R2, every chip's); its corner stays this code's.
+    if (myChipFace && myChipFace->drawnElsewhere() && myChipFace->faceSize().isValid())
+        setFixedSize(Theme::wholeDevicePixels(myChipFace->faceSize()));
+    else
+        setFixedSize(Theme::wholeDevicePixels(QSize(kCardWidth, height)));
 
     // Bottom LEFT of the viewport: the render settings are a docked panel down
     // the right edge, and the middle is the furniture this card exists to
@@ -370,6 +434,7 @@ QStringList MaterialCard::paintedTexts() const
 
 void MaterialCard::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myChipFace && myChipFace->drawnElsewhere()) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     Theme::paintSurface(painter, rect(), kCardRadius);

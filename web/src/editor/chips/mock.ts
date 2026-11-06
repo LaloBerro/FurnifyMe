@@ -17,6 +17,7 @@ export function mockChips(faces: Record<string, Face> = {}): MockChips {
     facesChanged: { connect: (fn: Listener) => listeners.push(fn) },
     edit: (chip, id, text) => api.calls.push({ op: 'edit', chip, args: [id, text] }),
     press: (chip, id) => api.calls.push({ op: 'press', chip, args: [id] }),
+    slide: (chip, id, value) => api.calls.push({ op: 'slide', chip, args: [id, value] }),
     commit: (chip, values) => api.calls.push({ op: 'commit', chip, args: [values] }),
     cancel: (chip) => api.calls.push({ op: 'cancel', chip, args: [] }),
     reportSize: (chip, w, h) => api.calls.push({ op: 'reportSize', chip, args: [w, h] }),
