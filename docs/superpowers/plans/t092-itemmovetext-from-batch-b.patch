@@ -1,0 +1,94 @@
+diff --git a/src/session/ItemMoveText.cpp b/src/session/ItemMoveText.cpp
+index 6c7de5a..4c8bdcb 100644
+--- a/src/session/ItemMoveText.cpp
++++ b/src/session/ItemMoveText.cpp
+@@ -2,6 +2,8 @@
+ 
+ #include <QCoreApplication>
+ 
++#include <algorithm>
++
+ namespace ItemMoveText {
+ namespace {
+ 
+@@ -78,7 +80,39 @@ QString sentence(const DocumentModel& doc, const DocumentModel::MoveResult& r, T
+ 
+ QString dragStatus(const DocumentModel& doc, const DocumentModel::MoveResult& r)
+ {
+-    return t("%1 — %2").arg(sentence(doc, r, Tense::Present), escHint());
++    // A target the block already stands at (ruling D15): its indicator stays,
++    // because the hand is genuinely over it, but "Drop to move" would promise
++    // a move the release does not make.
++    if (r.check == DocumentModel::MoveCheck::NoChange) return alreadyHere();
++    QString line = sentence(doc, r, Tense::Present);
++    // CARRIED OUT OF SEVERAL FOLDERS (finding F11): a folder click selects a
++    // whole subtree, and dragging one of its bodies carries all of them out of
++    // their subfolders - so the line says so before the release, not after.
++    const QString spread = foldersLeft(doc, r);
++    if (!spread.isEmpty()) line = t("%1 — %2").arg(line, spread);
++    return t("%1 — %2").arg(line, escHint());
++}
++
++QString foldersLeft(const DocumentModel& doc, const DocumentModel::MoveResult& r)
++{
++    // Where each carried row stands now. Only a spread across MORE THAN ONE
++    // folder is worth a clause: everything out of one folder is already said
++    // by where() ("out of Carcass"), and loose top-level rows leave no folder.
++    std::vector<int> from;
++    for (int id : r.carried) {
++        const int parent = doc.groupOf(id);
++        if (parent > 0 && std::find(from.begin(), from.end(), parent) == from.end())
++            from.push_back(parent);
++    }
++    if (from.size() < 2) return QString();
++    // ...and of those, the folders this drop actually takes something out of:
++    // the destination keeps whatever was already in it.
++    std::vector<int> left;
++    for (int folder : from)
++        if (folder != r.parent) left.push_back(folder);
++    if (left.empty()) return QString();
++    if (left.size() == 1) return t("takes some out of %1").arg(nameOf(doc, left.front()));
++    return t("takes them out of %1 folders").arg(left.size());
+ }
+ 
+ QString refusal(const DocumentModel& doc, const DocumentModel::MoveResult& r)
+@@ -92,6 +126,7 @@ QString refusal(const DocumentModel& doc, const DocumentModel::MoveResult& r)
+     return t("That row is no longer in the list — nothing was moved");
+ }
+ 
++QString alreadyHere() { return t("Already here — releasing changes nothing"); }
+ QString escHint() { return t("Esc cancels"); }
+ QString releaseToCancel() { return t("Release to cancel"); }
+ QString filteredDropHint() { return t("Drop on a folder while the list is filtered — Esc cancels"); }
+@@ -116,7 +151,8 @@ QStringList paintedTexts()
+             t("to the end of the list"), t("to the end of %1"), t("%1 and %2"), t("1 body"),
+             t("%1 bodies"), t("1 outline"), t("%1 outlines"), t("1 folder"), t("%1 folders"),
+             t("Drop to move %1 %2"), t("Moved %1 %2"), t(" — and 1 mirrored twin"),
+-            t(" — and %1 mirrored twins"),
++            t(" — and %1 mirrored twins"), t("%1 — %2"), t("takes some out of %1"),
++            t("takes them out of %1 folders"), alreadyHere(),
+             t("%1 can't go inside itself — drop it beside it instead"),
+             t("%1 can't go inside a folder it holds — drop it beside it instead"),
+             t("That row is no longer in the list — nothing was moved"), escHint(),
+diff --git a/src/session/ItemMoveText.h b/src/session/ItemMoveText.h
+index fdb7859..65ab214 100644
+--- a/src/session/ItemMoveText.h
++++ b/src/session/ItemMoveText.h
+@@ -21,8 +21,16 @@ QString nameOf(const DocumentModel& doc, int id);
+ QString subject(const DocumentModel& doc, const std::vector<int>& carried);
+ // Present: "Drop to move 3 bodies into Doors"; Past: "Moved 3 bodies to Doors".
+ QString sentence(const DocumentModel& doc, const DocumentModel::MoveResult& result, Tense tense);
+-// The status line during a drag: the present sentence, then "— Esc cancels".
++// The status line during a drag: the present sentence, then - when the carried
++// rows stand in more than one folder - what the drop takes them out of (finding
++// F11), then "— Esc cancels". A NoChange target reads alreadyHere() instead
++// (ruling D15).
+ QString dragStatus(const DocumentModel& doc, const DocumentModel::MoveResult& result);
++// "takes them out of 3 folders" / "takes some out of Drawer", or empty when the
++// carried rows stand in fewer than two folders or none of them is left.
++QString foldersLeft(const DocumentModel& doc, const DocumentModel::MoveResult& result);
++// "Already here — releasing changes nothing" (ruling D15).
++QString alreadyHere();
+ // The Failure for IntoItself or Unknown.
+ QString refusal(const DocumentModel& doc, const DocumentModel::MoveResult& result);
+ QString escHint();
