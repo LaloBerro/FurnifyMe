@@ -256,7 +256,6 @@ if(FURNIFYME_BUILD_APP)
       src/MainWindow.cpp
       src/OcctViewWidget.cpp
       src/GridRenderer.cpp
-      src/ui/AppBar.cpp
       src/ui/SettingsEdits.cpp
       src/ui/Themes.cpp
       src/ui/Themes.h
@@ -287,7 +286,6 @@ if(FURNIFYME_BUILD_APP)
       src/ui/Theme.cpp
       src/ui/IconSet.cpp
       src/ui/ToolChip.cpp
-      src/ui/ToolCluster.cpp
       src/ui/ViewportOverlay.cpp
       src/ui/PanelCloseButton.cpp
       src/ui/NameFurnitureCard.cpp

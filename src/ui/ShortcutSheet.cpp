@@ -12,7 +12,7 @@
 #include <QHideEvent>
 #include <QKeyEvent>
 #include <QMenu>
-#include <QMenuBar>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QWidget>
@@ -87,12 +87,11 @@ std::vector<ShortcutSheet::Group> ShortcutSheet::buildGroups() const
     // bound outside a menu rather than silently dropping it.
     std::vector<const QAction*> seen;
 
-    if (QMenuBar* bar = parentWidget()->findChild<QMenuBar*>()) {
-        for (QAction* top : bar->actions()) {
-            QMenu* menu = top->menu();
+    {
+        for (QMenu* menu : myMenus) {
             if (!menu) continue;
             Group group;
-            group.title = plainText(top);
+            group.title = plainText(menu->menuAction());
             for (QAction* candidate : menu->actions()) {
                 if (candidate->isSeparator() || candidate->shortcut().isEmpty()) continue;
                 group.rows.push_back(Row{plainText(candidate), keysFor(candidate)});

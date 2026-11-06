@@ -49,7 +49,6 @@
 #include "ui/UnsavedCloseCard.h"
 #include "ui/NameFurnitureCard.h"
 #include "ui/WindowChrome.h"
-#include "ui/ToolCluster.h"
 #include "ui/AxisGizmo.h"
 #include "ui/ToolChip.h"
 #include "session/ActionRegistry.h"
@@ -57,7 +56,6 @@
 #include "web/WebHost.h"
 #include "web/ShellBridge.h"
 #include "session/MenuModel.h"
-#include "ui/AppBar.h"
 #include "ui/HtmlCardSlot.h"
 #include "ui/BooleanTool.h"
 #include "ui/SlatsTool.h"
@@ -78,7 +76,6 @@
 #include <QColorDialog>
 #include <QKeyEvent>
 #include <QLabel>
-#include <QMenuBar>
 #include <QLineEdit>
 #include <QRegularExpression>
 #include <QSettings>
@@ -191,14 +188,12 @@ QRect toastRect(QWebEngineView* page)
     return QRect(n("x"), n("y"), n("w"), n("h"));
 }
 
-// The window buttons on screen (Phase 7a): the page's slot while the page
-// draws them, the Qt card otherwise - and whether a press at their centre
-// reaches buttons a user can press.
+// The window buttons' place (the page draws them; Phase 7b deleted the Qt
+// card) - and whether a press at their centre reaches buttons a user can press.
 QWidget* shownWindowButtons(MainWindow& window)
 {
-    auto* slot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_buttons"));
-    if (slot && slot->isVisible()) return slot;
-    return window.windowButtons();
+    auto* slot = window.buttonsSlot();
+    return slot && slot->isVisible() ? slot : nullptr;
 }
 
 bool windowButtonsTakePress(MainWindow& window, QWebEngineView* page)
@@ -207,7 +202,6 @@ bool windowButtonsTakePress(MainWindow& window, QWebEngineView* page)
     if (!buttons) return false;
     const QPoint centre = buttons->mapTo(window.view(), buttons->rect().center());
     QWidget* at = window.view()->childAt(centre);
-    if (buttons == window.windowButtons()) return at == buttons || (at && buttons->isAncestorOf(at));
     return at && (at == page || page->isAncestorOf(at)) &&
            js(page, QStringLiteral("!!document.elementFromPoint(%1, %2)?.closest('.window-buttons')").arg(centre.x()).arg(centre.y())).toBool();
 }
@@ -1792,14 +1786,10 @@ int main(int argc, char* argv[])
         HtmlCardSlot* pillSlot = slotNamed("pill");
         HtmlCardSlot* railSlot = slotNamed("rail");
         HtmlCardSlot* viewSlot = slotNamed("view");
-        ToolCluster* qtRail = window.findChild<ToolCluster*>();
-        AppBar* qtPill = window.findChild<AppBar*>();
         check(pillSlot && railSlot && viewSlot, "the pill, the rail and the view cluster each have a slot");
-        if (pillSlot && railSlot && viewSlot && qtRail && qtPill && window.viewControls()) {
-            check(pillSlot->isVisible() && !qtPill->isVisible(), "the pill's slot stands in the Qt pill's place");
-            check(railSlot->isVisible() && !qtRail->isVisible(), "the rail's slot stands in the Qt rail's place");
-            check(viewSlot->isVisible() && !window.viewControls()->isVisible(),
-                  "the view cluster's slot stands in the Qt cluster's place");
+        if (pillSlot && railSlot && viewSlot) {
+            check(pillSlot->isVisible() && railSlot->isVisible() && viewSlot->isVisible(),
+                  "the pill, the rail and the view cluster stand in their places");
             check(railSlot->geometry().top() > pillSlot->geometry().bottom() &&
                       railSlot->geometry().left() == pillSlot->geometry().left(),
                   "the rail stands under the pill, in one column");
@@ -2810,8 +2800,8 @@ int main(int argc, char* argv[])
     {
         auto* slot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_buttons"));
         HubWindowControls* controls = window.windowControls();
-        check(slot && slot->isVisible() && controls && window.windowButtons() && !window.windowButtons()->isVisible(),
-              "buttons: the page's window buttons stand in the Qt buttons' place");
+        check(slot && slot->isVisible() && controls,
+              "buttons: the page's window buttons stand in their place");
         check(waitFor([&] { return js(page, "document.querySelectorAll('.window-buttons .win').length").toInt() == 3; }, 3000),
               "buttons: the page draws minimize, maximize and close");
         // The maximize button's rectangle is what Windows' hit test answers
@@ -2909,10 +2899,9 @@ int main(int argc, char* argv[])
                   "material: the page's Done closes it");
             // Render mode's way out is the page's Back chip (Phase 7a).
             auto* backSlot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_back"));
-            ToolChip* qtBack = window.renderExitChip();
-            check(backSlot && backSlot->isVisible() && qtBack && !qtBack->isVisible() &&
+            check(backSlot && backSlot->isVisible() &&
                       waitFor([&] { return js(page, "!!document.querySelector('[data-cluster=\"back\"] [data-chip]')").toBool(); }, 3000),
-                  "back: in render mode the page draws the Back chip, in the Qt chip's place");
+                  "back: in render mode the page draws the Back chip in its place");
             js(page, "document.querySelector('[data-cluster=\"back\"] [data-chip]').click()");
             check(waitFor([&] { return !renderAction->isChecked(); }, 3000),
                   "back: the page's Back chip leaves render mode");
@@ -3103,7 +3092,7 @@ int main(int argc, char* argv[])
         // The window buttons' brightest pixel, before and while the question
         // stands - the page's wash must leave them as crisp as the Qt card's
         // raise did (measured red first: 52 against 152).
-        WindowButtons* windowButtons = window.findChild<WindowButtons*>();
+        QWidget* windowButtons = window.buttonsSlot();
         const auto buttonsBrightness = [&](const QString& file) {
             const QImage shot(file);
             if (shot.isNull() || !windowButtons) return -1;
@@ -3287,7 +3276,7 @@ int main(int argc, char* argv[])
             QWidget* atCentre = window.view()->childAt(window.view()->rect().center());
             check(atCentre && (atCentre == page || page->isAncestorOf(atCentre)),
                   "a press on the viewport behind the name question lands on the page");
-            if (ToolCluster* rail = window.findChild<ToolCluster*>()) {
+            if (QWidget* rail = window.railSlot()) {
                 QWidget* at = window.view()->childAt(rail->geometry().center());
                 check(at && (at == page || page->isAncestorOf(at)), "and so does a press on the rail");
             }
@@ -3460,8 +3449,6 @@ int main(int argc, char* argv[])
                 check(railSlot && pillSlot && !railSlot->isVisible() && !pillSlot->isVisible() &&
                           waitFor([&] { return !js(page, "!!document.querySelector('[data-cluster=\"rail\"]') || !!document.querySelector('[data-pill]')").toBool(); }, 3000),
                       "render mode takes the page's rail and pill away");
-                check(!window.findChild<ToolCluster*>()->isVisible() && !window.findChild<AppBar*>()->isVisible(),
-                      "and the Qt ones stay hidden");
             }
             check(rv->width() == panel->minimumWidth() && rv->height() > 400,
                   QStringLiteral("at the Qt panel's own width, full height (%1 x %2)").arg(rv->width()).arg(rv->height()));
@@ -3577,9 +3564,8 @@ int main(int argc, char* argv[])
                 auto* railSlot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"));
                 auto* pillSlot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_pill"));
                 check(railSlot && pillSlot && railSlot->isVisible() && pillSlot->isVisible() &&
-                          !window.findChild<ToolCluster*>()->isVisible() &&
                           waitFor([&] { return js(page, "document.querySelectorAll('[data-cluster=\"rail\"] [data-chip]').length").toInt() == 10; }, 3000),
-                      "leaving render mode brings the page's rail and pill back, never the Qt ones");
+                      "leaving render mode brings the page's rail and pill back");
             }
         }
     }
@@ -3638,12 +3624,10 @@ int main(int argc, char* argv[])
             check(jsString(sp, "(document.querySelector('.strip .right') || {}).textContent || ''") ==
                       scene.statusLine()->state(),
                   "and its right channel is the scene's next step");
-            check(waitFor([&] { return js(sp, "!!document.querySelector('[data-pill]')").toBool(); }, 3000) &&
-                      !scene.findChild<AppBar*>()->isVisible(),
-                  "the page draws the pill, and the Qt pill steps aside");
-            check(waitFor([&] { return js(sp, "document.querySelectorAll('[data-chip]').length").toInt() == 3; }, 3000) &&
-                      !scene.arrangeTools()->isVisible(),
-                  "the page draws Move, Rotate and Render mode, and the Qt cluster steps aside");
+            check(waitFor([&] { return js(sp, "!!document.querySelector('[data-pill]')").toBool(); }, 3000),
+                  "the page draws the pill");
+            check(waitFor([&] { return js(sp, "document.querySelectorAll('[data-chip]').length").toInt() == 3; }, 3000),
+                  "the page draws Move, Rotate and Render mode");
             QAction* rotate = actionNamed(&scene, QStringLiteral("Rotate"));
             QAction* move = actionNamed(&scene, QStringLiteral("Move"));
             const QString rotateId = rotate ? ActionRegistry::idFor(rotate->text()) : QString();
@@ -3654,7 +3638,7 @@ int main(int argc, char* argv[])
             // The menus: the scene's own, opened on the page.
             {
                 const int titles = js(sp, "document.querySelectorAll('[data-pill] [data-title]').length").toInt();
-                const int menus = int(scene.findChild<AppBar*>()->menus()->actions().size());
+                const int menus = int(scene.menus().size());
                 check(menus > 0 && titles == menus,
                       QStringLiteral("the page's pill carries the scene's own %1 menus (%2 titles)").arg(menus).arg(titles));
             }
@@ -3685,9 +3669,8 @@ int main(int argc, char* argv[])
                 sceneRender->trigger();
                 pump(500);
                 check(sceneRender->isChecked() &&
-                          waitFor([&] { return js(sp, "!!document.querySelector('[data-cluster=\"back\"] [data-chip]')").toBool(); }, 3000) &&
-                          scene.studio() && scene.studio()->exitChip() && !scene.studio()->exitChip()->isVisible(),
-                      "scene back: in render mode the scene's page draws the Back chip, the Qt one stands aside");
+                          waitFor([&] { return js(sp, "!!document.querySelector('[data-cluster=\"back\"] [data-chip]')").toBool(); }, 3000),
+                      "scene back: in render mode the scene's page draws the Back chip");
                 js(sp, "document.querySelector('[data-cluster=\"back\"] [data-chip]').click()");
                 check(waitFor([&] { return !sceneRender->isChecked(); }, 3000), "scene back: and it leaves render mode");
                 if (sceneRender->isChecked()) sceneRender->trigger();
@@ -3860,9 +3843,8 @@ int main(int argc, char* argv[])
             check(!window.isAskingForName(), "and Escape cancels it there");
         }
         check(!page->isVisible(), "the dead page leaves the viewport");
-        if (ToolCluster* rail = window.findChild<ToolCluster*>())
-            check(rail->isVisible() && window.findChild<AppBar*>()->isVisible() && window.viewControls()->isVisible(),
-                  "the Qt rail, pill and view cluster come back in their places (Phase 3i)");
+        // With no page there is no chrome (Phase 7b, ruling R1): the slots
+        // keep their places, painting nothing, until the page is back.
         check(!window.shellBridge()->menu()->isOpen(), "and no menu stands open");
 
         TopoDS_Face live;
@@ -3896,9 +3878,8 @@ int main(int argc, char* argv[])
         check(page->isVisible(), "it stands over the viewport again");
         check(window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail")) &&
                   window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"))->isVisible() &&
-                  !window.findChild<ToolCluster*>()->isVisible() &&
                   waitFor([&] { return js(page, "document.querySelectorAll('[data-cluster=\"rail\"] [data-chip]').length").toInt() == 10; }, 5000),
-              "and the page's rail is back in the Qt rail's place");
+              "and the page's rail is back in its place");
     }
 #endif
 

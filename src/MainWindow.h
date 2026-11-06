@@ -25,7 +25,6 @@
 #include "SketchController.h"
 #include "UserProgress.h"
 
-class AppBar;
 class EditorChrome;
 class AxisGizmo;
 class BevelArrow;
@@ -37,7 +36,7 @@ class PullArrow;
 class QAction;
 class QActionGroup;
 class QMenu;
-class QMenuBar;
+class QMenu;
 class QSplitter;
 class RenderSettingsPanel;
 class RenderShutterButton;
@@ -1018,17 +1017,21 @@ public:
     // before this task, a ViewportOverlay::Anchor::TopLeft card now. Exposed
     // the same way every other overlay card is, rather than making a caller
     // find it by class through findChild<>().
-    AppBar* appBar() const { return myAppBar; }
+    class HtmlCardSlot* pillSlot() const { return myPillSlot; }
+    // The window's menus (Phase 7b: no QMenuBar - the page's pill draws
+    // them, and every action they hold is also the window's own, so its
+    // shortcut fires with no menu bar anywhere).
+    const QList<QMenu*>& menus() const { return myMenus; }
     // The way back out of render mode - exposed so the suite can click the
     // real control rather than triggering the action behind it, which would
     // prove the action works and nothing about the chip.
-    class ToolChip* renderExitChip() const { return myRenderExitChip; }
+    class HtmlCardSlot* backSlot() const { return myBackSlot; }
     // The page's window buttons' controls (Phase 7a); null until the chrome.
     class HubWindowControls* windowControls() const { return myWindowControls; }
     // The bottom strip's state (Phase 7b): the left sentence, the right state
     // line, the furniture's name and its unsaved dot.
     class StatusLine* statusLine() const { return myStatusLine; }
-    class WindowButtons* windowButtons() const { return myWindowButtons; }
+    class HtmlCardSlot* buttonsSlot() const { return myButtonsSlot; }
     // The frame overlay, for the suite: what it is drawing is the same rect
     // the export reproduces, so a check can compare the two.
     class RenderFrameGuides* renderFrame() const { return myRenderFrame; }
@@ -1052,7 +1055,8 @@ public:
     // findChild<ToolCluster*>() (added first, in buildOverlay()), and a
     // caller that wants this one asks here instead of guessing which
     // ToolCluster findChildren() returned.
-    ToolCluster* viewControls() const { return myViewControls; }
+    class HtmlCardSlot* viewSlot() const { return myViewSlot; }
+    class HtmlCardSlot* railSlot() const { return myRailSlot; }
 
     UserProgress& progress() { return myProgress; }
     const UserProgress& progress() const { return myProgress; }
@@ -1548,10 +1552,7 @@ private:
     // QMainWindow::menuBar(): once the app bar is the menu widget, that
     // accessor cannot find a QMenuBar in the slot and creates a fresh empty
     // one, whose setMenuBar() then deletes the bar. See AppBar.h.
-    QMenuBar* buildMenus();
-    // Installs the app bar as the window's menu strip, with `menus` inside
-    // it. Must run after buildActions(), whose actions the bar mirrors.
-    void buildAppBar(QMenuBar* menus);
+    void buildMenus();
     // Back to the angled view, and record it. The View menu's Axonometric
     // entry and its 0 shortcut are both this, so neither carries its own copy
     // of the pose. Also drops any borrowed orthographic look - see the
@@ -2295,14 +2296,12 @@ public:
     // these two cards' positions the instant the window is up. A no-op while
     // the overlay has not laid out yet, and it always ends by handing the
     // final say back to ViewportOverlay::relayout().
-    void playShellEntrance();
 
 private:
     // The entrance flight, parented here and kept when stopped (a
     // DeleteWhenStopped animation deletes itself on natural completion too,
     // which dangles a retained pointer). Non-null means it has already played
     // once for this window.
-    class QParallelAnimationGroup* myShellEntrance = nullptr;
 
     // The rail slides off the viewport's left edge when render mode hides it,
     // and back when it returns; this object owns its visibility outright -
@@ -2334,7 +2333,6 @@ private:
     // the first visible one and lands in the corner the app bar just left.
     // NON-OWNING - RenderStudio builds and owns the Back chip; this is
     // the pointer this window's own wiring reads it through.
-    class ToolChip* myRenderExitChip = nullptr;
 
     // Render mode DOCKS its panel rather than floating it, which is a change
     // to what the central widget is. The user's reason is the whole
@@ -2362,7 +2360,7 @@ private:
     // the pointer this window's own wiring reads it through.
     class RenderFrameGuides* myRenderFrame = nullptr;
 
-    AppBar* myAppBar = nullptr;
+    QList<QMenu*> myMenus;
     QAction* myAddShapeAction = nullptr;
     QAction* myGridAction = nullptr;
     bool myStartGridOn = true;   // view/gridOn, applied once actions exist
@@ -2372,7 +2370,6 @@ private:
     // caption having been eaten by WindowChrome - see buildOverlay() and
     // the WindowChrome::attach() call in the constructor. Never hidden by
     // render mode: closing the window must stay reachable in every mode.
-    class WindowButtons* myWindowButtons = nullptr;
     class ViewportOverlay* myOverlay = nullptr;
     // The kind-lock refusal sentence THIS window last put in the status bar,
     // or empty. Kept only so the withdrawal can be surgical - see
@@ -2673,7 +2670,6 @@ private:
     // buildOverlay() otherwise, and both need to be reached from the
     // appStateChanged-driven visibility lambda that already hides the three
     // drawers and the status bar the same way.
-    ToolCluster* myRail = nullptr;
     AxisGizmo* myAxisGizmo = nullptr;
     // The view-controls cluster (Milestone 5, item 3) and the unit chip
     // inside it - kept on myRail/myAxisGizmo's own terms: both are built as
@@ -2681,7 +2677,6 @@ private:
     // needs a stored pointer because, unlike the other three, it owns no
     // QAction of its own to mirror - its text is pushed in on every
     // appStateChanged, exactly as AppBar::setUnitLabel() used to be called.
-    ToolCluster* myViewControls = nullptr;
     QString myCompareVersionName;   // user text - see the badge's own rule
     // The badge and its Close-compare control, parented to myCompareView -
     // owned by Qt's parent-child cascade (destroyed with myCompareView),

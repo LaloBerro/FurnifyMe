@@ -7,7 +7,7 @@
 // id) and a glyph; what it shows - enabled, checked, label, tooltip - is read
 // off the action on every change (one ActionWatch, one chipsChanged() per
 // turn), and a click goes back through ActionRegistry::trigger(), which obeys
-// isEnabled(). The menus are a MenuModel built from the window's own QMenuBar
+// isEnabled(). The menus are a MenuModel built from the window's own menu list
 // (registered beside this as `menu`). Glyphs are IconSet's, sent once as
 // alpha masks the page tints (ruling R2).
 //
@@ -39,7 +39,7 @@ class ActionWatch;
 class MenuModel;
 class QAction;
 class QMenu;
-class QMenuBar;
+class QMenu;
 class QWidget;
 
 class ShellBridge : public QObject
@@ -64,7 +64,7 @@ public:
         QString glyphName;
     };
 
-    ShellBridge(ActionRegistry* registry, std::vector<Chip> rail, std::vector<Chip> view, QMenuBar* menus,
+    ShellBridge(ActionRegistry* registry, std::vector<Chip> rail, std::vector<Chip> view, const QList<QMenu*>& menus,
                 QWidget* window, QObject* parent = nullptr, std::vector<Chip> back = {});
     ~ShellBridge() override;
 
@@ -75,9 +75,6 @@ public:
     QVariantMap chips() const;
     QString wordmark() const { return QStringLiteral("FurnifyMe"); }
     MenuModel* menu() const { return myMenu; }
-    // The menu bar's top-level menus, whose menuAction()s the pill's slot
-    // carries so every shortcut fires while the HTML pill shows (R5).
-    QList<QAction*> menuActions() const;
 
     // Where the page last said a chip stands, in the viewport's coordinates;
     // empty until it has said.
@@ -108,7 +105,6 @@ private:
     std::vector<Chip> myRail;
     std::vector<Chip> myView;
     std::vector<Chip> myBack;
-    QPointer<QMenuBar> myMenuBar;
     QPointer<QWidget> myWindow;
     MenuModel* myMenu = nullptr;
     ActionWatch* myWatch = nullptr;

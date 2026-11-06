@@ -36,14 +36,13 @@
 #include <gp_Trsf.hxx>
 
 class AddPieceCard;
-class AppBar;
+class QMenu;
 class FurnitureStore;
 class OcctViewWidget;
 class QLabel;
 class RenderStudio;
 class ScenePiecesPanel;
 class ToastHost;
-class ToolCluster;
 class UnsavedCloseCard;
 class ViewportOverlay;
 
@@ -136,7 +135,12 @@ public:
     class StatusLine* statusLine() const { return myStatusLine; }
     ScenePiecesPanel* piecesPanel() const { return myPieces; }
     AddPieceCard* addPieceCard() const { return myAddPiece; }
-    ToolCluster* arrangeTools() const { return myArrangeTools; }
+    // The Move / Rotate / Render cluster's place (the page draws it).
+    class HtmlCardSlot* arrangeSlot() const { return myViewSlot; }
+    class HtmlCardSlot* pillSlot() const { return myPillSlot; }
+    // The window's menus (Phase 7b: no QMenuBar; every action they hold is
+    // also the window's own, so its shortcut fires with nothing on screen).
+    const QList<QMenu*>& menus() const { return myMenus; }
     QAction* addPieceAction() const { return myAddPieceAction; }
     ToastHost* toasts() const { return myToasts; }
 
@@ -261,17 +265,15 @@ private:
     ViewportOverlay* myOverlay = nullptr;
     QAction* myUndoAction = nullptr;
     QAction* myRedoAction = nullptr;
-    AppBar* myAppBar = nullptr;
+    QList<QMenu*> myMenus;
     // The three window controls, floating over the viewport - this window is
     // frameless like the editor, so these ARE its caption buttons.
-    class WindowButtons* myWindowButtons = nullptr;
     ScenePiecesPanel* myPieces = nullptr;
     RenderStudio* myStudio = nullptr;
     QAction* myRenderModeAction = nullptr;
     QAction* myCloseSceneAction = nullptr;
     QAction* myAddPieceAction = nullptr;
     // Move, Rotate and Render mode as icon-only chips - see buildOverlay().
-    ToolCluster* myArrangeTools = nullptr;
     // The status bar's two channels - see buildOverlay().
     QAction* mySnapAction = nullptr;
     QAction* myMoveAction = nullptr;

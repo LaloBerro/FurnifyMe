@@ -9,7 +9,6 @@
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMenu>
-#include <QMenuBar>
 #include <QWidget>
 
 namespace {
@@ -37,16 +36,14 @@ std::vector<MenuModel::Node> walk(const QMenu* menu)
     return nodes;
 }
 
-std::vector<MenuModel::Node> walkBar(const QMenuBar* bar)
+std::vector<MenuModel::Node> walkBar(const QList<QMenu*>& list)
 {
     std::vector<MenuModel::Node> menus;
-    if (!bar) return menus;
-    for (QAction* a : bar->actions()) {
-        QMenu* menu = a->menu();
+    for (QMenu* menu : list) {
         if (!menu) continue;
         MenuModel::Node node;
         node.title = menu->title();
-        node.action = a;
+        node.action = menu->menuAction();
         node.children = walk(menu);
         menus.push_back(std::move(node));
     }
@@ -62,10 +59,10 @@ QRect rectOf(const QVariant& v)
 }  // namespace
 
 ShellBridge::ShellBridge(ActionRegistry* registry, std::vector<Chip> rail, std::vector<Chip> view,
-                         QMenuBar* menus, QWidget* window, QObject* parent, std::vector<Chip> back)
+                         const QList<QMenu*>& menus, QWidget* window, QObject* parent, std::vector<Chip> back)
     : QObject(parent), myRegistry(registry), myRail(std::move(rail)), myView(std::move(view)),
       myBack(std::move(back)),
-      myMenuBar(menus), myWindow(window)
+      myWindow(window)
 {
     myMenu = new MenuModel(walkBar(menus), this);
     connect(myMenu, &MenuModel::openChanged, this, &ShellBridge::menuOpenChanged);
@@ -131,15 +128,6 @@ QVariantMap ShellBridge::chips() const
         }
     }
     return map;
-}
-
-QList<QAction*> ShellBridge::menuActions() const
-{
-    QList<QAction*> list;
-    if (!myMenuBar) return list;
-    for (QAction* a : myMenuBar->actions())
-        if (a->menu()) list << a;
-    return list;
 }
 
 bool ShellBridge::trigger(const QString& id)

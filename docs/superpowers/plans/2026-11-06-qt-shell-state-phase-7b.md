@@ -41,3 +41,20 @@ the suite at the models, and deletes the widgets.
 - **R2: gui_smoke tests the models, chrome_smoke the page.** gui_smoke loses its checks
   on how the shell LOOKS (pixels, geometry, accessible names of Qt chips); what the shell
   SAYS and DOES stays pinned through the models. The floor is re-measured.
+- **R3: slices 3-5 land as one change.** The pill, the rail, the view cluster, the window
+  buttons and the Back chip all traded places with their page slots in one `liveChanged`
+  handler, so deleting one Qt widget meant rewriting the code shared by all of them. The
+  slots now stand in `buildOverlay()` for good, at the deleted widgets' own sizes
+  (`ui/ShellSizes.h`) until the page measures its own; `AppBar`, `ToolCluster` and
+  `WindowButtons` are deleted. `ToolChip` stays: the render card, the Add-shape flyout and
+  the scene's Pieces and add cards still build Qt chips.
+- **R4: a Qt card that is still the LOGIC keeps painting with no page.** The close and
+  name questions, the gesture chips, the loading card, the sheet, the guide, the hint and
+  the material card are drawn elsewhere while the page is live and paint themselves
+  otherwise. They hold the state and the input rules, so R1 does not reach them in this
+  phase; deleting their paint code is its own follow-up. Cost if wrong: dead paint code
+  that only gui_smoke exercises.
+- **R5: menus are a list the window owns.** `buildMenus()` makes `QMenu`s parented to the
+  window and adds every leaf action to the window itself, so a shortcut fires with no menu
+  widget anywhere (Qt matches a menu action only through a visible carrier). `ShellBridge`,
+  `ShortcutSheet` and the suites read `menus()`.

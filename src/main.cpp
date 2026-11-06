@@ -190,38 +190,6 @@ int main(int argc, char* argv[])
     // (show the target, then hide the source) is load-bearing.
     EditorSelectorHandoff::wire(window, hub, &sceneWindow);
 
-    // The shell's entrance, triggered HERE and nowhere else. The editor window
-    // is shown by the handoff above, which gui_smoke drives verbatim - so an
-    // entrance hung off the handoff, or off MainWindow::showEvent(), would
-    // animate under the suite's startup-layout checks as well. This filter is
-    // the real app's own trigger: it fires on the editor's first show, one
-    // event-loop turn later so the show's own resize storm has settled and
-    // ViewportOverlay has placed both cards, and then removes itself.
-    class FirstShowEntrance : public QObject
-    {
-    public:
-        explicit FirstShowEntrance(MainWindow* window)
-            : QObject(window), myWindow(window)
-        {
-            window->installEventFilter(this);
-        }
-
-    protected:
-        bool eventFilter(QObject* watched, QEvent* event) override
-        {
-            if (watched == myWindow && event->type() == QEvent::Show) {
-                myWindow->removeEventFilter(this);
-                QTimer::singleShot(0, myWindow, &MainWindow::playShellEntrance);
-                deleteLater();
-            }
-            return QObject::eventFilter(watched, event);
-        }
-
-    private:
-        MainWindow* myWindow = nullptr;
-    };
-    new FirstShowEntrance(&window);
-
 #ifdef FURNIFYME_WEB_UI
     // PHASE 0 SPIKE: `furnifyme --web-spike` lays the Svelte page (web/) over
     // the editor's viewport. Without the flag the app is exactly as shipped.

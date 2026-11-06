@@ -1,7 +1,7 @@
 #include "SceneWindow.h"
 
 #include "AddPieceCard.h"
-#include "AppBar.h"
+#include "ShellSizes.h"
 #include "FurnitureStore.h"
 #include "OcctViewWidget.h"
 #include "RenderSettingsPanel.h"
@@ -9,8 +9,6 @@
 #include "ModelingOps.h"
 #include "ScenePiecesPanel.h"
 #include "Theme.h"
-#include "ToolChip.h"
-#include "ToolCluster.h"
 #include "WindowChrome.h"
 #include "UnsavedCloseCard.h"
 #include "ViewportOverlay.h"
@@ -39,7 +37,7 @@
 #include <QLabel>
 #include <QStandardPaths>
 #include <QMenu>
-#include <QMenuBar>
+#include <QMenu>
 #include <QStatusBar>
 
 #include <BRepBndLib.hxx>
@@ -90,7 +88,7 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
     // ruling R10): its ground drags the window, its titles do not, and
     // nothing does while a menu is open.
     {
-        auto qtHit = WindowChrome::captionHitTest(this, myAppBar, myWindowButtons);
+        auto qtHit = WindowChrome::captionHitTest(this, myPillSlot);
         WindowChrome::attach(
             this,
             [this, qtHit](const QPoint& p) {
@@ -118,13 +116,11 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
                 return hit;
             },
             [this](bool hovered) {
-                if (myWindowButtons) myWindowButtons->setMaxHovered(hovered);
 #ifdef FURNIFYME_WEB_UI
                 if (myWindowControls) emit myWindowControls->maxHovered(hovered);
 #endif
             },
             [this](bool pressed) {
-                if (myWindowButtons) myWindowButtons->setMaxPressed(pressed);
 #ifdef FURNIFYME_WEB_UI
                 if (myWindowControls) emit myWindowControls->maxPressed(pressed);
 #endif
@@ -227,7 +223,13 @@ void SceneWindow::buildMenus()
     // sketch, extrude, boolean, joint, mirror, version or compare entry
     // anywhere - absent rather than disabled, because a control that exists
     // and refuses reads as broken.
-    auto* file = menuBar()->addMenu(tr("&File"));
+    // A list the window owns, not a QMenuBar (Phase 7b) - the editor's rule.
+    auto addMenu = [this](const QString& title) {
+        auto* menu = new QMenu(title, this);
+        myMenus << menu;
+        return menu;
+    };
+    auto* file = addMenu(tr("&File"));
 
     myCloseSceneAction = new QAction(tr("Close scene"), this);
     myCloseSceneAction->setToolTip(tr("Go back to the library"));
@@ -321,7 +323,7 @@ void SceneWindow::buildMenus()
     // EDIT, before Arrange - a scene has an undo stack now (SceneModel's own,
     // the editor's shape). Before this, taking a piece out was final, which is
     // why removal needed a two-click confirm to be safe at all.
-    auto* edit = menuBar()->addMenu(tr("&Edit"));
+    auto* edit = addMenu(tr("&Edit"));
     myUndoAction = new QAction(tr("Undo"), this);
     myUndoAction->setShortcut(QKeySequence::Undo);
     myUndoAction->setToolTip(tr("Take back the last change to this scene"));
@@ -345,7 +347,7 @@ void SceneWindow::buildMenus()
     });
     edit->addAction(myRedoAction);
 
-    auto* arrange = menuBar()->addMenu(tr("&Arrange"));
+    auto* arrange = addMenu(tr("&Arrange"));
     // Putting furniture in is arranging, so it leads the menu that arranges.
     arrange->addAction(myAddPieceAction);
     arrange->addSeparator();
@@ -369,7 +371,7 @@ void SceneWindow::buildMenus()
     tools->addAction(myRotateAction);
     arrange->addAction(myRotateAction);
 
-    auto* view = menuBar()->addMenu(tr("&View"));
+    auto* view = addMenu(tr("&View"));
     myRenderModeAction = new QAction(tr("Render mode"), this);
     myRenderModeAction->setCheckable(true);
     myRenderModeAction->setToolTip(tr("Light the scene and frame a picture of it"));
@@ -393,21 +395,30 @@ void SceneWindow::buildMenus()
         if (myView) myView->setSnap(on, kSnapStepMm);
     });
     view->addAction(mySnapAction);
+    // Every menu action is the window's own too, so its shortcut fires with
+    // no menu widget on screen.
+    std::function<void(QMenu*)> carry = [this, &carry](QMenu* menu) {
+        for (QAction* a : menu->actions()) {
+            if (a->menu()) carry(a->menu());
+            else if (!a->isSeparator()) addAction(a);
+        }
+    };
+    for (QMenu* menu : myMenus) carry(menu);
 }
 
 void SceneWindow::syncViewportMinimumWidth()
 {
-    if (!myView || !myAppBar || !myWindowButtons) return;
+    if (!myView || !myPillSlot || !myButtonsSlot) return;
     // MainWindow::syncViewportMinimumWidth()'s rule, for this window's two
     // rows: the pill beside the window buttons, and under them the Pieces
     // card beside the Move/Rotate/Render cluster - both pairs stand in the
     // same TopLeft/TopRight columns, so either could be the one that meets.
     int wanted = ViewportOverlay::minimumWidthBeside(
-        myAppBar, ViewportOverlay::Anchor::TopLeft, myWindowButtons);
-    if (myPieces && myArrangeTools) {
+        myPillSlot, ViewportOverlay::Anchor::TopLeft, myButtonsSlot);
+    if (myPieces && myViewSlot) {
         wanted = std::max(wanted, ViewportOverlay::minimumWidthBeside(
                                       myPieces, ViewportOverlay::Anchor::TopLeft,
-                                      myArrangeTools));
+                                      myViewSlot));
     }
     myView->setMinimumWidth(wanted);
 }
@@ -425,8 +436,10 @@ void SceneWindow::buildOverlay()
     // because AppBar's corner radius is half its own height, it painted as an
     // enormous ellipse down the left of the screen with the menus floating in
     // the middle of it. A header is only a header when something follows it.
-    myAppBar = new AppBar(menuBar(), myView);
-    myOverlay->addWidget(myAppBar, ViewportOverlay::Anchor::TopLeft);
+    // The page draws it; its slot stands here (Phase 7b), at the Qt pill's
+    // size until the page measures its own.
+    myPillSlot = new HtmlCardSlot(QStringLiteral("pill"), ShellSizes::pill(myMenus), myView);
+    myOverlay->addWidget(myPillSlot, ViewportOverlay::Anchor::TopLeft);
 
     // FRAMELESS, LIKE THE EDITOR. This window wore the native Windows caption
     // while the editor hid its own, so the same app had two window treatments
@@ -436,8 +449,8 @@ void SceneWindow::buildOverlay()
     // dragging lives on the pill (any point inside it whose deepest child is
     // nothing answers Caption, which buys native move, double-click-to-
     // maximize and the system menu in one word).
-    myWindowButtons = new WindowButtons(WindowButtons::Look::Card, myView);
-    myOverlay->addWidget(myWindowButtons, ViewportOverlay::Anchor::TopRight);
+    myButtonsSlot = new HtmlCardSlot(QStringLiteral("buttons"), ShellSizes::windowButtons(), myView);
+    myOverlay->addWidget(myButtonsSlot, ViewportOverlay::Anchor::TopRight);
 
     // THE WINDOW'S TWO OTHER JOBS, ON SCREEN (the 2026-10 review's F16).
     // Arranging and rendering were menu-only. Three icon-only chips mirroring
@@ -453,14 +466,8 @@ void SceneWindow::buildOverlay()
     // wireframe, framing - while Move and Rotate do nothing with the gizmos
     // gone, and the studio's own Back chip is already the way out. A shot is
     // the furniture alone.
-    myArrangeTools = new ToolCluster(myView);
-    myArrangeTools->addChip(
-        new ToolChip(myMoveAction, IconSet::Glyph::Move, ToolChip::ChipMode::IconOnly));
-    myArrangeTools->addChip(
-        new ToolChip(myRotateAction, IconSet::Glyph::Rotate, ToolChip::ChipMode::IconOnly));
-    myArrangeTools->addChip(
-        new ToolChip(myRenderModeAction, IconSet::Glyph::Render, ToolChip::ChipMode::IconOnly));
-    myOverlay->addWidget(myArrangeTools, ViewportOverlay::Anchor::TopRight);
+    myViewSlot = new HtmlCardSlot(QStringLiteral("view"), ShellSizes::cluster(3, 0), myView);
+    myOverlay->addWidget(myViewSlot, ViewportOverlay::Anchor::TopRight);
 
     // Added after the pill, so it stacks below it in the same TopLeft column.
     myPieces = new ScenePiecesPanel(myView);
@@ -475,7 +482,8 @@ void SceneWindow::buildOverlay()
     // after the pieces list so its Back chip is the LAST TopLeft entry and
     // takes the corner only when the list above it is hidden - which is
     // exactly and only render mode.
-    myStudio = new RenderStudio(myView, this, myOverlay, myAppBar, myRenderModeAction, this);
+    myStudio = new RenderStudio(myView, this, myOverlay, myPillSlot, myRenderModeAction, this);
+    myBackSlot = myStudio->exitSlot();
     connect(myStudio, &RenderStudio::enabledChanged, this, [this](bool) { refreshSurfaces(); });
     // Every viewport control on the render card raises this one signal; the
     // wiring itself is RenderStudio's, shared with the editor.
@@ -1572,8 +1580,7 @@ bool SceneWindow::htmlChromeLive() const
 
 QWidget* SceneWindow::pillSurface() const
 {
-    if (htmlChromeLive() && myPillSlot) return myPillSlot;
-    return myAppBar;
+    return myPillSlot;
 }
 
 QWidget* SceneWindow::piecesSurface() const
@@ -1601,8 +1608,7 @@ void SceneWindow::setPieceShown(int pieceId, bool shown)
 
 QWidget* SceneWindow::arrangeSurface() const
 {
-    if (htmlChromeLive() && myViewSlot) return myViewSlot;
-    return myArrangeTools;
+    return myViewSlot;
 }
 
 void SceneWindow::showToast(const QString& text, Toast::Kind kind, bool undo, int stamp)
@@ -1633,8 +1639,7 @@ void SceneWindow::syncHtmlChrome()
     QVariantMap words;
     if (myCloseCard && myCloseCard->isAsking() && myCloseCard->drawnElsewhere()) {
         words = myCloseCard->words();
-        QWidget* shownButtons = myButtonsSlot && myButtonsSlot->isVisible() ? static_cast<QWidget*>(myButtonsSlot)
-                                                                            : static_cast<QWidget*>(myWindowButtons);
+        QWidget* shownButtons = myButtonsSlot;
         if (shownButtons && shownButtons->isVisible()) {
             const QRect r(shownButtons->mapTo(myView, QPoint(0, 0)), shownButtons->size());
             words.insert(QStringLiteral("keepClear"), QVariantMap{{QStringLiteral("x"), r.x()},
@@ -1646,7 +1651,6 @@ void SceneWindow::syncHtmlChrome()
     if (live) myHtmlChrome->setQuestion(!words.isEmpty(), words);
     if (!words.isEmpty()) {
         myHtmlChrome->view()->raise();
-        if (myWindowButtons) myWindowButtons->raise();
     }
 #endif
 }
@@ -1685,39 +1689,22 @@ void SceneWindow::useHtmlChrome()
 
     // THE PILL AND THE ARRANGING CHIPS (the editor's Phase 3i): slots take
     // the Qt surfaces' places while the page is live.
-    myPillSlot = new HtmlCardSlot(QStringLiteral("pill"), myAppBar->sizeHint(), myView);
-    myPillSlot->hide();
-    myHtmlChrome->addCard(myPillSlot);
-    myViewSlot = new HtmlCardSlot(QStringLiteral("view"), myArrangeTools->sizeHint(), myView);
-    myViewSlot->hide();
-    myHtmlChrome->addCard(myViewSlot);
+    for (HtmlCardSlot* slot : {myPillSlot, myViewSlot, myButtonsSlot}) myHtmlChrome->addCard(slot);
     std::vector<ShellBridge::Chip> view = {
         ShellBridge::Chip{myMoveAction, IconSet::Glyph::Move, QStringLiteral("move")},
         ShellBridge::Chip{myRotateAction, IconSet::Glyph::Rotate, QStringLiteral("rotate")},
         ShellBridge::Chip{myRenderModeAction, IconSet::Glyph::Render, QStringLiteral("render")}};
-    // The PILL's menu bar: the window's own was reparented into the AppBar, and
-    // asking QMainWindow::menuBar() again quietly makes a new, empty one.
-    if (myWindowButtons) {
-        myButtonsSlot = new HtmlCardSlot(QStringLiteral("buttons"), myWindowButtons->size(), myView);
-        myButtonsSlot->hide();
-        myHtmlChrome->addCard(myButtonsSlot);
-        myWindowControls = new HubWindowControls(this);
-        myHtmlChrome->registerObject(QStringLiteral("window"), myWindowControls);
-    }
+    myWindowControls = new HubWindowControls(this);
+    myHtmlChrome->registerObject(QStringLiteral("window"), myWindowControls);
     std::vector<ShellBridge::Chip> back;
-    if (myStudio && myStudio->exitChip() && myRenderModeAction) {
-        myBackSlot = new HtmlCardSlot(QStringLiteral("back"), myStudio->exitChip()->sizeHint(), myView);
-        myBackSlot->hide();
+    if (myBackSlot && myRenderModeAction) {
         myHtmlChrome->addCard(myBackSlot);
         back.push_back(ShellBridge::Chip{myRenderModeAction, IconSet::Glyph::Back, QStringLiteral("back")});
     }
-    myShellBridge = new ShellBridge(myActionRegistry, {}, std::move(view), myAppBar->menus(), this, myHtmlChrome,
+    myShellBridge = new ShellBridge(myActionRegistry, {}, std::move(view), myMenus, this, myHtmlChrome,
                                     std::move(back));
-    if (myStudio && myBackSlot) myStudio->setExitSlot(myBackSlot, [this] { return htmlChromeLive(); });
     myHtmlChrome->registerObject(QStringLiteral("shell"), myShellBridge);
     myHtmlChrome->registerObject(QStringLiteral("menu"), myShellBridge->menu());
-    // Every menu shortcut fires while the HTML pill shows (the editor's R5).
-    myPillSlot->addActions(myShellBridge->menuActions());
     connect(myShellBridge, &ShellBridge::pillReported, this, [this](int w, int h) {
         if (myPillSlot) myPillSlot->setContentSize(QSize(w, h));
     });
@@ -1781,30 +1768,6 @@ void SceneWindow::useHtmlChrome()
         }
         // An add card the page was showing goes with the page.
         if (!live && myAddPieceModel) myAddPieceModel->close();
-        if (myOverlay && myPillSlot && myAppBar) {
-            if (live) myOverlay->replaceWidget(myAppBar, myPillSlot);
-            else myOverlay->replaceWidget(myPillSlot, myAppBar);
-            if (myStudio && myStudio->barSlide()) {
-                if (live) myStudio->barSlide()->retarget(myPillSlot, false);
-                else myStudio->barSlide()->retarget(myAppBar, true);
-            } else {
-                (live ? static_cast<QWidget*>(myPillSlot) : myAppBar)->show();
-            }
-        }
-        if (myOverlay && myViewSlot && myArrangeTools) {
-            if (live) myOverlay->replaceWidget(myArrangeTools, myViewSlot);
-            else myOverlay->replaceWidget(myViewSlot, myArrangeTools);
-        }
-        if (myOverlay && myButtonsSlot && myWindowButtons) {
-            if (live) myOverlay->replaceWidget(myWindowButtons, myButtonsSlot);
-            else myOverlay->replaceWidget(myButtonsSlot, myWindowButtons);
-            (live ? static_cast<QWidget*>(myButtonsSlot) : myWindowButtons)->show();
-        }
-        if (myOverlay && myBackSlot && myStudio && myStudio->exitChip()) {
-            if (live) myOverlay->replaceWidget(myStudio->exitChip(), myBackSlot);
-            else myOverlay->replaceWidget(myBackSlot, myStudio->exitChip());
-            myStudio->refresh();
-        }
         if (!live && myShellBridge) myShellBridge->menu()->close();
         if (myCloseCard) myCloseCard->setDrawnElsewhere(live);
         refreshSurfaces();

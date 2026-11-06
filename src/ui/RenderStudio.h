@@ -32,7 +32,7 @@
 
 #include <functional>
 
-class AppBar;
+class HtmlCardSlot;
 class CardSlide;
 class OcctViewWidget;
 class QAction;
@@ -53,7 +53,7 @@ public:
     // whatever decides that action's availability still decides the chip's.
     // `bar` may be null for a host with no app bar to slide away.
     RenderStudio(OcctViewWidget* view, QMainWindow* host, ViewportOverlay* overlay,
-                 AppBar* bar, QAction* renderModeAction, QObject* parent = nullptr);
+                 QWidget* bar, QAction* renderModeAction, QObject* parent = nullptr);
 
     // THE SINGLE AUTHORITY for whether render mode is on. Docks the panel,
     // slides the bar away, raises the Back chip and starts the polish ticker;
@@ -107,13 +107,10 @@ public:
     // Which of the two the dock holds - null while render mode is off.
     QWidget* dockedPanel() const { return myDocked; }
     RenderFrameGuides* frame() const { return myFrame; }
-    ToolChip* exitChip() const { return myExitChip; }
-    // The page's Back chip (Phase 7a): a slot in the exit chip's place, shown
-    // instead of it while `live` says the page can draw it. refresh() stays
-    // the one place either is shown.
-    void setExitSlot(QWidget* slot, std::function<bool()> live);
-    // The app bar's slide-away, so the window can hand it the HTML pill's
-    // slot while the chrome page draws the pill (Phase 3i).
+    // The Back chip's place (Phase 7b: the page draws it, the Qt chip is
+    // gone). refresh() is the one place it is shown.
+    HtmlCardSlot* exitSlot() const { return myExitSlot; }
+    // The pill's slide-away - instant, since the page flies its own card.
     CardSlide* barSlide() const { return myBarSlide; }
 
 private:
@@ -153,13 +150,11 @@ private:
     OcctViewWidget* myView = nullptr;
     QMainWindow* myHost = nullptr;
     ViewportOverlay* myOverlay = nullptr;
-    AppBar* myBar = nullptr;
+    QWidget* myBar = nullptr;
     CardSlide* myBarSlide = nullptr;
     RenderSettingsPanel* myPanel = nullptr;
     RenderFrameGuides* myFrame = nullptr;
-    ToolChip* myExitChip = nullptr;
-    QPointer<QWidget> myExitSlot;
-    std::function<bool()> myExitSlotLive;
+    HtmlCardSlot* myExitSlot = nullptr;
     QTimer* myTierTicker = nullptr;
     QWidget* myDock = nullptr;
     bool myEnabled = false;

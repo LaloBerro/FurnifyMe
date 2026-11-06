@@ -10,6 +10,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVariantMap>
+#include <QList>
 #include <QWidget>
 
 #include <functional>
@@ -43,6 +44,8 @@ public:
     // Each row is (label, keys).
     using KeyRows = std::vector<std::pair<QString, QString>>;
     void addKeyTable(const QString& title, std::function<KeyRows()> rows);
+    // The window's menus, in order (Phase 7b: there is no QMenuBar to read).
+    void setMenus(const QList<class QMenu*>& menus) { myMenus = menus; }
 
     // Every string this sheet paints: the title, the group headings, and each
     // row's label and keys. Painted copy is invisible to gui_smoke's
@@ -101,6 +104,7 @@ private:
     int myColumns = 1;
     QSize myContentExtent;
     std::vector<std::pair<QString, std::function<KeyRows()>>> myKeyTables;
+    QList<class QMenu*> myMenus;
     // A click outside is swallowed so it cannot also pick in the viewport
     // behind an apparently-modal sheet; its release has to go the same way,
     // or the viewport picks on the release instead.

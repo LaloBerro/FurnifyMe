@@ -1,12 +1,12 @@
 #include "RenderStudio.h"
 
-#include "AppBar.h"
 #include "CardSlide.h"
 #include "IconSet.h"
 #include "OcctViewWidget.h"
 #include "RenderFrameGuides.h"
 #include "RenderSettingsPanel.h"
-#include "ToolChip.h"
+#include "HtmlCardSlot.h"
+#include "ShellSizes.h"
 #include "ViewportOverlay.h"
 
 #include <QAction>
@@ -23,7 +23,7 @@ constexpr int kTierTickMs = 500;
 }  // namespace
 
 RenderStudio::RenderStudio(OcctViewWidget* view, QMainWindow* host, ViewportOverlay* overlay,
-                           AppBar* bar, QAction* renderModeAction, QObject* parent)
+                           QWidget* bar, QAction* renderModeAction, QObject* parent)
     : QObject(parent ? parent : host), myView(view), myHost(host), myOverlay(overlay), myBar(bar)
 {
     // The app bar leaves upward when render mode takes the viewport. The user
@@ -32,6 +32,7 @@ RenderStudio::RenderStudio(OcctViewWidget* view, QMainWindow* host, ViewportOver
     // and no ground colour. A host with no bar simply has no slide.
     if (myBar && myView && myOverlay) {
         myBarSlide = new CardSlide(myBar, CardSlide::From::Top, myView, myOverlay, this);
+        myBarSlide->retarget(myBar, false);
     }
 
     // The way back out of render mode once the menu has slid away.
@@ -42,13 +43,13 @@ RenderStudio::RenderStudio(OcctViewWidget* view, QMainWindow* host, ViewportOver
     // reads as "back" without a word, and the words are in the tooltip,
     // which mirrors the action exactly as every other chip's does.
     if (renderModeAction && myView) {
-        myExitChip = new ToolChip(renderModeAction, IconSet::Glyph::Back,
-                                  ToolChip::ChipMode::IconOnly, myView);
-        myExitChip->hide();
-        // Added LAST in the TopLeft column by the host, so it takes the corner
-        // only when every drawer above it is hidden - which is exactly and
-        // only render mode.
-        if (myOverlay) myOverlay->addWidget(myExitChip, ViewportOverlay::Anchor::TopLeft);
+        // The page draws the chip (Phase 7a) and its slot stands here; the Qt
+        // chip is gone (7b). Added LAST in the TopLeft column by the host, so
+        // it takes the corner only when every drawer above it is hidden -
+        // which is exactly and only render mode.
+        myExitSlot = new HtmlCardSlot(QStringLiteral("back"), QSize(ShellSizes::chipSide(), ShellSizes::chipSide()), myView);
+        myExitSlot->hide();
+        if (myOverlay) myOverlay->addWidget(myExitSlot, ViewportOverlay::Anchor::TopLeft);
     }
 
     // The picture's edges. Deliberately NOT a ViewportOverlay entry: the
@@ -259,22 +260,13 @@ void RenderStudio::syncPanelFromView()
                                    : RenderSettingsPanel::Quality::Deep));
 }
 
-void RenderStudio::setExitSlot(QWidget* slot, std::function<bool()> live)
-{
-    myExitSlot = slot;
-    myExitSlotLive = std::move(live);
-    refresh();
-}
-
 void RenderStudio::refresh()
 {
     // Derived on every state change, never set once at the toggle - a one-shot
     // hide is not a state, and QWidget::showChildren() on a window's first
     // show will happily undo one.
     if (myBarSlide) myBarSlide->setShown(!myEnabled);
-    const bool slotDraws = myExitSlot && myExitSlotLive && myExitSlotLive();
-    if (myExitChip) myExitChip->setVisible(myEnabled && !slotDraws);
-    if (myExitSlot) myExitSlot->setVisible(myEnabled && slotDraws);
+    if (myExitSlot) myExitSlot->setVisible(myEnabled);
     // Only the one the dock holds is shown: the other is a child of the window
     // standing in no layout, and showing it would float it at the corner.
     if (myPanel) myPanel->setVisible(myEnabled && myDocked == myPanel);

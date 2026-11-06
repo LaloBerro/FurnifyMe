@@ -4,7 +4,6 @@
 
 #include "Theme.h"
 #include "Themes.h"
-#include "ToolCluster.h"
 
 #include <QEvent>
 #include <QWidget>
@@ -421,7 +420,6 @@ void ViewportOverlay::relayout()
                     // column (themes part 2) gets it back, tools still at
                     // the top: the empty run below is the mockup's.
                     const bool full = Themes::shell().card.railFull;
-                    if (auto* cluster = qobject_cast<ToolCluster*>(placed)) cluster->setLoose(full);
                     const int railH = full
                                           ? std::max(placed->sizeHint().height(), h - leftEdgeY - kEdgeMargin)
                                           : ch;

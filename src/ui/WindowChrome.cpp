@@ -21,235 +21,13 @@
 #include <windowsx.h>
 #endif
 
-namespace {
-
-// One geometry per look - see WindowButtons' own header for which window
-// wears which.
-struct ButtonMetrics {
-    int pad;
-    int chipW;
-    int chipH;
-    int gap;
-    int radius;   // of the hover fill; the Card look's outer card keeps
-                  // Theme::paintSurface()'s own radius
-};
-
-ButtonMetrics metricsFor(WindowButtons::Look look)
-{
-    if (look == WindowButtons::Look::Card) return {6, 36, 26, 4, 6};
-    return {0, 44, 32, 0, 0};   // Flat: bare full-height segments, no gaps
-}
-
-}  // namespace
-
-// ---------------------------------------------------------------------------
-// WindowButtons
-// ---------------------------------------------------------------------------
-
-WindowButtons::WindowButtons(Look look, QWidget* parent) : QWidget(parent), myLook(look)
-{
-    setAttribute(Qt::WA_NoSystemBackground);
-    // Every sibling control over the viewport carries this - CLAUDE.md's
-    // press-must-own-its-release law. Without it, a press on the Card
-    // look's padding (between and around the chips) fell through to the
-    // viewport underneath and re-picked (the branch review's finding).
-    setAttribute(Qt::WA_NoMousePropagation);
-    Theme::makeSurfaceTransparent(this);
-    setMouseTracking(true);
-    const ButtonMetrics m = metricsFor(myLook);
-    setFixedSize(Theme::wholeDevicePixels(
-        QSize(2 * m.pad + 3 * m.chipW + 2 * m.gap, 2 * m.pad + m.chipH)));
-}
-
-QRect WindowButtons::chipRect(int index) const
-{
-    const ButtonMetrics m = metricsFor(myLook);
-    return QRect(m.pad + index * (m.chipW + m.gap), m.pad, m.chipW, m.chipH);
-}
-
-int WindowButtons::chipAt(const QPoint& pos) const
-{
-    for (int i = 0; i < 3; ++i) {
-        if (chipRect(i).contains(pos)) return i;
-    }
-    return -1;
-}
-
-QRect WindowButtons::maxChipRectIn(const QWidget* ancestor) const
-{
-    const QRect r = chipRect(1);
-    return QRect(mapTo(const_cast<QWidget*>(ancestor), r.topLeft()), r.size());
-}
-
-void WindowButtons::setGroundColour(const QColor& ground)
-{
-    if (myGround == ground) return;
-    myGround = ground;
-    update();
-}
-
-void WindowButtons::setMaxHovered(bool hovered)
-{
-    if (myMaxHovered == hovered) return;
-    myMaxHovered = hovered;
-    update();
-}
-
-void WindowButtons::setMaxPressed(bool pressed)
-{
-    if (myMaxPressed == pressed) return;
-    myMaxPressed = pressed;
-    update();
-}
-
-void WindowButtons::paintEvent(QPaintEvent*)
-{
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    const ButtonMetrics m = metricsFor(myLook);
-    if (myLook == Look::Card) {
-        // A theme's mockup can draw these buttons with no card (Aurora) or
-        // behind two hairlines (Ultraviolet) - themes part 2.
-        const Themes::Card& card = Themes::shell().card;
-        if (card.on && card.windowButtons == QLatin1String("bare")) {
-        } else if (card.on && card.windowButtons == QLatin1String("rule")) {
-            painter.setPen(QPen(card.edge.isValid() ? card.edge : Theme::border(), 1.0));
-            painter.drawLine(QPointF(0.5, 0), QPointF(0.5, height()));
-            painter.drawLine(QPointF(0, height() - 0.5), QPointF(width(), height() - 0.5));
-        } else {
-            Theme::paintSurfaceOn(painter, rect(), 10, myGround);
-        }
-    }
-
-    for (int i = 0; i < 3; ++i) {
-        const QRect chip = chipRect(i);
-        const bool hovered = (i == 1) ? myMaxHovered : (myHovered == i);
-        const bool pressed = (i == 1) ? myMaxPressed : (myPressed == i);
-
-        // Close wears the platform's own red on hover - the one colour every
-        // Windows user already reads as "this closes the window" - and the
-        // other two the ordinary chip-hover fill.
-        if (hovered || pressed) {
-            QColor fill = (i == 2) ? Theme::danger() : Theme::chipHover();
-            if (pressed) fill = (i == 2) ? Theme::danger().darker(120) : Theme::chipActive();
-            QPainterPath path;
-            path.addRoundedRect(QRectF(chip), m.radius, m.radius);
-            painter.fillPath(path, fill);
-        }
-
-        // The glyphs live in IconSet - the module for QPainter-drawn
-        // monochrome icons - drawn here through paintGlyph() because their
-        // ink is state-dependent. White over Close's danger fill by the
-        // same ruling the selector's accent-filled button recorded: white
-        // reads against every shipped danger/accent hue, none pastel.
-        // On a tinted card the glyphs follow the ground, or three near-white
-        // strokes sit on a near-white pill - setGroundColour()'s reason.
-        const QColor base = myGround.isValid() ? Theme::inkOn(myGround) : Theme::text();
-        const QColor quiet = myGround.isValid()
-                                 ? QColor(base.red(), base.green(), base.blue(), 150)
-                                 : Theme::textMuted();
-        QColor ink = hovered || pressed ? base : quiet;
-        if (i == 2 && (hovered || pressed)) ink = Theme::Fixed::inkOnFill();
-
-        const IconSet::Glyph glyph =
-            i == 0 ? IconSet::Glyph::Minimize
-                   : (i == 2 ? IconSet::Glyph::Close
-                             : (window() && window()->isMaximized()
-                                    ? IconSet::Glyph::Restore
-                                    : IconSet::Glyph::Maximize));
-        // A 12x12 box centred in the chip: the 24-grid glyph scaled by 0.5,
-        // pen width pre-compensated so the stroke stays ~1.2 px on screen.
-        const double scale = 0.5;
-        painter.save();
-        const QPointF c = QRectF(chip).center();
-        painter.translate(c.x() - 12.0 * scale, c.y() - 12.0 * scale);
-        painter.scale(scale, scale);
-        painter.setPen(QPen(ink, 1.2 / scale));
-        painter.setBrush(Qt::NoBrush);
-        IconSet::paintGlyph(painter, glyph);
-        painter.restore();
-    }
-}
-
-void WindowButtons::mousePressEvent(QMouseEvent* event)
-{
-    if (event->button() == Qt::LeftButton) {
-        const int chip = chipAt(event->pos());
-        if (chip == 0 || chip == 2) {
-            myPressed = chip;
-            update();
-            return;   // swallowed - the press belongs to the chip
-        }
-    }
-    QWidget::mousePressEvent(event);
-}
-
-void WindowButtons::mouseReleaseEvent(QMouseEvent* event)
-{
-    if (event->button() == Qt::LeftButton && myPressed >= 0) {
-        const int chip = chipAt(event->pos());
-        const int pressed = myPressed;
-        myPressed = -1;
-        update();
-        if (chip == pressed && window()) {
-            if (chip == 0) window()->showMinimized();
-            if (chip == 2) window()->close();
-        }
-        return;
-    }
-    QWidget::mouseReleaseEvent(event);
-}
-
-void WindowButtons::mouseMoveEvent(QMouseEvent* event)
-{
-    const int chip = chipAt(event->pos());
-    const int clientChip = (chip == 1) ? -1 : chip;   // max hover is native-driven
-    if (clientChip != myHovered) {
-        myHovered = clientChip;
-        update();
-    }
-    QWidget::mouseMoveEvent(event);
-}
-
-void WindowButtons::leaveEvent(QEvent* event)
-{
-    if (myHovered != -1 || myPressed != -1) {
-        myHovered = -1;
-        myPressed = -1;
-        update();
-    }
-    QWidget::leaveEvent(event);
-}
-
-void WindowButtons::showEvent(QShowEvent* event)
-{
-    QWidget::showEvent(event);
-    // The maximize glyph swaps to "restore" with the window's state, and the
-    // state changes on gestures (snap, double-click, the native maximize)
-    // this widget never sees - so watch the top-level window itself.
-    if (QWidget* top = window(); top && top != myWatchedWindow) {
-        if (myWatchedWindow) myWatchedWindow->removeEventFilter(this);
-        top->installEventFilter(this);
-        myWatchedWindow = top;
-    }
-}
-
-bool WindowButtons::eventFilter(QObject* watched, QEvent* event)
-{
-    if (watched == myWatchedWindow && event->type() == QEvent::WindowStateChange) update();
-    return QWidget::eventFilter(watched, event);
-}
-
 std::function<WindowChrome::Hit(const QPoint&)> WindowChrome::captionHitTest(
-    QWidget* topLevel, QWidget* dragWidget, WindowButtons* buttons)
+    QWidget* topLevel, QWidget* dragWidget)
 {
     QPointer<QWidget> top(topLevel);
     QPointer<QWidget> drag(dragWidget);
-    QPointer<WindowButtons> chips(buttons);
-    return [top, drag, chips](const QPoint& p) -> WindowChrome::Hit {
+    return [top, drag](const QPoint& p) -> WindowChrome::Hit {
         if (!top) return WindowChrome::Hit::Client;
-        if (chips && chips->isVisible() && chips->maxChipRectIn(top).contains(p))
-            return WindowChrome::Hit::MaxButton;
         if (drag && drag->isVisible()) {
             const QPoint inDrag = drag->mapFrom(top, p);
             if (drag->rect().contains(inDrag) && !drag->childAt(inDrag))
@@ -270,7 +48,7 @@ namespace {
 struct ChromeEntry {
     QPointer<QWidget> widget;
     std::function<WindowChrome::Hit(const QPoint&)> hitTest;
-    // Where the maximize chip's native hover and press go - WindowButtons'
+    // Where the maximize chip's native hover and press go - the window's
     // setters for the Qt hub, the page's window object for the HTML one.
     std::function<void(bool)> onMaxHover;
     std::function<void(bool)> onMaxPressed;
@@ -536,15 +314,6 @@ private:
 }  // namespace
 
 void WindowChrome::attach(QWidget* topLevel, std::function<Hit(const QPoint&)> hitTest,
-                          WindowButtons* buttons)
-{
-    QPointer<WindowButtons> chips(buttons);
-    attach(topLevel, std::move(hitTest),
-           [chips](bool hovered) { if (chips) chips->setMaxHovered(hovered); },
-           [chips](bool pressed) { if (chips) chips->setMaxPressed(pressed); });
-}
-
-void WindowChrome::attach(QWidget* topLevel, std::function<Hit(const QPoint&)> hitTest,
                           std::function<void(bool)> onMaxHover,
                           std::function<void(bool)> onMaxPressed)
 {
@@ -556,11 +325,6 @@ void WindowChrome::attach(QWidget* topLevel, std::function<Hit(const QPoint&)> h
 }
 
 #else   // !Q_OS_WIN
-
-void WindowChrome::attach(QWidget*, std::function<Hit(const QPoint&)>, WindowButtons*)
-{
-    // Not Windows: the native title bar stays, and nothing here is needed.
-}
 
 void WindowChrome::attach(QWidget*, std::function<Hit(const QPoint&)>,
                           std::function<void(bool)>, std::function<void(bool)>)

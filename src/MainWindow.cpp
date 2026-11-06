@@ -32,7 +32,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 
-#include "AppBar.h"
+#include "ShellSizes.h"
 #include "Themes.h"
 #include "RenderFrameGuides.h"
 #include "RenderStudio.h"
@@ -49,7 +49,6 @@
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "ToolChip.h"
-#include "ToolCluster.h"
 #include "TransformGizmo.h"
 #include "UnsavedCloseCard.h"
 #include "ViewportOverlay.h"
@@ -95,7 +94,6 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMenuBar>
 #include <QMetaMethod>
 #include <QCloseEvent>
 #include <QPainter>
@@ -1005,7 +1003,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     });
 
     buildActions();
-    buildAppBar(buildMenus());
+    buildMenus();
 
     // The mirror-placement gesture's own self-cancel (fix round 1) - see
     // refreshMirrorPlacement()'s own comment. Connected HERE, genuinely
@@ -1041,7 +1039,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // nothing does while a menu is open - the menu's outside layer takes the
     // press. The maximize chip still answers first.
     {
-        auto qtHit = WindowChrome::captionHitTest(this, myAppBar, myWindowButtons);
+        auto qtHit = WindowChrome::captionHitTest(this, myPillSlot);
         WindowChrome::attach(
             this,
             [this, qtHit](const QPoint& p) {
@@ -1072,13 +1070,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
                 return hit;
             },
             [this](bool hovered) {
-                if (myWindowButtons) myWindowButtons->setMaxHovered(hovered);
 #ifdef FURNIFYME_WEB_UI
                 if (myWindowControls) emit myWindowControls->maxHovered(hovered);
 #endif
             },
             [this](bool pressed) {
-                if (myWindowButtons) myWindowButtons->setMaxPressed(pressed);
 #ifdef FURNIFYME_WEB_UI
                 if (myWindowControls) emit myWindowControls->maxPressed(pressed);
 #endif
@@ -1086,6 +1082,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     }
 
     myShortcutSheet = new ShortcutSheet(this);
+    myShortcutSheet->setMenus(myMenus);
     connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
     // The Items list's own keys (ruling D19): no QAction carries them, so the
     // sheet is handed the drawer's ONE key table and reads it on every build.
@@ -1984,15 +1981,23 @@ void MainWindow::buildActions()
     });
 }
 
-QMenuBar* MainWindow::buildMenus()
+void MainWindow::buildMenus()
 {
     // Ours from the start, never the window's auto-created one - see the
     // declaration in MainWindow.h and the trap at the top of AppBar.h. It is
     // parented to the window only so it is never briefly a top-level widget;
     // the app bar's layout adopts it a moment later.
-    auto* bar = new QMenuBar(this);
+    // A list the window owns, not a QMenuBar (Phase 7b): the page's pill
+    // draws the titles, MenuModel opens them, and every action below is also
+    // added to the window itself so its shortcut fires with no menu widget on
+    // screen (Qt matches a menu action only through a VISIBLE carrier).
+    auto addMenu = [this](const QString& title) {
+        auto* menu = new QMenu(title, this);
+        myMenus << menu;
+        return menu;
+    };
 
-    QMenu* fileMenu = bar->addMenu(tr("&File"));
+    QMenu* fileMenu = addMenu(tr("&File"));
     fileMenu->addAction(myNewFurnitureAction);
     fileMenu->addSeparator();
     fileMenu->addAction(myFileSaveAction);
@@ -2005,7 +2010,7 @@ QMenuBar* MainWindow::buildMenus()
     fileMenu->addSeparator();
     fileMenu->addAction(tr("E&xit"), this, &QWidget::close);
 
-    QMenu* sketchMenu = bar->addMenu(tr("&Sketch"));
+    QMenu* sketchMenu = addMenu(tr("&Sketch"));
     sketchMenu->addAction(myStartSketchAction);
     sketchMenu->addAction(myFinishSketchAction);
     sketchMenu->addAction(myUndoPointAction);
@@ -2014,7 +2019,7 @@ QMenuBar* MainWindow::buildMenus()
     sketchMenu->addAction(myLockFaceAction);
     sketchMenu->addAction(myUnlockFaceAction);
 
-    QMenu* editMenu = bar->addMenu(tr("&Edit"));
+    QMenu* editMenu = addMenu(tr("&Edit"));
     editMenu->addAction(myUndoAction);
     editMenu->addAction(myRedoAction);
     editMenu->addSeparator();
@@ -2023,7 +2028,7 @@ QMenuBar* MainWindow::buildMenus()
     editMenu->addSeparator();
     editMenu->addAction(mySelectAllAction);
 
-    QMenu* modelMenu = bar->addMenu(tr("&Model"));
+    QMenu* modelMenu = addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
     modelMenu->addSeparator();
     modelMenu->addAction(myUnionAction);
@@ -2066,7 +2071,7 @@ QMenuBar* MainWindow::buildMenus()
     modelMenu->addSeparator();
     modelMenu->addAction(mySlatsAction);
 
-    QMenu* viewMenu = bar->addMenu(tr("&View"));
+    QMenu* viewMenu = addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
     viewMenu->addSeparator();
     viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this,
@@ -2117,7 +2122,7 @@ QMenuBar* MainWindow::buildMenus()
     for (QAction* theme : myThemeActions) themeMenu->addAction(theme);
     viewMenu->addAction(myAppearanceAction);
 
-    QMenu* helpMenu = bar->addMenu(tr("&Help"));
+    QMenu* helpMenu = addMenu(tr("&Help"));
 
     myShortcutsAction = new QAction(tr("Keyboard Shortcuts"), this);
     // Both bindings the design calls for. F1 is what people reach for without
@@ -2154,7 +2159,13 @@ QMenuBar* MainWindow::buildMenus()
         if (myOverlay) myOverlay->relayout();
     });
 
-    return bar;
+    std::function<void(QMenu*)> carry = [this, &carry](QMenu* menu) {
+        for (QAction* a : menu->actions()) {
+            if (a->menu()) carry(a->menu());
+            else if (!a->isSeparator()) addAction(a);
+        }
+    };
+    for (QMenu* menu : myMenus) carry(menu);
 }
 
 void MainWindow::goAxonometric()
@@ -2174,28 +2185,9 @@ void MainWindow::goAxonometric()
     recordViewChanged();
 }
 
-void MainWindow::buildAppBar(QMenuBar* menus)
-{
-    // Milestone 5, item 3: this no longer installs a window-spanning menu
-    // strip through setMenuWidget() - the pill is a ViewportOverlay-anchored
-    // card now, and MainWindow::buildOverlay() is what anchors it (a
-    // ViewportOverlay does not exist yet at this point in the constructor,
-    // which is why this stays a separate function rather than folding
-    // straight into buildOverlay()). Left unparented here; addWidget()
-    // reparents it onto the viewport.
-    //
-    // The four view controls that used to live here as bar buttons - and the
-    // signals/slots that wired their clicks to the projection and unit
-    // actions - moved to buildOverlay()'s own view-controls cluster, built
-    // directly on the real QAction objects (Persp/Ortho, Wireframe, Fit All)
-    // the way every rail chip already is; only the unit chip still needs
-    // hand-wiring, since it owns no action of its own to mirror.
-    myAppBar = new AppBar(menus);
-}
-
 void MainWindow::syncViewportMinimumWidth()
 {
-    if (!myView || !pillSurface() || !myWindowButtons) return;
+    if (!myView || !myPillSlot || !myButtonsSlot) return;
     // THE TOP ROW: the pill leads the left column at the rail's own margin,
     // the window buttons hold the top-right corner, and nothing in between
     // may cover a menu title. Derived from the two widgets' own sizeHint()s
@@ -2203,7 +2195,7 @@ void MainWindow::syncViewportMinimumWidth()
     // minimum height's rule, sideways. The window follows its central
     // widget's minimum, so a QMainWindow that is narrower grows to it.
     myView->setMinimumWidth(ViewportOverlay::minimumWidthBeside(
-        pillSurface(), ViewportOverlay::Anchor::LeftEdge, myWindowButtons));
+        myPillSlot, ViewportOverlay::Anchor::LeftEdge, myButtonsSlot));
 }
 
 void MainWindow::buildOverlay()
@@ -2225,7 +2217,10 @@ void MainWindow::buildOverlay()
     // It carries the window's own menu bar, so it is not something render
     // mode ever hides - see the appStateChanged-driven visibility lambda
     // below, which only reaches the rail and the gizmo.
-    myOverlay->addWidget(myAppBar, ViewportOverlay::Anchor::LeftEdge);
+    // The page draws it (Phase 3i) and the Qt pill is gone (7b): its slot
+    // stands here, at the Qt pill's size until the page measures its own.
+    myPillSlot = new HtmlCardSlot(QStringLiteral("pill"), ShellSizes::pill(myMenus), myView);
+    myOverlay->addWidget(myPillSlot, ViewportOverlay::Anchor::LeftEdge);
 
     // ONE rail, pinned to the viewport's left edge, in place of the four
     // chip clusters that used to float in three corners and one edge centre.
@@ -2248,43 +2243,12 @@ void MainWindow::buildOverlay()
     // (see CLAUDE.md's warning that the rail wants a rework well before a
     // screen's own height becomes the real ceiling this derivation cannot
     // push past).
-    auto* rail = new ToolCluster(myView);
-    // Kept as a member - render mode's own visibility lambda (see the
-    // constructor) needs to reach it, and findChild<>() on every
-    // appStateChanged is a lookup this class already has a real pointer for.
-    myRail = rail;
-    auto tool = [rail](QAction* action, IconSet::Glyph glyph) {
-        rail->addChip(new ToolChip(action, glyph, ToolChip::ChipMode::IconOnly));
-    };
-
-    tool(myItemsPanelAction, IconSet::Glyph::Items);
-    rail->addSeparator();
-    tool(myStartSketchAction, IconSet::Glyph::Sketch);
-    tool(myExtrudeAction,     IconSet::Glyph::Extrude);
-    tool(myAddShapeAction,    IconSet::Glyph::Shapes);
-    rail->addSeparator();
-    tool(myUnionAction,       IconSet::Glyph::Fuse);
-    tool(mySubtractAction,    IconSet::Glyph::Cut);
-    tool(myIntersectAction,   IconSet::Glyph::Intersect);
-    // DESTROY IS ITS OWN GROUP. Delete used to sit inside the combine run, so
-    // the rail said that removing a body and intersecting two were the same
-    // kind of thing - and the chip that destroys work was the one with no
-    // visual separation from the three beside it.
-    rail->addSeparator();
-    tool(myDeleteAction,      IconSet::Glyph::Delete);
-    // Snap to Grid is View-menu-only now, by the user's call - it is a setting
-    // you flip rarely, not a tool you reach for, and it was the rail's last
-    // checkable chip. The rail's derived minimum height below follows for free:
-    // it reads rail->sizeHint(), never a count.
-    // UNDO AND REDO JOIN THE COLUMN (the user's pick from the rail mockups,
-    // option C). They used to be pushed to the viewport's bottom edge by a
-    // stretch, which put the two most-used controls in any CAD tool roughly
-    // 350 px of travel from everything else and made the rail read as a
-    // broken column with a hole in it. A separator, not a stretch: they are
-    // still their own group, just a reachable one.
-    rail->addSeparator();
-    tool(myUndoAction,        IconSet::Glyph::Undo);
-    tool(myRedoAction,        IconSet::Glyph::Redo);
+    // The page draws the rail (Phase 3i) and the Qt rail is gone (7b): a
+    // stretchable slot, the LeftEdge spine, sized as the Qt rail of ten chips
+    // in five groups was until the page measures its own.
+    myRailSlot = new HtmlCardSlot(QStringLiteral("rail"), ShellSizes::cluster(10, 4), myView);
+    myRailSlot->setStretchable(true);
+    QWidget* rail = myRailSlot;
 
     // The viewport must never be able to shrink shorter than the pill-plus-
     // rail column needs. rail->sizeHint() is the rail's own natural stack
@@ -2303,7 +2267,7 @@ void MainWindow::buildOverlay()
     // disagree with what relayout() actually places against, and a control
     // that grows a pixel raises this floor for free rather than reopening
     // the clip CLAUDE.md already tells this story about once.
-    myViewMinimumHeight = myAppBar->sizeHint().height() + ViewportOverlay::kStackGap +
+    myViewMinimumHeight = myPillSlot->sizeHint().height() + ViewportOverlay::kStackGap +
                           rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin;
     myView->setMinimumHeight(myViewMinimumHeight);
 
@@ -2312,6 +2276,7 @@ void MainWindow::buildOverlay()
     // viewport's own left edge. Every show and hide of it goes through this
     // object from here on; nothing else may call setVisible() on the rail.
     myRailSlide = new CardSlide(rail, CardSlide::From::Left, myView, myOverlay, this);
+    myRailSlide->retarget(rail, false);  // the page flies its own card (R8)
     // And the pill above it leaves upward, for the same reason and through
     // the same object: every show and hide of the app bar goes through this
     // from here on, and nothing else may call setVisible() on it.
@@ -2335,26 +2300,12 @@ void MainWindow::buildOverlay()
             myShapeFlyout->closeFlyout();
             return;
         }
-        // Beside the chip itself when it can be found, beside the rail's
-        // top otherwise - the chip is addressed through its own action, the
-        // way every control in this shell is.
-        QPoint at(rail->geometry().right() + ViewportOverlay::kStackGap,
-                  rail->geometry().top());
-#ifdef FURNIFYME_WEB_UI
-        // The page's rail: beside the chip where the page says it stands.
-        if (QWidget* surface = railSurface(); surface && surface != rail && myShellBridge) {
-            at = QPoint(surface->geometry().right() + ViewportOverlay::kStackGap, surface->geometry().top());
+        // Beside the chip where the page says it stands, beside the rail's
+        // top otherwise.
+        QPoint at(rail->geometry().right() + ViewportOverlay::kStackGap, rail->geometry().top());
+        if (myShellBridge) {
             const QRect chip = myShellBridge->chipRect(ActionRegistry::idFor(myAddShapeAction->text()));
             if (!chip.isEmpty()) at.setY(chip.top());
-            myShapeFlyout->openAt(at);
-            return;
-        }
-#endif
-        for (ToolChip* chip : rail->findChildren<ToolChip*>()) {
-            if (chip->action() == myAddShapeAction) {
-                at.setY(chip->mapTo(myView, QPoint(0, 0)).y());
-                break;
-            }
         }
         myShapeFlyout->openAt(at);
     });
@@ -2450,8 +2401,8 @@ void MainWindow::buildOverlay()
     // THE RENDER LAYER, built here because the Back chip it owns must be the
     // LAST TopLeft overlay entry - it takes the corner only when every drawer
     // above it is hidden, which is exactly and only render mode.
-    myStudio = new RenderStudio(myView, this, myOverlay, myAppBar, myRenderModeAction, this);
-    myRenderExitChip = myStudio->exitChip();
+    myStudio = new RenderStudio(myView, this, myOverlay, myPillSlot, myRenderModeAction, this);
+    myBackSlot = myStudio->exitSlot();
     myRenderFrame = myStudio->frame();
     myRenderSettingsPanel = myStudio->panel();
     connect(myStudio, &RenderStudio::tierTick, this, &MainWindow::syncRenderTierStatus);
@@ -2478,8 +2429,9 @@ void MainWindow::buildOverlay()
     // mode, the same reasoning that keeps the view-controls cluster up.
     // The maximize chip's clicks and hover are native (HTMAXBUTTON, for
     // Windows 11's snap layouts) - see WindowChrome.h.
-    myWindowButtons = new WindowButtons(WindowButtons::Look::Card, myView);
-    myOverlay->addWidget(myWindowButtons, ViewportOverlay::Anchor::TopRight);
+    // The page draws them (Phase 7a); their slot stands here (7b).
+    myButtonsSlot = new HtmlCardSlot(QStringLiteral("buttons"), ShellSizes::windowButtons(), myView);
+    myOverlay->addWidget(myButtonsSlot, ViewportOverlay::Anchor::TopRight);
     syncViewportMinimumWidth();
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
             &MainWindow::syncViewportMinimumWidth);
@@ -2512,28 +2464,10 @@ void MainWindow::buildOverlay()
     // about moving them onto chips changes that; if the gizmo above it hides,
     // this cluster simply reflows up to the gizmo's own slot; occupiedRects()
     // and the anchor's own stacking already give that for free.
-    auto* viewControls = new ToolCluster(myView);
-    myViewControls = viewControls;
-    auto viewTool = [viewControls](QAction* toolAction, IconSet::Glyph glyph) {
-        viewControls->addChip(new ToolChip(toolAction, glyph, ToolChip::ChipMode::IconOnly));
-    };
-    // Persp/Ortho: the real checkable action, mirrored exactly as every rail
-    // chip already mirrors its own action - no bespoke tooltip text and no
-    // bespoke click handling survive the move, both of which the OLD bar
-    // button carried instead of the plain action-driven contract every other
-    // chip in the shell follows.
-    viewTool(myOrthographicAction, IconSet::Glyph::Projection);
-    // NO UNIT CHIP here any more (improvements item 18, the user's own call:
-    // "remove the mm button, keep mm in the View tab"). The unit lives in
-    // Settings -> Working, where the rest of the reading preferences are, and
-    // in the View menu's own two entries - which is where a setting flipped
-    // once in a session belongs, rather than on a chip beside the four
-    // controls a user reaches for constantly. Nothing about the unit itself
-    // changed: Measure is still the one place it is read, and every surface
-    // still follows appStateChanged.
-    viewTool(myDisplayModeAction, IconSet::Glyph::Wireframe);
-    viewTool(myFitAction,         IconSet::Glyph::FitAll);
-    myOverlay->addWidget(viewControls, ViewportOverlay::Anchor::TopRight);
+    // The page draws them (Phase 3i); their slot stands here (7b), at the Qt
+    // cluster's size of three chips until the page measures its own.
+    myViewSlot = new HtmlCardSlot(QStringLiteral("view"), ShellSizes::cluster(3, 0), myView);
+    myOverlay->addWidget(myViewSlot, ViewportOverlay::Anchor::TopRight);
 
     // The joint's chip (joinery, Task 13). It decides its own visibility from
     // MainWindow::jointChipJointId() on every appStateChanged, exactly as the
@@ -3089,62 +3023,6 @@ void MainWindow::buildOverlay()
     connect(myNameCard, &NameFurnitureCard::created, this,
             &MainWindow::createAndOpenFurniture);
     connect(myNameCard, &NameFurnitureCard::cancelled, this, [this] { updateActions(); });
-}
-
-void MainWindow::playShellEntrance()
-{
-    // The app bar drops in from above the viewport's top edge and the rail
-    // slides in from its left, a quarter of the way behind it, so the two read
-    // as one column arriving rather than two cards appearing at once.
-    //
-    // Called from main.cpp on the editor's first show and from nowhere else.
-    // NOT from showEvent(), and not from EditorSelectorHandoff: gui_smoke
-    // drives the same handoff, shows the same window and reads both cards'
-    // positions the instant it is up, so an entrance that started itself would
-    // leave the suite measuring widgets in flight. The window that never calls
-    // this is laid out exactly as it always was.
-    if (!myAppBar || !myRail || !myOverlay || !myView) return;
-    if (myShellEntrance) return;  // once per window
-    if (!myView->animationsEnabled()) return;
-    if (!myAppBar->isVisible() || !myRail->isVisible()) return;
-
-    // Where the overlay put them IS the destination - this animates toward the
-    // laid-out positions, it never computes one of its own. A relayout() that
-    // has not run yet leaves both at the origin, and there is nothing to fly to.
-    const QPoint barHome = myAppBar->pos();
-    const QPoint railHome = myRail->pos();
-    if (barHome.isNull() && railHome.isNull()) return;
-
-    const int ms = Theme::motionMs() * 2;  // 160 reads as a flicker at this distance
-
-    auto* bar = new QPropertyAnimation(myAppBar, "pos", this);
-    bar->setDuration(ms);
-    bar->setEasingCurve(Theme::motionCurve());
-    bar->setStartValue(QPoint(barHome.x(), -myAppBar->height()));
-    bar->setEndValue(barHome);
-
-    auto* rail = new QPropertyAnimation(myRail, "pos", this);
-    rail->setDuration(ms);
-    rail->setEasingCurve(Theme::motionCurve());
-    rail->setStartValue(QPoint(-myRail->width(), railHome.y()));
-    rail->setEndValue(railHome);
-
-    auto* railLeg = new QSequentialAnimationGroup(this);
-    railLeg->addPause(ms / 4);
-    railLeg->addAnimation(rail);
-
-    myShellEntrance = new QParallelAnimationGroup(this);
-    myShellEntrance->addAnimation(bar);
-    myShellEntrance->addAnimation(railLeg);
-
-    // ViewportOverlay::relayout() has the final say, as it does for every other
-    // self-placing card: a resize landing mid-flight has already moved both to
-    // their new home, so the flight stops there rather than tweening on toward
-    // a position that no longer exists. Parented to this and KeepWhenStopped -
-    // DeleteWhenStopped would dangle the pointer on natural completion too.
-    connect(myOverlay, &ViewportOverlay::laidOut, myShellEntrance,
-            [this] { myShellEntrance->stop(); });
-    myShellEntrance->start(QAbstractAnimation::KeepWhenStopped);
 }
 
 void MainWindow::updateActions()
@@ -4083,8 +3961,7 @@ QVariantMap MainWindow::withKeepClear(QVariantMap words) const
     // a dimmed window.
     // Whichever buttons are on screen: the page's own since Phase 7a, the Qt
     // card's while the page cannot draw them.
-    QWidget* buttons = myButtonsSlot && myButtonsSlot->isVisible() ? static_cast<QWidget*>(myButtonsSlot)
-                                                                   : static_cast<QWidget*>(myWindowButtons);
+    QWidget* buttons = myButtonsSlot;
     if (buttons && myView && buttons->isVisible()) {
         const QRect r(buttons->mapTo(myView, QPoint(0, 0)), buttons->size());
         words.insert(QStringLiteral("keepClear"), QVariantMap{{QStringLiteral("x"), r.x()},
@@ -4108,7 +3985,6 @@ void MainWindow::raiseQuestions()
     const bool drawnElsewhere = closing ? myCloseCard->drawnElsewhere() : myNameCard->drawnElsewhere();
     if (drawnElsewhere && myHtmlChrome) myHtmlChrome->view()->raise();
 #endif
-    if (myWindowButtons) myWindowButtons->raise();
 }
 
 void MainWindow::syncHtmlQuestion()
@@ -4781,7 +4657,8 @@ void MainWindow::setRenderModeEnabled(bool on)
     // oversight: they cannot leave with the bar, because a window with no
     // close button is a trap, and untinted they are the one near-black card
     // left standing in the middle of a pale studio photograph.
-    if (myWindowButtons) myWindowButtons->setGroundColour(ground);
+    // (The page's buttons take it as the studio's backdrop - shell tokens.)
+    Q_UNUSED(ground);
     // The single source of truth for the menu entry's checked state, kept in
     // step in BOTH directions - the user unchecking the box arrives here
     // already in sync (QAction::toggled already changed it), but every OTHER
@@ -10552,45 +10429,9 @@ void MainWindow::useHtmlChrome()
     // Until the page says it is listening, and for good once it dies, the
     // Qt toast and status bar carry every report (review I3).
     connect(myHtmlChrome, &EditorChrome::liveChanged, this, [this](bool live) {
-        // THE SHELL FIRST (Phase 3i): the pill, the rail and the view cluster
-        // trade places with their slots exactly as the drawers do below. The
-        // slides that show and hide the pill and the rail follow whichever
-        // card is on screen - instant for a slot, whose card the page
-        // animates itself (ruling R8).
-        if (myOverlay && myPillSlot && myAppBar) {
-            if (live) myOverlay->replaceWidget(myAppBar, myPillSlot);
-            else myOverlay->replaceWidget(myPillSlot, myAppBar);
-            if (myStudio && myStudio->barSlide()) {
-                if (live) myStudio->barSlide()->retarget(myPillSlot, false);
-                else myStudio->barSlide()->retarget(myAppBar, true);
-            } else {
-                (live ? static_cast<QWidget*>(myPillSlot) : myAppBar)->show();
-            }
-        }
-        if (myOverlay && myRailSlot && myRail) {
-            if (live) myOverlay->replaceWidget(myRail, myRailSlot);
-            else myOverlay->replaceWidget(myRailSlot, myRail);
-            if (myRailSlide) {
-                if (live) myRailSlide->retarget(myRailSlot, false);
-                else myRailSlide->retarget(myRail, true);
-            }
-        }
-        if (myOverlay && myButtonsSlot && myWindowButtons) {
-            if (live) myOverlay->replaceWidget(myWindowButtons, myButtonsSlot);
-            else myOverlay->replaceWidget(myButtonsSlot, myWindowButtons);
-            (live ? static_cast<QWidget*>(myButtonsSlot) : myWindowButtons)->show();
-        }
-        if (myOverlay && myBackSlot && myRenderExitChip) {
-            if (live) myOverlay->replaceWidget(myRenderExitChip, myBackSlot);
-            else myOverlay->replaceWidget(myBackSlot, myRenderExitChip);
-            if (myStudio) myStudio->refresh();
-        }
-        if (myOverlay && myViewSlot && myViewControls) {
-            // Never hidden by render mode - shown whenever it is anchored.
-            if (live) myOverlay->replaceWidget(myViewControls, myViewSlot);
-            else myOverlay->replaceWidget(myViewSlot, myViewControls);
-            (live ? static_cast<QWidget*>(myViewSlot) : myViewControls)->show();
-        }
+        // THE SHELL (Phase 7b): the pill, the rail, the view cluster, the
+        // window buttons and the Back chip are the page's slots for good -
+        // with no page there is no chrome (ruling R1).
         if (!live && myShellBridge) myShellBridge->menu()->close();
         syncViewportMinimumHeight();
         syncViewportMinimumWidth();
@@ -10724,29 +10565,12 @@ void MainWindow::useHtmlChrome()
     // LeftEdge spine is; the pill's sized by the page - over ShellBridge,
     // whose chips are the very actions the Qt chips mirror and whose menus
     // are the Qt menu bar's own.
-    if (myOverlay && myRail && myViewControls && myAppBar && myAppBar->menus()) {
-        myPillSlot = new HtmlCardSlot(QStringLiteral("pill"), myAppBar->sizeHint(), myView);
-        myPillSlot->hide();
-        myHtmlChrome->addCard(myPillSlot);
-        myRailSlot = new HtmlCardSlot(QStringLiteral("rail"), myRail->sizeHint(), myView);
-        myRailSlot->setStretchable(true);
-        myRailSlot->hide();
-        myHtmlChrome->addCard(myRailSlot);
-        myViewSlot = new HtmlCardSlot(QStringLiteral("view"), myViewControls->sizeHint(), myView);
-        myViewSlot->hide();
-        myHtmlChrome->addCard(myViewSlot);
-        if (myWindowButtons) {
-            myButtonsSlot = new HtmlCardSlot(QStringLiteral("buttons"), myWindowButtons->size(), myView);
-            myButtonsSlot->hide();
-            myHtmlChrome->addCard(myButtonsSlot);
-            myWindowControls = new HubWindowControls(this);
-            myHtmlChrome->registerObject(QStringLiteral("window"), myWindowControls);
-        }
-        if (myRenderExitChip) {
-            myBackSlot = new HtmlCardSlot(QStringLiteral("back"), myRenderExitChip->sizeHint(), myView);
-            myBackSlot->hide();
-            myHtmlChrome->addCard(myBackSlot);
-        }
+    if (myOverlay && myPillSlot && myRailSlot && myViewSlot && myButtonsSlot) {
+        for (HtmlCardSlot* slot : {myPillSlot, myRailSlot, myViewSlot, myButtonsSlot})
+            myHtmlChrome->addCard(slot);
+        if (myBackSlot) myHtmlChrome->addCard(myBackSlot);
+        myWindowControls = new HubWindowControls(this);
+        myHtmlChrome->registerObject(QStringLiteral("window"), myWindowControls);
 
         auto chip = [](QAction* action, IconSet::Glyph glyph, const char* name) {
             return ShellBridge::Chip{action, glyph, QString::fromLatin1(name)};
@@ -10769,16 +10593,12 @@ void MainWindow::useHtmlChrome()
             chip(myFitAction, IconSet::Glyph::FitAll, "fitAll")};
         std::vector<ShellBridge::Chip> back;
         if (myRenderModeAction) back.push_back(chip(myRenderModeAction, IconSet::Glyph::Back, "back"));
-        myShellBridge = new ShellBridge(&mySession.actions(), std::move(rail), std::move(view), myAppBar->menus(),
+        myShellBridge = new ShellBridge(&mySession.actions(), std::move(rail), std::move(view), myMenus,
                                         this, myHtmlChrome, std::move(back));
-        if (myStudio && myBackSlot) myStudio->setExitSlot(myBackSlot, [this] { return htmlChromeLive(); });
         myHtmlChrome->registerObject(QStringLiteral("shell"), myShellBridge);
         myHtmlChrome->registerObject(QStringLiteral("menu"), myShellBridge->menu());
-        // R5: every menu shortcut fires while the page's pill shows, exactly
-        // as it fires while the Qt pill does - Qt matches a menu action's
-        // shortcut only while a widget carrying its menu is visible, and the
-        // Qt menu bar is hidden with the Qt pill.
-        myPillSlot->addActions(myShellBridge->menuActions());
+        // (R5's shortcuts need no carrier any more: every menu action is the
+        // window's own since Phase 7b - see buildMenus().)
         // The pill measures itself (R9): its row in the page's own font.
         connect(myShellBridge, &ShellBridge::pillReported, this, [this](int w, int h) {
             if (myPillSlot) myPillSlot->setContentSize(QSize(w, h));
@@ -10918,14 +10738,12 @@ bool MainWindow::shellCardsLive() const { return myPillSlot && myShellBridge && 
 QWidget* MainWindow::railSurface() const
 {
     // settingsSurface()'s rule: the page's card only while the page can draw it.
-    if (myRailSlot && htmlChromeLive()) return myRailSlot;
-    return myRail;
+    return myRailSlot;
 }
 
 QWidget* MainWindow::pillSurface() const
 {
-    if (myPillSlot && htmlChromeLive()) return myPillSlot;
-    return myAppBar;
+    return myPillSlot;
 }
 
 void MainWindow::syncMenuShortcuts()
