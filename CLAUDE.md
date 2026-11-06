@@ -109,7 +109,7 @@ total above was not re-measured with them. `ctest` is **15/15** as of 2026-10-08
 `headless_item_order`, the Items drawer's stored order, at 57 checks on its own. `ctest` is **24/24** as of 2026-11-05, in both presets: the HTML
 migration's model tests (hub, versions, joints, items, menu) and their session and
 settings suites joined it. **25/25** the same day with `chip_face`, the gesture chips' face and
-bridge, Phase 4a.)
+bridge, Phase 4a. **26/26** on 2026-11-06 with `scene_cards`, Phase 5b.)
 
 Verified by driving the running app and reading the screenshots:
 viewport renders with grid, triedron and lighting; sketch mode draws a live yellow polyline
@@ -579,6 +579,22 @@ Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own an
   filter as a press on the page's view and would otherwise close the menu before the page saw it.
   The card stays docked in the TopRight column (not glued), so it is drawn through a camera move.
   Its entries are registered as `kind:<n>` when the menu is first built.
+- **The scene window (Phase 5, branches `scene-chrome-5a`, `scene-pieces-5b`) wears the EDITOR'S
+  page.** `SceneWindow::useHtmlChrome()` (main.cpp, under the editor's rule) puts `EditorChrome`
+  over the scene's viewport and registers what this window has: `shell`/`menu` (the scene's
+  menus, an empty rail, Move/Rotate/Render as the `view` cluster), `pieces` and `addPiece`
+  (`web/SceneCardsBridge`, both presets, `scene_cards_tests`). The page draws only what it is
+  given, so one `Editor.svelte` serves both windows. Every scene toast goes through ONE
+  `SceneWindow::showToast()` (the page's while it is live, `ToastHost` otherwise); the strip, the
+  pill, the arrange cluster, the Pieces card and the close question take the Qt surfaces' places
+  exactly as in the editor, and the caption hit test reads the HTML pill. The two scene cards'
+  models send the Qt cards' OWN signals into one handler each (`selectPieceFromList`,
+  `setPieceShown`), so a row click is one implementation whichever card took it; the add card is
+  drawn centred by the page and claims the keyboard for its Escape. **`QMainWindow::menuBar()`
+  after the bar was reparented into the pill quietly makes a NEW, EMPTY bar** - the first build
+  handed the page no menus and the slot no shortcuts; read `AppBar::menus()`. A Svelte variable
+  named `state` collides with the `$state` rune (svelte-check reads `$state` as a store) - name it
+  something else. The render studio's panel was already a page (3e); its Back chip stays Qt.
 - **Keyboard claims belong to a CARD.** `EditorChrome::syncCards()` dropped the keyboard
   whenever any card was hidden, which was right with one card and wrong with two: the
   closed Settings card took the keyboard from the Versions name field on the relayout a
@@ -718,6 +734,7 @@ Source files under `src/`, plus `tests/`:
 | `session/ItemsKeys.{h,cpp}` | the Items list's ONE key table (ruling D19): read by `ItemsPanel`, the shortcut sheet, `ItemsModel` and the chrome's list hold |
 | `session/ItemsModel.{h,cpp}` | the Items drawer's model for the HTML card - visible rows, folds, filter, marks, reveal, the row menu, key commands, a drag's dry run; writes nothing, every change through hooks; tested by `items_model_tests` |
 | `ui/ChipFace.{h,cpp}` | a gesture chip's face for the page - rows of parts read off its real controls; edits land in those controls; drawn elsewhere, sized by the page; tested by `chip_face_tests` |
+| `web/SceneCardsBridge.{h,cpp}` | the scene window's Pieces card (`pieces`) and add card (`addPiece`) as data for the page; requests leave as the Qt cards' own signals; tested by `scene_cards_tests` |
 | `web/ChipsBridge.{h,cpp}` | the page's `chips` object: every chip's face by name, and the page's edits, presses, commits and sizes back into them (both presets) |
 | `session/MenuModel.{h,cpp}` | the menu bar for the page - a tree of QActions, open levels, QMenu's keyboard rules, a trigger that closes first and runs on the next turn; tested by `menu_model_tests` |
 | `session/VersionsModel.{h,cpp}` | the Versions drawer's model for the HTML card - list, thumbnail URLs, default name, words, gates; the four requests through hooks; Core + Gui, tested by `versions_model_tests` |
