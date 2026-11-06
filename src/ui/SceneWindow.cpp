@@ -1670,7 +1670,16 @@ void SceneWindow::useHtmlChrome()
         ShellBridge::Chip{myRenderModeAction, IconSet::Glyph::Render, QStringLiteral("render")}};
     // The PILL's menu bar: the window's own was reparented into the AppBar, and
     // asking QMainWindow::menuBar() again quietly makes a new, empty one.
-    myShellBridge = new ShellBridge(myActionRegistry, {}, std::move(view), myAppBar->menus(), this, myHtmlChrome);
+    std::vector<ShellBridge::Chip> back;
+    if (myStudio && myStudio->exitChip() && myRenderModeAction) {
+        myBackSlot = new HtmlCardSlot(QStringLiteral("back"), myStudio->exitChip()->sizeHint(), myView);
+        myBackSlot->hide();
+        myHtmlChrome->addCard(myBackSlot);
+        back.push_back(ShellBridge::Chip{myRenderModeAction, IconSet::Glyph::Back, QStringLiteral("back")});
+    }
+    myShellBridge = new ShellBridge(myActionRegistry, {}, std::move(view), myAppBar->menus(), this, myHtmlChrome,
+                                    std::move(back));
+    if (myStudio && myBackSlot) myStudio->setExitSlot(myBackSlot, [this] { return htmlChromeLive(); });
     myHtmlChrome->registerObject(QStringLiteral("shell"), myShellBridge);
     myHtmlChrome->registerObject(QStringLiteral("menu"), myShellBridge->menu());
     // Every menu shortcut fires while the HTML pill shows (the editor's R5).
@@ -1751,6 +1760,11 @@ void SceneWindow::useHtmlChrome()
         if (myOverlay && myViewSlot && myArrangeTools) {
             if (live) myOverlay->replaceWidget(myArrangeTools, myViewSlot);
             else myOverlay->replaceWidget(myViewSlot, myArrangeTools);
+        }
+        if (myOverlay && myBackSlot && myStudio && myStudio->exitChip()) {
+            if (live) myOverlay->replaceWidget(myStudio->exitChip(), myBackSlot);
+            else myOverlay->replaceWidget(myBackSlot, myStudio->exitChip());
+            myStudio->refresh();
         }
         if (!live && myShellBridge) myShellBridge->menu()->close();
         if (myCloseCard) myCloseCard->setDrawnElsewhere(live);

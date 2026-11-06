@@ -48,6 +48,8 @@ class ShellBridge : public QObject
     // [{id, glyph} | {separator: true}], top to bottom.
     Q_PROPERTY(QVariantList rail READ rail CONSTANT)
     Q_PROPERTY(QVariantList view READ view CONSTANT)
+    // Render mode's way out (Phase 7a): one chip, in the Back chip's place.
+    Q_PROPERTY(QVariantList back READ back CONSTANT)
     // glyph name -> PNG data URL (an alpha mask, white on transparent).
     Q_PROPERTY(QVariantMap glyphs READ glyphs CONSTANT)
     // id -> {label, tip, enabled, checkable, checked}.
@@ -63,11 +65,12 @@ public:
     };
 
     ShellBridge(ActionRegistry* registry, std::vector<Chip> rail, std::vector<Chip> view, QMenuBar* menus,
-                QWidget* window, QObject* parent = nullptr);
+                QWidget* window, QObject* parent = nullptr, std::vector<Chip> back = {});
     ~ShellBridge() override;
 
     QVariantList rail() const;
     QVariantList view() const;
+    QVariantList back() const;
     QVariantMap glyphs() const { return myGlyphs; }
     QVariantMap chips() const;
     QString wordmark() const { return QStringLiteral("FurnifyMe"); }
@@ -104,6 +107,7 @@ private:
     ActionRegistry* myRegistry = nullptr;
     std::vector<Chip> myRail;
     std::vector<Chip> myView;
+    std::vector<Chip> myBack;
     QPointer<QMenuBar> myMenuBar;
     QPointer<QWidget> myWindow;
     MenuModel* myMenu = nullptr;

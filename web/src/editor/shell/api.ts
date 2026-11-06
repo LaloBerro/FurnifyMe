@@ -29,6 +29,8 @@ export interface Rect {
 export interface ShellApi {
   rail: ShellEntry[];
   view: ShellEntry[];
+  // Render mode's way out (Phase 7a): one chip, in the Back chip's place.
+  back?: ShellEntry[];
   glyphs: Record<string, string>;
   chips: Record<string, ChipState>;
   chipsChanged: Signal;

@@ -259,13 +259,22 @@ void RenderStudio::syncPanelFromView()
                                    : RenderSettingsPanel::Quality::Deep));
 }
 
+void RenderStudio::setExitSlot(QWidget* slot, std::function<bool()> live)
+{
+    myExitSlot = slot;
+    myExitSlotLive = std::move(live);
+    refresh();
+}
+
 void RenderStudio::refresh()
 {
     // Derived on every state change, never set once at the toggle - a one-shot
     // hide is not a state, and QWidget::showChildren() on a window's first
     // show will happily undo one.
     if (myBarSlide) myBarSlide->setShown(!myEnabled);
-    if (myExitChip) myExitChip->setVisible(myEnabled);
+    const bool slotDraws = myExitSlot && myExitSlotLive && myExitSlotLive();
+    if (myExitChip) myExitChip->setVisible(myEnabled && !slotDraws);
+    if (myExitSlot) myExitSlot->setVisible(myEnabled && slotDraws);
     // Only the one the dock holds is shown: the other is a child of the window
     // standing in no layout, and showing it would float it at the corner.
     if (myPanel) myPanel->setVisible(myEnabled && myDocked == myPanel);

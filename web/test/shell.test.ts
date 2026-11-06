@@ -286,3 +286,28 @@ describe('the menu', () => {
     expect(bannedWordsIn([document.body.textContent ?? ''])).toEqual([]);
   });
 });
+
+describe("render mode's Back chip", () => {
+  it('draws the one chip of the back cluster, and a press triggers Render mode', async () => {
+    const shell = mockShell();
+    const triggers: string[] = [];
+    render(Cluster, {
+      props: {
+        name: 'back',
+        entries: shell.back!,
+        chips: shell.chips,
+        glyphs: shell.glyphs,
+        rect: { x: 16, y: 16, w: 44, h: 44 },
+        animate: false,
+        ontrigger: (id: string) => triggers.push(id),
+        report: () => {},
+      },
+    });
+    await settle();
+    const chips = all('[data-cluster="back"] [data-chip]');
+    expect(chips.map((c) => c.dataset.chip)).toEqual(['render-mode']);
+    expect(chips[0].getAttribute('aria-label')).toBe('Render mode');
+    await fireEvent.click(chips[0]);
+    expect(triggers).toEqual(['render-mode']);
+  });
+});

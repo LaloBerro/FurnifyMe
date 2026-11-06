@@ -108,6 +108,10 @@ public:
     QWidget* dockedPanel() const { return myDocked; }
     RenderFrameGuides* frame() const { return myFrame; }
     ToolChip* exitChip() const { return myExitChip; }
+    // The page's Back chip (Phase 7a): a slot in the exit chip's place, shown
+    // instead of it while `live` says the page can draw it. refresh() stays
+    // the one place either is shown.
+    void setExitSlot(QWidget* slot, std::function<bool()> live);
     // The app bar's slide-away, so the window can hand it the HTML pill's
     // slot while the chrome page draws the pill (Phase 3i).
     CardSlide* barSlide() const { return myBarSlide; }
@@ -154,6 +158,8 @@ private:
     RenderSettingsPanel* myPanel = nullptr;
     RenderFrameGuides* myFrame = nullptr;
     ToolChip* myExitChip = nullptr;
+    QPointer<QWidget> myExitSlot;
+    std::function<bool()> myExitSlotLive;
     QTimer* myTierTicker = nullptr;
     QWidget* myDock = nullptr;
     bool myEnabled = false;

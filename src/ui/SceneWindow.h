@@ -310,6 +310,8 @@ private:
     class ActionRegistry* myActionRegistry = nullptr;
     class HtmlCardSlot* myPillSlot = nullptr;
     class HtmlCardSlot* myViewSlot = nullptr;
+    // Render mode's Back chip drawn by the page (Phase 7a) - the editor's.
+    class HtmlCardSlot* myBackSlot = nullptr;
     // The two cards on the page (Phase 5b).
     class HtmlCardSlot* myPiecesSlot = nullptr;
     class ScenePiecesModel* myPiecesModel = nullptr;

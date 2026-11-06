@@ -2831,6 +2831,17 @@ int main(int argc, char* argv[])
             check(waitFor([&] { return !mcard->isOpen(); }, 3000) &&
                       waitFor([&] { return !js(page, "!!document.querySelector('[data-gesture=\"material\"]')").toBool(); }, 3000),
                   "material: the page's Done closes it");
+            // Render mode's way out is the page's Back chip (Phase 7a).
+            auto* backSlot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_back"));
+            ToolChip* qtBack = window.renderExitChip();
+            check(backSlot && backSlot->isVisible() && qtBack && !qtBack->isVisible() &&
+                      waitFor([&] { return js(page, "!!document.querySelector('[data-cluster=\"back\"] [data-chip]')").toBool(); }, 3000),
+                  "back: in render mode the page draws the Back chip, in the Qt chip's place");
+            js(page, "document.querySelector('[data-cluster=\"back\"] [data-chip]').click()");
+            check(waitFor([&] { return !renderAction->isChecked(); }, 3000),
+                  "back: the page's Back chip leaves render mode");
+            check(waitFor([&] { return !backSlot || !backSlot->isVisible(); }, 2000),
+                  "back: and its place goes with render mode");
             if (renderAction->isChecked()) renderAction->trigger();
             pump(400);
         }
@@ -3594,6 +3605,20 @@ int main(int argc, char* argv[])
             check(scene.statusBar()->currentMessage().contains(QStringLiteral("empty")),
                   "and its reason stays on the status line after it");
             check(!scene.toasts()->isShowing(), "and the Qt toast stays down");
+
+            // Render mode's Back chip, drawn by the scene's page too (Phase 7a).
+            if (QAction* sceneRender = actionNamed(&scene, QStringLiteral("Render mode"))) {
+                sceneRender->trigger();
+                pump(500);
+                check(sceneRender->isChecked() &&
+                          waitFor([&] { return js(sp, "!!document.querySelector('[data-cluster=\"back\"] [data-chip]')").toBool(); }, 3000) &&
+                          scene.studio() && scene.studio()->exitChip() && !scene.studio()->exitChip()->isVisible(),
+                      "scene back: in render mode the scene's page draws the Back chip, the Qt one stands aside");
+                js(sp, "document.querySelector('[data-cluster=\"back\"] [data-chip]').click()");
+                check(waitFor([&] { return !sceneRender->isChecked(); }, 3000), "scene back: and it leaves render mode");
+                if (sceneRender->isChecked()) sceneRender->trigger();
+                pump(300);
+            }
 
             // --- the Pieces card and the add card (Phase 5b) ----------------------------
             check(waitFor([&] { return js(sp, "!!document.querySelector('[data-scene=\"pieces\"]')").toBool(); }, 3000) &&

@@ -10570,6 +10570,11 @@ void MainWindow::useHtmlChrome()
                 else myRailSlide->retarget(myRail, true);
             }
         }
+        if (myOverlay && myBackSlot && myRenderExitChip) {
+            if (live) myOverlay->replaceWidget(myRenderExitChip, myBackSlot);
+            else myOverlay->replaceWidget(myBackSlot, myRenderExitChip);
+            if (myStudio) myStudio->refresh();
+        }
         if (myOverlay && myViewSlot && myViewControls) {
             // Never hidden by render mode - shown whenever it is anchored.
             if (live) myOverlay->replaceWidget(myViewControls, myViewSlot);
@@ -10720,6 +10725,11 @@ void MainWindow::useHtmlChrome()
         myViewSlot = new HtmlCardSlot(QStringLiteral("view"), myViewControls->sizeHint(), myView);
         myViewSlot->hide();
         myHtmlChrome->addCard(myViewSlot);
+        if (myRenderExitChip) {
+            myBackSlot = new HtmlCardSlot(QStringLiteral("back"), myRenderExitChip->sizeHint(), myView);
+            myBackSlot->hide();
+            myHtmlChrome->addCard(myBackSlot);
+        }
 
         auto chip = [](QAction* action, IconSet::Glyph glyph, const char* name) {
             return ShellBridge::Chip{action, glyph, QString::fromLatin1(name)};
@@ -10740,8 +10750,11 @@ void MainWindow::useHtmlChrome()
             chip(myOrthographicAction, IconSet::Glyph::Projection, "projection"),
             chip(myDisplayModeAction, IconSet::Glyph::Wireframe, "wireframe"),
             chip(myFitAction, IconSet::Glyph::FitAll, "fitAll")};
+        std::vector<ShellBridge::Chip> back;
+        if (myRenderModeAction) back.push_back(chip(myRenderModeAction, IconSet::Glyph::Back, "back"));
         myShellBridge = new ShellBridge(&mySession.actions(), std::move(rail), std::move(view), myAppBar->menus(),
-                                        this, myHtmlChrome);
+                                        this, myHtmlChrome, std::move(back));
+        if (myStudio && myBackSlot) myStudio->setExitSlot(myBackSlot, [this] { return htmlChromeLive(); });
         myHtmlChrome->registerObject(QStringLiteral("shell"), myShellBridge);
         myHtmlChrome->registerObject(QStringLiteral("menu"), myShellBridge->menu());
         // R5: every menu shortcut fires while the page's pill shows, exactly

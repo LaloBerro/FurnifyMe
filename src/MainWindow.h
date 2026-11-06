@@ -2428,6 +2428,9 @@ private:
     // the Qt surfaces' places while the page is live, as the drawers' are.
     class HtmlCardSlot* myRailSlot = nullptr;
     class HtmlCardSlot* myViewSlot = nullptr;
+    // Render mode's Back chip drawn by the page (Phase 7a), in the Qt exit
+    // chip's place; RenderStudio::refresh() shows whichever the page allows.
+    class HtmlCardSlot* myBackSlot = nullptr;
     class HtmlCardSlot* myPillSlot = nullptr;
     class ShellBridge* myShellBridge = nullptr;
     class ChipsBridge* myChipsBridge = nullptr;

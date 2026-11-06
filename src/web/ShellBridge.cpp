@@ -62,8 +62,9 @@ QRect rectOf(const QVariant& v)
 }  // namespace
 
 ShellBridge::ShellBridge(ActionRegistry* registry, std::vector<Chip> rail, std::vector<Chip> view,
-                         QMenuBar* menus, QWidget* window, QObject* parent)
+                         QMenuBar* menus, QWidget* window, QObject* parent, std::vector<Chip> back)
     : QObject(parent), myRegistry(registry), myRail(std::move(rail)), myView(std::move(view)),
+      myBack(std::move(back)),
       myMenuBar(menus), myWindow(window)
 {
     myMenu = new MenuModel(walkBar(menus), this);
@@ -75,7 +76,7 @@ ShellBridge::ShellBridge(ActionRegistry* registry, std::vector<Chip> rail, std::
     });
 
     QStringList ids;
-    for (const std::vector<Chip>* list : {&myRail, &myView}) {
+    for (const std::vector<Chip>* list : {&myRail, &myView, &myBack}) {
         for (const Chip& chip : *list) {
             if (!chip.action) continue;
             ids << ActionRegistry::idFor(chip.action->text());
@@ -111,11 +112,12 @@ QVariantList ShellBridge::listOf(const std::vector<Chip>& chips) const
 
 QVariantList ShellBridge::rail() const { return listOf(myRail); }
 QVariantList ShellBridge::view() const { return listOf(myView); }
+QVariantList ShellBridge::back() const { return listOf(myBack); }
 
 QVariantMap ShellBridge::chips() const
 {
     QVariantMap map;
-    for (const std::vector<Chip>* list : {&myRail, &myView}) {
+    for (const std::vector<Chip>* list : {&myRail, &myView, &myBack}) {
         for (const Chip& chip : *list) {
             QAction* a = chip.action;
             if (!a) continue;
@@ -145,7 +147,7 @@ bool ShellBridge::trigger(const QString& id)
     // Only the chips' own actions: the page's channel is not a way to run
     // any command in the app.
     bool ours = false;
-    for (const std::vector<Chip>* list : {&myRail, &myView})
+    for (const std::vector<Chip>* list : {&myRail, &myView, &myBack})
         for (const Chip& chip : *list)
             if (chip.action && ActionRegistry::idFor(chip.action->text()) == id) ours = true;
     if (!ours || !myRegistry) return false;

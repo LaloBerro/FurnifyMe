@@ -193,6 +193,19 @@
     reportSize={(w, h) => chrome.reportCardSize?.('rail', w, h)}
   />
 {/if}
+{#if shell && shell.back && cards.back?.shown}
+  <Cluster
+    name="back"
+    entries={shell.back}
+    {chips}
+    glyphs={shell.glyphs}
+    rect={cards.back}
+    {animate}
+    ontrigger={(id) => shell.trigger(id)}
+    report={(rects) => shell.reportChipRects(rects)}
+    reportSize={(w, h) => chrome.reportCardSize?.('back', w, h)}
+  />
+{/if}
 {#if shell && cards.view?.shown}
   <Cluster
     name="view"

@@ -42,12 +42,14 @@ export function mockShell(): ShellApi & {
     { id: 'wireframe', glyph: 'wireframe' },
     { id: 'fit-all', glyph: 'fitAll' },
   ];
+  const back: ShellEntry[] = [{ id: 'render-mode', glyph: 'back' }];
   const glyphs: Record<string, string> = {};
-  for (const e of [...rail, ...view]) if (e.glyph) glyphs[e.glyph] = dot;
+  for (const e of [...rail, ...view, ...back]) if (e.glyph) glyphs[e.glyph] = dot;
   const shell = {
     calls,
     rail,
     view,
+    back,
     glyphs,
     chips: {
       items: chipState('Items', { checkable: true, tip: 'Items\nShow or hide the list of bodies' }),
@@ -63,6 +65,7 @@ export function mockShell(): ShellApi & {
       orthographic: chipState('Orthographic', { checkable: true }),
       wireframe: chipState('Wireframe', { checkable: true }),
       'fit-all': chipState('Fit All'),
+      'render-mode': chipState('Render mode', { checkable: true, checked: true }),
     } as Record<string, ChipState>,
     chipsChanged: new MockSignal(),
     wordmark: 'FurnifyMe',
