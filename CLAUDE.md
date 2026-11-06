@@ -192,7 +192,7 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
-**`kCheckFloor` is 4358 since Phase 6 (see the history below); the paragraph that follows is the 6324 step's.** Two consecutive
+**`kCheckFloor` is 4137 since Phase 7b (4358 after Phase 6; see the history below); the paragraph that follows is the 6324 step's.** Two consecutive
 unfiltered runs measured **6323 checks + 1 environment skip**, agreeing to the digit, against
 one binary. The one environment skip is the RayTracing floor-blend
 measurement, which does not apply when PathTracing is the session's tier. The floor is the
@@ -212,6 +212,8 @@ new `the-shortcut-sheet-fits-its-window` block, T-064), and then **4358**, LOWER
 purpose by migration Phase 6 (`delete-qt-6`): the Qt drawers and the Qt hub were deleted
 and their own blocks went with them, about 2,100 checks whose subjects no longer exist.
 Measured (4357 + 1) and then confirmed by two unfiltered runs on the binary carrying it.
+Then **4137**, LOWERED again by Phase 7b: the Qt shell was deleted and with it the checks
+that measured how it looked (4136 + 1 twice, then a pass on the binary carrying it).
 The floor
 has never been computed from a predicted delta at any of those steps, which is the whole
 point of the paragraph below.
@@ -336,10 +338,9 @@ the only app build; the four Qt drawers (`AppearancePanel`, `VersionsPanel`,
 `JointsPanel`, `ItemsPanel` and its row, filter, drop mark and ghost) are gone and their
 `HtmlCardSlot`s stand in `buildOverlay()` for good, widths from `ui/DrawerWidths`; the Qt
 hub `SelectorWindow`, `--qt-hub` and `--qt-chrome` are gone; and **a dead page reloads**
-(`WebHost`, at most `kMaxCrashReloads` a session). **The Qt toast, status bar, pill,
-rail and view cluster stay** (ruling R1): they are still the state the pages mirror and
-what `gui_smoke` drives, and they are the bridge while a page reloads. Moving that
-state, and the surfaces with no page yet, is Phase 7. Everything below that speaks of
+(`WebHost`, at most `kMaxCrashReloads` a session). The Qt toast, status bar, pill,
+rail and view cluster stayed through Phase 7a as the state the pages mirrored; Phase 7b
+moved that state into models and deleted them (below). Everything below that speaks of
 "the Qt drawer" or "the Qt hub" in the present tense is history now.
 `EditorSelectorHandoff::wire()` is a header template; `gui_smoke` wires it to
 `tests/SuiteHub.h` (HubModel in a plain window), never to a page.
@@ -370,6 +371,35 @@ live (`setDrawnElsewhere`); the page draws what its `words()` say, where it stan
   redraws (the freed one crashed the driver); deferring that redraw to `paintGL()`
   instead left the page undrawn after render mode at 150% and crashed in
   `blitBuffers` - A/B'd. chrome_smoke can be run at `QT_SCALE_FACTOR=1.5`.
+
+**Phase 7b (branch `phase-7b`) moved the state out of the Qt shell and deleted it** -
+ledger `docs/superpowers/plans/2026-11-06-qt-shell-state-phase-7b.md`.
+- **The status line is `session/StatusLine`** (the left sentence, the state line, the
+  name and its unsaved dot), one per window: `statusLine()`. There is no `QStatusBar`;
+  `StatusMessageLine` and `FurnitureNameMark` are deleted. **Never call
+  `QMainWindow::statusBar()`** - it creates an empty bar.
+- **The toast's rules are `session/ToastHost`**, a QObject: one message, Note 4 s and
+  Failure 8 s, the Undo stamp, Undo's enabled state, the Notes switch, `requestUndo()`
+  for the pill, `paintedTexts()` for the sweep. The page draws it - fade, rise and the
+  hover pause are `Toast.svelte`'s. `Toast` and `UndoControl` are deleted, and with them
+  gui_smoke's checks of the Qt toast's pixels, placement and announcement.
+- **Menus are a list the window owns** (`menus()`): `QMenu`s parented to the window, and
+  every leaf action is ALSO added to the window, so a shortcut fires with no menu widget
+  anywhere (Qt matches a menu action only through a visible carrier). `ShellBridge`,
+  `ShortcutSheet` and the suites read the list.
+- **The pill, the rail, the view cluster, the window buttons and the Back chip are
+  `HtmlCardSlot`s for good**, built in `buildOverlay()` (the scene's too) at the deleted
+  widgets' sizes (`ui/ShellSizes.h`) until the page measures its own. `AppBar`,
+  `ToolCluster` and `WindowButtons` are deleted; `ToolChip` stays (the render card, the
+  flyout and the scene's cards still build Qt chips). The caption hit test reads the
+  pill slot and the page's rectangles only.
+- **With no page there is no chrome (R1)**: a page missing or reloading leaves the slots
+  standing, painting nothing. **A Qt card that is still the LOGIC keeps painting with no
+  page (R4)** - the questions, the gesture chips, the loading card, the sheet, the guide,
+  the hint, the material card - until its paint code is deleted in a follow-up.
+- **gui_smoke tests the models, chrome_smoke the page (R2).** The blocks that only
+  measured how the Qt shell looked are deleted; the rest read the slots, the actions and
+  the two models.
 
 - **Build:** `cmake --preset windows && cmake --build --preset windows` (`windows-web`
   is the same preset under its old name). It
@@ -781,6 +811,8 @@ Source files under `src/`, plus `tests/`:
 | `DocumentModel.{h,cpp}` | owns the list of solids |
 | `session/EditorSession.{h,cpp}` | the document, checkpoints, undo/redo and the ONE outcome channel; Core + Gui only (`furnify_session`), tested by `session_tests`; `session_no_widgets` fails on any Widgets include reached from `src/session` |
 | `session/Outcome.h` | one thing to tell the user, as a value: Note, Failure or Status |
+| `session/StatusLine.{h,cpp}` | the bottom strip's state - left sentence, state line, name, unsaved dot; the page draws it (Phase 7b) |
+| `session/ToastHost.{h,cpp}` | the toast's rules - one message, its kind and lifetime, the Undo stamp, the Notes switch; the page draws it (Phase 7b) |
 | `session/ActionRegistry.{h,cpp}` | every `QAction` by a stable id, a JSON snapshot, and a `trigger()` that obeys `isEnabled()` |
 | `session/JointRows.{h,cpp}` | what a joint's row says and measures - shared by the Qt joints drawer and the page's; `reasonText()` lives here |
 | `session/JointsModel.{h,cpp}` | the Joints drawer's model for the HTML card - rows broken first, open rows by joint id, hooks; Core + OCCT, tested by `joints_model_tests` |
@@ -813,7 +845,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/Theme.{h,cpp}` | colour tokens, the `Fixed` colours + the app stylesheet; the only place hex lives (`headless_colour_literals` enforces it) |
 | `ui/IconSet.{h,cpp}` | glyphs painted with QPainter (no qtsvg installed) |
 | `ui/ToolChip.{h,cpp}` | a button built from a `QAction`, never storing its own state |
-| `ui/ToolCluster.{h,cpp}` | a vertical stack of chips |
+| `ui/ShellSizes.h` | the shell slots' sizes before the page measures them (the deleted Qt widgets' own) |
 | `ui/ViewportOverlay.{h,cpp}` | anchors clusters to viewport edges; not a widget |
 | `session/ItemMoveText.{h,cpp}` | the ONE author of the drawer's move copy: present tense for the drag's status line, past for the Note, the Failure's reason (in `furnify_session` since Phase 3h, so both drawers read it) |
 | `ui/PanelCloseButton.{h,cpp}` | the hover-only x in a panel's corner; triggers the panel's own `QAction`, holds no state |
@@ -821,7 +853,6 @@ Source files under `src/`, plus `tests/`:
 | `ui/WalkthroughPanel.{h,cpp}` | the guided first build; steps derived from live state |
 | `ui/HintBalloon.{h,cpp}` | one hint at a time, retired when its trigger stops holding |
 | `ui/ShortcutSheet.{h,cpp}` | shortcut list generated from the window's own `QAction`s |
-| `ui/Toast.{h,cpp}` | one non-blocking message at a time, with Undo where it applies |
 | `ui/ExtrudePreview.{h,cpp}` | height entry with a live preview built by the commit's own path |
 | `ui/DimensionRenderer.{h,cpp}` | CAD length annotation; one renderer for the sketch and edges |
 | `ui/SelectionSizesRenderer.{h,cpp}` | width/depth/height around a selection; a composition over `DimensionRenderer` |
@@ -831,13 +862,12 @@ Source files under `src/`, plus `tests/`:
 | `ui/ReMeasureTool.{h,cpp}` | Re-Measure chip: a size number becomes a field; preview by the commit's own call |
 | `ui/ResizePinRenderer.{h,cpp}` | the Re-Measure pin: which end stays put, three marks on the dimension line |
 | `ui/TransformGizmo.{h,cpp}` | the gizmo we draw: shared `GizmoRenderer` base + the Move tool |
-| `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
 | `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
 | `EditorSelectorHandoff.h` | the ONE wiring that swaps editor and hub, a header template; `main.cpp` wires `HubWindow`, `gui_smoke` its `SuiteHub` |
 | `ui/DrawerWidths.{h,cpp}` | the four drawer cards' widths (Settings, Versions, Joints, Items), as the deleted Qt drawers computed them |
 | `ui/InlineRename.{h,cpp}` | the one `QLineEdit`-in-place helper: selector cards and drawer rows both use it |
-| `ui/UnsavedCloseCard.{h,cpp}` | the close question over a dimmed viewport, the status bar's unsaved dot (`FurnitureNameMark`) and its elided left channel (`StatusMessageLine`) |
+| `ui/UnsavedCloseCard.{h,cpp}` | the close question over a dimmed viewport |
 | `ui/RenderSettingsPanel.{h,cpp}` | the render-mode settings card and its shutter (`RenderShutterButton`, same file) |
 | `ui/CardSlide.{h,cpp}` | slide-in/out for an overlay card; only the rail uses it. `setShown()` is idempotent against what was ASKED for, `settle()` re-aims a live flight at relayout's new home rather than stopping it |
 | `ui/NameFurnitureCard.{h,cpp}` | the "what should this be called" question; creates nothing until it is answered |

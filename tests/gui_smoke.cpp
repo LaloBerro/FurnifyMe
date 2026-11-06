@@ -818,7 +818,16 @@ void skipByEnvironment(int checks, const QString& why)
 // through ItemsModel, JointsModel or the window's own routes. Measured on the
 // tree that carries it: 4357 checks + 1 environment skip = 4358, then confirmed
 // by two more unfiltered runs on the binary with this number in it.
-constexpr int kCheckFloor = 4358;
+//
+// LOWERED, deliberately (migration Phase 7b, branch phase-7b): the Qt toast,
+// status bar, pill, rail, view cluster and window buttons were deleted, and
+// with them the blocks and checks that measured how those widgets LOOKED -
+// their pixels, placement and Qt hit testing (ruling R2: the page's are
+// chrome_smoke's). What they SAID and DID is pinned through StatusLine,
+// ToastHost, the slots and the actions. Two unfiltered runs measured 4136
+// checks + 1 environment skip = 4137, agreeing to the digit; confirmed by an
+// unfiltered run on the binary with this number in it.
+constexpr int kCheckFloor = 4137;
 
 void check(bool condition, const QString& what)
 {
@@ -9303,16 +9312,25 @@ int main(int argc, char* argv[])
             // DIFFERENT answer, or the probe cannot tell a swallowed
             // release-pick from one that re-picked the same face and looked
             // identical. 400 mm out along the normal is well clear of the
-            // arrow (which is 52 px long) and of every body.
+            // arrow (which is 52 px long) and of every body - or, where the
+            // framing puts that off screen (the viewport's aspect moves it),
+            // the nearest of a few shorter or longer reaches that lands.
             QPoint emptyAt;
-            const bool haveEmpty =
-                view->projectToScreen(targetCentre.Translated(gp_Vec(targetOutward) * 400.0),
-                                      emptyAt) &&
-                view->rect().adjusted(20, 20, -20, -20).contains(emptyAt) &&
-                (emptyAt - centreAt).manhattanLength() > 60;
+            bool haveEmpty = false;
+            for (const double reach : {400.0, 300.0, 250.0, 500.0, 600.0}) {
+                QPoint at;
+                if (view->projectToScreen(targetCentre.Translated(gp_Vec(targetOutward) * reach), at) &&
+                    view->rect().adjusted(20, 20, -20, -20).contains(at) &&
+                    (at - centreAt).manhattanLength() > 60) {
+                    emptyAt = at;
+                    haveEmpty = true;
+                    break;
+                }
+            }
             check(haveEmpty,
-                  "a release point well clear of the arrow and of every body projects "
-                  "inside the viewport");
+                  QStringLiteral("a release point well clear of the arrow and of every body "
+                                 "projects inside the viewport (%1,%2 in %3x%4)")
+                      .arg(emptyAt.x()).arg(emptyAt.y()).arg(view->width()).arg(view->height()));
 
             const double before = bodyVolume();
             pressThenReleaseAt(view, QPointF(centreAt),
@@ -35230,7 +35248,9 @@ int main(int argc, char* argv[])
         settle(250);
         {
             const auto [swept, takers] = focusTakers(&fw);
-            check(swept >= 13 && takers.isEmpty(),
+            // No floor here since Phase 7b: the editor's chips are the page's,
+            // so its Qt buttons are only the few cards still Qt's.
+            check(takers.isEmpty(),
                   QStringLiteral("focus: every visible chip and button in the editor is NoFocus "
                                  "(%1 swept; takers: %2)")
                       .arg(swept)
@@ -35259,7 +35279,9 @@ int main(int argc, char* argv[])
             sw.addPiece(furnitureId);
             settle(250);
             const auto [swept, takers] = focusTakers(&sw);
-            check(swept >= 5 && takers.isEmpty(),
+            // The Pieces card's rows and its Add piece row (the arranging
+            // chips are the page's since Phase 7b).
+            check(swept >= 3 && takers.isEmpty(),
                   QStringLiteral("focus: every visible chip and button in the scene window is "
                                  "NoFocus (%1 swept; takers: %2)")
                       .arg(swept)

@@ -3655,7 +3655,10 @@ int main(int argc, char* argv[])
                   "an empty scene's screenshot refusal is a Failure on the page - " + toastText(sp));
             check(scene.statusLine()->message().contains(QStringLiteral("empty")),
                   "and its reason stays on the status line after it");
-            check(!scene.toasts()->isShowing(), "and the Qt toast stays down");
+            // One toast since Phase 7b: the model the page draws from.
+            check(scene.toasts()->isShowing() && scene.toasts()->kind() == Toast::Kind::Failure &&
+                      scene.toasts()->currentText().trimmed() == toastText(sp).trimmed(),
+                  "and the toast model holds the same Failure the page shows");
 
             // The window buttons, drawn by the scene's page too (Phase 7a).
             {
