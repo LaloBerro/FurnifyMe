@@ -7,6 +7,7 @@
 //
 #include <QPointer>
 #include <QStringList>
+#include <QVariantMap>
 #include <QWidget>
 
 class MainWindow;
@@ -40,6 +41,23 @@ public:
     // left: none of this is ever put on a QAction text or tooltip, so
     // nothing else makes any of it visible to that check.
     QStringList paintedTexts() const;
+
+    // DRAWN ELSEWHERE (migration Phase 7a): the chrome page draws the guide at
+    // this widget's place while it is live, and its skip answers through
+    // skip() - what a click on the skip control does. This widget keeps
+    // deriving the steps and its own visibility; it paints nothing.
+    void setDrawnElsewhere(bool elsewhere);
+    bool drawnElsewhere() const { return myDrawnElsewhere; }
+    // {shown, title, skip, steps: [{text, done}], skipRect {x, y, w, h}} - the
+    // skip rectangle in this widget's own coordinates.
+    QVariantMap words() const;
+    void skip() { finish(); }
+
+signals:
+    // Shown, hidden, moved or a step done: the page's guide follows.
+    void guideChanged();
+
+public:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -124,4 +142,5 @@ private:
     // baseline), and a render-mode hide is not that: the walkthrough must
     // resume exactly where it was, not restart. See refresh()'s own comment.
     bool myHiddenForRenderMode = false;
+    bool myDrawnElsewhere = false;
 };

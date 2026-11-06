@@ -4137,6 +4137,29 @@ void MainWindow::syncHtmlSheet()
 #endif
 }
 
+void MainWindow::syncHtmlTeaching()
+{
+#ifdef FURNIFYME_WEB_UI
+    if (!myHtmlChrome || !myHtmlChrome->isLive()) return;
+    const auto placed = [](QVariantMap words, const QWidget* w) {
+        if (!words.value(QStringLiteral("shown")).toBool()) return QVariantMap{{QStringLiteral("shown"), false}};
+        const int margin = Theme::surfaceShadowMargin();
+        const QRect r = w->geometry().adjusted(margin, margin, -margin, -margin);
+        words.insert(QStringLiteral("x"), r.x());
+        words.insert(QStringLiteral("y"), r.y());
+        words.insert(QStringLiteral("w"), r.width());
+        words.insert(QStringLiteral("h"), r.height());
+        return words;
+    };
+    if (auto* guide = myView->findChild<WalkthroughPanel*>())
+        myHtmlChrome->setGuide(guide->drawnElsewhere() ? placed(guide->words(), guide)
+                                                       : QVariantMap{{QStringLiteral("shown"), false}});
+    if (auto* balloon = myView->findChild<HintBalloon*>())
+        myHtmlChrome->setHint(balloon->drawnElsewhere() ? placed(balloon->words(), balloon)
+                                                        : QVariantMap{{QStringLiteral("shown"), false}});
+#endif
+}
+
 void MainWindow::onHtmlQuestionChanged()
 {
 #ifdef FURNIFYME_WEB_UI
@@ -10465,6 +10488,16 @@ void MainWindow::useHtmlChrome()
     // The shortcut sheet (Phase 7a): drawn by the page, under the Qt sheet,
     // at the Qt sheet's own rectangle mapped into the viewport.
     if (myShortcutSheet) connect(myShortcutSheet, &ShortcutSheet::sheetChanged, this, &MainWindow::syncHtmlSheet);
+    // The guide and the hint balloon (Phase 7a): drawn by the page at their
+    // own places; skip and "got it" come back as the presses they replace.
+    if (auto* guide = myView->findChild<WalkthroughPanel*>()) {
+        connect(guide, &WalkthroughPanel::guideChanged, this, &MainWindow::syncHtmlTeaching);
+        connect(myHtmlChrome, &EditorChrome::guideSkipped, guide, &WalkthroughPanel::skip);
+    }
+    if (auto* balloon = myView->findChild<HintBalloon*>()) {
+        connect(balloon, &HintBalloon::balloonChanged, this, &MainWindow::syncHtmlTeaching);
+        connect(myHtmlChrome, &EditorChrome::hintDismissed, balloon, &HintBalloon::dismissHint);
+    }
     if (myLoadingCard)
         connect(myLoadingCard, &LoadingCard::stateChanged, this, [this] {
             syncHtmlQuestion();
@@ -10553,6 +10586,9 @@ void MainWindow::useHtmlChrome()
         if (myLoadingCard) myLoadingCard->setDrawnElsewhere(live);
         if (myShortcutSheet) myShortcutSheet->setDrawnElsewhere(live);
         syncHtmlSheet();
+        if (auto* guide = myView->findChild<WalkthroughPanel*>()) guide->setDrawnElsewhere(live);
+        if (auto* balloon = myView->findChild<HintBalloon*>()) balloon->setDrawnElsewhere(live);
+        syncHtmlTeaching();
         // The name question the same way (Phase 3g); keys aimed at the page's
         // view go through the card's claim to the page's field.
         if (myNameCard) myNameCard->setDrawnElsewhere(live, live ? myHtmlChrome->view() : nullptr);

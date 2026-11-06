@@ -55,6 +55,30 @@ void ChromeBridge::setSheetMap(const QVariantMap& map)
     emit sheetChanged(map);
 }
 
+void ChromeBridge::setGuideMap(const QVariantMap& map)
+{
+    if (myGuide == map) return;
+    myGuide = map;
+    emit guideChanged(map);
+}
+
+void ChromeBridge::setHintMap(const QVariantMap& map)
+{
+    if (myHint == map) return;
+    myHint = map;
+    emit hintChanged(map);
+}
+
+void ChromeBridge::skipGuide()
+{
+    if (myGuide.value(QStringLiteral("shown")).toBool()) emit guideSkipped();
+}
+
+void ChromeBridge::dismissHint()
+{
+    if (myHint.value(QStringLiteral("shown")).toBool()) emit hintDismissed();
+}
+
 bool ChromeBridge::asks(const QString& kind) const
 {
     if (!myQuestion.value(QStringLiteral("asking")).toBool()) return false;
@@ -205,6 +229,8 @@ EditorChrome::EditorChrome(OcctViewWidget* viewport, QObject* parent)
     connect(myBridge, &ChromeBridge::hitRectsChanged, this, &EditorChrome::applyMask);
     connect(myBridge, &ChromeBridge::undoRequested, this, &EditorChrome::undoRequested);
     connect(myBridge, &ChromeBridge::questionAnswered, this, &EditorChrome::questionAnswered);
+    connect(myBridge, &ChromeBridge::guideSkipped, this, &EditorChrome::guideSkipped);
+    connect(myBridge, &ChromeBridge::hintDismissed, this, &EditorChrome::hintDismissed);
     connect(myBridge, &ChromeBridge::nameQuestionAnswered, this, &EditorChrome::nameQuestionAnswered);
     connect(myBridge, &ChromeBridge::nameQuestionTyped, this, &EditorChrome::nameQuestionTyped);
     connect(myBridge, &ChromeBridge::keyboardClaimed, this, &EditorChrome::claimKeyboard);
@@ -510,6 +536,18 @@ void EditorChrome::setQuestion(bool asking, const QVariantMap& words)
 void EditorChrome::setSheet(const QVariantMap& words)
 {
     myBridge->setSheetMap(words);
+    if (words.value(QStringLiteral("shown")).toBool()) myHost->view()->raise();
+}
+
+void EditorChrome::setGuide(const QVariantMap& words)
+{
+    myBridge->setGuideMap(words);
+    if (words.value(QStringLiteral("shown")).toBool()) myHost->view()->raise();
+}
+
+void EditorChrome::setHint(const QVariantMap& words)
+{
+    myBridge->setHintMap(words);
     if (words.value(QStringLiteral("shown")).toBool()) myHost->view()->raise();
 }
 

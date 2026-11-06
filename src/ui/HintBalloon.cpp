@@ -418,9 +418,47 @@ void HintBalloon::mousePressEvent(QMouseEvent* /*event*/)
     dismiss();
 }
 
+void HintBalloon::setDrawnElsewhere(bool elsewhere)
+{
+    if (myDrawnElsewhere == elsewhere) return;
+    myDrawnElsewhere = elsewhere;
+    update();
+    emit balloonChanged();
+}
+
+QVariantMap HintBalloon::words() const
+{
+    if (!isVisible() || myText.isEmpty()) return {{QStringLiteral("shown"), false}};
+    return {{QStringLiteral("shown"), true}, {QStringLiteral("text"), myText}, {QStringLiteral("gotIt"), tr("got it")}};
+}
+
+void HintBalloon::moveEvent(QMoveEvent* event)
+{
+    QWidget::moveEvent(event);
+    emit balloonChanged();
+}
+
+void HintBalloon::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    emit balloonChanged();
+}
+
+void HintBalloon::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    emit balloonChanged();
+}
+
+void HintBalloon::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    emit balloonChanged();
+}
+
 void HintBalloon::paintEvent(QPaintEvent* /*event*/)
 {
-    if (myText.isEmpty()) return;
+    if (myText.isEmpty() || myDrawnElsewhere) return;
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);

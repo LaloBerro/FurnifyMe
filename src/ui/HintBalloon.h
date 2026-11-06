@@ -33,6 +33,7 @@
 // accompany it.
 //
 #include <QString>
+#include <QVariantMap>
 #include <QWidget>
 
 #include <set>
@@ -67,7 +68,25 @@ public:
     // be at its final rectangle. A no-op when nothing is up.
     void reposition();
 
+    // DRAWN ELSEWHERE (migration Phase 7a): the chrome page draws the balloon
+    // while it is live, at this widget's own place, and a press on it answers
+    // through dismissHint() - the press a click on this widget makes. This
+    // widget keeps deciding which hint stands and where; it paints nothing.
+    void setDrawnElsewhere(bool elsewhere);
+    bool drawnElsewhere() const { return myDrawnElsewhere; }
+    // {shown, text, gotIt}; the place is this widget's geometry.
+    QVariantMap words() const;
+    void dismissHint() { dismiss(); }
+
+signals:
+    // Shown, hidden, moved or reworded: the page's balloon follows.
+    void balloonChanged();
+
 protected:
+    void moveEvent(QMoveEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
 
@@ -100,4 +119,5 @@ private:
     // Per-hint, not global: a single flag would mean the first balloon shown
     // silenced the other two for the rest of the session.
     std::set<QString> myShownThisSession;
+    bool myDrawnElsewhere = false;
 };

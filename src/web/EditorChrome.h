@@ -42,6 +42,8 @@ class ChromeBridge : public QObject
     Q_PROPERTY(QVariantMap cards READ cards NOTIFY cardsChanged)
     Q_PROPERTY(QVariantMap question READ question NOTIFY questionChanged)
     Q_PROPERTY(QVariantMap sheet READ sheet NOTIFY sheetChanged)
+    Q_PROPERTY(QVariantMap guide READ guide NOTIFY guideChanged)
+    Q_PROPERTY(QVariantMap hint READ hint NOTIFY hintChanged)
     // Whether the page may animate (the viewport's switch: the suites turn it
     // off). The rail and the pill fly in and out on the page's own clock while
     // it does (Phase 3i, ruling R8).
@@ -60,6 +62,13 @@ public:
     // rectangle in viewport pixels {x, y}; {shown: false} while it is down.
     QVariantMap sheet() const { return mySheet; }
     void setSheetMap(const QVariantMap& map);
+    // The first-run guide and the hint balloon (Phase 7a): WalkthroughPanel's
+    // and HintBalloon's words() plus their rectangles in viewport pixels
+    // {x, y, w, h}; {shown: false} while down.
+    QVariantMap guide() const { return myGuide; }
+    QVariantMap hint() const { return myHint; }
+    void setGuideMap(const QVariantMap& map);
+    void setHintMap(const QVariantMap& map);
     bool animate() const { return myAnimate; }
     void setAnimate(bool on);
     void setQuestionMap(const QVariantMap& map);
@@ -84,6 +93,10 @@ signals:
     void cardsChanged();
     void questionChanged(const QVariantMap& question);
     void sheetChanged(const QVariantMap& sheet);
+    void guideChanged(const QVariantMap& guide);
+    void hintChanged(const QVariantMap& hint);
+    void guideSkipped();
+    void hintDismissed();
     void animateChanged();
     // Observed on the C++ side
     void questionAnswered(const QString& which);
@@ -128,6 +141,9 @@ public slots:
     // The close question's answer: "save", "discard" or "keep". Anything else,
     // or an answer while no question stands, is refused.
     void answerQuestion(const QString& which);
+    // The guide's skip and the hint's "got it" - only while each stands.
+    void skipGuide();
+    void dismissHint();
     // The name question's answer (Phase 3g): "create" with the name the
     // page's field holds - it rides WITH the answer - or "cancel". Refused
     // unless the name question stands.
@@ -142,6 +158,8 @@ public:
 private:
     QVariantMap myQuestion;
     QVariantMap mySheet{{QStringLiteral("shown"), false}};
+    QVariantMap myGuide{{QStringLiteral("shown"), false}};
+    QVariantMap myHint{{QStringLiteral("shown"), false}};
     bool myAnimate = true;
     bool myUndoEnabled = true;
     QVariantList myObstacles;
@@ -200,6 +218,8 @@ public:
     // The shortcut sheet, drawn by the page under the Qt sheet (Phase 7a):
     // the view rises while it shows.
     void setSheet(const QVariantMap& words);
+    void setGuide(const QVariantMap& words);
+    void setHint(const QVariantMap& words);
     // A menu stands open (Phase 3i, ruling R7): the mask takes the whole
     // viewport at once and the view is raised, so a press anywhere reaches
     // the page's outside layer, which closes the menu and swallows it.
@@ -224,6 +244,8 @@ signals:
     void questionAnswered(const QString& which);
     void nameQuestionAnswered(const QString& which, const QString& name);
     void nameQuestionTyped(const QString& name);
+    void guideSkipped();
+    void hintDismissed();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

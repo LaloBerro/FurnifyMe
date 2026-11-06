@@ -276,6 +276,7 @@ void WalkthroughPanel::refresh()
         return;
     }
     update();
+    emit guideChanged();
 }
 
 void WalkthroughPanel::finish()
@@ -326,6 +327,8 @@ void WalkthroughPanel::syncSkipGeometry()
     // panel back above mySkip - see the class comment on SkipControl for why
     // that stacking does not actually matter.
     mySkip->raise();
+    // Every move, resize, show and hide passes here: the page's guide follows.
+    emit guideChanged();
 }
 
 void WalkthroughPanel::showEvent(QShowEvent* event)
@@ -348,6 +351,7 @@ void WalkthroughPanel::hideEvent(QHideEvent* event)
     // control at all. This covers the ordinary case; syncSkipGeometry() is
     // what covers the case where this event never arrives at all.
     if (mySkip) mySkip->hide();
+    emit guideChanged();
 }
 
 void WalkthroughPanel::moveEvent(QMoveEvent* event)
@@ -420,8 +424,35 @@ QSize WalkthroughPanel::sizeHint() const
                 kTitle + kStep * static_cast<int>(steps.size()) + kBottomPad + margin * 2);
 }
 
+void WalkthroughPanel::setDrawnElsewhere(bool elsewhere)
+{
+    if (myDrawnElsewhere == elsewhere) return;
+    myDrawnElsewhere = elsewhere;
+    update();
+    emit guideChanged();
+}
+
+QVariantMap WalkthroughPanel::words() const
+{
+    if (!isVisible()) return {{QStringLiteral("shown"), false}};
+    const QStringList texts = paintedTexts();
+    const bool done[4] = {myStartedSketch, myPlacedPoints, myClosedOutline,
+                          static_cast<int>(myWindow->document().count()) > myBodyBaseline};
+    QVariantList steps;
+    for (int i = 0; i < 4 && 2 + i < texts.size(); ++i)
+        steps.push_back(QVariantMap{{QStringLiteral("text"), texts[2 + i]}, {QStringLiteral("done"), done[i]}});
+    const QRect s = skipRect();
+    return {{QStringLiteral("shown"), true},
+            {QStringLiteral("title"), texts.value(0)},
+            {QStringLiteral("skip"), texts.value(1)},
+            {QStringLiteral("steps"), steps},
+            {QStringLiteral("skipRect"), QVariantMap{{QStringLiteral("x"), s.x()}, {QStringLiteral("y"), s.y()},
+                                                    {QStringLiteral("w"), s.width()}, {QStringLiteral("h"), s.height()}}}};
+}
+
 void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)
 {
+    if (myDrawnElsewhere) return;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 

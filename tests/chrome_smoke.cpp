@@ -35,6 +35,8 @@
 #include "ui/SceneWindow.h"
 #include "ui/LoadingCard.h"
 #include "ui/ShortcutSheet.h"
+#include "ui/HintBalloon.h"
+#include "ui/WalkthroughPanel.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include "ui/ScenePiecesPanel.h"
@@ -2686,6 +2688,71 @@ int main(int argc, char* argv[])
               "four rows in the copy (two copies, two twins)");
         window.openFurniture(furnitureId);
         pump(300);
+    }
+
+    // --- the first-run guide and the hint balloon, drawn by the page (Phase 7a) ------
+    {
+        // A fresh window, so the guide stands as it does on a first run.
+        MainWindow fresh(nullptr, /*persistProgress=*/false, library.path());
+        fresh.setAttribute(Qt::WA_ShowWithoutActivating);
+        fresh.resize(1280, 820);
+        fresh.useHtmlChrome();
+        fresh.show();
+        fresh.view()->setAnimationsEnabled(false);
+        check(waitFor([&] { return fresh.htmlChrome() && fresh.htmlChrome()->isLive(); }, 20000),
+              "teaching: a fresh window's page is live");
+        fresh.openFurniture(furnitureId);
+        pump(400);
+        QWebEngineView* fp = fresh.htmlChrome() ? fresh.htmlChrome()->view() : nullptr;
+        auto* guide = fresh.view()->findChild<WalkthroughPanel*>();
+        check(guide && guide->isVisible() && guide->drawnElsewhere(), "teaching: the guide stands, drawn by the page");
+        if (fp && guide && guide->isVisible()) {
+            check(waitFor([&] { return js(fp, "!!document.querySelector('.guide')").toBool(); }, 3000) &&
+                      js(fp, "document.querySelectorAll('.guide .steps li').length").toInt() == 4,
+                  "teaching: the page draws the guide and its four steps");
+            const QRect drawn(js(fp, "Math.round(document.querySelector('.guide').getBoundingClientRect().left)").toInt(),
+                              js(fp, "Math.round(document.querySelector('.guide').getBoundingClientRect().top)").toInt(),
+                              js(fp, "Math.round(document.querySelector('.guide').getBoundingClientRect().width)").toInt(),
+                              js(fp, "Math.round(document.querySelector('.guide').getBoundingClientRect().height)").toInt());
+            check(std::abs(drawn.x() - guide->x()) <= 1 && std::abs(drawn.y() - guide->y()) <= 1 &&
+                      std::abs(drawn.width() - guide->width()) <= 1 && std::abs(drawn.height() - guide->height()) <= 1,
+                  QStringLiteral("teaching: at the Qt guide's own place (%1,%2 %3x%4 against %5,%6 %7x%8)")
+                      .arg(drawn.x()).arg(drawn.y()).arg(drawn.width()).arg(drawn.height())
+                      .arg(guide->x()).arg(guide->y()).arg(guide->width()).arg(guide->height()));
+#ifdef _WIN32
+            pump(250);
+            capture(&fresh, outDir + "/guide.png");
+#endif
+        }
+        // The hint: two bodies selected raise the boolean hint.
+        std::vector<int> two;
+        for (const DocumentModel::Solid& sd : fresh.document().solids())
+            if (two.size() < 2) two.push_back(sd.id);
+        fresh.view()->setSelectedSolids(two);
+        pump(400);
+        auto* balloon = fresh.view()->findChild<HintBalloon*>();
+        check(balloon && balloon->isVisible() && balloon->drawnElsewhere(), "teaching: two bodies selected raise a hint");
+        if (fp && balloon && balloon->isVisible()) {
+            check(waitFor([&] { return jsString(fp, "(document.querySelector('.hint .text') || {}).textContent || ''") ==
+                                       balloon->currentHint(); }, 3000),
+                  "teaching: the page draws the hint the Qt balloon chose - " + balloon->currentHint());
+#ifdef _WIN32
+            pump(250);
+            capture(&fresh, outDir + "/hint.png");
+#endif
+            js(fp, "document.querySelector('.hint').click()");
+            check(waitFor([&] { return !balloon->isVisible(); }, 3000) &&
+                      waitFor([&] { return !js(fp, "!!document.querySelector('.hint')").toBool(); }, 3000),
+                  "teaching: a press on the page's balloon is its got it - the hint retires, on the page too");
+        }
+        if (fp && guide && guide->isVisible()) {
+            js(fp, "document.querySelector('.guide .skip').click()");
+            check(waitFor([&] { return !guide->isVisible() && guide->isFinished(); }, 3000) &&
+                      waitFor([&] { return !js(fp, "!!document.querySelector('.guide')").toBool(); }, 3000),
+                  "teaching: the page's skip finishes the guide, and its card goes");
+        }
+        fresh.close();
+        pump(200);
     }
 
     // --- the shortcut sheet, drawn by the page under the Qt sheet (Phase 7a) ---------

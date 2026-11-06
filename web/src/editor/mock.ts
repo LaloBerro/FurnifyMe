@@ -1,5 +1,7 @@
 import type { QuestionState } from './Question.svelte';
 import type { SheetState } from './Sheet.svelte';
+import type { GuideState } from './Guide.svelte';
+import type { HintState } from './Hint.svelte';
 import type { ChromeApi, StatusState, ToastKind } from './api';
 import type { Rect } from './solver';
 import { MockSignal } from '../hub/mock';
@@ -16,6 +18,8 @@ export function mockChrome() {
     cardsChanged: MockSignal;
     questionChanged: MockSignal<[QuestionState]>;
     sheetChanged: MockSignal<[SheetState]>;
+    guideChanged: MockSignal<[GuideState]>;
+    hintChanged: MockSignal<[HintState]>;
   } = {
     calls,
     toast: new MockSignal<[string, ToastKind, boolean, number, number?, number?, boolean?]>(),
@@ -32,6 +36,12 @@ export function mockChrome() {
     questionChanged: new MockSignal<[QuestionState]>(),
     sheet: { shown: false } as SheetState,
     sheetChanged: new MockSignal<[SheetState]>(),
+    guide: { shown: false } as GuideState,
+    guideChanged: new MockSignal<[GuideState]>(),
+    hint: { shown: false } as HintState,
+    hintChanged: new MockSignal<[HintState]>(),
+    skipGuide: () => calls.push({ method: 'skipGuide', args: [] }),
+    dismissHint: () => calls.push({ method: 'dismissHint', args: [] }),
     answerQuestion: (which) => calls.push({ method: 'answerQuestion', args: [which] }),
     answerNameQuestion: (which, name) => calls.push({ method: 'answerNameQuestion', args: [which, name] }),
     nameQuestionEdited: (name) => calls.push({ method: 'nameQuestionEdited', args: [name] }),

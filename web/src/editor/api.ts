@@ -1,5 +1,7 @@
 import type { QuestionState } from './Question.svelte';
 import type { SheetState } from './Sheet.svelte';
+import type { GuideState } from './Guide.svelte';
+import type { HintState } from './Hint.svelte';
 // What the editor's chrome page talks to: EditorChrome's `chrome` object on
 // the web channel (ThemeBridge as `theme` beside it). A mock with the same
 // shape serves the tests and the dev server (mock.ts).
@@ -76,6 +78,14 @@ export interface ChromeApi {
   // The shortcut sheet (Phase 7a), carried WITH each change the same way.
   sheet?: SheetState;
   sheetChanged?: Signal<[SheetState]>;
+  // The first-run guide and the hint balloon (Phase 7a); skip and "got it"
+  // answer through C++, which retires them.
+  guide?: GuideState;
+  guideChanged?: Signal<[GuideState]>;
+  hint?: HintState;
+  hintChanged?: Signal<[HintState]>;
+  skipGuide?(): void;
+  dismissHint?(): void;
   // "save", "discard" or "keep" - answered through the Qt card's own answer().
   answerQuestion?(which: 'save' | 'discard' | 'keep'): void;
   // The name question (Phase 3g, kind "name"): "create" carries the name the

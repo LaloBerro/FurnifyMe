@@ -2018,6 +2018,7 @@ private:
     // signals arrive. A no-op unless the page is live.
     void syncHtmlQuestion();
     void syncHtmlSheet();
+    void syncHtmlTeaching();
     // syncHtmlQuestion(), then the raise - or, once nothing stands, the
     // relayout that puts the Qt cards back over the page.
     void onHtmlQuestionChanged();
