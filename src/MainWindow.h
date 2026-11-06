@@ -27,7 +27,6 @@
 
 class AppBar;
 class EditorChrome;
-class AppearancePanel;
 class AxisGizmo;
 class BevelArrow;
 class ExtrudePreview;
@@ -44,7 +43,6 @@ class RenderSettingsPanel;
 class RenderShutterButton;
 class ToastHost;
 class ToolCluster;
-class VersionsPanel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -892,7 +890,6 @@ public:
     // than the widget's isVisible(), which would make the gate depend on
     // which appStateChanged slot happened to run first.
     bool jointsDrawerOpen() const;
-    class JointsPanel* jointsPanel() const { return myJointsPanel; }
 
     // --- joinery: the joint's chip (Task 13) --------------------------------
     //
@@ -1008,8 +1005,6 @@ public:
 
     bool isSketching() const { return mySketching; }
     OcctViewWidget* view() const { return myView; }
-    class ItemsPanel* itemsPanel() const { return myItemsPanel; }
-    AppearancePanel* appearancePanel() const { return myAppearancePanel; }
     RenderSettingsPanel* renderSettingsPanel() const { return myRenderSettingsPanel; }
     // The wide footer shutter - owned by the panel since the Milestone 5
     // rework; kept as an accessor so the suite's wiring pins hold.
@@ -1353,6 +1348,13 @@ public:
     // need to exclude the three gizmo predicates - it hides them itself the
     // moment it turns on.
     bool canOpenRenderMode() const;
+
+    // An item row's eye: the document first, the view second - the Items
+    // card's one route (and the suite's, which has no page).
+    void setItemsVisible(const std::vector<int>& ids, bool outline, bool show);
+    // A body row's grain mark: which way this body's grain runs flips.
+    // Presentation - the revision moves, no checkpoint.
+    void toggleBodyGrain(int bodyId);
 
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
@@ -2379,8 +2381,6 @@ private:
     // above, a step or a move into while filtered), so a filter change can
     // take exactly that sentence down again - see the moveRefused connection.
     QString myPaintedMoveRefusal;
-    class ItemsPanel* myItemsPanel = nullptr;
-    AppearancePanel* myAppearancePanel = nullptr;
     // The render settings card and the camera shutter (Task 7.2) - both
     // constructed in buildOverlay(), both derived-visible off myRenderModeOn
     // alone (neither has a QAction of its own to check; they exist exactly
@@ -2474,7 +2474,6 @@ private:
     // --- versions and the side-by-side compare (Milestone 3) ---------------
     QAction* myVersionsPanelAction = nullptr;   // View -> Versions - the drawer's law
     QAction* mySaveVersionAction = nullptr;     // File -> Save version...
-    VersionsPanel* myVersionsPanel = nullptr;
 
     // Non-null only while compare is open. mySplitter owns myView and
     // myCompareView as its two panes for that interval; myView is
@@ -2569,7 +2568,6 @@ private:
     QAction* myGroupAction = nullptr;
     QAction* myUngroupAction = nullptr;
     QAction* myJointsPanelAction = nullptr;
-    class JointsPanel* myJointsPanel = nullptr;
     // See selectedJointId(). 0 = none.
     int mySelectedJointId = 0;
     bool jointExists(int jointId) const;

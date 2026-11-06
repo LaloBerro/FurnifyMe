@@ -36,6 +36,8 @@ public:
     QVariantMap state() const;
     // The page has said it is listening (ready()).
     bool isReady() const { return myReady; }
+    // The page died: the reloaded one says ready() again.
+    void forgetReady() { myReady = false; }
 
 public slots:
     // Each by the panel's own rules - a current choice says nothing, an index

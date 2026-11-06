@@ -70,6 +70,12 @@ cmake --preset windows
 cmake --build --preset windows
 ```
 
+**Since migration Phase 6 the `windows` preset IS the web build** (`build-web/`, the
+installer Qt with WebEngine beside vcpkg OCCT - see "The HTML UI" below); the app
+cannot be configured without the web UI any more, and `windows-web` is kept as an alias.
+The old vcpkg-Qt `build/` directory is stale. vcpkg's Qt still serves the two
+`*-headless` presets, which build no app.
+
 Fallback if the vcpkg route is ever abandoned: the official prebuilt OCCT installer from
 dev.opencascade.org plus the Qt online installer, then point `OpenCASCADE_DIR` and
 `Qt6_DIR` at them manually.
@@ -161,7 +167,7 @@ in the test suite.
 
 ```powershell
 cmake --build --preset windows
-.\build\RelWithDebInfo\gui_smoke.exe <output-dir-for-snapshots>
+.\build-web\RelWithDebInfo\gui_smoke.exe <output-dir-for-snapshots>
 ```
 
 **A second, optional argument filters which blocks run**, so a targeted fix
@@ -320,7 +326,22 @@ hidden Qt status bar as the STATE, and mirrors it to the page's strip. **Phase 3
 Settings drawer on the same page**: one table (`SettingsEdits`) and one edit path feed the
 Qt drawer and the HTML card alike, and the card stands in the Qt drawer's own anchor.
 
-- **Build:** `cmake --preset windows-web && cmake --build --preset windows-web`. It
+**Phase 6 (branch `delete-qt-6`) deleted what had a page in its place** - plan and
+rulings in `docs/superpowers/plans/2026-11-06-delete-qt-phase-6.md`. The web build is
+the only app build; the four Qt drawers (`AppearancePanel`, `VersionsPanel`,
+`JointsPanel`, `ItemsPanel` and its row, filter, drop mark and ghost) are gone and their
+`HtmlCardSlot`s stand in `buildOverlay()` for good, widths from `ui/DrawerWidths`; the Qt
+hub `SelectorWindow`, `--qt-hub` and `--qt-chrome` are gone; and **a dead page reloads**
+(`WebHost`, at most `kMaxCrashReloads` a session). **The Qt toast, status bar, pill,
+rail and view cluster stay** (ruling R1): they are still the state the pages mirror and
+what `gui_smoke` drives, and they are the bridge while a page reloads. Moving that
+state, and the surfaces with no page yet, is Phase 7. Everything below that speaks of
+"the Qt drawer" or "the Qt hub" in the present tense is history now.
+`EditorSelectorHandoff::wire()` is a header template; `gui_smoke` wires it to
+`tests/SuiteHub.h` (HubModel in a plain window), never to a page.
+
+- **Build:** `cmake --preset windows && cmake --build --preset windows` (`windows-web`
+  is the same preset under its old name). It
   uses the INSTALLER Qt 6.11.1 in `C:/Qt/6.11.1/msvc2022_64` (WebEngine; vcpkg's Qt
   has none) with vcpkg OCCT, applocal OFF (windeployqt + the non-Qt vcpkg DLLs are
   copied by POST_BUILD), and Node: `web_pages` runs `npm run build` and the pages land
@@ -762,11 +783,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/ToolChip.{h,cpp}` | a button built from a `QAction`, never storing its own state |
 | `ui/ToolCluster.{h,cpp}` | a vertical stack of chips |
 | `ui/ViewportOverlay.{h,cpp}` | anchors clusters to viewport edges; not a widget |
-| `ui/ItemsPanel.{h,cpp}` | the item list: rows reused by id and folded by visibility, the stored order, the drag, the filter, reveal, the keys |
 | `session/ItemMoveText.{h,cpp}` | the ONE author of the drawer's move copy: present tense for the drag's status line, past for the Note, the Failure's reason (in `furnify_session` since Phase 3h, so both drawers read it) |
-| `ui/ItemsFilterField.{h,cpp}` | the drawer's permanent "Filter by name" field; claims Escape and letters back from the shortcut map |
-| `ui/DropIndicator.{h,cpp}` | the drag's one mark inside the drawer: an insertion line with a ring, or a ring around a folder row; `accentText`, `dangerText` when refused |
-| `ui/DragGhost.{h,cpp}` | what a drag carries, over the viewport; three variants rasterised once per drag |
 | `ui/PanelCloseButton.{h,cpp}` | the hover-only x in a panel's corner; triggers the panel's own `QAction`, holds no state |
 | `ui/AxisGizmo.{h,cpp}` | Unity-style orientation gizmo; each axis tip snaps the view |
 | `ui/WalkthroughPanel.{h,cpp}` | the guided first build; steps derived from live state |
@@ -782,14 +799,12 @@ Source files under `src/`, plus `tests/`:
 | `ui/ReMeasureTool.{h,cpp}` | Re-Measure chip: a size number becomes a field; preview by the commit's own call |
 | `ui/ResizePinRenderer.{h,cpp}` | the Re-Measure pin: which end stays put, three marks on the dimension line |
 | `ui/TransformGizmo.{h,cpp}` | the gizmo we draw: shared `GizmoRenderer` base + the Move tool |
-| `ui/AppearancePanel.{h,cpp}` | the **Settings** drawer — four tabs; Theme tokens live and debounced, every other row a mirror of a `QAction` (class name kept, see its header) |
 | `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
 | `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
-| `ui/SelectorWindow.{h,cpp}` | the library, a top-level window of its own — cards, New, rename, delete; its own `ToastHost` for the delete Note |
-| `EditorSelectorHandoff.{h,cpp}` | the ONE wiring that swaps editor and selector; `main.cpp` and `gui_smoke` share it |
+| `EditorSelectorHandoff.h` | the ONE wiring that swaps editor and hub, a header template; `main.cpp` wires `HubWindow`, `gui_smoke` its `SuiteHub` |
+| `ui/DrawerWidths.{h,cpp}` | the four drawer cards' widths (Settings, Versions, Joints, Items), as the deleted Qt drawers computed them |
 | `ui/InlineRename.{h,cpp}` | the one `QLineEdit`-in-place helper: selector cards and drawer rows both use it |
-| `ui/VersionsPanel.{h,cpp}` | versions drawer: thumbnail cards, Compare, Restore, two-click Delete |
 | `ui/UnsavedCloseCard.{h,cpp}` | the close question over a dimmed viewport, the status bar's unsaved dot (`FurnitureNameMark`) and its elided left channel (`StatusMessageLine`) |
 | `ui/RenderSettingsPanel.{h,cpp}` | the render-mode settings card and its shutter (`RenderShutterButton`, same file) |
 | `ui/CardSlide.{h,cpp}` | slide-in/out for an overlay card; only the rail uses it. `setShown()` is idempotent against what was ASKED for, `settle()` re-aims a live flight at relayout's new home rather than stopping it |

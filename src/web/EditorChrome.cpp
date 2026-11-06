@@ -524,6 +524,11 @@ void EditorChrome::setLive(bool live)
         // Nothing of the page takes the pointer any more - the wheel shield
         // and the mask read this region (review I3).
         myBridge->reportHitRects({});
+    } else {
+        // A page loaded again after its render process died (WebHost's
+        // reload) comes back over the viewport it left.
+        myHost->view()->show();
+        myHost->view()->raise();
     }
     emit liveChanged(live);
 }

@@ -146,7 +146,7 @@ public:
     // EditorChrome over this viewport - toast, status strip, the pill and its
     // menus, the arranging chips and the close question - while it is live;
     // the Qt surfaces otherwise. Called by main.cpp under the editor's rule
-    // (a web build, no --qt-chrome, the page present); gui_smoke never calls
+    // (the page present); gui_smoke never calls
     // it. A no-op in a build without the web UI.
     void useHtmlChrome();
     class EditorChrome* htmlChrome() const { return myHtmlChrome; }

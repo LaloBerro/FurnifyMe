@@ -8,11 +8,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # run and pass before any Qt code exists. Turn the app off to build tests alone
 # on a machine that has OCCT but no Qt:  -DFURNIFYME_BUILD_APP=OFF
 option(FURNIFYME_BUILD_APP "Build the Qt desktop application" ON)
-# The HTML UI (migration Phases 0-2): pages in Qt WebEngine - the hub today,
-# the editor's chrome later. Needs a Qt that ships WebEngine - the installer
-# build in C:/Qt, see the windows-web preset - and Node for the page build.
-# Off, the app is exactly the Qt Widgets app.
-option(FURNIFYME_WEB_UI "Build the HTML UI (Qt WebEngine pages)" OFF)
+# The HTML UI: the app's surfaces are pages in Qt WebEngine. Needs a Qt that
+# ships WebEngine - the installer build in C:/Qt, see the windows preset - and
+# Node for the page build. Since migration Phase 6 the app IS the web build:
+# the Qt surfaces the pages replaced are deleted, so an app without the pages
+# has no drawers, no hub and no chrome to fall back to. Off is refused for an
+# app build; the headless presets build no app and need neither.
+option(FURNIFYME_WEB_UI "Build the HTML UI (Qt WebEngine pages)" ON)
+if(FURNIFYME_BUILD_APP AND NOT FURNIFYME_WEB_UI)
+  message(FATAL_ERROR "The app needs the HTML UI since migration Phase 6: configure with the "
+                      "windows preset (installer Qt with WebEngine), or turn FURNIFYME_BUILD_APP off "
+                      "for the geometry library and the headless tests alone.")
+endif()
 
 find_package(OpenCASCADE REQUIRED)
 
@@ -245,11 +252,9 @@ if(FURNIFYME_BUILD_APP)
     add_library(furnify_app STATIC
       resources.qrc
       src/MainWindow.cpp
-      src/EditorSelectorHandoff.cpp
       src/OcctViewWidget.cpp
       src/GridRenderer.cpp
       src/ui/AppBar.cpp
-      src/ui/AppearancePanel.cpp
       src/ui/SettingsEdits.cpp
       src/ui/Themes.cpp
       src/ui/Themes.h
@@ -258,6 +263,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ThemeDecor.cpp
       src/ui/ThemeDecor.h
       src/ui/HtmlCardSlot.cpp
+      src/ui/DrawerWidths.cpp
       src/web/SettingsBridge.cpp
       src/web/SettingsBridge.h
       src/web/RenderBridge.cpp
@@ -281,11 +287,6 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ToolChip.cpp
       src/ui/ToolCluster.cpp
       src/ui/ViewportOverlay.cpp
-      src/ui/ItemsPanel.cpp
-      src/ui/ItemsRow.cpp
-      src/ui/ItemsFilterField.cpp
-      src/ui/DropIndicator.cpp
-      src/ui/DragGhost.cpp
       src/ui/PanelCloseButton.cpp
       src/ui/NameFurnitureCard.cpp
       src/ui/LoadingCard.cpp
@@ -304,10 +305,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/TransformGizmo.cpp
       src/ui/InlineRename.cpp
       src/ui/WindowChrome.cpp
-      src/ui/SelectorWindow.cpp
-      src/ui/VersionsPanel.cpp
       src/ui/JointChip.cpp
-      src/ui/JointsPanel.cpp
       src/ui/RenderSettingsPanel.cpp
       src/ui/RenderSettingsCopy.cpp
       src/ui/RenderFrameGuides.cpp
@@ -484,7 +482,7 @@ if(FURNIFYME_BUILD_APP)
     # them, so it never touches the OS cursor or steals focus - the machine
     # stays usable while it runs. Not registered with ctest: it needs a GPU and
     # a window server, unlike the headless tests.
-    add_executable(gui_smoke tests/gui_smoke.cpp)
+    add_executable(gui_smoke tests/gui_smoke.cpp tests/SuiteHub.h)
     target_link_libraries(gui_smoke PRIVATE furnify_app)
     # The suite's own stack-overflow reporter resolves its frames with DbgHelp
     # (see traceStackOverflow() in tests/gui_smoke.cpp) - there is no debugger

@@ -22,16 +22,12 @@
 #include "OcctViewWidget.h"
 #include "Theme.h"
 #include "ViewportOverlay.h"
-#include "ui/AppearancePanel.h"
-#include "ui/VersionsPanel.h"
 #include "session/VersionsModel.h"
 #include "session/JointsModel.h"
 #include "session/ItemsModel.h"
-#include "ui/JointsPanel.h"
 #include "ui/GestureChip.h"
 #include "ui/SettingsEdits.h"
 #include "ui/Themes.h"
-#include "ui/ItemsPanel.h"
 #include "ui/Toast.h"
 #include "web/EditorChrome.h"
 #include "web/RenderPage.h"
@@ -662,7 +658,6 @@ int main(int argc, char* argv[])
                   card.value("y").toInt() == settingsSlot->y() && card.value("shown").toBool(),
               QStringLiteral("the page is told where the slot stands (%1,%2)")
                   .arg(card.value("x").toInt()).arg(card.value("y").toInt()));
-        check(!window.findChild<AppearancePanel*>()->isVisible(), "and the Qt drawer stays hidden");
         waitFor([&] { return js(page, "!!document.querySelector('.settings-card')").toBool(); }, 3000);
         const QRect drawn = QRect(js(page, "Math.round(document.querySelector('.settings-card').getBoundingClientRect().left)").toInt(),
                                   js(page, "Math.round(document.querySelector('.settings-card').getBoundingClientRect().top)").toInt(),
@@ -909,7 +904,6 @@ int main(int argc, char* argv[])
     pump(400);
     QWidget* versionsSlot = window.findChild<QWidget*>(QStringLiteral("htmlCardSlot_versions"));
     check(versionsSlot && versionsSlot->isVisible(), "Versions shows the card's slot");
-    check(!window.findChild<VersionsPanel*>()->isVisible(), "and the Qt drawer stays hidden");
     check(window.versionsModel() && window.versionsModel()->canSave(),
           "the page's versions object is there, with + open");
     if (!versionsSlot || !versionsAction) return 1;
@@ -1159,7 +1153,6 @@ int main(int argc, char* argv[])
     pump(400);
     QWidget* jointsSlot = window.findChild<QWidget*>(QStringLiteral("htmlCardSlot_joints"));
     check(jointsSlot && jointsSlot->isVisible(), "Joints shows the card's slot");
-    check(!window.findChild<JointsPanel*>()->isVisible(), "and the Qt drawer stays hidden");
     check(window.jointsModel() && window.jointsModel()->live(), "the page's joints object is there, live");
     if (!jointsSlot || !jointsAction) return 1;
     jointsAction->trigger();
@@ -1460,8 +1453,8 @@ int main(int argc, char* argv[])
         if (itemsAction && !itemsAction->isChecked()) itemsAction->trigger();
         QWidget* itemsSlot = window.findChild<QWidget*>(QStringLiteral("htmlCardSlot_items"));
         ItemsModel* model = window.itemsModel();
-        check(itemsSlot && itemsSlot->isVisible() && !window.itemsPanel()->isVisible() && model,
-              "Items shows the card's slot, and the Qt drawer stays hidden");
+        check(itemsSlot && itemsSlot->isVisible() && model,
+              "Items shows the card's slot");
         if (!itemsSlot || !model || !itemsAction) return 1;
         // Helpers: a press, a move and a release where the page's own row is.
         js(page, "window.__ic = (id) => { const r = document.querySelector(`.items-card [data-row=\"${id}\"]`); "
@@ -2707,14 +2700,6 @@ int main(int argc, char* argv[])
         pump(300);
         check(broken.htmlChrome() && !broken.htmlChrome()->isLive(), "a page that never loaded is not live");
         check(broken.statusBar()->isVisible(), "so the Qt status bar stays up");
-        if (QAction* brokenSettings = actionNamed(&broken, QStringLiteral("Settings..."))) {
-            brokenSettings->trigger();
-            pump(200);
-            check(broken.findChild<AppearancePanel*>()->isVisible(),
-                  "and Settings opens the Qt drawer, not an empty slot (review I3)");
-            brokenSettings->trigger();
-            pump(100);
-        }
         TopoDS_Face f;
         for (TopExp_Explorer e(broken.document().solids().front().shape, TopAbs_FACE); e.More(); e.Next()) {
             f = TopoDS::Face(e.Current());
@@ -3193,7 +3178,9 @@ int main(int argc, char* argv[])
 
 #ifdef _WIN32
             // The page dies mid-render-mode (Review Focus 1): the Qt panel docks
-            // back at once, every value intact, and render mode stays on.
+            // back at once, every value intact, and render mode stays on. The
+            // reload (Phase 6) waits until the fallback has been read.
+            renderPage->host()->setReloadOnCrash(false);
             const qint64 pid = rv->page()->renderProcessPid();
             if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
                 TerminateProcess(h, 1);
@@ -3208,6 +3195,11 @@ int main(int argc, char* argv[])
                       panel->dialValue(RenderSettingsPanel::Dial::LightAngle) == 123,
                   "with every value the page set");
             capture(&window, outDir + "/render-panel-fallback.png");
+            // ...and then the page loads again and takes the dock back.
+            renderPage->host()->setReloadOnCrash(true);
+            check(waitFor([&] { return renderPage->isLive(); }, 20000) && renderPage->host()->crashReloads() == 1 &&
+                      studio->dockedPanel() != panel && rv->isVisible(),
+                  "the dead render page loads again and docks back in the Qt panel's place");
 #endif
             panel->chooseQuality(RenderSettingsPanel::Quality::Deep);
             renderMode->trigger();
@@ -3441,6 +3433,8 @@ int main(int argc, char* argv[])
             check(nameCard->name() == QStringLiteral("Typed before, more"),
                   "an edit arriving under the close question still reaches the name - " + nameCard->name());
         }
+        // The reload (Phase 6) waits until the fallback below has been read.
+        chrome->host()->setReloadOnCrash(false);
         const qint64 pid = page->page()->renderProcessPid();
         if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
             TerminateProcess(h, 1);
@@ -3483,6 +3477,19 @@ int main(int argc, char* argv[])
             check(rail->isVisible() && window.findChild<AppBar*>()->isVisible() && window.viewControls()->isVisible(),
                   "the Qt rail, pill and view cluster come back in their places (Phase 3i)");
         check(!window.shellBridge()->menu()->isOpen(), "and no menu stands open");
+
+        // --- and then the page comes back (Phase 6): a dead page reloads -------
+        chrome->host()->setReloadOnCrash(true);
+        check(waitFor([&] { return chrome->isLive(); }, 20000) && chrome->host()->crashReloads() == 1,
+              "the dead page loads again and says it is listening");
+        pump(300);
+        check(page->isVisible() && !window.statusBar()->isVisible(),
+              "it stands over the viewport again, and the Qt status bar steps aside");
+        check(window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail")) &&
+                  window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_rail"))->isVisible() &&
+                  !window.findChild<ToolCluster*>()->isVisible() &&
+                  waitFor([&] { return js(page, "document.querySelectorAll('[data-cluster=\"rail\"] [data-chip]').length").toInt() == 10; }, 5000),
+              "and the page's rail is back in the Qt rail's place");
         TopoDS_Face live;
         for (TopExp_Explorer e(window.document().solids().front().shape, TopAbs_FACE); e.More(); e.Next()) {
             live = TopoDS::Face(e.Current());
@@ -3491,14 +3498,6 @@ int main(int argc, char* argv[])
         window.pullFaceBy(live, -100000.0);
         ToastHost* toasts = window.findChild<ToastHost*>();
         check(toasts && toasts->isShowing(), "and the next Failure is shown by the Qt toast");
-        if (settingsAction) {
-            settingsAction->trigger();
-            pump(200);
-            check(window.findChild<AppearancePanel*>()->isVisible(),
-                  "Settings opens the Qt drawer once the page is gone (review I3)");
-            settingsAction->trigger();
-            pump(100);
-        }
         {
             // Where the page's strip was - always in its hit region while it
             // lived - a wheel zooms again.

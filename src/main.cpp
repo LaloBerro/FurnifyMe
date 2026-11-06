@@ -3,7 +3,6 @@
 #include "MainWindow.h"
 #include "OcctViewWidget.h"
 #include "SceneWindow.h"
-#include "SelectorWindow.h"
 #include "Theme.h"
 #ifdef FURNIFYME_WEB_UI
 #include "web/HubWindow.h"
@@ -160,49 +159,27 @@ int main(int argc, char* argv[])
     // once already).
     MainWindow window;
 #ifdef FURNIFYME_WEB_UI
-    // The editor's toasts and status bar as HTML (migration Phase 3a) unless
-    // asked for the Qt ones - or unless the page is missing beside the app.
-    if (!QCoreApplication::arguments().contains(QStringLiteral("--qt-chrome")) &&
-        WebHost::pageAvailable(QStringLiteral("editor")))
-        window.useHtmlChrome();
+    // The editor's chrome is a page (migration Phases 3-5; the --qt-chrome
+    // switch went with Phase 6). A deploy that lost it says so, and the Qt
+    // surfaces - still the state the page mirrors - stand in.
+    if (WebHost::pageAvailable(QStringLiteral("editor"))) window.useHtmlChrome();
+    else qWarning("FurnifyMe: web/editor is missing beside the app");
 #endif
-    // THE HUB: the HTML one (migration Phase 2) wherever the app is built with
-    // the web UI, the Qt one otherwise - and `--qt-hub` asks for the Qt one
-    // in a web build, for comparing the two side by side until Phase 6
-    // deletes it. Both are wired by the one templated handoff below.
-#ifdef FURNIFYME_WEB_UI
-    // A deploy that lost the hub's page opens on the Qt hub rather than on a
-    // blank first window.
-    const bool pageMissing = !WebHost::pageAvailable(QStringLiteral("hub"));
-    if (pageMissing) qWarning("FurnifyMe: web/hub is missing beside the app - using the Qt hub");
-    const bool qtHub =
-        pageMissing || QCoreApplication::arguments().contains(QStringLiteral("--qt-hub"));
-#else
-    const bool qtHub = true;
-#endif
-    std::unique_ptr<SelectorWindow> qtSelector;
-#ifdef FURNIFYME_WEB_UI
-    std::unique_ptr<HubWindow> htmlHub;
-#endif
-    if (qtHub) qtSelector = std::make_unique<SelectorWindow>(window.furnitureStore());
-#ifdef FURNIFYME_WEB_UI
-    else htmlHub = std::make_unique<HubWindow>(window.furnitureStore());
-#endif
+    // THE HUB: the library as a page (migration Phase 2; the Qt hub it
+    // replaced was deleted in Phase 6). A deploy that lost the page says so.
+    if (!WebHost::pageAvailable(QStringLiteral("hub")))
+        qWarning("FurnifyMe: web/hub is missing beside the app");
+    HubWindow hub(window.furnitureStore());
     // The third window, constructed here and never shown until a scene card
     // is chosen - the same contract the editor keeps above, and for the same
     // lazy-initializeViewer() reason.
     SceneWindow sceneWindow(&window.furnitureStore());
 #ifdef FURNIFYME_WEB_UI
     // The scene window's render settings panel as the same page the editor's
-    // is (migration Phase 3e), under the chrome's rule.
-    if (!QCoreApplication::arguments().contains(QStringLiteral("--qt-chrome")) &&
-        WebHost::pageAvailable(QStringLiteral("render")))
+    // is (migration Phase 3e), and its chrome as the editor's page (5a).
+    if (WebHost::pageAvailable(QStringLiteral("render")))
         RenderPage::attach(sceneWindow.studio(), &sceneWindow);
-    // The scene window's chrome as the editor's page (migration Phase 5a),
-    // under the same rule.
-    if (!QCoreApplication::arguments().contains(QStringLiteral("--qt-chrome")) &&
-        WebHost::pageAvailable(QStringLiteral("editor")))
-        sceneWindow.useHtmlChrome();
+    if (WebHost::pageAvailable(QStringLiteral("editor"))) sceneWindow.useHtmlChrome();
 #endif
 
     // The whole handoff - both directions, and the selector's own close -
@@ -211,10 +188,7 @@ int main(int argc, char* argv[])
     // exactly what ships rather than a close cousin of it. See that
     // function's own comments for what each leg does and why the ORDER
     // (show the target, then hide the source) is load-bearing.
-    if (qtSelector) EditorSelectorHandoff::wire(window, *qtSelector, &sceneWindow);
-#ifdef FURNIFYME_WEB_UI
-    if (htmlHub) EditorSelectorHandoff::wire(window, *htmlHub, &sceneWindow);
-#endif
+    EditorSelectorHandoff::wire(window, hub, &sceneWindow);
 
     // The shell's entrance, triggered HERE and nowhere else. The editor window
     // is shown by the handoff above, which gui_smoke drives verbatim - so an
@@ -265,10 +239,7 @@ int main(int argc, char* argv[])
     }
 #endif
 
-    if (qtSelector) qtSelector->show();
-#ifdef FURNIFYME_WEB_UI
-    if (htmlHub) htmlHub->show();
-#endif
+    hub.show();
 
     return app.exec();
 }

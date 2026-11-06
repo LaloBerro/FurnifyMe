@@ -10,7 +10,7 @@
 //
 // attach() is the one way in, and both windows that have a RenderStudio call
 // it: MainWindow::useHtmlChrome() for the editor and main.cpp for the scene
-// window, under the same rule as the chrome (no --qt-chrome, the page present).
+// window, under the same rule as the chrome (the page present).
 // gui_smoke calls neither, so the suite's render mode docks the Qt panel.
 
 #include <QObject>
@@ -33,6 +33,7 @@ public:
 
     bool isLive() const { return myLive; }
     QWidget* view() const;
+    WebHost* host() const { return myHost; }
     RenderBridge* bridge() const { return myBridge; }
 
 signals:

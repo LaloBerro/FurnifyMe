@@ -39,7 +39,10 @@ RenderPage::RenderPage(RenderStudio* studio, QWidget* window) : QObject(window),
         refuseFocus();
         if (!ok) setLive(false);
     });
-    connect(view->page(), &QWebEnginePage::renderProcessTerminated, this, [this] { setLive(false); });
+    connect(view->page(), &QWebEnginePage::renderProcessTerminated, this, [this] {
+        myBridge->forgetReady();
+        setLive(false);
+    });
     refuseFocus();
 
     studio->setHtmlPanel(view, [this] { return myLive; });

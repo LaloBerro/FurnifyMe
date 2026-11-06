@@ -53,8 +53,21 @@ public:
     bool loaded() const { return myLoaded; }
     bool loadOk() const { return myLoadOk; }
 
+    // A page whose render process dies is loaded again (migration Phase 6:
+    // the Qt surfaces are a bridge for the gap, never the destination), at
+    // most kMaxCrashReloads times a session - a page that keeps dying keeps
+    // the Qt fallback instead of a reload loop. On by default; a test that
+    // reads the fallback turns it off first, and turning it back on while the
+    // page is dead reloads at once.
+    static constexpr int kMaxCrashReloads = 3;
+    static constexpr int kCrashReloadMs = 400;
+    void setReloadOnCrash(bool on);
+    int crashReloads() const { return myCrashReloads; }
+
 signals:
     void loadFinished(bool ok);
+    // The render process died (not a normal end); a reload may follow.
+    void crashed();
 
 protected:
     // Ctrl+wheel would zoom the page, and a zoomed page draws its title strip
@@ -73,5 +86,10 @@ private:
     QPointer<QWebEngineView> myView;
     QWebChannel* myChannel = nullptr;
     bool myLoaded = false;
+    bool myReloadOnCrash = true;
+    bool myDead = false;
+    int myCrashReloads = 0;
+    QUrl myUrl;
+    void reloadAfterCrash();
     bool myLoadOk = false;
 };

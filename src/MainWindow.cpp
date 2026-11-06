@@ -1,4 +1,7 @@
 #include "MainWindow.h"
+#include "DrawerWidths.h"
+#include "PanelCloseButton.h"
+#include "session/JointRows.h"
 // Outside the web guard: both are built into every preset, and
 // settingsSurface()/versionsSurface()/syncVersionsModel()/onSaveVersion()
 // use them in every build (Phase 3c review C1 - the vcpkg build had not
@@ -27,7 +30,6 @@
 #include "OcctViewWidget.h"
 
 #include "AppBar.h"
-#include "AppearancePanel.h"
 #include "Themes.h"
 #include "RenderFrameGuides.h"
 #include "RenderStudio.h"
@@ -38,9 +40,7 @@
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
-#include "ItemsPanel.h"
 #include "session/ItemMoveText.h"
-#include "PanelCloseButton.h"
 #include "PullArrow.h"
 #include "ShapeFlyout.h"
 #include "ShortcutSheet.h"
@@ -51,9 +51,7 @@
 #include "TransformGizmo.h"
 #include "UnsavedCloseCard.h"
 #include "ViewportOverlay.h"
-#include "VersionsPanel.h"
 #include "JointChip.h"
-#include "JointsPanel.h"
 #include "KeyClaim.h"
 #include "MitreTool.h"
 #include "LoadingCard.h"
@@ -918,14 +916,6 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // which is why there is no longer anything to split.
     setCentralWidget(myView);
 
-    // Parented to the viewport from birth - buildOverlay() anchors it, and
-    // ViewportOverlay would reparent it anyway, but a card that is a child of
-    // the window until then would flash in the wrong place on the first show.
-    myItemsPanel = new ItemsPanel(&myDocument, myView, myView);
-    // NO hover x on this one, by the user's own call: its title row carries a
-    // + that makes a folder instead, and the drawer is closed from its rail
-    // chip and its menu entry exactly as it always could be. The other three
-    // closable panels keep theirs.
 
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
@@ -1074,44 +1064,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // sheet is handed the drawer's ONE key table and reads it on every build.
     myShortcutSheet->addKeyTable(tr("Items list"), [] {
         ShortcutSheet::KeyRows rows;
-        for (const ItemsPanel::ListKey& entry : ItemsPanel::listKeys())
-            rows.emplace_back(ItemsPanel::listKeyLabel(entry), ItemsPanel::listKeyText(entry));
+        for (const ItemsKeys::Key& entry : ItemsKeys::table())
+            rows.emplace_back(ItemsKeys::label(entry), ItemsKeys::text(entry));
         return rows;
     });
 
-    // appStateChanged alone, not documentChanged too: every document edit
-    // already calls updateActions() (and so emits appStateChanged) before it
-    // emits documentChanged, so a second connection here only rebuilt the
-    // same rows twice per edit. appStateChanged also covers the case
-    // documentChanged never fires for - switching the display unit, which
-    // touches no document but still has to reread every dimension the panel
-    // shows (see setDisplayUnit()).
-    connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
-    // The eye's write composed with the session filter at the one writer -
-    // see ItemsPanel's visibilityToggled() comment. updateActions() ends in
-    // appStateChanged, which re-runs the refresh above, re-deriving the
-    // rows' own dimming from the view's composed answer.
-    connect(myItemsPanel, &ItemsPanel::visibilityToggled, this, &MainWindow::afterItemVisibilityChanged);
-    // A row's grain mark. The DOCUMENT is the writer and this window is its
-    // one caller, exactly as the eye above is: the drawer announces the
-    // gesture and never writes. NO CHECKPOINT - presentation, like
-    // visibility and a material's colour - and updateActions() is what pushes
-    // the new list at the viewport, so the drawing follows by derivation
-    // rather than by a second write here.
-    connect(myItemsPanel, &ItemsPanel::grainToggled, this, [this](int bodyId) {
-        if (myShowingInitScreen || bodyId <= 0) return;
-        myDocument.setBodyGrainAcross(bodyId, !myDocument.bodyGrainAcross(bodyId));
-        updateActions();
-    });
-    // The versions drawer, on the same terms - built in buildOverlay(),
-    // which has already run by this point in the constructor.
-    if (myVersionsPanel)
-        connect(this, &MainWindow::appStateChanged, myVersionsPanel, &VersionsPanel::refresh);
-    // The joints drawer, on the same terms. It reads and repaints only - its
-    // row clicks call setSelectedJoint()/deleteJoint() from a mouse event, never
-    // from this slot - so it cannot recurse into updateActions().
-    if (myJointsPanel)
-        connect(this, &MainWindow::appStateChanged, myJointsPanel, &JointsPanel::refresh);
 
     // Connected AFTER the refresh above, so it runs after it: a row added or
     // removed changes the drawer's height, and the drawer's rectangle is one
@@ -1288,79 +1245,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(myView, &OcctViewWidget::scaleReleased, this, [this] { refreshSelectionSizes(); });
 
     // Selection syncs both ways.
-    // What a click on a body row asks the selection to BE - the panel works
-    // that out from the modifiers and the row order (plain replaces, Ctrl
-    // toggles, Shift takes the run between), and this window simply applies
-    // it. One place decides, one place applies.
-    connect(myItemsPanel, &ItemsPanel::selectionRequested, this,
-            [this](std::vector<int> ids) { myView->setSelectedSolids(ids); });
-    // An outline row is the outline's only handle - it is not pickable in the
-    // viewport - so clicking one is what chooses which outline Extrude
-    // consumes. Routed through MainWindow rather than the panel writing the
-    // state itself: selectOutline() calls updateActions(), which is the single
-    // place that decides what is available.
-    connect(myItemsPanel, &ItemsPanel::outlineActivated, this,
-            [this](int id) { selectOutline(id); });
     connect(myView, &OcctViewWidget::selectionChanged, this,
             [this] {
-                myItemsPanel->showSelection(myView->selectedSolidIds());
                 // The page's drawer reveals a pick the same way (Phase 3h).
                 if (myItemsModel) myItemsModel->showSelection(myView->selectedSolidIds());
             });
-    // A row's rename gesture (double-click, or F2 through onRenameSelected())
-    // committed. MainWindow does the checkpoint/setItemName/toast, exactly as
-    // the panel's own header says - see onItemRenameCommitted().
-    connect(myItemsPanel, &ItemsPanel::renameCommitted, this,
-            &MainWindow::onItemRenameCommitted);
-    // The folder rows' own three gestures (improvements item 10), each
-    // routed through this window for the same reason the rename above is:
-    // the panel runs the gesture, MainWindow checkpoints and reports.
-    // A folder row's click arrives as selectionRequested() with the bodies
-    // already worked out (plain replaces, Ctrl adds the folder to what is
-    // selected) - the same channel a body row uses, so the two cannot end up
-    // with two different ideas of what a click means.
-    connect(myItemsPanel, &ItemsPanel::groupRenameCommitted, this,
-            &MainWindow::onGroupRenameCommitted);
-    connect(myItemsPanel, &ItemsPanel::itemsMoveRequested, this, &MainWindow::onItemsMoveRequested);
-    // The drag's present-tense line takes the right channel while it lasts.
-    connect(myItemsPanel, &ItemsPanel::dragStatusChanged, this, &MainWindow::updateStateLabel);
-    // The right-click menu's entries, each landing on the SAME handler the
-    // Model menu's own entry does (the title row's chip triggers that entry's
-    // action itself - see buildOverlay()).
-    connect(myItemsPanel, &ItemsPanel::newFolderRequested, this,
-            &MainWindow::onGroupSelection);
-    // A folder row's own two (rulings RF1, RF2): each carries the folder it
-    // names, because the selection a right press leaves behind is that
-    // folder's BODIES, and the bodies' shared folder can be a different one.
-    connect(myItemsPanel, &ItemsPanel::removeFolderRequested, this,
-            &MainWindow::removeFolderKeepContents);
-    connect(myItemsPanel, &ItemsPanel::wrapFolderRequested, this, &MainWindow::onWrapFolder);
-    // A move the list refused (Alt+Up/Down while filtered): quiet, so the
-    // status bar's left channel, never a Failure toast.
-    // REMEMBERED, so it can be WITHDRAWN (ruling D1, after the RF3 defect):
-    // the sentence blames the filter or the row above, and once either moves
-    // it is advice about a list that is no longer on screen. A selection
-    // change rewrites the bar anyway (onSelectionChanged()); a filter change
-    // does not, so it takes the sentence down itself - and only this
-    // sentence, compared against what the bar is actually showing.
-    connect(myItemsPanel, &ItemsPanel::moveRefused, this, [this](const QString& reason) {
-        myPaintedMoveRefusal = reason;
-        mySession.reportStatus(reason);
-    });
-    // ...and so does the keys moving to another row (ruling DA1): a step
-    // onto an OUTLINE row changes no body selection, so the bar is not
-    // rewritten by onSelectionChanged() there. One compare-before-clear for
-    // both, so only the sentence this window painted ever comes down.
-    const auto withdrawMoveRefusal = [this] {
-        if (myPaintedMoveRefusal.isEmpty()) return;
-        const bool showing = statusBar()->currentMessage() == myPaintedMoveRefusal;
-        myPaintedMoveRefusal.clear();
-        if (showing) showSelectionStatus();
-    };
-    connect(myItemsPanel, &ItemsPanel::filterChanged, this, withdrawMoveRefusal);
-    connect(myItemsPanel, &ItemsPanel::currentRowChanged, this, withdrawMoveRefusal);
-    connect(myItemsPanel, &ItemsPanel::deleteGroupRequested, this,
-            &MainWindow::onDeleteGroup);
 
     // The Items rail button, the menu entry and Ctrl+Alt+S all drive the one
     // action, and the drawer's shown state is read off that action rather
@@ -1402,7 +1291,6 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // toggle runs no updateActions(), so the viewport is told here.
     connect(myJointsPanelAction, &QAction::toggled, this, [this](bool shown) {
         if (QWidget* joints = jointsSurface()) joints->setVisible(shown && !myRenderModeOn);
-        if (myJointsPanel) myJointsPanel->refresh();
         // At once: a toggle runs no updateActions() (Phase 3d).
         syncJointsModel();
         if (myOverlay) myOverlay->relayout();
@@ -1490,9 +1378,9 @@ MainWindow::~MainWindow()
     // that member destruction had already taken. Ended here instead, with
     // the document alive, and silently: the line it would announce belongs
     // to a window going away. The later hide then finds nothing to cancel.
-    if (myItemsPanel) {
-        const QSignalBlocker quiet(myItemsPanel);
-        myItemsPanel->cancelDrag();
+    if (myItemsModel) {
+        const QSignalBlocker quiet(myItemsModel);
+        myItemsModel->cancelDrag();
     }
     // The close question, for good: ~QWidget's hide of a window destroyed
     // with the question standing would report questionChanged(false) into a
@@ -2483,10 +2371,11 @@ void MainWindow::buildOverlay()
     // and not a hard-coded offset here. Anchoring it is also the whole of
     // what puts it in occupiedRects(), so the toast, the balloon and the
     // guide step around it without any of them naming this widget.
-    myOverlay->addWidget(myItemsPanel, ViewportOverlay::Anchor::TopLeft);
-    // The title row's New folder is a chip mirroring the Model menu's New
-    // Folder with These - one action, so the menu, Ctrl+G and the chip agree.
-    myItemsPanel->setNewFolderAction(myGroupAction);
+    // The page draws it (migration Phase 6: the Qt drawer is deleted); its
+    // slot stands here, its height the page's.
+    myItemsSlot = new HtmlCardSlot(QStringLiteral("items"), QSize(DrawerWidths::items(), 176), myView);
+    myItemsSlot->hide();
+    myOverlay->addWidget(myItemsSlot, ViewportOverlay::Anchor::TopLeft);
 
     // A theme's decoration over the viewport (themes part 2): Ultraviolet's
     // crosshairs at every card's corners and its grid readout beside the
@@ -2516,24 +2405,18 @@ void MainWindow::buildOverlay()
     // and addWidget() shows whatever it anchors UNLESS the widget has
     // already made its own explicit hide decision - hide() here, before
     // adding it, is what makes this one of those.
-    myVersionsPanel = new VersionsPanel(this, myView, myView);
-    // The x in the corner, shown only while the pointer is over this panel.
-    // It triggers the same checkable action the rail chip and the menu entry
-    // do - see PanelCloseButton.
-    new PanelCloseButton(myVersionsPanelAction, myVersionsPanel);
-    myVersionsPanel->hide();
-    myOverlay->addWidget(myVersionsPanel, ViewportOverlay::Anchor::TopLeft);
+
+    myVersionsSlot = new HtmlCardSlot(QStringLiteral("versions"), QSize(DrawerWidths::versions(), 160), myView);
+    myVersionsSlot->hide();
+    myOverlay->addWidget(myVersionsSlot, ViewportOverlay::Anchor::TopLeft);
 
     // The joints drawer, same anchor, added after Versions so it stacks below
     // Items and Versions. Hidden BEFORE addWidget() for the same reason: its
     // visibility belongs to myJointsPanelAction alone.
-    myJointsPanel = new JointsPanel(this, myView, myView);
-    // The x in the corner, shown only while the pointer is over this panel.
-    // It triggers the same checkable action the rail chip and the menu entry
-    // do - see PanelCloseButton.
-    new PanelCloseButton(myJointsPanelAction, myJointsPanel);
-    myJointsPanel->hide();
-    myOverlay->addWidget(myJointsPanel, ViewportOverlay::Anchor::TopLeft);
+
+    myJointsSlot = new HtmlCardSlot(QStringLiteral("joints"), QSize(DrawerWidths::joints(), 60), myView);
+    myJointsSlot->hide();
+    myOverlay->addWidget(myJointsSlot, ViewportOverlay::Anchor::TopLeft);
 
     // The way back out of render mode, added LAST in the TopLeft column so
     // the three drawers above keep their order and this takes the corner
@@ -2659,13 +2542,10 @@ void MainWindow::buildOverlay()
     // shows whatever it anchors unless the widget has already made an
     // explicit hide decision of its own, and this card's visibility belongs to
     // myAppearanceAction alone.
-    myAppearancePanel = new AppearancePanel(myView);
-    // The x in the corner, shown only while the pointer is over this panel.
-    // It triggers the same checkable action the rail chip and the menu entry
-    // do - see PanelCloseButton.
-    new PanelCloseButton(myAppearanceAction, myAppearancePanel);
-    myAppearancePanel->hide();
-    myOverlay->addWidget(myAppearancePanel, ViewportOverlay::Anchor::TopRight);
+
+    mySettingsSlot = new HtmlCardSlot(QStringLiteral("settings"), DrawerWidths::settings(), myView);
+    mySettingsSlot->hide();
+    myOverlay->addWidget(mySettingsSlot, ViewportOverlay::Anchor::TopRight);
 
     // --- the Settings drawer's other three tabs (improvements item 10) -----
     //
@@ -2679,7 +2559,6 @@ void MainWindow::buildOverlay()
     // There is no second copy of any of these settings, so the View menu, the
     // File menu and this drawer cannot disagree, and updateActions() stays
     // the single place that decides what is available.
-    myAppearancePanel->addRows(settingsRows());
 
     // The render settings card (Task 7.2, Option A - "one floating card"),
     // anchored at the SAME TopRight slot the gizmo and the Appearance card
@@ -2913,10 +2792,6 @@ void MainWindow::buildOverlay()
     // Failures, so they are shown whether or not the user has notifications on
     // (see ToastHost::show): a Load that changed nothing and said nothing would
     // be indistinguishable from a colour file with nothing in it.
-    connect(myAppearancePanel, &AppearancePanel::colourSaveFailed, this,
-            &MainWindow::reportColourSaveFailed);
-    connect(myAppearancePanel, &AppearancePanel::colourLoadRefused, this,
-            &MainWindow::reportColourLoadRefused);
 
     // A toast that offers to undo one operation must not survive that
     // operation - see ToastHost::documentMovedTo().
@@ -3709,12 +3584,10 @@ void MainWindow::updateActions()
     // choice with no mark on it is a choice they cannot see. Refreshed here
     // rather than at the click, so an undo or a redo that moves the pending
     // outline moves the highlight with it.
-    if (myItemsPanel) myItemsPanel->showPendingOutline(pendingOutlineId());
     // ...and whether a folder may be made or removed at all, which the row
     // menu's folder-row entries read (rulings RF1, RF2): decided here, with
     // the same terms the two Model menu entries carry, so none of them can be
     // enabled over a handler that would refuse.
-    if (myItemsPanel) myItemsPanel->setFolderEditsAllowed(folderEditsAllowed());
     myRedoAction->setEnabled(!mySketching && !atInit && myDocument.canRedo());
 
     // Not a slot on appStateChanged - part of updateActions() itself, same
@@ -4440,7 +4313,6 @@ void MainWindow::showInitScreen()
     // The drawer's filter was typed against the furniture that just closed
     // (M2) - here and in openFurniture(), the two furniture swaps, and never
     // in resyncView(), which undo and redo go through too.
-    if (myItemsPanel) myItemsPanel->forgetFurniture();
     if (myItemsModel) myItemsModel->forgetFurniture();
 
     updateActions();
@@ -4534,7 +4406,6 @@ bool MainWindow::openFurniture(const QString& id)
     }
     resyncView();
     // A new furniture never opens filtered (M2) - see showInitScreen().
-    if (myItemsPanel) myItemsPanel->forgetFurniture();
     if (myItemsModel) myItemsModel->forgetFurniture();
 
     myView->fitAll();
@@ -4969,10 +4840,7 @@ void MainWindow::onSaveVersion()
     // canOpenSaveVersion() as beginNewVersion() checks it: trigger() ignores
     // isEnabled(), and a request left waiting would open a pending card the
     // next time the drawer mounts (review M1).
-    if (htmlChromeLive() && myVersionsModel) {
-        if (canOpenSaveVersion()) myVersionsModel->requestNew();
-    }
-    else if (myVersionsPanel) myVersionsPanel->beginNewVersion();
+    if (myVersionsModel && canOpenSaveVersion()) myVersionsModel->requestNew();
 }
 
 bool MainWindow::saveVersion(const QString& name)
@@ -5565,7 +5433,6 @@ void MainWindow::resyncView()
     // the one line that closes it. The kind lock needs nothing: it is derived
     // from the live selection, and clearSolids() below empties that.
     myView->resetPickGesture();
-    if (myItemsPanel) myItemsPanel->resetPick();
     if (myItemsModel) myItemsModel->resetPick();
     // ...and the sentence it dropped comes off the bar with it. Called
     // directly rather than through the signal, because resetPickGesture()
@@ -9578,7 +9445,7 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
     const auto cannotTake = [&refuse, this](const std::string& why) {
         // Through JointsPanel's one mapping: a kernel exception's text is
         // written for a log and never reaches a toast.
-        return refuse(tr("These pieces can't take a joint — %1").arg(JointsPanel::reasonText(why)));
+        return refuse(tr("These pieces can't take a joint — %1").arg(JointRows::reasonText(why)));
     };
 
     // The HOST by geometry. Piece A is simply whichever shape is passed first -
@@ -10026,7 +9893,7 @@ bool MainWindow::setJointKind(int jointId, Joinery::Kind kind)
     Joinery::ContactResult contact;
     if (!jointContact(jointId, contact)) {
         refuseJointEdit(tr("This joint can't change kind — %1")
-                            .arg(JointsPanel::reasonText(contact.error)));
+                            .arg(JointRows::reasonText(contact.error)));
         return false;
     }
     const std::string why = Joinery::validityOf(kind, contact.contact);
@@ -10084,7 +9951,7 @@ bool MainWindow::setJointHost(int jointId, int hostBodyId)
         Joinery::findContact(myDocument.shapeOf(joint.bodyB), myDocument.shapeOf(joint.bodyA));
     if (!contact.ok) {
         refuseJointEdit(tr("This joint can't change which piece it is cut into — %1")
-                            .arg(JointsPanel::reasonText(contact.error)));
+                            .arg(JointRows::reasonText(contact.error)));
         return false;
     }
     const std::string why = Joinery::validityOf(joint.kind, contact.contact);
@@ -10565,7 +10432,7 @@ void MainWindow::useHtmlChrome()
     }
     // The render settings panel as its own page, docked in the Qt panel's
     // place while it is live (migration Phase 3e) - under the chrome's own
-    // rule, so `--qt-chrome` keeps the Qt panel too.
+    // rule.
     if (myStudio && WebHost::pageAvailable(QStringLiteral("render"))) RenderPage::attach(myStudio, this);
     // The page's Undo pill: through the ACTION, with the same two guards the
     // Qt toast's pill keeps (see the ToastHost::undoRequested connection).
@@ -10624,29 +10491,10 @@ void MainWindow::useHtmlChrome()
         syncViewportMinimumHeight();
         syncViewportMinimumWidth();
         syncMenuShortcuts();
-        // The card's place follows the page: the slot while it can draw,
-        // the Qt drawer back in its anchor when it cannot.
-        if (myOverlay && mySettingsSlot && myAppearancePanel) {
-            if (live) myOverlay->replaceWidget(myAppearancePanel, mySettingsSlot);
-            else myOverlay->replaceWidget(mySettingsSlot, myAppearancePanel);
-        }
-        if (myOverlay && myVersionsSlot && myVersionsPanel) {
-            if (live) myOverlay->replaceWidget(myVersionsPanel, myVersionsSlot);
-            else myOverlay->replaceWidget(myVersionsSlot, myVersionsPanel);
-        }
-        if (myOverlay && myJointsSlot && myJointsPanel) {
-            if (live) myOverlay->replaceWidget(myJointsPanel, myJointsSlot);
-            else myOverlay->replaceWidget(myJointsSlot, myJointsPanel);
-        }
-        if (myOverlay && myItemsSlot && myItemsPanel) {
-            // A drag or a rename in the drawer that is leaving ends here.
-            if (live) myItemsPanel->cancelDrag();
-            else if (myItemsModel) myItemsModel->cancelDrag();
-            if (live) myOverlay->replaceWidget(myItemsPanel, myItemsSlot);
-            else myOverlay->replaceWidget(myItemsSlot, myItemsPanel);
-        }
         // The close question (Phase 3f): the page draws it while it can, and
         // the Qt card paints again the moment it cannot - mid-question too.
+        // A drag or a rename in the page's drawer ends with the page.
+        if (!live && myItemsModel) myItemsModel->cancelDrag();
         if (myCloseCard) myCloseCard->setDrawnElsewhere(live);
         // The name question the same way (Phase 3g); keys aimed at the page's
         // view go through the card's claim to the page's field.
@@ -10664,13 +10512,7 @@ void MainWindow::useHtmlChrome()
     // THE SETTINGS CARD (Phase 3b): its slot takes the Qt drawer's place in
     // the overlay, and the page draws the card there. The Qt drawer stays
     // built - gui_smoke drives it - and simply never shows in this mode.
-    if (myOverlay && myAppearancePanel) {
-        // Built now, anchored when the page says it is listening (liveChanged
-        // above) - until then Settings is still the Qt drawer.
-        mySettingsSlot = new HtmlCardSlot(QStringLiteral("settings"), myAppearancePanel->size(), myView);
-        mySettingsSlot->hide();
-        myHtmlChrome->addCard(mySettingsSlot);
-    }
+    if (mySettingsSlot) myHtmlChrome->addCard(mySettingsSlot);
     auto* settings = new SettingsBridge(&mySession.actions(), settingsRows(), myHtmlChrome);
     // The card's close x triggers the Settings action itself.
     settings->allowAction(ActionRegistry::idFor(myAppearanceAction->text()));
@@ -10681,17 +10523,14 @@ void MainWindow::useHtmlChrome()
 
     // THE VERSIONS CARD (Phase 3c): the Settings card's shape, with one
     // difference - its height is the page's, because the list grows.
-    if (myOverlay && myVersionsPanel) {
-        myVersionsSlot = new HtmlCardSlot(QStringLiteral("versions"),
-                                          QSize(VersionsPanel::cardWidth(), 160), myView);
-        myVersionsSlot->hide();
+    if (myVersionsSlot) {
         myHtmlChrome->addCard(myVersionsSlot);
         connect(myVersionsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
             if (myOverlay) myOverlay->relayout();
         });
         // The width follows the type scale, as the Qt drawer's does.
         connect(Theme::notifier(), &Theme::Notifier::changed, myVersionsSlot, [this] {
-            myVersionsSlot->setFixedWidth(Theme::wholeDevicePixels(VersionsPanel::cardWidth()));
+            myVersionsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::versions()));
         });
     }
     VersionsModel::Hooks hooks;
@@ -10710,15 +10549,13 @@ void MainWindow::useHtmlChrome()
     // THE JOINTS CARD (Phase 3d): the Versions card's shape - a slot whose
     // height is the page's - over JointsModel, which reads JointRows as the
     // Qt drawer does.
-    if (myOverlay && myJointsPanel) {
-        myJointsSlot = new HtmlCardSlot(QStringLiteral("joints"), QSize(JointsPanel::cardWidth(), 60), myView);
-        myJointsSlot->hide();
+    if (myJointsSlot) {
         myHtmlChrome->addCard(myJointsSlot);
         connect(myJointsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
             if (myOverlay) myOverlay->relayout();
         });
         connect(Theme::notifier(), &Theme::Notifier::changed, myJointsSlot, [this] {
-            myJointsSlot->setFixedWidth(Theme::wholeDevicePixels(JointsPanel::cardWidth()));
+            myJointsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::joints()));
         });
     }
     JointsModel::Hooks jointHooks;
@@ -10737,36 +10574,22 @@ void MainWindow::useHtmlChrome()
     // ItemsModel, whose hooks land on exactly what the Qt drawer's signals
     // reach (see the constructor's connections), so every change checkpoints
     // and reports the same way.
-    if (myOverlay && myItemsPanel) {
-        myItemsSlot = new HtmlCardSlot(QStringLiteral("items"), QSize(ItemsPanel::cardWidth(), 176), myView);
-        myItemsSlot->hide();
+    if (myItemsSlot) {
         myHtmlChrome->addCard(myItemsSlot);
         connect(myItemsSlot, &HtmlCardSlot::contentHeightChanged, this, [this] {
             if (myOverlay) myOverlay->relayout();
         });
         connect(Theme::notifier(), &Theme::Notifier::changed, myItemsSlot, [this] {
-            myItemsSlot->setFixedWidth(Theme::wholeDevicePixels(ItemsPanel::cardWidth()));
+            myItemsSlot->setFixedWidth(Theme::wholeDevicePixels(DrawerWidths::items()));
         });
     }
     ItemsModel::Hooks itemHooks;
     itemHooks.select = [this](const std::vector<int>& ids) { myView->setSelectedSolids(ids); };
     itemHooks.activateOutline = [this](int id) { selectOutline(id); };
     itemHooks.setVisible = [this](const std::vector<int>& ids, bool outline, bool show) {
-        if (myShowingInitScreen) return;
-        // The eye's two writes, as the Qt drawer makes them: the document
-        // first, the view second.
-        for (int id : ids) {
-            myDocument.setVisible(id, show);
-            if (outline) myView->setOutlineVisible(id, show);
-            else myView->setSolidVisible(id, show);
-        }
-        afterItemVisibilityChanged();
+        setItemsVisible(ids, outline, show);
     };
-    itemHooks.toggleGrain = [this](int bodyId) {
-        if (myShowingInitScreen || bodyId <= 0) return;
-        myDocument.setBodyGrainAcross(bodyId, !myDocument.bodyGrainAcross(bodyId));
-        updateActions();
-    };
+    itemHooks.toggleGrain = [this](int bodyId) { toggleBodyGrain(bodyId); };
     itemHooks.renameItem = [this](int id, bool outline, const QString& name) {
         onItemRenameCommitted(id, outline, name);
     };
@@ -10936,15 +10759,13 @@ QWidget* MainWindow::settingsSurface() const
     // The page's card only while the page is there to draw it (review I3):
     // before it says it is listening, and for good once it dies, Settings is
     // the Qt drawer again, in its own place.
-    if (mySettingsSlot && htmlChromeLive()) return mySettingsSlot;
-    return myAppearancePanel;
+    return mySettingsSlot;
 }
 
 QWidget* MainWindow::versionsSurface() const
 {
     // settingsSurface()'s rule: the page's card only while the page can draw it.
-    if (myVersionsSlot && htmlChromeLive()) return myVersionsSlot;
-    return myVersionsPanel;
+    return myVersionsSlot;
 }
 
 void MainWindow::syncVersionsModel()
@@ -10963,8 +10784,7 @@ void MainWindow::syncVersionsModel()
 QWidget* MainWindow::jointsSurface() const
 {
     // settingsSurface()'s rule: the page's card only while the page can draw it.
-    if (myJointsSlot && htmlChromeLive()) return myJointsSlot;
-    return myJointsPanel;
+    return myJointsSlot;
 }
 
 void MainWindow::syncJointsModel()
@@ -10982,8 +10802,7 @@ void MainWindow::syncJointsModel()
 QWidget* MainWindow::itemsSurface() const
 {
     // settingsSurface()'s rule: the page's card only while the page can draw it.
-    if (myItemsSlot && htmlChromeLive()) return myItemsSlot;
-    return myItemsPanel;
+    return myItemsSlot;
 }
 
 bool MainWindow::itemsCardLive() const { return myItemsSlot && myItemsModel && htmlChromeLive(); }
@@ -11046,28 +10865,44 @@ void MainWindow::syncItemsModel()
 
 void MainWindow::beginItemRename(int id, bool isOutline)
 {
+    Q_UNUSED(isOutline);
     if (itemsCardLive()) myItemsModel->beginRenameFor(id);
-    else if (myItemsPanel) myItemsPanel->beginRenameForItem(id, isOutline);
 }
 
 void MainWindow::beginFolderRename(int folderId)
 {
     if (itemsCardLive()) myItemsModel->beginRenameFor(folderId);
-    else if (myItemsPanel) myItemsPanel->beginRenameForGroup(folderId);
 }
 
 void MainWindow::setItemsFolderOpen(int folderId, bool open)
 {
     // Both: a fold is where the user last looked, and either drawer may be the
     // one on screen next.
-    if (myItemsPanel) myItemsPanel->setGroupExpanded(folderId, open);
     if (myItemsModel) myItemsModel->setFolderOpen(folderId, open);
 }
 
 QString MainWindow::itemsDragStatusText() const
 {
-    if (itemsCardLive()) return myItemsModel->dragStatusText();
-    return myItemsPanel ? myItemsPanel->dragStatusText() : QString();
+    return itemsCardLive() ? myItemsModel->dragStatusText() : QString();
+}
+
+void MainWindow::setItemsVisible(const std::vector<int>& ids, bool outline, bool show)
+{
+    if (myShowingInitScreen) return;
+    // The eye's two writes: the document first, the view second.
+    for (int id : ids) {
+        myDocument.setVisible(id, show);
+        if (outline) myView->setOutlineVisible(id, show);
+        else myView->setSolidVisible(id, show);
+    }
+    afterItemVisibilityChanged();
+}
+
+void MainWindow::toggleBodyGrain(int bodyId)
+{
+    if (myShowingInitScreen || bodyId <= 0) return;
+    myDocument.setBodyGrainAcross(bodyId, !myDocument.bodyGrainAcross(bodyId));
+    updateActions();
 }
 
 void MainWindow::afterItemVisibilityChanged()

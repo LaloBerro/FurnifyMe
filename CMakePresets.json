@@ -1,13 +1,16 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
   "configurePresets": [
     {
-      "name": "windows",
-      "displayName": "Windows (vcpkg, release-only deps)",
+      "name": "windows-base",
+      "hidden": true,
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
-      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows-release",
@@ -16,16 +19,9 @@
       }
     },
     {
-      "name": "windows-headless",
-      "inherits": "windows",
-      "displayName": "Windows, geometry + headless test only (no Qt)",
-      "binaryDir": "${sourceDir}/build-headless",
-      "cacheVariables": { "FURNIFYME_BUILD_APP": "OFF" }
-    },
-    {
-      "name": "windows-web",
-      "inherits": "windows",
-      "displayName": "Windows, HTML UI: installer Qt 6.11.1 with WebEngine + vcpkg OCCT",
+      "name": "windows",
+      "inherits": "windows-base",
+      "displayName": "Windows: installer Qt 6.11.1 with WebEngine + vcpkg OCCT (the app)",
       "binaryDir": "${sourceDir}/build-web",
       "cacheVariables": {
         "FURNIFYME_WEB_UI": "ON",
@@ -38,38 +34,80 @@
       }
     },
     {
+      "name": "windows-headless",
+      "inherits": "windows-base",
+      "displayName": "Windows, geometry + headless test only (no Qt)",
+      "binaryDir": "${sourceDir}/build-headless",
+      "cacheVariables": {
+        "FURNIFYME_BUILD_APP": "OFF",
+        "FURNIFYME_WEB_UI": "OFF"
+      }
+    },
+    {
+      "name": "windows-web",
+      "inherits": "windows",
+      "displayName": "Windows (the same as the windows preset - kept for older notes)"
+    },
+    {
       "name": "linux",
       "displayName": "Linux (system OCCT + Qt6 from apt)",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
     },
     {
       "name": "linux-headless",
       "inherits": "linux",
       "displayName": "Linux, geometry + headless test only (no Qt)",
       "binaryDir": "${sourceDir}/build-headless",
-      "cacheVariables": { "FURNIFYME_BUILD_APP": "OFF" }
+      "cacheVariables": {
+        "FURNIFYME_BUILD_APP": "OFF",
+        "FURNIFYME_WEB_UI": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "windows",          "configurePreset": "windows",          "configuration": "RelWithDebInfo" },
-    { "name": "windows-headless", "configurePreset": "windows-headless", "configuration": "RelWithDebInfo" },
-    { "name": "windows-web",      "configurePreset": "windows-web",      "configuration": "RelWithDebInfo" },
-    { "name": "linux",            "configurePreset": "linux" },
-    { "name": "linux-headless",   "configurePreset": "linux-headless" }
+    {
+      "name": "windows",
+      "configurePreset": "windows",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "windows-headless",
+      "configurePreset": "windows-headless",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "windows-web",
+      "configurePreset": "windows-web",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux"
+    },
+    {
+      "name": "linux-headless",
+      "configurePreset": "linux-headless"
+    }
   ],
   "testPresets": [
     {
       "name": "windows-headless",
       "configurePreset": "windows-headless",
       "configuration": "RelWithDebInfo",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "linux-headless",
       "configurePreset": "linux-headless",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

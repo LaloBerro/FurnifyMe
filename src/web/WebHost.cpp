@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QTimer>
 #include <QWebChannel>
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
@@ -117,6 +118,13 @@ WebHost::WebHost(QWidget* parent, Ground ground, QObject* owner)
         watchRenderWidget();
         emit loadFinished(ok);
     });
+    connect(page, &QWebEnginePage::renderProcessTerminated, this,
+            [this](QWebEnginePage::RenderProcessTerminationStatus status, int) {
+                if (status == QWebEnginePage::NormalTerminationStatus) return;
+                myDead = true;
+                emit crashed();
+                if (myReloadOnCrash) QTimer::singleShot(kCrashReloadMs, this, &WebHost::reloadAfterCrash);
+            });
     myView->installEventFilter(this);
     watchRenderWidget();
 }
@@ -153,8 +161,23 @@ void WebHost::registerObject(const QString& name, QObject* object)
     myChannel->registerObject(name, object);
 }
 
+void WebHost::setReloadOnCrash(bool on)
+{
+    myReloadOnCrash = on;
+    if (on && myDead) reloadAfterCrash();
+}
+
+void WebHost::reloadAfterCrash()
+{
+    if (!myDead || !myReloadOnCrash || myCrashReloads >= kMaxCrashReloads || myUrl.isEmpty() || !myView) return;
+    ++myCrashReloads;
+    load(myUrl);
+}
+
 void WebHost::load(const QUrl& url)
 {
+    myUrl = url;
+    myDead = false;
     myLoaded = false;
     myLoadOk = false;
     static_cast<AppPage*>(myView->page())->allowed = url;

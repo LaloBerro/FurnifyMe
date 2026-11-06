@@ -4,7 +4,7 @@
 
 #include "GestureChip.h"
 #include "KeyClaim.h"
-#include "JointsPanel.h"
+#include "session/JointRows.h"
 #include "MainWindow.h"
 #include "Measure.h"
 #include "OcctViewWidget.h"
@@ -196,7 +196,7 @@ public:
         const QFontMetrics badge(Theme::badgeFont());
         const QFontMetrics label(Theme::labelFont());
         const QString contactError =
-            contact.ok ? QString() : JointsPanel::reasonText(contact.error);
+            contact.ok ? QString() : JointRows::reasonText(contact.error);
 
         int content = kMenuMinWidth - kMenuPad * 2;
         for (KindEntry* entry : myEntries) {
