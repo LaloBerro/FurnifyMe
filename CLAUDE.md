@@ -344,6 +344,33 @@ state, and the surfaces with no page yet, is Phase 7. Everything below that spea
 `EditorSelectorHandoff::wire()` is a header template; `gui_smoke` wires it to
 `tests/SuiteHub.h` (HubModel in a plain window), never to a page.
 
+**Phase 7a (branch `phase-7a`) moved the last Qt-only surfaces onto the page** - ledger
+`docs/superpowers/plans/2026-11-06-last-qt-surfaces-phase-7a.md`. Each keeps its Qt
+widget as the logic, the place and the input rules, painting nothing while the page is
+live (`setDrawnElsewhere`); the page draws what its `words()` say, where it stands.
+- The loading card rides the question channel as `kind: "loading"`, its words sent
+  BEFORE each pump so the pumped frame is this step's.
+- The shortcut sheet (`sheet`), the first-run guide (`guide`) and the hint balloon
+  (`hint`) are chrome maps; the guide's skip and the hint's "got it" answer through
+  `WalkthroughPanel::skip()` / `HintBalloon::dismissHint()`.
+- The material card and the Add-shape flyout are chip faces: `ChipFace` grew a `slider`
+  part (`slide()` lands in the QSlider), `addHidden()`, and button extras (`swatch`,
+  `align: "end"`, `look: "tile"` with an IconSet `glyph` mask).
+- Render mode's Back chip is a third `shell` cluster, `back`; `RenderStudio::refresh()`
+  shows the Qt chip or its slot.
+- The window buttons use the hub's `HubWindowControls` as `window`: the hit test answers
+  HTMAXBUTTON from the rectangle the page reports, so snap layouts still appear.
+- **Stay Qt, by ruling:** the axis gizmo (it redraws every camera move; a page must not be
+  driven per frame) and the compare badge (it stands on the compare pane's second
+  viewport, which has no page).
+- **A card the page draws takes the presses over it** (R1) - the guide no longer lets
+  clicks through to the wood behind it.
+- **A GL-path change is not done until it has run at a fractional scale.**
+  `OcctViewWidget::resizeGL()` wraps Qt's new framebuffer before `MustBeResized()`
+  redraws (the freed one crashed the driver); deferring that redraw to `paintGL()`
+  instead left the page undrawn after render mode at 150% and crashed in
+  `blitBuffers` - A/B'd. chrome_smoke can be run at `QT_SCALE_FACTOR=1.5`.
+
 - **Build:** `cmake --preset windows && cmake --build --preset windows` (`windows-web`
   is the same preset under its old name). It
   uses the INSTALLER Qt 6.11.1 in `C:/Qt/6.11.1/msvc2022_64` (WebEngine; vcpkg's Qt

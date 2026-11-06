@@ -59,8 +59,12 @@ widget stands. Phase 7b then moves the state and deletes the widgets.
 
 ## Found on the way
 
-- **A GL driver crash in `OcctViewWidget::resizeGL`** (fixed in 7a-1):
-  `MustBeResized()` redrew at once into the framebuffer Qt had just replaced. The resize
-  now schedules a frame; `paintGL()` wraps the live framebuffer.
+- **A GL driver crash in `OcctViewWidget::resizeGL`**: `MustBeResized()` redrew at once
+  into the framebuffer Qt had just replaced. 7a-1 deferred the redraw to `paintGL()`;
+  at 150% that was worse (the page undrawn after render mode, a crash in
+  `blitBuffers`), proved by an A/B against the old code. 7a-7 keeps the redraw in
+  `resizeGL()` and wraps Qt's new framebuffer first. chrome_smoke 503/503 at 100% and at
+  150%. **Lesson: a fix to a GL path is not done until it has run at a fractional scale**
+  - this machine's suite windows only sometimes land on its 150% monitor.
 - **T-090**: the shortcut sheet can come out wider than its window (1404 px in a
   1280-wide editor) - an old layout limit, filed.
