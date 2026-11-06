@@ -10,3 +10,12 @@ out.step
 build.log
 g*-*.png
 vcpkg_installed/
+
+# Tool data and the task board (never committed)
+.dipsynator/
+.codegraph/
+.impeccable/
+.board-activity.json
+board-images/
+tasks.json
+aqtinstall.log
