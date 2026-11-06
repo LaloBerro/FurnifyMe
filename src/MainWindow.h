@@ -1023,6 +1023,9 @@ public:
     // real control rather than triggering the action behind it, which would
     // prove the action works and nothing about the chip.
     class ToolChip* renderExitChip() const { return myRenderExitChip; }
+    // The page's window buttons' controls (Phase 7a); null until the chrome.
+    class HubWindowControls* windowControls() const { return myWindowControls; }
+    class WindowButtons* windowButtons() const { return myWindowButtons; }
     // The frame overlay, for the suite: what it is drawing is the same rect
     // the export reproduces, so a check can compare the two.
     class RenderFrameGuides* renderFrame() const { return myRenderFrame; }
@@ -1406,6 +1409,8 @@ signals:
     void quitRequested();
 
 protected:
+    // The window's maximized state, for the page's window buttons (Phase 7a).
+    void changeEvent(QEvent* event) override;
     // Flushes a pending appearance write - see myAppearanceWrite.
     void closeEvent(QCloseEvent* event) override;
 
@@ -2431,6 +2436,11 @@ private:
     // Render mode's Back chip drawn by the page (Phase 7a), in the Qt exit
     // chip's place; RenderStudio::refresh() shows whichever the page allows.
     class HtmlCardSlot* myBackSlot = nullptr;
+    // The window buttons drawn by the page (Phase 7a): a slot in the Qt
+    // buttons' TopRight place, and the hub's own controls object (minimize,
+    // maximize, close, the maximize button's rectangle for snap layouts).
+    class HtmlCardSlot* myButtonsSlot = nullptr;
+    class HubWindowControls* myWindowControls = nullptr;
     class HtmlCardSlot* myPillSlot = nullptr;
     class ShellBridge* myShellBridge = nullptr;
     class ChipsBridge* myChipsBridge = nullptr;

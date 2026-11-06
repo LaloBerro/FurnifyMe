@@ -15,6 +15,8 @@
   import Sheet, { type SheetState } from './Sheet.svelte';
   import Guide, { type GuideState } from './Guide.svelte';
   import Hint, { type HintState } from './Hint.svelte';
+  import WindowButtons from './WindowButtons.svelte';
+  import type { WindowApi } from '../hub/api';
   import Settings from './settings/Settings.svelte';
   import type { CardRect, SettingsApi } from './settings/api';
   import Versions from './versions/Versions.svelte';
@@ -47,6 +49,7 @@
     chips: chipsApi,
     pieces,
     addPiece,
+    win,
   }: {
     chrome: ChromeApi;
     theme: ThemeApi;
@@ -60,6 +63,8 @@
     // The scene window's two cards (Phase 5b) - only its page carries them.
     pieces?: PiecesApi;
     addPiece?: AddPieceApi;
+    // The window buttons' controls (Phase 7a) - the hub's own object.
+    win?: WindowApi;
   } = $props();
 
   const kStripHeight = 24;
@@ -313,4 +318,7 @@
   <Loading {question} {host} />
 {:else if question.asking}
   <Question {question} {host} onanswer={(which) => chrome.answerQuestion?.(which)} />
+{/if}
+{#if win && cards.buttons?.shown}
+  <WindowButtons {win} rect={cards.buttons} />
 {/if}

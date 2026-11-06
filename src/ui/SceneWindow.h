@@ -166,6 +166,8 @@ signals:
     void quitRequested();
 
 protected:
+    // The maximized state, for the page's window buttons (Phase 7a).
+    void changeEvent(QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
 
 private:
@@ -312,6 +314,9 @@ private:
     class HtmlCardSlot* myViewSlot = nullptr;
     // Render mode's Back chip drawn by the page (Phase 7a) - the editor's.
     class HtmlCardSlot* myBackSlot = nullptr;
+    // The window buttons drawn by the page (Phase 7a) - the editor's.
+    class HtmlCardSlot* myButtonsSlot = nullptr;
+    class HubWindowControls* myWindowControls = nullptr;
     // The two cards on the page (Phase 5b).
     class HtmlCardSlot* myPiecesSlot = nullptr;
     class ScenePiecesModel* myPiecesModel = nullptr;

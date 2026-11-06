@@ -1546,17 +1546,16 @@ void OcctViewWidget::resizeGL(int w, int h)
     // here and nowhere else.
     const QPoint device = toDevicePixels(QPoint(std::max(1, w), std::max(1, h)));
     myHostWindow->SetSize(std::max(1, device.x()), std::max(1, device.y()));
-    // NO REDRAW HERE. MustBeResized() redraws at once while immediate update
-    // is on, and resizeGL() runs just after Qt has replaced this widget's
-    // framebuffer: the wrapper OCCT holds still names the one Qt freed, and a
-    // redraw into it died inside the GL driver (chrome_smoke, the status bar
-    // hiding as a reloaded page came back - T-083's driver addresses).
-    // paintGL() wraps the live framebuffer every frame, so the frame this
-    // resize needs is scheduled instead of drawn.
-    const bool immediate = myView->SetImmediateUpdate(false);
+    // WRAP THE NEW FRAMEBUFFER FIRST. Qt has just replaced this widget's
+    // framebuffer, and MustBeResized() redraws at once - into whatever the
+    // wrapper OCCT holds names, which was the one Qt freed: a redraw into it
+    // died inside the GL driver (chrome_smoke, the status bar hiding as a
+    // reloaded page came back). Deferring the redraw to paintGL() instead was
+    // tried and was worse - at 150% the page stopped being drawn after render
+    // mode and OCCT died in blitBuffers; OCCT wants its buffers resized here.
+    // So the timing stays, and the wrapper is made honest before it is used.
+    wrapDefaultFramebuffer();
     myView->MustBeResized();
-    myView->SetImmediateUpdate(immediate);
-    update();
     // The theme's backdrop is a picture of the viewport's size: rebuilt once
     // the resize settles, stretched until then.
     if (myBackdropShown) {

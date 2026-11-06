@@ -18,6 +18,7 @@
 #include "CardSlide.h"
 #include "HtmlCardSlot.h"
 #include "web/SceneCardsBridge.h"
+#include "web/HubWindow.h"
 #ifdef FURNIFYME_WEB_UI
 #include "session/ActionRegistry.h"
 #include "session/MenuModel.h"
@@ -91,6 +92,15 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
         WindowChrome::attach(
             this,
             [this, qtHit](const QPoint& p) {
+#ifdef FURNIFYME_WEB_UI
+                // The page's window buttons (Phase 7a): the editor's rule.
+                if (myButtonsSlot && myWindowControls && htmlChromeLive() && myButtonsSlot->isVisible() &&
+                    !myWindowControls->maxButton().isEmpty()) {
+                    const QPoint at = myView->mapFrom(this, p);
+                    if (myWindowControls->maxButton().contains(at)) return WindowChrome::Hit::MaxButton;
+                    if (myWindowControls->buttons().contains(at)) return WindowChrome::Hit::Client;
+                }
+#endif
                 const WindowChrome::Hit hit = qtHit(p);
 #ifdef FURNIFYME_WEB_UI
                 if (hit != WindowChrome::Hit::MaxButton && myPillSlot && myShellBridge && htmlChromeLive() &&
@@ -105,7 +115,18 @@ SceneWindow::SceneWindow(FurnitureStore* store, QWidget* parent)
 #endif
                 return hit;
             },
-            myWindowButtons);
+            [this](bool hovered) {
+                if (myWindowButtons) myWindowButtons->setMaxHovered(hovered);
+#ifdef FURNIFYME_WEB_UI
+                if (myWindowControls) emit myWindowControls->maxHovered(hovered);
+#endif
+            },
+            [this](bool pressed) {
+                if (myWindowButtons) myWindowButtons->setMaxPressed(pressed);
+#ifdef FURNIFYME_WEB_UI
+                if (myWindowControls) emit myWindowControls->maxPressed(pressed);
+#endif
+            });
     }
 
     // WHOLE BODIES, never faces or edges. The editor's auto selection exists
@@ -1617,8 +1638,10 @@ void SceneWindow::syncHtmlChrome()
     QVariantMap words;
     if (myCloseCard && myCloseCard->isAsking() && myCloseCard->drawnElsewhere()) {
         words = myCloseCard->words();
-        if (myWindowButtons && myWindowButtons->isVisible()) {
-            const QRect r(myWindowButtons->mapTo(myView, QPoint(0, 0)), myWindowButtons->size());
+        QWidget* shownButtons = myButtonsSlot && myButtonsSlot->isVisible() ? static_cast<QWidget*>(myButtonsSlot)
+                                                                            : static_cast<QWidget*>(myWindowButtons);
+        if (shownButtons && shownButtons->isVisible()) {
+            const QRect r(shownButtons->mapTo(myView, QPoint(0, 0)), shownButtons->size());
             words.insert(QStringLiteral("keepClear"), QVariantMap{{QStringLiteral("x"), r.x()},
                                                                   {QStringLiteral("y"), r.y()},
                                                                   {QStringLiteral("w"), r.width()},
@@ -1630,6 +1653,15 @@ void SceneWindow::syncHtmlChrome()
         myHtmlChrome->view()->raise();
         if (myWindowButtons) myWindowButtons->raise();
     }
+#endif
+}
+
+void SceneWindow::changeEvent(QEvent* event)
+{
+    QMainWindow::changeEvent(event);
+#ifdef FURNIFYME_WEB_UI
+    if (event->type() == QEvent::WindowStateChange && myWindowControls)
+        emit myWindowControls->maximizedChanged(isMaximized());
 #endif
 }
 
@@ -1670,6 +1702,13 @@ void SceneWindow::useHtmlChrome()
         ShellBridge::Chip{myRenderModeAction, IconSet::Glyph::Render, QStringLiteral("render")}};
     // The PILL's menu bar: the window's own was reparented into the AppBar, and
     // asking QMainWindow::menuBar() again quietly makes a new, empty one.
+    if (myWindowButtons) {
+        myButtonsSlot = new HtmlCardSlot(QStringLiteral("buttons"), myWindowButtons->size(), myView);
+        myButtonsSlot->hide();
+        myHtmlChrome->addCard(myButtonsSlot);
+        myWindowControls = new HubWindowControls(this);
+        myHtmlChrome->registerObject(QStringLiteral("window"), myWindowControls);
+    }
     std::vector<ShellBridge::Chip> back;
     if (myStudio && myStudio->exitChip() && myRenderModeAction) {
         myBackSlot = new HtmlCardSlot(QStringLiteral("back"), myStudio->exitChip()->sizeHint(), myView);
@@ -1760,6 +1799,11 @@ void SceneWindow::useHtmlChrome()
         if (myOverlay && myViewSlot && myArrangeTools) {
             if (live) myOverlay->replaceWidget(myArrangeTools, myViewSlot);
             else myOverlay->replaceWidget(myViewSlot, myArrangeTools);
+        }
+        if (myOverlay && myButtonsSlot && myWindowButtons) {
+            if (live) myOverlay->replaceWidget(myWindowButtons, myButtonsSlot);
+            else myOverlay->replaceWidget(myButtonsSlot, myWindowButtons);
+            (live ? static_cast<QWidget*>(myButtonsSlot) : myWindowButtons)->show();
         }
         if (myOverlay && myBackSlot && myStudio && myStudio->exitChip()) {
             if (live) myOverlay->replaceWidget(myStudio->exitChip(), myBackSlot);

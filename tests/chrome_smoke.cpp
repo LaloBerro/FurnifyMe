@@ -35,6 +35,8 @@
 #include "ui/SceneWindow.h"
 #include "ui/LoadingCard.h"
 #include "ui/ShortcutSheet.h"
+#include "web/HubWindow.h"
+#include "ui/WindowChrome.h"
 #include "ui/ShapeFlyout.h"
 #include "ui/MaterialCard.h"
 #include "ui/HintBalloon.h"
@@ -160,6 +162,27 @@ QRect toastRect(QWebEngineView* page)
     // non-integral number, and at 150% a toast is 51.33 px tall.
     auto n = [&](const char* key) { return qRound(o.value(QLatin1String(key)).toDouble()); };
     return QRect(n("x"), n("y"), n("w"), n("h"));
+}
+
+// The window buttons on screen (Phase 7a): the page's slot while the page
+// draws them, the Qt card otherwise - and whether a press at their centre
+// reaches buttons a user can press.
+QWidget* shownWindowButtons(MainWindow& window)
+{
+    auto* slot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_buttons"));
+    if (slot && slot->isVisible()) return slot;
+    return window.windowButtons();
+}
+
+bool windowButtonsTakePress(MainWindow& window, QWebEngineView* page)
+{
+    QWidget* buttons = shownWindowButtons(window);
+    if (!buttons) return false;
+    const QPoint centre = buttons->mapTo(window.view(), buttons->rect().center());
+    QWidget* at = window.view()->childAt(centre);
+    if (buttons == window.windowButtons()) return at == buttons || (at && buttons->isAncestorOf(at));
+    return at && (at == page || page->isAncestorOf(at)) &&
+           js(page, QStringLiteral("!!document.elementFromPoint(%1, %2)?.closest('.window-buttons')").arg(centre.x()).arg(centre.y())).toBool();
 }
 
 QAction* actionNamed(QWidget* window, const QString& text)
@@ -2757,6 +2780,33 @@ int main(int argc, char* argv[])
         pump(200);
     }
 
+    // --- the window buttons, drawn by the page (Phase 7a) -----------------------------
+    {
+        auto* slot = window.view()->findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_buttons"));
+        HubWindowControls* controls = window.windowControls();
+        check(slot && slot->isVisible() && controls && window.windowButtons() && !window.windowButtons()->isVisible(),
+              "buttons: the page's window buttons stand in the Qt buttons' place");
+        check(waitFor([&] { return js(page, "document.querySelectorAll('.window-buttons .win').length").toInt() == 3; }, 3000),
+              "buttons: the page draws minimize, maximize and close");
+        // The maximize button's rectangle is what Windows' hit test answers
+        // HTMAXBUTTON from (snap layouts) - reported, and inside the slot.
+        check(controls && waitFor([&] { return !controls->maxButton().isEmpty(); }, 3000) &&
+                  slot->geometry().contains(controls->maxButton().center()),
+              QStringLiteral("buttons: the page reports its maximize button, inside the slot (%1,%2 in %3,%4 %5x%6)")
+                  .arg(controls ? controls->maxButton().center().x() : -1).arg(controls ? controls->maxButton().center().y() : -1)
+                  .arg(slot ? slot->x() : -1).arg(slot ? slot->y() : -1).arg(slot ? slot->width() : -1).arg(slot ? slot->height() : -1));
+        if (controls) {
+            emit controls->maxHovered(true);
+            check(waitFor([&] { return js(page, "document.querySelectorAll('.window-buttons .win')[1].classList.contains('hovered')").toBool(); }, 2000),
+                  "buttons: the native side's maximize hover reaches the page's button");
+            emit controls->maxHovered(false);
+        }
+#ifdef _WIN32
+        pump(200);
+        capture(&window, outDir + "/window-buttons.png");
+#endif
+    }
+
     // --- the Add-shape flyout, its tiles drawn by the page (Phase 7a) -----------------
     {
         QAction* addShape = actionNamed(&window, QStringLiteral("Add shape"));
@@ -3070,12 +3120,7 @@ int main(int argc, char* argv[])
                 QWidget* at = window.view()->childAt(onRail);
                 check(at && (at == page || page->isAncestorOf(at)), "and so does a press on the rail");
             }
-            if (WindowButtons* buttons = window.findChild<WindowButtons*>()) {
-                const QPoint onButtons = window.view()->mapFrom(&window, buttons->mapTo(&window, buttons->rect().center()));
-                QWidget* at = window.view()->childAt(onButtons);
-                check(at == buttons || (at && buttons->isAncestorOf(at)),
-                      "the window buttons stay usable over the wash (Review Focus 4)");
-            }
+            check(windowButtonsTakePress(window, page), "the window buttons stay usable over the wash (Review Focus 4)");
             check(js(page, "document.querySelector('.behind').inert").toBool(), "everything else on the page is inert");
 #ifdef _WIN32
             capture(&window, outDir + "/close-question.png");
@@ -3100,7 +3145,7 @@ int main(int argc, char* argv[])
                 const QSize was = window.size();
                 window.resize(was.width() - 120, was.height());
                 pump(400);
-                WindowButtons* buttons = window.findChild<WindowButtons*>();
+                QWidget* buttons = shownWindowButtons(window);
                 const int x = buttons ? buttons->mapTo(window.view(), QPoint(0, 0)).x() : -1;
                 const QString clip = jsString(page, "document.querySelector('.wash').style.clipPath");
                 check(buttons && clip.contains(QStringLiteral("%1px").arg(x)),
@@ -3221,10 +3266,8 @@ int main(int argc, char* argv[])
                 QWidget* at = window.view()->childAt(rail->geometry().center());
                 check(at && (at == page || page->isAncestorOf(at)), "and so does a press on the rail");
             }
-            if (WindowButtons* buttons = window.findChild<WindowButtons*>()) {
-                const QPoint on = window.view()->mapFrom(&window, buttons->mapTo(&window, buttons->rect().center()));
-                QWidget* at = window.view()->childAt(on);
-                check(at == buttons || (at && buttons->isAncestorOf(at)), "the window buttons stay usable");
+            if (QWidget* buttons = shownWindowButtons(window)) {
+                check(windowButtonsTakePress(window, page), "the window buttons stay usable");
                 const int x = buttons->mapTo(window.view(), QPoint(0, 0)).x();
                 check(jsString(page, "document.querySelector('.wash').style.clipPath").contains(QStringLiteral("%1px").arg(x)),
                       "and the wash leaves them clear");
@@ -3606,6 +3649,13 @@ int main(int argc, char* argv[])
                   "and its reason stays on the status line after it");
             check(!scene.toasts()->isShowing(), "and the Qt toast stays down");
 
+            // The window buttons, drawn by the scene's page too (Phase 7a).
+            {
+                auto* slot = scene.findChild<HtmlCardSlot*>(QStringLiteral("htmlCardSlot_buttons"));
+                check(slot && slot->isVisible() &&
+                          waitFor([&] { return js(sp, "document.querySelectorAll('.window-buttons .win').length").toInt() == 3; }, 3000),
+                      "scene buttons: the scene's page draws the window buttons in their place");
+            }
             // Render mode's Back chip, drawn by the scene's page too (Phase 7a).
             if (QAction* sceneRender = actionNamed(&scene, QStringLiteral("Render mode"))) {
                 sceneRender->trigger();

@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "DrawerWidths.h"
+#include "web/HubWindow.h"
 #include "PanelCloseButton.h"
 #include "session/JointRows.h"
 // Outside the web guard: both are built into every preset, and
@@ -1041,6 +1042,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         WindowChrome::attach(
             this,
             [this, qtHit](const QPoint& p) {
+#ifdef FURNIFYME_WEB_UI
+                // The page's window buttons (Phase 7a): its maximize button
+                // answers HTMAXBUTTON from the rectangle the page reported,
+                // so Windows' snap layouts appear over it; its other two are
+                // the page's own presses.
+                if (myButtonsSlot && myWindowControls && htmlChromeLive() && myButtonsSlot->isVisible() &&
+                    !myWindowControls->maxButton().isEmpty()) {
+                    const QPoint at = myView->mapFrom(this, p);
+                    if (myWindowControls->maxButton().contains(at)) return WindowChrome::Hit::MaxButton;
+                    if (myWindowControls->buttons().contains(at)) return WindowChrome::Hit::Client;
+                }
+#endif
                 const WindowChrome::Hit hit = qtHit(p);
 #ifdef FURNIFYME_WEB_UI
                 if (hit != WindowChrome::Hit::MaxButton && myPillSlot && myShellBridge && shellCardsLive() &&
@@ -1055,7 +1068,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
 #endif
                 return hit;
             },
-            myWindowButtons);
+            [this](bool hovered) {
+                if (myWindowButtons) myWindowButtons->setMaxHovered(hovered);
+#ifdef FURNIFYME_WEB_UI
+                if (myWindowControls) emit myWindowControls->maxHovered(hovered);
+#endif
+            },
+            [this](bool pressed) {
+                if (myWindowButtons) myWindowButtons->setMaxPressed(pressed);
+#ifdef FURNIFYME_WEB_UI
+                if (myWindowControls) emit myWindowControls->maxPressed(pressed);
+#endif
+            });
     }
 
     myShortcutSheet = new ShortcutSheet(this);
@@ -4079,8 +4103,12 @@ QVariantMap MainWindow::withKeepClear(QVariantMap words) const
     // close glyph at 52 against the Qt card's 152). The page cuts this
     // rectangle out of its wash instead - the Qt card's look, a crisp card in
     // a dimmed window.
-    if (myWindowButtons && myView && myWindowButtons->isVisible()) {
-        const QRect r(myWindowButtons->mapTo(myView, QPoint(0, 0)), myWindowButtons->size());
+    // Whichever buttons are on screen: the page's own since Phase 7a, the Qt
+    // card's while the page cannot draw them.
+    QWidget* buttons = myButtonsSlot && myButtonsSlot->isVisible() ? static_cast<QWidget*>(myButtonsSlot)
+                                                                   : static_cast<QWidget*>(myWindowButtons);
+    if (buttons && myView && buttons->isVisible()) {
+        const QRect r(buttons->mapTo(myView, QPoint(0, 0)), buttons->size());
         words.insert(QStringLiteral("keepClear"), QVariantMap{{QStringLiteral("x"), r.x()},
                                                               {QStringLiteral("y"), r.y()},
                                                               {QStringLiteral("w"), r.width()},
@@ -4118,6 +4146,15 @@ void MainWindow::syncHtmlQuestion()
         words = myLoadingCard->words();
     const bool asking = !words.isEmpty();
     myHtmlChrome->setQuestion(asking, asking ? withKeepClear(words) : QVariantMap());
+#endif
+}
+
+void MainWindow::changeEvent(QEvent* event)
+{
+    QMainWindow::changeEvent(event);
+#ifdef FURNIFYME_WEB_UI
+    if (event->type() == QEvent::WindowStateChange && myWindowControls)
+        emit myWindowControls->maximizedChanged(isMaximized());
 #endif
 }
 
@@ -10570,6 +10607,11 @@ void MainWindow::useHtmlChrome()
                 else myRailSlide->retarget(myRail, true);
             }
         }
+        if (myOverlay && myButtonsSlot && myWindowButtons) {
+            if (live) myOverlay->replaceWidget(myWindowButtons, myButtonsSlot);
+            else myOverlay->replaceWidget(myButtonsSlot, myWindowButtons);
+            (live ? static_cast<QWidget*>(myButtonsSlot) : myWindowButtons)->show();
+        }
         if (myOverlay && myBackSlot && myRenderExitChip) {
             if (live) myOverlay->replaceWidget(myRenderExitChip, myBackSlot);
             else myOverlay->replaceWidget(myBackSlot, myRenderExitChip);
@@ -10725,6 +10767,13 @@ void MainWindow::useHtmlChrome()
         myViewSlot = new HtmlCardSlot(QStringLiteral("view"), myViewControls->sizeHint(), myView);
         myViewSlot->hide();
         myHtmlChrome->addCard(myViewSlot);
+        if (myWindowButtons) {
+            myButtonsSlot = new HtmlCardSlot(QStringLiteral("buttons"), myWindowButtons->size(), myView);
+            myButtonsSlot->hide();
+            myHtmlChrome->addCard(myButtonsSlot);
+            myWindowControls = new HubWindowControls(this);
+            myHtmlChrome->registerObject(QStringLiteral("window"), myWindowControls);
+        }
         if (myRenderExitChip) {
             myBackSlot = new HtmlCardSlot(QStringLiteral("back"), myRenderExitChip->sizeHint(), myView);
             myBackSlot->hide();

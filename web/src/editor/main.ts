@@ -5,7 +5,7 @@ import { applyTokens } from '../theme';
 import '../overlay/overlay.css';
 import Editor from './Editor.svelte';
 import type { ChromeApi } from './api';
-import type { ThemeApi } from '../hub/api';
+import type { ThemeApi, WindowApi } from '../hub/api';
 import { channelObjects, hosted } from '../channel';
 import { mockChrome } from './mock';
 import { mockTheme } from '../hub/mock';
@@ -35,6 +35,7 @@ async function start() {
   let chips: ChipsApi | undefined;
   let pieces: PiecesApi | undefined;
   let addPiece: AddPieceApi | undefined;
+  let win: WindowApi | undefined;
   if (hosted()) {
     const objects = await channelObjects();
     chrome = objects.chrome as ChromeApi;
@@ -48,6 +49,7 @@ async function start() {
     chips = objects.chips as ChipsApi | undefined;
     pieces = objects.pieces as PiecesApi | undefined;
     addPiece = objects.addPiece as AddPieceApi | undefined;
+    win = objects.window as WindowApi | undefined;
   } else {
     // The dev server: a status strip and a toast to look at.
     const mock = mockChrome();
@@ -76,7 +78,7 @@ async function start() {
   }
   // The theme goes on before the first mount - see hub/main.ts.
   applyTokens(theme.tokens);
-  mount(Editor, { target: document.getElementById('app')!, props: { chrome, theme, settings, versions, joints, items, shell, menu, chips, pieces, addPiece } });
+  mount(Editor, { target: document.getElementById('app')!, props: { chrome, theme, settings, versions, joints, items, shell, menu, chips, pieces, addPiece, win } });
 }
 
 start();
