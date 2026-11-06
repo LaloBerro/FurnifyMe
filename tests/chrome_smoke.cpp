@@ -132,6 +132,32 @@ bool waitFor(const std::function<bool()>& done, int ms)
     return true;
 }
 
+// True once `done` has HELD for `stableMs` (T-084). A card that sizes itself
+// settles through a chain - the page reports a height, the slot takes it, the
+// overlay re-stacks, the page is told the new rectangle - and a wait that
+// returned at the first instant the three agreed, followed by a second read
+// for the check, could catch the next link of the chain in between. The check
+// takes THIS answer; it never reads the state a second time.
+bool waitStable(const std::function<bool()>& done, int ms, int stableMs = 250)
+{
+    QElapsedTimer t, held;
+    t.start();
+    bool holding = false;
+    while (t.elapsed() <= ms) {
+        if (done()) {
+            if (!holding) {
+                holding = true;
+                held.start();
+            }
+            if (held.elapsed() >= stableMs) return true;
+        } else {
+            holding = false;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    }
+    return false;
+}
+
 QVariant js(QWebEngineView* view, const QString& script)
 {
     QVariant out;
@@ -956,8 +982,8 @@ int main(int argc, char* argv[])
                    drawn() == versionsSlot->geometry();
         };
         waitFor([&] { return js(page, "!!document.querySelector('.versions-card')").toBool(); }, 3000);
-        waitFor(settled, 3000);
-        check(settled(), QStringLiteral("the card reports its height, the slot takes it, and the page draws "
+        const bool versionsSettled = waitStable(settled, 5000);
+        check(versionsSettled, QStringLiteral("the card reports its height, the slot takes it, and the page draws "
                                         "exactly over the slot (%1x%2, reported %3)")
                              .arg(drawn().width()).arg(drawn().height()).arg(reported()));
         check(chrome->hitRegion().contains(versionsSlot->geometry().center()), "a press on the card reaches the page");
@@ -1007,8 +1033,8 @@ int main(int argc, char* argv[])
         check(!chrome->holdsKeyboard(), "and gives the keyboard back");
         const QString row = QStringLiteral("document.querySelector('.version[data-version=\"Shelf added\"]%1')");
         waitFor([&] { return js(page, "!!" + row.arg(QString())).toBool(); }, 3000);
-        waitFor([&] { return versionsSlot->height() > emptyHeight && settled(); }, 3000);
-        check(versionsSlot->height() > emptyHeight && settled(),
+        const bool held1 = waitStable([&] { return versionsSlot->height() > emptyHeight && settled(); }, 5000);
+        check(held1,
               QStringLiteral("the slot grows with the list and the card still covers it exactly (%1 -> %2) (Review Focus 5)")
                   .arg(emptyHeight).arg(versionsSlot->height()));
         const QRect grown = versionsSlot->geometry();
@@ -1099,8 +1125,8 @@ int main(int argc, char* argv[])
         js(page, row.arg(QStringLiteral(" .delete")) + ".click()");
         waitFor([&] { return store.versions(furnitureId).isEmpty(); }, 3000);
         check(store.versions(furnitureId).isEmpty(), "the second click deletes the version");
-        waitFor([&] { return versionsSlot->height() == emptyHeight && settled(); }, 3000);
-        check(versionsSlot->height() == emptyHeight && settled(),
+        const bool held2 = waitStable([&] { return versionsSlot->height() == emptyHeight && settled(); }, 5000);
+        check(held2,
               QStringLiteral("and the slot shrinks back to the empty state's height (%1) (Review Focus 5)")
                   .arg(versionsSlot->height()));
         waitFor([&] { return !chrome->hitRegion().contains(QPoint(grown.center().x(), grown.bottom() - 4)); }, 2000);
@@ -1132,7 +1158,15 @@ int main(int argc, char* argv[])
         // and Restore it wrapped and leaked below the card's row.
         if (jsString(page, row.arg(QStringLiteral(" .delete")) + ".textContent") == QStringLiteral("Delete"))
             js(page, row.arg(QStringLiteral(" .delete")) + ".click()");
-        pump(150);
+        // Arming is a C++ round trip, and the row lays out after it: wait for
+        // the fit itself (it includes the armed words), never a fixed time.
+        const bool armedFits = waitStable([&] { return js(page, "(() => { const a = " + row.arg(QStringLiteral(" .actions")) + "; const d = " +
+                           row.arg(QStringLiteral(" .delete")) +
+                           "; return a.scrollWidth <= a.clientWidth && d.scrollHeight <= d.clientHeight + 1 && "
+                           "[...a.children].every((b) => { const r = b.getBoundingClientRect(), "
+                           "o = a.getBoundingClientRect(); return b.scrollWidth <= b.clientWidth && "
+                           "r.left >= o.left - 0.5 && r.right <= o.right + 0.5; }) && "
+                           "d.textContent.includes('again'); })()").toBool(); }, 3000, 150);
         std::printf("[info] armed row: %s\n",
                     qPrintable(jsString(page, "JSON.stringify((() => { const a = " + row.arg(QStringLiteral(" .actions")) +
                                                   "; const d = " + row.arg(QStringLiteral(" .delete")) +
@@ -1140,13 +1174,7 @@ int main(int argc, char* argv[])
                                                   "dc: d.clientHeight, n: a.children.length, clipped: [...a.children].filter((b) => b.scrollWidth > b.clientWidth).length, "
                                                   "right: Math.round(d.getBoundingClientRect().right), "
                                                   "card: Math.round(document.querySelector('.versions-card').getBoundingClientRect().right)}; })())")));
-        check(js(page, "(() => { const a = " + row.arg(QStringLiteral(" .actions")) + "; const d = " +
-                           row.arg(QStringLiteral(" .delete")) +
-                           "; return a.scrollWidth <= a.clientWidth && d.scrollHeight <= d.clientHeight + 1 && "
-                           "[...a.children].every((b) => { const r = b.getBoundingClientRect(), "
-                           "o = a.getBoundingClientRect(); return b.scrollWidth <= b.clientWidth && "
-                           "r.left >= o.left - 0.5 && r.right <= o.right + 0.5; }) && "
-                           "d.textContent.includes('again'); })()").toBool(),
+        check(armedFits,
               "an armed Delete's sentence fits its row on one line - every button inside the row, none cut off");
 
         // A long list scrolls inside its 384 px, with the app's scrollbar.
@@ -1161,8 +1189,8 @@ int main(int argc, char* argv[])
               QStringLiteral("a long list scrolls inside 384 px (%1 of %2)")
                   .arg(list.value("client").toInt()).arg(list.value("scroll").toInt()));
         check(list.value("bar").toInt() == 8, QStringLiteral("with the app's 8 px scrollbar (%1)").arg(list.value("bar").toInt()));
-        waitFor(settled, 3000);   // the card follows its slot a channel message later
-        check(settled(), "and the card still covers its slot exactly");
+        // The card follows its slot a channel message later: read once it holds.
+        check(waitStable(settled, 5000), "and the card still covers its slot exactly");
 #ifdef _WIN32
         capture(&window, outDir + "/chrome-versions-long.png");
 #endif
@@ -1346,8 +1374,8 @@ int main(int argc, char* argv[])
             const int h = js(page, "window.__jointsHeight || 0").toInt();
             return h > 0 && jointsSlot->height() == Theme::wholeDevicePixels(h) && drawn() == jointsSlot->geometry();
         };
-        waitFor(settled, 3000);
-        check(settled(), QStringLiteral("the card reports its height and covers its slot exactly (%1x%2)")
+        const bool jointsSettled = waitStable(settled, 5000);
+        check(jointsSettled, QStringLiteral("the card reports its height and covers its slot exactly (%1x%2)")
                              .arg(drawn().width()).arg(drawn().height()));
         const QVariantMap modelRow = window.jointsModel()->rows().value(0).toMap();
         const QString row = QStringLiteral("document.querySelector('.joint[data-joint=\"%1\"]%2')").arg(jointId);
@@ -1378,8 +1406,7 @@ int main(int argc, char* argv[])
                                         "return true; })()").toBool();
             check(apart, "every tick label stands clear of the last one on its line, inside the strip");
         }
-        waitFor(settled, 3000);
-        check(settled(), "the slot grows with the open row and the card still covers it");
+        check(waitStable(settled, 5000), "the slot grows with the open row and the card still covers it");
         // Every label was laid out with the width it is PAINTED at, and sits
         // centred on its tick unless the strip clamped it - so a font that
         // changed under the ruler shows here (Review Focus 1, review I1).
@@ -1431,8 +1458,8 @@ int main(int argc, char* argv[])
         check(!js(page, "!!" + row.arg(QStringLiteral(" .strip"))).toBool() &&
                   !QRegularExpression(QStringLiteral("\\d")).match(jsString(page, row.arg(QStringLiteral(" .kind")) + ".textContent")).hasMatch(),
               "with no ruler and no number - \"" + jsString(page, row.arg(QStringLiteral(" .kind")) + ".textContent") + "\" (Review Focus 2)");
-        waitFor([&] { return jointsSlot->height() < openHeight && settled(); }, 3000);
-        check(jointsSlot->height() < openHeight && settled(),
+        const bool held3 = waitStable([&] { return jointsSlot->height() < openHeight && settled(); }, 5000);
+        check(held3,
               QStringLiteral("and the card shrinks to the broken row, still covering its slot (%1 -> %2)").arg(openHeight).arg(jointsSlot->height()));
 #ifdef _WIN32
         capture(&window, outDir + "/chrome-joints-broken.png");
@@ -1529,8 +1556,7 @@ int main(int argc, char* argv[])
             }();
             return h > 0 && itemsSlot->height() == Theme::wholeDevicePixels(h) && drawn == itemsSlot->geometry();
         };
-        waitFor(settled, 3000);
-        check(settled(), "the card reports its height and covers its slot exactly");
+        check(waitStable(settled, 5000), "the card reports its height and covers its slot exactly");
 
         // The twisty opens the folder.
         js(page, QStringLiteral("document.querySelector('.items-card [data-row=\"%1\"] .twisty').click()").arg(carcass));
@@ -1631,8 +1657,8 @@ int main(int argc, char* argv[])
         const int openHeight = itemsSlot->height();
         js(page, QStringLiteral("document.querySelector('.items-card [data-row=\"%1\"] .twisty').click()").arg(carcass));
         waitFor([&] { return !pageNames().split(QLatin1Char('|')).contains(QStringLiteral("Top")); }, 2000);
-        waitFor([&] { return itemsSlot->height() < openHeight && settled(); }, 2000);
-        check(itemsSlot->height() < openHeight && settled(),
+        const bool held4 = waitStable([&] { return itemsSlot->height() < openHeight && settled(); }, 5000);
+        check(held4,
               QStringLiteral("folding a folder shrinks the card, which still covers its slot (%1 -> %2)")
                   .arg(openHeight).arg(itemsSlot->height()));
         window.view()->setSelectedSolids({});
